@@ -319,14 +319,17 @@ pub fn shows_opencode_prompt(lines: &[String]) -> bool {
 ///
 /// Klaudia (WI-1090) writes `klaudia: ready`, `klaudia: working`,
 /// `klaudia: awaiting approval` and `klaudia: goal-loop`. The WI-1127 Codex
-/// fork (WI-1145) was built to write the same words under `codex:` — `codex:
-/// ready`, `codex: working`, `codex: awaiting approval` — and has no goal loop,
-/// so a `codex:` title never reads [`AgentTitle::GoalLoop`]. What the fork
-/// actually sets while a turn is blocked on a person is `[ ! ] Action
-/// Required` (WI-1355), blinking with `[ . ] Action Required`; both are read
-/// as awaiting approval. Matched on the start of what follows the prefix, so a
-/// suffix (`klaudia: working · fixing tests`) is allowed. A build that sets no
-/// such title reads `None`, and its screen is consulted instead.
+/// fork (WI-1145) writes the same words under `codex:` — `codex: ready`,
+/// `codex: working`, `codex: awaiting approval` — and has no goal loop, so a
+/// `codex:` title never reads [`AgentTitle::GoalLoop`]. The fork's title is
+/// only a backstop for approvals (WI-1355): it turns to `awaiting approval`
+/// for an MCP elicitation form, but stays `codex: working` under its approval
+/// overlay (commands, patches), so the screen is what finds those. A launch
+/// whose title includes the spinner shows `[ ! ] Action Required` instead,
+/// blinking with `[ . ]`; the bang form is read as awaiting approval. Matched
+/// on the start of what follows the prefix, so a suffix (`klaudia: working ·
+/// fixing tests`) is allowed. A build that sets no such title reads `None`,
+/// and its screen is consulted instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTitle {
     Ready,
@@ -350,10 +353,9 @@ pub enum TitleAgent {
 /// titles this engine trusts.
 pub fn agent_title(title: Option<&str>) -> Option<(TitleAgent, AgentTitle)> {
     let title = title?.trim().to_lowercase();
-    // The fork's approval title carries no `codex:` prefix (WI-1355):
-    // `[ ! ] Action Required | <cwd>` while a turn waits on a person, blinking
-    // with `[ . ]`. Only the bang form is read, so the blink does not churn the
-    // activity every frame.
+    // With the spinner in its title the fork shows `[ ! ] Action Required |
+    // <cwd>` while a turn waits on a person, blinking with `[ . ]` (WI-1355).
+    // Only the bang form is read, so the blink does not churn the activity.
     if title.starts_with("[ ! ] action required") {
         return Some((TitleAgent::Codex, AgentTitle::AwaitingApproval));
     }

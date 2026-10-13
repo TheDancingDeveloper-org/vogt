@@ -20,6 +20,12 @@
 //! command?") and a numbered option line below it (`❯ 1. Yes`, `› 1. Yes,
 //! proceed`). Either alone is ordinary output.
 //!
+//! Codex is read by its structure instead (WI-1355): its approval overlay
+//! ends in "Press enter to confirm or esc to cancel" and its MCP forms run
+//! from "Field 1/1" to "enter to submit | esc to cancel", the footer the last
+//! thing on the screen. The question is read off the overlay's title or the
+//! form's message, whatever its wording, length or wrap.
+//!
 //! Claude Code also stops at **startup gates** that are not permission
 //! dialogs but stall a session just the same (WI-917): folder trust ("Do you
 //! trust the files in this folder?" / "Is this a project you created or one
@@ -45,7 +51,7 @@ const BORDER: &[char] = &[
 /// because a TUI may position words with cursor moves rather than spaces.
 static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
     regex::bytes::Regex::new(
-        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow)|allow\s*(?:command|the\s*\S+\s*mcp\s*server)|automatically\s*den|requires\s*approval|trust\s*the\s*files|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director|\(y\)\s*es\s*/\s*\(n\)\s*o",
+        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow|grant|send)|allow\s*(?:command|.{1,80}?to\s*run\s*tool)|press\s*\S+\s*to\s*confirm\s*or\s*\S+\s*to\s*cancel|field\s*\d+\s*/\s*\d+|needs\s*your\s*approval|approve\s*network|grant\s*these\s*permissions|send\s*input\s*to|automatically\s*den|requires\s*approval|trust\s*the\s*files|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director|\(y\)\s*es\s*/\s*\(n\)\s*o",
     )
     .expect("approval prefilter compiles")
 });
@@ -54,10 +60,48 @@ static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
 /// line of the rendered screen.
 static QUESTION: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|allow the \S+ mcp server to run tool\b.*\?|.*\brequires approval\b.*|do you trust the files in this folder\??|.*\bis this a project you (?:created or one you )?trust\b.*\??|allow external claude\.md(?: file)? imports\??)$",
+        r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|approve|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow|grant|send)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|allow .+ to run tool\b.*\?|.*\brequires approval\b.*|do you trust the files in this folder\??|.*\bis this a project you (?:created or one you )?trust\b.*\??|allow external claude\.md(?: file)? imports\??)$",
     )
     .expect("approval question regex compiles")
 });
+
+/// The footer of Codex's approval overlay (`approval_overlay.rs`), on the
+/// footer line joined with the one after it, since it wraps on a narrow
+/// screen: "Press enter to confirm or esc to cancel", with " or o to open
+/// thread" when it comes from another thread. Codex's other pickers say "to
+/// go back", so this footer is the overlay's alone (WI-1355).
+static CODEX_OVERLAY_FOOTER: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^press \S+ to confirm or \S+ to cancel\b").expect("codex footer compiles")
+});
+
+/// The progress line that heads every MCP elicitation form Codex draws
+/// (`mcp_server_elicitation.rs`): "Field 1/1", "Field 2/3 (1 required
+/// unanswered)". Its tool approvals and server elicitations alike.
+static CODEX_FIELD: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^Field \d+/\d+(?: \(\d+ required unanswered\))?$").expect("codex field compiles")
+});
+
+/// The elicitation form's footer: "enter to submit | esc to cancel", "enter
+/// to submit all | ←/→ to navigate fields | esc to cancel", "⌃x enter to
+/// submit | esc to cancel", read on up to three joined lines.
+static CODEX_FORM_FOOTER: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^(?:\S+ )?\S+ to submit\b.*\besc to cancel\b")
+        .expect("codex form footer compiles")
+});
+
+/// The overlay's title, which `approval_overlay.rs` builds for each kind of
+/// request: a command, input to a running terminal, network access, extra
+/// permissions, a patch, and an MCP server's request.
+static CODEX_OVERLAY_TITLE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)^(?:would you like to (?:run the following command|make the following edits|grant these permissions|send input to (?:the existing terminal|terminal \S+))\?|do you want to approve network access to .+\?|.+ needs your approval\.)$",
+    )
+    .expect("codex overlay title compiles")
+});
+
+/// What the overlay is taken to ask when its title has scrolled out of
+/// reach (a command taller than the screen and the scrollback read).
+const CODEX_UNTITLED: &str = "Codex is waiting for approval";
 
 /// A numbered menu option, with or without the selection glyph.
 static OPTION: Lazy<Regex> =
@@ -248,7 +292,8 @@ fn is_rule(line: &str) -> bool {
 /// screen, with a numbered option within the next eight lines; the command
 /// excerpt may reach up into the scrollback.
 pub fn detect(visible: &[String], scrollback: &[String]) -> Option<Detected> {
-    detect_numbered(visible, scrollback)
+    detect_codex(visible, scrollback)
+        .or_else(|| detect_numbered(visible, scrollback))
         .or_else(|| detect_opencode(visible))
         .or_else(|| detect_klaudia(visible, scrollback))
 }
@@ -385,6 +430,226 @@ fn detect_opencode(visible: &[String]) -> Option<Detected> {
     })
 }
 
+/// Codex's approval surfaces (WI-1355), recognised by their structure rather
+/// than by what they ask, so a long body, a wrapped question or a message an
+/// MCP server wrote itself does not hide them:
+///
+/// ```text
+///   Would you like to run the following command?
+///
+///   Environment: local
+///
+///   Reason: write a probe file outside the workspace
+///
+///   $ touch /etc/probe
+///
+///
+/// › 1. Yes, proceed (y)
+///   2. No, and tell Codex what to do differently (esc)
+///
+///   Press enter to confirm or esc to cancel
+/// ```
+///
+/// is the approval overlay — commands, patches, network access, input to a
+/// running terminal, extra permissions and MCP requests — and
+///
+/// ```text
+///   Field 1/1
+///   Allow the echo MCP server to run tool "echo"?
+///
+///   › 1. Allow                   Run the tool and continue
+///     2. Allow for this session  Run the tool and remember this choice …
+///   enter to submit | esc to cancel
+/// ```
+///
+/// is an MCP elicitation form: a tool approval for a server, an app or a
+/// connector, or a question the server asks in its own words. Either is live
+/// only while its footer is the last thing on the screen, which is where
+/// Codex draws it and where ordinary output never leaves those words: an
+/// idle or working Codex shows its composer and status line under them.
+fn detect_codex(visible: &[String], scrollback: &[String]) -> Option<Detected> {
+    let last_visible = visible.iter().rposition(|l| !strip(l).trim().is_empty())?;
+    let all: Vec<&str> = scrollback
+        .iter()
+        .chain(visible.iter())
+        .map(String::as_str)
+        .collect();
+    let last = scrollback.len() + last_visible;
+    // The footer wraps over up to three lines on a phone-width screen.
+    for start in last.saturating_sub(2)..=last {
+        let joined = join_stripped(&all[start..=last]);
+        if CODEX_OVERLAY_FOOTER.is_match(&joined) {
+            return codex_overlay(&all, start);
+        }
+        if CODEX_FORM_FOOTER.is_match(&joined) {
+            return codex_form(&all, start);
+        }
+    }
+    None
+}
+
+fn join_stripped(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .map(|l| strip(l).trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn cut_excerpt(lines: &[&str]) -> String {
+    let mut excerpt = lines
+        .iter()
+        .map(|l| strip(l).trim_end())
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if excerpt.chars().count() > MAX_EXCERPT_CHARS {
+        excerpt = excerpt.chars().take(MAX_EXCERPT_CHARS).collect();
+        excerpt.push('…');
+    }
+    excerpt
+}
+
+fn codex_overlay(all: &[&str], footer: usize) -> Option<Detected> {
+    let from = footer.saturating_sub(MAX_CONTEXT_LINES);
+    let opt = from
+        + all[from..footer]
+            .iter()
+            .rposition(|l| OPTION.is_match(strip(l).trim()))?;
+    let options = codex_options(&all[opt..footer]);
+    // The title is the header's first paragraph, with the reason, the
+    // command or the diff between it and the menu. Searched upward a
+    // paragraph at a time, stopping at the transcript ("• Running …").
+    let mut title: Option<(usize, String)> = None;
+    let mut top = opt;
+    let mut end = opt;
+    let floor = opt.saturating_sub(SCROLLBACK_CONTEXT_LINES);
+    let mut i = opt;
+    while i > floor {
+        let line = strip(all[i - 1]).trim();
+        if line.starts_with('•') || line.starts_with('›') {
+            break;
+        }
+        if line.is_empty() {
+            if end > i {
+                let text = join_stripped(&all[i..end]);
+                if CODEX_OVERLAY_TITLE.is_match(&text) {
+                    title = Some((end, text));
+                    break;
+                }
+            }
+            end = i - 1;
+        }
+        i -= 1;
+        top = i;
+    }
+    if title.is_none() && end > i {
+        let text = join_stripped(&all[i..end]);
+        if CODEX_OVERLAY_TITLE.is_match(&text) {
+            title = Some((end, text));
+        }
+    }
+    let (body_from, question) = match title {
+        Some((after, text)) => (after, text),
+        None => (top, CODEX_UNTITLED.to_string()),
+    };
+    Some(Detected {
+        question,
+        command_excerpt: cut_excerpt(&all[body_from..opt]),
+        deadline_seconds: None,
+        kind: "permission",
+        options,
+        horizontal: false,
+    })
+}
+
+fn codex_form(all: &[&str], footer: usize) -> Option<Detected> {
+    let from = footer.saturating_sub(SCROLLBACK_CONTEXT_LINES);
+    let field = from
+        + all[from..footer]
+            .iter()
+            .rposition(|l| CODEX_FIELD.is_match(strip(l).trim()))?;
+    let body = &all[field + 1..footer];
+    let opt = body
+        .iter()
+        .position(|l| OPTION.is_match(strip(l).trim()))
+        .unwrap_or(body.len());
+    let options = codex_options(&body[opt..]);
+    // The message is the first paragraph; a question wrapped over several
+    // lines ends at its question mark.
+    let prompt = &body[..opt];
+    let first = prompt
+        .iter()
+        .position(|l| !strip(l).trim().is_empty())
+        .unwrap_or(prompt.len());
+    let mut upto = first;
+    while upto < prompt.len() && !strip(prompt[upto]).trim().is_empty() {
+        upto += 1;
+        if strip(prompt[upto - 1]).trim_end().ends_with('?') {
+            break;
+        }
+    }
+    let question = join_stripped(&prompt[first..upto]);
+    if question.is_empty() && options.is_empty() {
+        return None;
+    }
+    let rest = cut_excerpt(&prompt[upto..]);
+    let command_excerpt = if rest.is_empty() {
+        question.clone()
+    } else {
+        rest
+    };
+    Some(Detected {
+        question,
+        command_excerpt,
+        deadline_seconds: None,
+        kind: "permission",
+        options,
+        horizontal: false,
+    })
+}
+
+/// Codex's numbered menu, from option 1 to the footer. A choice that has a
+/// description shows it after a run of two or more spaces ("Allow for this
+/// session  Run the tool and remember …"); the label is the part before it.
+/// A line indented to the label's column continues a label that wrapped.
+fn codex_options(lines: &[&str]) -> Vec<MenuOption> {
+    let mut options: Vec<MenuOption> = Vec::new();
+    let mut label_col = usize::MAX;
+    for raw in lines {
+        let line = strip(raw).trim();
+        if let Some(c) = ANY_OPTION.captures(line) {
+            let number: u32 = c[2].parse().unwrap_or(0);
+            if number as usize == options.len() + 1 {
+                let text = c.get(3).map_or("", |m| m.as_str());
+                label_col = raw
+                    .find(text)
+                    .map_or(usize::MAX, |at| raw[..at].chars().count());
+                options.push(MenuOption {
+                    number,
+                    label: label_part(text).to_string(),
+                    selected: c.get(1).is_some(),
+                });
+                continue;
+            }
+        }
+        let indent = raw.chars().take_while(|c| *c == ' ').count();
+        if let Some(last) = options.last_mut() {
+            if !line.is_empty() && indent == label_col {
+                last.label.push(' ');
+                last.label.push_str(label_part(line));
+            }
+        }
+    }
+    options
+}
+
+/// A menu line's label, without the description after a run of spaces.
+fn label_part(text: &str) -> &str {
+    text.split("  ").next().unwrap_or(text).trim()
+}
+
 fn detect_numbered(visible: &[String], scrollback: &[String]) -> Option<Detected> {
     let q_visible = visible
         .iter()
@@ -456,11 +721,9 @@ fn detect_numbered(visible: &[String], scrollback: &[String]) -> Option<Detected
             }
             options.push(MenuOption {
                 number,
-                // Codex's MCP approval prints the choice and its description on
-                // one line, split by a run of spaces (WI-1355): "Allow
-                //                   Run the tool and continue". The choice is
-                // the part before that run.
-                label: c[3].split("   ").next().unwrap_or(&c[3]).trim().to_string(),
+                // A choice and its description on one line, split by a run
+                // of spaces (Codex, WI-1355): the choice is the part before.
+                label: label_part(&c[3]).to_string(),
                 selected: c.get(1).is_some(),
             });
         } else if !options.is_empty()
@@ -564,10 +827,8 @@ mod tests {
 
     #[test]
     fn codex_mcp_tool_approval() {
-        // Captured from the WI-1127 Codex fork's TUI (v0.162.0) while an MCP
-        // tool call waited on its person (WI-1355). The window title at the
-        // time was "[ ! ] Action Required", not `codex: awaiting approval`, so
-        // the screen text is what has to be recognised.
+        // An MCP tool call waiting on its person in the WI-1127 Codex fork's
+        // TUI (v0.162.0, WI-1355).
         let screen = lines(
             "Field 1/1\n\
              Allow the vogt MCP server to run tool \"board_list\"?\n\
@@ -587,6 +848,8 @@ mod tests {
         assert_eq!(d.options.len(), 4);
         assert!(d.options[0].selected && !d.options[1].selected);
         assert_eq!(d.options[0].label, "Allow");
+        // Two spaces part the widest label from its description.
+        assert_eq!(d.options[1].label, "Allow for this session");
         assert_eq!(d.options[3].label, "Cancel");
         assert!(d.command_excerpt.contains("cells:"), "{d:?}");
         assert!(mentions_approval(screen.join("\n").as_bytes()));
@@ -857,5 +1120,315 @@ mod tests {
         let mut quoted = lines("Change this machine? (y)es / (n)o / (s)omething else");
         quoted.extend(std::iter::repeat_n(String::new(), 10));
         assert_eq!(detect(&quoted, &[]), None);
+    }
+
+    /// A screen captured off the WI-1127 Codex fork (0.162.0+fork.ca04973b4)
+    /// under the engine's launch flags (`-a on-request`, `agent-state` title,
+    /// no animations), with a fake Responses API and a harmless stdio MCP
+    /// server (WI-1355), rendered by the engine's own terminal.
+    fn codex_capture(name: &str, cols: u16) -> (Vec<String>, Vec<String>) {
+        let path = format!(
+            "{}/tests/fixtures/codex-approvals/{name}.pty",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(&path).expect("capture reads");
+        let (rendered, scrollback) =
+            crate::screen::render_with_scrollback(&bytes, 40, cols, SCROLLBACK_CONTEXT_LINES);
+        (rendered.lines, scrollback)
+    }
+
+    fn captured(name: &str, cols: u16) -> Detected {
+        let (screen, scrollback) = codex_capture(name, cols);
+        // The PTY reader renders only when the stripped raw bytes mention one.
+        let path = format!(
+            "{}/tests/fixtures/codex-approvals/{name}.pty",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let raw = std::fs::read(path).expect("capture reads");
+        assert!(
+            mentions_approval(&crate::activity::strip_ansi(&raw)),
+            "{name}: prefilter"
+        );
+        detect(&screen, &scrollback).unwrap_or_else(|| panic!("{name}: no dialog in {screen:#?}"))
+    }
+
+    fn labels(d: &Detected) -> Vec<&str> {
+        d.options.iter().map(|o| o.label.as_str()).collect()
+    }
+
+    #[test]
+    fn codex_command_approval_with_a_reason_is_read_however_far_down_its_menu_is() {
+        // Option 1 sits nine lines under the question: past where the old
+        // detector looked, and the title stays `codex: working` throughout.
+        let d = captured("exec-120", 120);
+        assert_eq!(d.question, "Would you like to run the following command?");
+        assert_eq!(d.kind, "permission");
+        assert!(
+            d.command_excerpt.contains("Reason: write a probe file"),
+            "{d:?}"
+        );
+        assert!(
+            d.command_excerpt.contains("$ touch /etc/vogt-probe-file"),
+            "{d:?}"
+        );
+        assert_eq!(d.options.len(), 3);
+        assert!(d.options[0].selected);
+        assert_eq!(d.options[0].label, "Yes, proceed (y)");
+        assert_eq!(
+            d.options[2].label,
+            "No, and tell Codex what to do differently (esc)"
+        );
+
+        let d = captured("execlong-120", 120);
+        assert_eq!(d.question, "Would you like to run the following command?");
+        assert!(d.command_excerpt.contains("a long reason"), "{d:?}");
+        assert_eq!(d.options.len(), 3);
+    }
+
+    #[test]
+    fn codex_prompts_wrapped_on_a_phone_width_screen_are_read_whole() {
+        let d = captured("exec-45", 45);
+        assert_eq!(d.question, "Would you like to run the following command?");
+        assert_eq!(d.options.len(), 3);
+        assert_eq!(
+            d.options[2].label,
+            "No, and tell Codex what to do differently (esc)"
+        );
+
+        let d = captured("mcp-45", 45);
+        assert_eq!(
+            d.question,
+            "Allow the echo MCP server to run tool \"echo\"?"
+        );
+        assert_eq!(
+            labels(&d),
+            ["Allow", "Allow for this session", "Always allow", "Cancel"]
+        );
+
+        let d = captured("patch-45", 45);
+        assert_eq!(d.question, "Would you like to make the following edits?");
+        assert_eq!(d.options.len(), 3);
+    }
+
+    #[test]
+    fn codex_patch_approval() {
+        let d = captured("patch-120", 120);
+        assert_eq!(d.question, "Would you like to make the following edits?");
+        assert!(
+            d.command_excerpt.contains("Destination: /var/tmp/"),
+            "{d:?}"
+        );
+        assert_eq!(
+            d.options[1].label,
+            "Yes, and don't ask again for these files (a)"
+        );
+    }
+
+    #[test]
+    fn codex_mcp_tool_approval_captured() {
+        let d = captured("mcp-120", 120);
+        assert_eq!(
+            d.question,
+            "Allow the echo MCP server to run tool \"echo\"?"
+        );
+        assert_eq!(d.command_excerpt, "text: hello");
+        assert_eq!(
+            labels(&d),
+            ["Allow", "Allow for this session", "Always allow", "Cancel"]
+        );
+        assert!(d.options[0].selected && !d.options[1].selected);
+    }
+
+    #[test]
+    fn codex_mcp_elicitation_is_read_by_its_form_not_its_words() {
+        // The server chose this message; nothing in it says "approve".
+        let d = captured("elicitation-120", 120);
+        assert_eq!(
+            d.question,
+            "Pick the deployment lane for this harmless probe"
+        );
+        assert_eq!(d.kind, "permission");
+        assert_eq!(labels(&d), ["dev", "prod"]);
+        assert!(d.command_excerpt.contains("Lane"), "{d:?}");
+    }
+
+    #[test]
+    fn an_idle_codex_is_no_dialog() {
+        let (screen, scrollback) = codex_capture("idle-120", 120);
+        assert_eq!(detect(&screen, &scrollback), None);
+    }
+
+    /// The overlay as `approval_overlay.rs` builds it for the request kinds
+    /// that need a sandbox or a tool the harness could not offer, from the
+    /// fork's own strings and snapshots (ca04973b4).
+    fn overlay(title: &[&str], body: &[&str], options: &[&str]) -> Vec<String> {
+        let mut screen = vec!["• Working".to_string(), String::new()];
+        screen.extend(title.iter().map(|l| format!("  {l}")));
+        screen.push(String::new());
+        screen.extend(body.iter().map(|l| format!("  {l}")));
+        screen.extend([String::new(), String::new()]);
+        for (i, o) in options.iter().enumerate() {
+            let glyph = if i == 0 { "› " } else { "  " };
+            screen.push(format!("{glyph}{}. {o}", i + 1));
+        }
+        screen.push(String::new());
+        screen.push("  Press enter to confirm or esc to cancel".to_string());
+        screen.extend(std::iter::repeat_n(String::new(), 3));
+        screen
+    }
+
+    #[test]
+    fn every_codex_overlay_kind_is_a_dialog() {
+        let cases: &[(&[&str], &[&str], &[&str])] = &[
+            (
+                &["Do you want to approve network access to \"example.com\"?"],
+                &["Reason: network request blocked"],
+                &[
+                    "Yes, just this once (y)",
+                    "Yes, and allow this host for this conversation (a)",
+                    "Yes, and allow this host in the future (p)",
+                    "No, and tell Codex what to do differently (esc)",
+                ],
+            ),
+            (
+                &["Would you like to send input to terminal 4?"],
+                &["$ y"],
+                &[
+                    "Yes, proceed (y)",
+                    "No, and tell Codex what to do differently (esc)",
+                ],
+            ),
+            (
+                &["Would you like to send input to the existing terminal?"],
+                &[],
+                &[
+                    "Yes, proceed (y)",
+                    "No, and tell Codex what to do differently (esc)",
+                ],
+            ),
+            (
+                &["Would you like to grant these permissions?"],
+                &[
+                    "Reason: need workspace access",
+                    "",
+                    "Permission rule: network; read `/tmp/readme.txt`; write `/tmp/out.txt`",
+                ],
+                &[
+                    "Yes, grant these permissions for this turn (y)",
+                    "Yes, grant for this turn with strict auto review (r)",
+                    "Yes, grant these permissions for this session (a)",
+                    "No, continue without permissions (d)",
+                ],
+            ),
+            (
+                &["vogt needs your approval."],
+                &["Approve the pending action."],
+                &[
+                    "Yes, provide the requested info (y)",
+                    "No, but continue without it (n)",
+                    "Cancel this request (esc)",
+                ],
+            ),
+            (
+                // Wrapped at 40 columns, as the fork's clipping snapshot shows.
+                &["Would you like to run the following", "command?"],
+                &["Thread: Robie [explorer]", "", "$ echo hi"],
+                &[
+                    "Yes, proceed (y)",
+                    "No, and tell Codex what to do differently (esc)",
+                ],
+            ),
+        ];
+        for (title, body, options) in cases {
+            let screen = overlay(title, body, options);
+            let d = detect(&screen, &[]).unwrap_or_else(|| panic!("{screen:#?}"));
+            assert_eq!(d.question, title.join(" "));
+            assert_eq!(d.kind, "permission");
+            assert_eq!(labels(&d), *options);
+            assert!(mentions_approval(screen.join("\n").as_bytes()), "{title:?}");
+        }
+
+        // A command taller than the screen: the title is out of reach, the
+        // menu and footer are not.
+        let clipped = lines(
+            "  [… 43 lines] ⌃g view all\n\
+             › 1. Yes, proceed (y)\n\
+             \x20 2. No, and tell Codex what to do\n\
+             \x20    differently (esc)\n\
+             \x20 Press enter to confirm or esc to\n\
+             \x20 cancel",
+        );
+        let d = detect(&clipped, &[]).expect("clipped overlay");
+        assert_eq!(d.question, CODEX_UNTITLED);
+        assert_eq!(
+            labels(&d),
+            [
+                "Yes, proceed (y)",
+                "No, and tell Codex what to do differently (esc)"
+            ]
+        );
+    }
+
+    #[test]
+    fn every_codex_elicitation_form_is_a_dialog() {
+        // MCP tool approvals for an app and for a connector
+        // (`mcp_tool_call.rs`), and forms whose wording the server chose,
+        // from the fork's snapshots.
+        for (screen, question) in [
+            (
+                "  Field 1/1\n  Allow this app to run tool \"run_action\"?\n  › 1. Allow   Run the tool and continue\n    2. Cancel  Cancel this tool call\n\n  enter to submit | esc to cancel",
+                "Allow this app to run tool \"run_action\"?",
+            ),
+            (
+                "  Field 1/1\n  Allow Google Calendar to run tool \"create_event\"?\n\n  Calendar: primary\n\n  › 1. Allow   Run the tool and continue\n    2. Cancel  Cancel this tool call\n  enter to submit | esc to cancel",
+                "Allow Google Calendar to run tool \"create_event\"?",
+            ),
+            (
+                "  Field 1/1\n  Boolean elicit MCP example: do you confirm?\n  › 1. Allow   Allow this request and continue\n    2. Deny    Decline this request and continue\n    3. Cancel  Cancel this request\n  enter to submit | esc to cancel",
+                "Boolean elicit MCP example: do you confirm?",
+            ),
+            (
+                "  Field 1/1 (1 required unanswered)\n  Allow this request?\n\n  Confirm\n  Approve the pending action.\n  › 1. True\n    2. False\n  enter to submit | esc to cancel",
+                "Allow this request?",
+            ),
+            (
+                "  Field 2/3 (1 required unanswered)\n  Enter a name\n\n  Name\n\n  › Type your answer\n\n  ⌃x enter to submit all | ⌃p / ⌃n change field | esc to cancel",
+                "Enter a name",
+            ),
+        ] {
+            let screen = lines(screen);
+            let d = detect(&screen, &[]).unwrap_or_else(|| panic!("{screen:#?}"));
+            assert_eq!(d.question, question);
+            assert!(mentions_approval(screen.join("\n").as_bytes()), "{question}");
+        }
+    }
+
+    #[test]
+    fn codex_words_in_ordinary_output_are_not_a_dialog() {
+        // The footer's words in the transcript, with the composer under them.
+        let working = lines(
+            "• Ran printf 'Press enter to confirm or esc to cancel'\n\
+             \x20 └ 1. first\n\
+             \x20   Press enter to confirm or esc to cancel\n\
+             \n\
+             • Working (3s • esc to interrupt)\n\
+             \n\
+             › Ask Codex to do anything\n\
+             \x20 gpt-5 default · ~/vogt",
+        );
+        assert_eq!(detect(&working, &[]), None);
+        let form_words = lines(
+            "• Field 1/1 is the progress line\n\
+             › 1. Allow\n\
+             enter to submit | esc to cancel\n\
+             \n\
+             › Ask Codex to do anything",
+        );
+        assert_eq!(detect(&form_words, &[]), None);
+        // A picker's footer goes back rather than cancelling.
+        let picker = lines(
+            "  Select model\n› 1. gpt-5\n  2. gpt-5-mini\n\n  Press enter to confirm or esc to go back",
+        );
+        assert_eq!(detect(&picker, &[]), None);
     }
 }
