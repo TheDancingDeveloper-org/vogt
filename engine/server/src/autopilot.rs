@@ -27,6 +27,9 @@
 //! other, and is nudged like one (WI-1090): it says it is in its goal loop in
 //! its title (`klaudia: goal-loop`) or, on older builds, in its status bar.
 //!
+//! Nor is a session whose budget watcher holds it: a warning or a hard stop is
+//! due and waits for the prompt, and a nudge would start the next turn first.
+//!
 //! A nudge is input, so it resets the session's quiet clock: the next one
 //! cannot come sooner than `nudge_after` after the agent last stopped.
 
@@ -139,7 +142,9 @@ pub fn decide(policy: &Policy, seen: Seen) -> Step {
 /// Look at every autopilot session once.
 pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
     for session in registry.live_sessions() {
-        if !session.autopilot() || !session.is_alive() {
+        // A budget action is waiting for the prompt (WI-1281): a nudge now
+        // would start another turn and push the action past it again.
+        if !session.autopilot() || !session.is_alive() || session.budget_hold() {
             continue;
         }
         let Some(agent) = session.agent() else {
