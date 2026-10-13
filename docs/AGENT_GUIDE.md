@@ -368,11 +368,13 @@ The recipe is **start with a task → wait until ready → read → answer → s
    with the blocked report and the economics the engine already computed.
 4. **Answer.** `session_input` types `text`, then presses the named `keys` in
    order (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`,
-   `ctrl-d`, `backspace`), then Enter if `submit`. A menu or dialog: `keys:
-   ["esc"]` to dismiss it, or arrows then `enter` to choose. When Enter is
-   pressed (`submit`, or `enter` among the `keys`), the result says what
-   became of the input in `delivery`: `delivered` means a turn started;
-   `queued` means it waits behind a running turn; `unconfirmed` means
+   `ctrl-d`, `backspace`), then Enter. Enter is pressed by default, so
+   `session_input(id, text)` sends the line; `draft: true` (or an explicit
+   `submit: false`) types without sending and the result says `typed`. A menu
+   or dialog: `keys: ["esc"]` to dismiss it, or arrows then `enter` to choose.
+   When Enter is pressed (the default, or `enter` among the `keys`), the result
+   says what became of the input in `delivery`: `delivered` means a turn
+   started; `queued` means it waits behind a running turn; `unconfirmed` means
    nothing showed within about 2 s, so read the screen. `typed` means no
    Enter, and the text sits in the input box. `delivery_evidence` says how
    that was judged. Then wait again.
@@ -383,7 +385,7 @@ The recipe is **start with a task → wait until ready → read → answer → s
 $ uv run vogt session start --project vogt --template claude --task "run the test suite and report failures" --reason "delegate the test run"
 $ uv run vogt session screen --id <session-id>
 $ uv run vogt session input --id <session-id> --keys esc --reason "dismiss the dialog"
-$ uv run vogt session input --id <session-id> --text "now fix the first failure" --submit --reason "follow-up"
+$ uv run vogt session input --id <session-id> --text "now fix the first failure" --reason "follow-up"
 $ uv run vogt session stop --id <session-id> --reason "done"
 ```
 
@@ -860,7 +862,7 @@ the engine's HTTP API at `$VOGT_ENGINE_URL` is the fallback):
    `alive` is false).
 3. **Read:** `session_screen` for what is on screen now, `session_log_tail` for
    history.
-4. **Answer:** `session_input` — `text` with `submit`, or `keys` such as `esc`
+4. **Answer:** `session_input` — `text` (Enter is pressed; `draft: true` types without sending), or `keys` such as `esc`
    (dismiss a menu) or `down` then `enter` (choose). Never send a blind Enter:
    read the screen first.
 5. **Stop:** `session_stop`.

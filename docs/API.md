@@ -124,7 +124,7 @@ Reading a terminal and typing into one are deliberately different grants.
 | `session.log_tail` (`session_log_tail`) | `read` | the tail of a session's output log |
 | `session.screen` (`session_screen`) | `read` | what the terminal shows now: lines, cursor, title, activity, readiness |
 | `session.digest` (`session_digest`) | `read` | one session's digest from the engine row: activity, blocked report, a last-reply excerpt, and economics the engine already computed (null when the row has none; does not read a transcript) |
-| `session.input` (`session_input`) | `work.write` | type text, press named keys (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`, `ctrl-d`, `backspace`), then Enter with `submit` |
+| `session.input` (`session_input`) | `work.write` | type text, press named keys (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`, `ctrl-d`, `backspace`), then Enter (the default; `draft` or `submit: false` types without sending) |
 | `session.start` / `session.stop` | `work.write` | open or close a terminal |
 | `session.rename` (`session_rename`) | `work.write` | rename a session, as the GUI does; `session.list` returns the name as `name` |
 | `session.remove` (`session_remove`) | `work.write` | kill a session if it runs and have the engine forget it, as the GUI's Remove does |
@@ -228,8 +228,10 @@ whole process tree, as the engine last sampled them, with `over_threshold`
 past the deployment's `ENGINE_SESSION_RSS_WARN`. `session.list` with
 `order: "rss"` lists the heaviest first.
 
-`session.input` reports what became of the input. `submitted` is true when
-Enter was pressed, by `submit` or as one of the `keys`. `delivery` is:
+`session.input` reports what became of the input. Enter is pressed by default;
+`draft: true`, or an explicit `submit: false`, types without sending.
+`submitted` is true when Enter was pressed, by that default or as one of the
+`keys`. `delivery` is:
 
 - `typed`: no Enter;
 - `delivered`: a turn started after it;

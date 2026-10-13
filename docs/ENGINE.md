@@ -1303,18 +1303,21 @@ ready → read → answer → stop.** Over MCP (the core's tools, preferred):
    the terminal shows now (`scrollback_lines` for more); `session_log_tail`
    is the raw history of what it printed. `session_list` carries a
    `last_reply_excerpt` for each live agent session.
-4. **Answer.** `session_input` with `text` and `submit: true` to type a
-   follow-up; `keys: ["esc"]` to dismiss a menu or dialog; `keys: ["down",
-   "enter"]` to pick an option; `session_answer` for a startup gate. A
-   permission prompt is not the driver's to answer unless the driver is a
-   person (below). Then go back to step 2.
+4. **Answer.** `session_input` with `text` to type a follow-up (Enter is
+   pressed by default; `draft: true` types without sending); `keys: ["esc"]`
+   to dismiss a menu or dialog; `keys: ["down", "enter"]` to pick an option;
+   `session_answer` for a startup gate. A permission prompt is not the
+   driver's to answer unless the driver is a person (below). Then go back to
+   step 2.
 5. **Stop.** `session_stop` kills the process and, for a session the core
    started, revokes its token. The screen and log stay readable until the
    session is deleted.
 
 **Input semantics.** `session.input` sends `text` verbatim, then each named
 key as its own write (so an Esc is not read as Alt plus the next byte), then
-Enter if `submit`. The keys are `enter` (`\r`), `esc` (`\u001b`), `tab`,
+Enter. Enter is pressed by default; `draft: true` (or an explicit
+`submit: false`) types without sending. The keys are `enter` (`\r`), `esc`
+(`\u001b`), `tab`,
 `up`/`down`/`right`/`left` (`\u001b[A`/`B`/`C`/`D`), `ctrl-c` (`\u0003`),
 `ctrl-d` (`\u0004`) and `backspace` (`\u007f`). At most 64 KiB of text per
 call. The raw `POST /api/sessions/:id/input` is one write of `text` (escape

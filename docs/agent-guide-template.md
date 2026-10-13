@@ -41,7 +41,7 @@ the engine's HTTP API at `$VOGT_ENGINE_URL` is the fallback):
    `alive` is false).
 3. **Read:** `session_screen` for what is on screen now, `session_log_tail` for
    history.
-4. **Answer:** `session_input` — `text` with `submit`, or `keys` such as `esc`
+4. **Answer:** `session_input` — `text` (Enter is pressed; `draft: true` types without sending), or `keys` such as `esc`
    (dismiss a menu) or `down` then `enter` (choose). Never send a blind Enter:
    read the screen first.
 5. **Stop:** `session_stop`.
