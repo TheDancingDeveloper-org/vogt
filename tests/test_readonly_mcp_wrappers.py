@@ -783,3 +783,59 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     assert broken.returncode == 0, broken.stderr
     assert "not valid TOML" in broken.stderr
     assert config.read_text(encoding="utf-8") == duplicate
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_codex_gets_the_browser_and_the_isolated_subagent(tmp_path: Path) -> None:
+    """WI-1358: a Codex session has no browser of its own and its spawn_agent
+    cannot take a working directory. The bootstrap registers the two stdio
+    servers the klaudia binary serves, and points the sub-agent at the real
+    codex binary rather than the full-access wrapper on PATH."""
+    import tomllib
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("codex", "klaudia"):
+        path = bindir / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", "stdout is the MCP transport"
+
+    config = tmp_path / "codex" / "config.toml"
+    servers = _codex_tables(config.read_text(encoding="utf-8"))
+    assert servers["browser"]["command"] == str(bindir / "klaudia")
+    assert servers["browser"]["args"] == ["mcp", "browser"]
+    assert servers["browser"]["tool_timeout_sec"] == 60
+    sub = servers["codex-subagent"]
+    assert sub["command"] == str(bindir / "klaudia")
+    assert sub["args"] == [
+        "mcp",
+        "codex-subagent",
+        "--codex",
+        "/usr/local/libexec/codex-real",
+        "--root",
+        str(tmp_path),
+    ]
+    # The registration is a command and arguments, never a credential.
+    assert "env" not in sub and "bearer_token" not in sub
+
+    # A second run replaces the tables in place.
+    again = _codex_bootstrap(tmp_path, {})
+    assert again.returncode == 0, again.stderr
+    settled = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]
+    assert settled["browser"] == servers["browser"]
+    assert config.read_text(encoding="utf-8").count("[mcp_servers.browser]") == 1
+
+    # No klaudia binary, no tables: nothing is written that cannot be run.
+    bindir.joinpath("klaudia").unlink()
+    config.write_text("[other]\nkept = true\n", encoding="utf-8")
+    absent = _codex_bootstrap(tmp_path, {})
+    assert absent.returncode == 0, absent.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert "mcp_servers" not in parsed
+    assert parsed["other"] == {"kept": True}

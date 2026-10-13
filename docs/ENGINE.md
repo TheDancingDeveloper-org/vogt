@@ -410,6 +410,24 @@ Code (`~/.claude.json`), Codex (`~/.codex/config.toml`), opencode (its user
 `vogt-klaudia-mcp`); `VOGT_MCP_URL` overrides the endpoint, and
 with neither set the bootstrap falls back to the front door on loopback.
 
+**Codex's browser and isolated sub-agent** (WI-1358). Codex has neither a
+browser nor a way to hand `spawn_agent` a working directory — that tool takes
+`message`, `output_schema`, `fork_turns` and a model, and nothing else, in the
+fork this image ships (`codex-cli 0.162.0+fork.ca04973b4`). When `klaudia` is on
+`PATH`, `vogt-mcp-bootstrap` writes two stdio servers into Codex's config:
+`[mcp_servers.browser]` runs `klaudia mcp browser` (WI-1137) with
+`tool_timeout_sec = 60`, and `[mcp_servers.codex-subagent]` runs
+`klaudia mcp codex-subagent` (WI-1138). The sub-agent's `--codex` is
+`/usr/local/libexec/codex-real` (`CODEX_REAL` overrides it), never `codex` on
+`PATH`, because that name is the full-access wrapper and a child spawned
+through it would run unsandboxed. `--root` is the session's own working
+directory, which is the confinement the server applies. The tables carry a
+command and arguments only — no token, no environment — and are replaced in
+place on the next launch. Claude and Klaudia keep their own browser and
+sub-agent, so nothing is registered for them. A fork change that adds a
+working directory to `spawn_agent` is what would retire the sub-agent server;
+it is not something this repository can do.
+
 Any further MCP server an agent should reach is registered by hand inside the
 session, the way the Rust LSP entry above shows.
 
