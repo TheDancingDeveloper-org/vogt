@@ -421,6 +421,62 @@ pub async fn stop_tree(pid: u32, grace: Duration, exited: impl Fn() -> bool) {
     }
 }
 
+/// `SIGKILL` to `pid`'s process group, `pid`, and every pid in `tree` (taken
+/// with [`descendants`] before the leader was signalled). For a stop that must
+/// leave nothing running in the session's directory (WI-1304).
+pub fn kill_tree(pid: u32, tree: &[u32]) {
+    #[cfg(unix)]
+    {
+        signal(-(pid as i32), libc::SIGKILL);
+        signal(pid as i32, libc::SIGKILL);
+        for &p in tree {
+            signal(p as i32, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, tree);
+    }
+}
+
+/// Whether `pid` is a process that can still run: present and not a zombie.
+/// A zombie has stopped writing anywhere; only its exit status is left.
+/// Off Linux this cannot be told apart, so any process that exists counts.
+pub fn running(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return exists(pid);
+        };
+        let Some(close) = stat.rfind(')') else {
+            return true;
+        };
+        !matches!(
+            stat[close + 1..].split_whitespace().next(),
+            Some("Z") | Some("X") | Some("x")
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        exists(pid)
+    }
+}
+
+/// Whether `pid` exists at all. `EPERM` means it exists but is not ours,
+/// which still counts.
+fn exists(pid: u32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 fn alive(pid: u32) -> bool {
     #[cfg(unix)]
     unsafe {
