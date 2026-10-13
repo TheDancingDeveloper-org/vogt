@@ -388,6 +388,22 @@ for itself; those come from the engine and the core, not from the request. The e
 fetch VAR` are [`ENGINE.md` §9](ENGINE.md),
 and the design is [`design/oversight-grants.md`](design/oversight-grants.md).
 
+`decision.ask` (`work.write`, audited) records a question for a person:
+`question` (≤ 2000), two to four `options` (`label` ≤ 60, `description` ≤ 400,
+exactly one `recommended`), `context` (≤ 4000), optional `work_item`, and
+`ttl_seconds` (default 86 400, at most 604 800). The asker's session is taken
+from its token, never a parameter. A pending decision shows in the Inbox as
+`decision.pending`, with an action of kind `decision` (`decision_id`) and the
+options and recommendation in its evidence. `decision.answer` (`id`, `label`,
+optional `note`) is **refused for every agent principal** with
+`403 person_required`, and a `label` that is not one of the options is
+refused. `decision.withdraw` withdraws a pending decision; a person or the
+asking session may. `decision.list` (`read`) filters by `state` (`pending`,
+`answered`, `withdrawn`, `expired`), `work_item` and `asker` (identity_ref).
+`expired` is a pending decision past `expires_at`, computed on read; it cannot
+be answered and implies no answer. Nothing is applied when a decision is
+answered. The design is `design/agent-harness-services.md` §2.3.
+
 Only a session whose conversation id the
 engine knows can hibernate: Claude Code started by Vogt, or any `resume`. A
 shell needs `allow_shell`, and wakes as a fresh shell. The engine side is
