@@ -161,9 +161,18 @@ A project can carry an **agent policy** (`project.update --agent-policy`). The
 brief states all of it: text that must not appear in a commit, branch or PR
 (`forbidden_text`, regexes checked when the policy is saved), whether merging
 deploys production (`merge_deploys_prod`, with `main_branches`; an empty list
-means `main`), `commit_identity`, `test_recipe`, `deployed_setup` and `rules`. Today all of it
-is guidance. The brief says it and nothing refuses it; enforcement hooks are
-a follow-up.
+means `main`), `commit_identity`, `test_recipe`, `deployed_setup` and `rules`. It may
+also carry three structured blocks. `landing` names the base branch, the branch pattern
+(`{n}` is the work item number, and the brief fills it in), how a worker lands
+(`push_branch` or `open_pr`), who merges (`oversight` or `operator`) and by
+which mode (`fast_forward` or `rebase` — a merge commit is refused), and who
+deploys; when it is set the brief renders a "Landing rule for this repo"
+block, and when it is absent the brief says nothing about one. `review` names
+the template, model, effort, models a review must not run on, and a turn
+budget. `verification` says whether an item needs a verification record before
+it is done and which deploy lanes that record must cover. Today all of it is
+guidance. The brief says it and nothing refuses it; enforcement is a
+follow-up.
 
 ```console
 $ uv run vogt session start --work-item WI-42 --reason "start on the login-timeout fix"
