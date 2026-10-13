@@ -7,7 +7,8 @@ installed helpers in `/usr/local/bin/vogt-*`, msp-klaudia `be8cd0b`, and work
 items WI-1279, WI-1281, WI-1291 and WI-1298 to WI-1316.
 
 The initiative that carries the work is `agent-harness-services`. The item
-refs in §9 are the Vogt items created from this doc.
+refs in §9 are the Vogt items created from this doc (WI-1318 to WI-1338,
+plus the existing items mapped in).
 
 ## 0. Summary
 
@@ -529,44 +530,45 @@ the kernel: everything in §5's honest limits.
 Each phase leaves every existing flow working. Items are sized for one
 session; the model tag says who runs it. **Opus low** marks investigation,
 design or security-sensitive work where grok or Haiku is not appropriate.
-Refs are filled in below from the items created in Vogt.
+Every H-item below names its Vogt ref; the initiative is `agent-harness-services` (ini_01M4SKSTT8WGPB3XQHTT8A4WAH). Labels `model:haiku`, `model:grok`, `model:opus-low` carry the tag; `ci:flaky` marks the flaky register.
 
 **Phase 0 — land what is cut (this week).**
 Finish and land the in-progress grok branches: WI-1298 worktree start,
 WI-1304 build-output cleanup and disk status, WI-1281 budget enforcement,
 WI-1299 review brief (its six blockers). Fix the MCP footguns (WI-1316 split
-into three), the CI job timeouts and `if: always()` (WI-1312), and document
+into three: WI-1316 submit default, WI-1337 either id form, WI-1338 a local
+item for unbound autopilot workers), the CI job timeouts and `if: always()` (WI-1312), and document
 the landing flows (WI-1302). Ship WI-1279's host-change detection and verify
 it on dev.
 
 **Phase 1 — records and policy as data.**
-`agent_policy.landing/review/verification` (H1); `verdict` and
-`verification` comment kinds (H2); brief composer renders the latest
-hand-off and verdict only (H3); `Decision` entity and ops (H4, Opus low:
-first slice of a new subsystem); Inbox card and typed answer (H5); dispatch
-profiles and `purpose` on `session.start` (H6).
+`agent_policy.landing/review/verification` (H1 (WI-1318)); `verdict` and
+`verification` comment kinds (H2 (WI-1319)); brief composer renders the latest
+hand-off and verdict only (H3 (WI-1320)); `Decision` entity and ops (H4 (WI-1321), Opus low:
+first slice of a new subsystem); Inbox card and typed answer (H5 (WI-1322)); dispatch
+profiles and `purpose` on `session.start` (H6 (WI-1323)).
 
 **Phase 2 — gates.**
-Workspace record and `workspace.list` (H7); `workspace.clean` and
-merged-branch removal (H8); engine discard guard (H9, Opus low); branch
-ownership and PR rules in `policy.rs` (H10, Opus low); `work.land` (H11,
+Workspace record and `workspace.list` (H7 (WI-1324)); `workspace.clean` and
+merged-branch removal (H8 (WI-1325)); engine discard guard (H9 (WI-1326), Opus low); branch
+ownership and PR rules in `policy.rs` (H10 (WI-1327), Opus low); `work.land` (H11 (WI-1328),
 Opus low); linear-history CI check (WI-1315, re-scoped); dispatch
-enforcement at `session.start` (H12); `delivery` projection and the
-agent-only done gate (H13); askpass fetches a granted token (H14).
+enforcement at `session.start` (H12 (WI-1329)); `delivery` projection and the
+agent-only done gate (H13 (WI-1330)); askpass fetches a granted token (H14 (WI-1331)).
 
 **Phase 3 — adapters converge.**
-Klaudia `gitguard` defers to the engine (H15, Opus low, msp-klaudia); Klaudia
+Klaudia `gitguard` defers to the engine (H15 (WI-1332), Opus low, msp-klaudia); Klaudia
 Grep content default (WI-1311, re-scoped); blocked auto-clear (WI-1314,
 re-scoped); autopilot trail-off investigation (WI-1313, Opus low); Klaudia
 in-loop trail-off nudge (WI-1301); adapter contract documented in ENGINE.md
-(H16).
+(H16 (WI-1333)).
 
 **Phase 4 — CI watcher.**
-Hung-run detection (H17); flaky register (H18); person-armed rerun recipe
-(H19). Flaky items WI-1305, WI-1309, WI-1310 are labelled `ci:flaky`.
+Hung-run detection (H17 (WI-1334)); flaky register (H18 (WI-1335)); person-armed rerun recipe
+(H19 (WI-1336)). Flaky items WI-1305, WI-1309, WI-1310 are labelled `ci:flaky`.
 
-Dependencies: H2 → H3, H11, H13; H1 → H10, H11, H12, H13; H4 → H5; H6 →
-H12; WI-1298 → H7 → H8, H9, H15; WI-1304 → H8; H9 → H15; WI-1312 → H17, H18.
+Dependencies: H2 (WI-1319) → H3 (WI-1320), H11 (WI-1328), H13 (WI-1330); H1 (WI-1318) → H10 (WI-1327), H11 (WI-1328), H12 (WI-1329), H13 (WI-1330); H4 (WI-1321) → H5 (WI-1322); H6 (WI-1323) →
+H12 (WI-1329); WI-1298 → H7 (WI-1324) → H8 (WI-1325), H9 (WI-1326), H15 (WI-1332); WI-1304 → H8 (WI-1325); H9 (WI-1326) → H15 (WI-1332); WI-1312 → H17 (WI-1334), H18 (WI-1335).
 
 ## 10. Open questions for the operator
 
@@ -587,7 +589,7 @@ H12; WI-1298 → H7 → H8, H9, H15; WI-1304 → H8; H9 → H15; WI-1312 → H17
    happened.
 5. **`identity` mode.** Threat-model item 9 does not hold in this
    deployment. Move the dev stack to `brokered` once grants and the askpass
-   fetch (H14) are verified? Recommended: dev first, prod after a week.
+   fetch (H14 (WI-1331)) are verified? Recommended: dev first, prod after a week.
 6. **Decision expiry.** 24 h default, then `expired` and the asker is told to
    proceed on its recommendation or stop? Recommended: expire with no
    implied answer; the asker decides what expiry means.
