@@ -611,6 +611,28 @@ fn agent_binary(command: &[String]) -> (usize, String) {
     (idx, name)
 }
 
+/// `command` with the workspace guidance override inserted right after the
+/// Codex binary (WI-1357), or `None` when it is not a Codex launch, already
+/// carries one, or there is nothing to carry. Only the argument list changes:
+/// `CODEX_HOME` is never set, so the user's `~/.codex` (MCP servers,
+/// providers, trust, login, transcripts) stays the config Codex reads.
+pub fn with_codex_guidance(
+    command: &[String],
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Option<Vec<String>> {
+    if agent_name(command).as_deref() != Some("codex")
+        || crate::codex_guidance::has_override(command)
+    {
+        return None;
+    }
+    let value = crate::codex_guidance::developer_instructions_override(cwd, home)?;
+    let (idx, _) = agent_binary(command);
+    let mut out = command.to_vec();
+    out.splice(idx + 1..idx + 1, ["-c".to_string(), value]);
+    Some(out)
+}
+
 /// A conversation id becomes an argument to the agent CLI, so it is held to a
 /// narrower vocabulary than a model id: Claude Code and Codex ids are UUIDs,
 /// OpenCode's are `ses_…`, and a Codex session *name* is a plain word. No `/`
@@ -665,6 +687,29 @@ pub(crate) fn validate(field: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn codex_guidance_is_an_argument_and_leaves_codex_home_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let repo = home.join("Working").join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(home.join("Working").join("AGENTS.md"), "WS").unwrap();
+        let command: Vec<String> = ["env", "X=1", "--", "/usr/bin/codex", "--yolo"]
+            .map(String::from)
+            .to_vec();
+        let out = with_codex_guidance(&command, &repo, Some(&home)).unwrap();
+        assert_eq!(&out[..4], &command[..4]);
+        assert_eq!(out[4], "-c");
+        assert!(out[5].starts_with("developer_instructions=\""));
+        assert_eq!(out[6], "--yolo");
+        // The user's ~/.codex stays the config home: nothing names CODEX_HOME.
+        assert!(!out.iter().any(|arg| arg.contains("CODEX_HOME")));
+        // A second start does not stack another copy; other agents are untouched.
+        assert!(with_codex_guidance(&out, &repo, Some(&home)).is_none());
+        let claude = vec!["claude".to_string()];
+        assert!(with_codex_guidance(&claude, &repo, Some(&home)).is_none());
+    }
     use super::*;
 
     fn cmd(parts: &[&str]) -> Vec<String> {
