@@ -348,16 +348,16 @@ impl SessionHistory {
 
     /// Update a session row's identity (WI-962): its role when given, and its
     /// conversation when given. A conversation that ends is not cleared —
-    /// the row keeps the last one, which is what a resume needs. A row that
-    /// does not exist yet (history off, or the provisional write still in
-    /// flight) is left alone.
+    /// the row keeps the last one, which is what a resume needs. Whether a row
+    /// was there to update: `false` while the provisional row is still on its
+    /// way, so a caller can wait and try again instead of losing the report.
     pub async fn set_identity(
         &self,
         id: Uuid,
         role: Option<&'static str>,
         conversation: Option<&vogt_engine_contract::AgentConversation>,
-    ) -> Result<()> {
-        sqlx::query(
+    ) -> Result<bool> {
+        let done = sqlx::query(
             "UPDATE sessions SET role = COALESCE(?, role), \
              conversation_agent = COALESCE(?, conversation_agent), \
              conversation_id = COALESCE(?, conversation_id) WHERE id = ?",
@@ -369,7 +369,7 @@ impl SessionHistory {
         .execute(&self.pool)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to update session identity: {e}")))?;
-        Ok(())
+        Ok(done.rows_affected() > 0)
     }
 
     /// Set or clear a session row's work item (WI-998). Unlike the rest of
@@ -1079,14 +1079,21 @@ mod tests {
             agent: "claude".into(),
             id: "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f".into(),
         };
-        history
+        assert!(history
             .set_identity(id, None, Some(&conversation))
             .await
-            .unwrap();
-        history
+            .unwrap());
+        assert!(history
             .set_identity(id, Some("oversight"), None)
             .await
-            .unwrap();
+            .unwrap());
+        assert!(
+            !history
+                .set_identity(Uuid::new_v4(), Some("worker"), None)
+                .await
+                .unwrap(),
+            "no row yet is a miss, not a silent success"
+        );
         let row = history.get_session(id).await.unwrap();
         assert_eq!(row.role.as_deref(), Some("oversight"));
         assert_eq!(row.conversation_agent.as_deref(), Some("claude"));
