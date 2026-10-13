@@ -718,7 +718,8 @@ jobs:
       # so it is built as its own Dockerfile target and run inside the
       # candidate with VOGT_CODEX_GITGUARD_E2E=1, which turns a missing
       # prerequisite into a failure instead of a skip.
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+      - timeout-minutes: 30
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: engine/Dockerfile
