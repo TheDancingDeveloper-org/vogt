@@ -416,7 +416,7 @@ mod tests {
         let accounts = parse_accounts(Some(
             "noequals,Upper=/x,rel=relative/dir,ok=/ok,ok=/second,=/empty,../up=/y",
         ));
-        assert_eq!(accounts.len(), 1, "{accounts:?}");
+        assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].dir, PathBuf::from("/ok"));
     }
 
