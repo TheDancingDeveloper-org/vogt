@@ -2110,8 +2110,10 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
   (`engine.status`), through the core's engine credential.
 - `GET /api/agent-clis[?upstream=true]` -> `AgentCliReport` — the
   runtime-pinned agent CLIs and the Go toolchain ([`DEPLOYMENT.md`](DEPLOYMENT.md)
-  §3): for each tool in the image's table its package (an npm package, or
-  for `kind: "go-dist"` the Go release mirror), `kind`, binary, the variable
+  §3): for each tool in the image's table its package (an npm package, the
+  Go release mirror for `kind: "go-dist"`, a git repository for `go-src`, or
+  a GitHub repository for `github-release`), `kind` (`npm`, `go-dist`,
+  `go-src` or `github-release`), binary, the variable
   that pins it at boot, the baked version, the active version and its
   `source` (`image`, `runtime` or `absent`), and the versions already on the
   volume. With `upstream=true` the engine also asks npm for each package's
