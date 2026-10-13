@@ -206,13 +206,88 @@ async fn wait_for_run_count(
 async fn stand_in_core_knowing(
     identities: Vec<(&'static str, &'static str, Vec<&'static str>)>,
 ) -> String {
+    stand_in_core_relaying(identities, "").await.0
+}
+
+/// As `stand_in_core_knowing`, and its MCP `session_input` is carried out the
+/// way the real core does it: the engine's input route, under `stack`, with
+/// `person` saying whether the bearer that asked is a person. The engine's URL
+/// goes in the returned slot once it has booted.
+async fn stand_in_core_relaying(
+    identities: Vec<(&'static str, &'static str, Vec<&'static str>)>,
+    stack: &'static str,
+) -> (String, Arc<std::sync::OnceLock<String>>) {
     use axum::{extract::State, http::HeaderMap, response::IntoResponse, routing::any, Router};
     type Known = Arc<Vec<(&'static str, &'static str, Vec<&'static str>)>>;
+    type Relay = (Known, &'static str, Arc<std::sync::OnceLock<String>>);
+    async fn mcp(
+        (known, stack, engine): Relay,
+        headers: HeaderMap,
+        message: Value,
+    ) -> axum::response::Response {
+        let id = message.get("id").cloned().unwrap_or(json!(1));
+        let result = match message["method"].as_str() {
+            Some("tools/list") => json!({"tools": [{
+                "name": "session_input",
+                "description": "Type a line into a terminal session.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "text": {"type": "string"},
+                        "submit": {"type": "boolean"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["id", "text", "reason"],
+                    "additionalProperties": false,
+                },
+            }]}),
+            Some("tools/call") => {
+                let bearer = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .unwrap_or_default();
+                let person = known
+                    .iter()
+                    .any(|(token, who, _)| *token == bearer && !who.starts_with("agent:"));
+                let args = &message["params"]["arguments"];
+                let typed = reqwest::Client::new()
+                    .post(format!(
+                        "{}/api/sessions/{}/input",
+                        engine.get().expect("engine booted"),
+                        args["id"].as_str().unwrap_or_default()
+                    ))
+                    .bearer_auth(stack)
+                    .json(&json!({
+                        "text": args["text"],
+                        "submit": args["submit"].as_bool().unwrap_or(false),
+                        "person": person,
+                    }))
+                    .send()
+                    .await
+                    .unwrap();
+                let refused = !typed.status().is_success();
+                json!({
+                    "content": [{"type": "text", "text": typed.text().await.unwrap()}],
+                    "isError": refused,
+                })
+            }
+            _ => json!({}),
+        };
+        axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
+    }
     async fn handler(
-        State(known): State<Known>,
+        State(relay): State<Relay>,
         headers: HeaderMap,
         uri: axum::http::Uri,
+        body: axum::body::Bytes,
     ) -> axum::response::Response {
+        if uri.path() == "/mcp" {
+            let message = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            return mcp(relay, headers, message).await;
+        }
+        let known = relay.0;
         if uri.path() == "/api/auth/whoami" {
             let bearer = headers
                 .get(axum::http::header::AUTHORIZATION)
@@ -239,15 +314,18 @@ async fn stand_in_core_knowing(
         }
         (StatusCode::OK, axum::Json(json!({"seen": uri.path()}))).into_response()
     }
-    let app = Router::new()
-        .route("/{*path}", any(handler))
-        .with_state(Arc::new(identities));
+    let engine = Arc::new(std::sync::OnceLock::new());
+    let app = Router::new().route("/{*path}", any(handler)).with_state((
+        Arc::new(identities),
+        stack,
+        Arc::clone(&engine),
+    ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), engine)
 }
 
 fn auth() -> reqwest::header::HeaderMap {
@@ -886,7 +964,7 @@ async fn agent_task_create_run_and_records_prompt_file() {
         "Exited successfully"
     );
 
-    let sessions: Vec<Value> = client
+    let sessions: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -894,6 +972,7 @@ async fn agent_task_create_run_and_records_prompt_file() {
         .json()
         .await
         .unwrap();
+    let sessions: Vec<Value> = serde_json::from_value(sessions["sessions"].clone()).unwrap();
     assert!(sessions.iter().any(|s| s["id"] == session_id));
 }
 
@@ -1651,7 +1730,7 @@ async fn create_list_and_kill_session() {
     let id = create["id"].as_str().unwrap().to_string();
     assert_eq!(create["name"], "test-shell");
 
-    let list: Vec<Value> = client
+    let list: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -1659,6 +1738,7 @@ async fn create_list_and_kill_session() {
         .json()
         .await
         .unwrap();
+    let list: Vec<Value> = serde_json::from_value(list["sessions"].clone()).unwrap();
     assert!(list.iter().any(|s| s["id"] == id));
 
     let kill = client
@@ -8265,7 +8345,7 @@ async fn wait_for_session_row(
 ) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let list: Vec<Value> = client
+        let list: Value = client
             .get(format!("{base}/api/sessions"))
             .send()
             .await
@@ -8273,6 +8353,7 @@ async fn wait_for_session_row(
             .json()
             .await
             .unwrap();
+        let list: Vec<Value> = serde_json::from_value(list["sessions"].clone()).unwrap();
         if let Some(row) = list.iter().find(|s| s["id"] == id && pred(s)) {
             return row.clone();
         }
@@ -8560,7 +8641,7 @@ async fn a_permission_dialog_reads_awaiting_approval_with_its_command() {
     );
 
     // The list says the same.
-    let list: Vec<Value> = client
+    let list: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -8568,6 +8649,7 @@ async fn a_permission_dialog_reads_awaiting_approval_with_its_command() {
         .json()
         .await
         .unwrap();
+    let list: Vec<Value> = serde_json::from_value(list["sessions"].clone()).unwrap();
     let row = list.iter().find(|s| s["id"] == id).unwrap();
     assert_eq!(row["activity"], "awaiting-approval");
     assert_eq!(row["approval"]["question"], "Do you want to proceed?");
@@ -9294,7 +9376,7 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!pid_alive(helper), "the agent's child should be gone");
 
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -9302,6 +9384,7 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     let row = listed.iter().find(|s| s["id"] == id.as_str()).unwrap();
     assert_eq!(row["activity"], "hibernated");
     assert_eq!(row["blocked"]["reason"], "needs the bot token");
@@ -9466,7 +9549,7 @@ async fn a_sessions_budget_survives_hibernate_and_wake() {
     assert_eq!(hibernated["budget"]["turns"], 120);
     assert_eq!(hibernated["budget"]["wall_clock_minutes"], 90);
 
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -9474,6 +9557,7 @@ async fn a_sessions_budget_survives_hibernate_and_wake() {
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     let row = listed.iter().find(|s| s["id"] == id.as_str()).unwrap();
     assert_eq!(row["budget"]["turns"], 120);
     assert_eq!(row["budget"]["wall_clock_minutes"], 90);
@@ -9646,7 +9730,7 @@ async fn sessions_survive_an_engine_restart_as_hibernated() {
     .unwrap();
 
     let (base, _h) = boot_with_config(cfg).await;
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -9654,6 +9738,7 @@ async fn sessions_survive_an_engine_restart_as_hibernated() {
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     let find = |want: &str| {
         listed
             .iter()
@@ -9742,7 +9827,7 @@ async fn attaching_to_a_hibernated_session_replays_its_screen_and_does_not_wake_
     );
     assert!(String::from_utf8_lossy(&bytes).contains("helper=["));
 
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -9750,6 +9835,7 @@ async fn attaching_to_a_hibernated_session_replays_its_screen_and_does_not_wake_
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     let row = listed.iter().find(|s| s["id"] == id.as_str()).unwrap();
     assert_eq!(row["activity"], "hibernated", "attach must not wake it");
 }
@@ -9892,7 +9978,7 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
     )
     .await;
 
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -9900,6 +9986,7 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     let activity = |id: &str| {
         listed
             .iter()
@@ -9954,7 +10041,7 @@ async fn a_session_pinned_awake_wakes_by_itself_after_a_restart() {
     let (base, _h) = boot_with_config(cfg).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
-        let listed: Vec<Value> = client
+        let listed: Value = client
             .get(format!("{base}/api/sessions"))
             .send()
             .await
@@ -9962,6 +10049,7 @@ async fn a_session_pinned_awake_wakes_by_itself_after_a_restart() {
             .json()
             .await
             .unwrap();
+        let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
         let activity = |id: &str| {
             listed
                 .iter()
@@ -10035,7 +10123,7 @@ async fn an_oversight_session_is_pinned_listed_as_oversight_and_back_after_a_res
         "oversight pins the session awake"
     );
 
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -10043,6 +10131,7 @@ async fn an_oversight_session_is_pinned_listed_as_oversight_and_back_after_a_res
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     let row = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap().clone();
     assert_eq!(row(&ids[0])["role"], "oversight");
     assert_eq!(row(&ids[0])["keep_awake"], true);
@@ -10067,7 +10156,7 @@ async fn an_oversight_session_is_pinned_listed_as_oversight_and_back_after_a_res
     let (base, _h) = boot_with_config(cfg).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
-        let listed: Vec<Value> = client
+        let listed: Value = client
             .get(format!("{base}/api/sessions"))
             .send()
             .await
@@ -10075,6 +10164,7 @@ async fn an_oversight_session_is_pinned_listed_as_oversight_and_back_after_a_res
             .json()
             .await
             .unwrap();
+        let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
         let row = |id: &str| listed.iter().find(|s| s["id"] == id).cloned();
         let awake = |id: &str| row(id).is_some_and(|r| r["activity"] != "hibernated");
         if awake(&ids[0]) && awake(&ids[1]) {
@@ -10162,7 +10252,7 @@ async fn a_work_item_label_is_set_cleared_kept_in_history_and_survives_a_restart
     let missing = set(uuid::Uuid::new_v4().to_string(), json!("WI-1")).await;
     assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
 
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -10170,6 +10260,7 @@ async fn a_work_item_label_is_set_cleared_kept_in_history_and_survives_a_restart
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     let row = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap().clone();
     assert_eq!(row(&ids[0])["work_item"], "WI-7", "trimmed at start");
     assert_eq!(row(&ids[1])["work_item"], "WI-8");
@@ -10212,7 +10303,7 @@ async fn a_work_item_label_is_set_cleared_kept_in_history_and_survives_a_restart
     state.sessions.hibernate_for_shutdown().await;
     drop(guard);
     let (base, _h) = boot_with_config(cfg).await;
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -10220,6 +10311,7 @@ async fn a_work_item_label_is_set_cleared_kept_in_history_and_survives_a_restart
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     let kept = listed.iter().find(|s| s["id"] == ids[1].as_str()).unwrap();
     assert_eq!(kept["activity"], "hibernated");
     assert_eq!(kept["work_item"], "WI-8", "the label survives the restart");
@@ -10372,7 +10464,7 @@ async fn lose_session(
 }
 
 async fn session_row(client: &reqwest::Client, base: &str, id: &str) -> Value {
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -10380,6 +10472,7 @@ async fn session_row(client: &reqwest::Client, base: &str, id: &str) -> Value {
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     listed
         .into_iter()
         .find(|s| s["id"] == id)
@@ -10547,7 +10640,7 @@ async fn an_oversight_shell_stays_listed_after_a_sigkill_and_a_worker_shell_does
     assert_eq!(overseer["activity"], "hibernated", "{overseer}");
     assert_eq!(overseer["role"], "oversight");
     assert_eq!(overseer["hibernation"]["resumable"], false);
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -10555,6 +10648,7 @@ async fn an_oversight_shell_stays_listed_after_a_sigkill_and_a_worker_shell_does
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     assert!(
         !listed.iter().any(|s| s["id"] == records[1].0.as_str()),
         "a lost worker shell is forgotten: {listed:?}"
@@ -10965,7 +11059,7 @@ async fn a_sessions_process_tree_is_measured_and_rides_on_its_summary() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    let listed: Vec<Value> = client
+    let listed: Value = client
         .get(format!("{base}/api/sessions"))
         .send()
         .await
@@ -10973,6 +11067,7 @@ async fn a_sessions_process_tree_is_measured_and_rides_on_its_summary() {
         .json()
         .await
         .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
     let row = listed.iter().find(|s| s["id"] == ids[0].as_str()).unwrap();
     let resources = &row["resources"];
     assert!(
@@ -11515,7 +11610,7 @@ async fn a_requested_stop_is_stopped_and_a_crash_is_still_errored() {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let listed: Vec<Value> = client
+        let listed: Value = client
             .get(format!("{base}/api/sessions"))
             .send()
             .await
@@ -11523,6 +11618,7 @@ async fn a_requested_stop_is_stopped_and_a_crash_is_still_errored() {
             .json()
             .await
             .unwrap();
+        let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
         let row = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap().clone();
         let (r, c) = (row(&reaped), row(&crashed));
         if r["alive"] == false && c["alive"] == false {
@@ -11874,7 +11970,7 @@ async fn a_superseded_session_and_a_contended_work_item_are_not_woken() {
         .json()
         .await
         .unwrap();
-    let again = list
+    let again = list["sessions"]
         .as_array()
         .unwrap()
         .iter()
@@ -13169,9 +13265,14 @@ async fn approve_typing_one(
             "id": "call_1",
             "type": "function",
             "function": {
-                "name": "send_input",
-                "arguments": json!({"session_id": session, "text": "1", "submit": true})
-                    .to_string(),
+                "name": "vogt_session_input",
+                "arguments": json!({
+                    "id": session,
+                    "text": "1",
+                    "submit": true,
+                    "reason": "the session is asking and the caller chose 1",
+                })
+                .to_string(),
             },
         }]}),
         json!({"role": "assistant", "content": "turn over"}),
@@ -13185,7 +13286,8 @@ async fn approve_typing_one(
     assert_eq!(proposed.status(), StatusCode::OK);
     let proposed: Value = proposed.json().await.unwrap();
     let card = &proposed["pending_action"];
-    assert_eq!(card["kind"], "send_input", "{proposed}");
+    assert_eq!(card["kind"], "vogt_write", "{proposed}");
+    assert_eq!(card["operation"], "session.input", "{proposed}");
     let card = card["id"].as_str().unwrap();
     client
         .post(format!("{base}/api/assistant/actions/{card}"))
@@ -13195,19 +13297,22 @@ async fn approve_typing_one(
         .unwrap()
 }
 
-/// The assistant's `send_input` card types as whoever approves it, so an
+/// The assistant's `session.input` card types as whoever approves it, so an
 /// agent driving the assistant with its own token cannot approve its way
 /// past a permission prompt; a person's approval is typed.
 #[tokio::test]
 async fn an_agent_cannot_approve_an_assistant_card_onto_a_permission_prompt() {
-    let core = stand_in_core_knowing(vec![
-        (
-            WI983_SESSION,
-            "agent:session:ses_overseer",
-            vec!["work.write"],
-        ),
-        (WI983_PERSON, "human:ada", vec!["work.write"]),
-    ])
+    let (core, engine) = stand_in_core_relaying(
+        vec![
+            (
+                WI983_SESSION,
+                "agent:session:ses_overseer",
+                vec!["work.write"],
+            ),
+            (WI983_PERSON, "human:ada", vec!["work.write"]),
+        ],
+        WI983_STACK,
+    )
     .await;
     let (chat, script) = stand_in_chat().await;
     let tmp = tempfile::tempdir().unwrap();
@@ -13217,6 +13322,7 @@ async fn an_agent_cannot_approve_an_assistant_card_onto_a_permission_prompt() {
     cfg.assistant_api_key = Some("sk-test".into());
     cfg.assistant_base_url = chat;
     let (base, _guard) = boot_with_config(cfg).await;
+    engine.set(base.clone()).unwrap();
     let operator = client_for(TEST_TOKEN);
     let dialog = dialog_script(tmp.path(), "ask.py", "Do you want to proceed?");
     let (id, approval) = session_showing_dialog(&operator, &base, "asking", &dialog).await;
@@ -14320,7 +14426,7 @@ async fn only_a_person_or_the_core_starts_an_oversight_session() {
     };
     let operator = client_for(TEST_TOKEN);
     let count = || async {
-        let listed: Vec<Value> = operator
+        let listed: Value = operator
             .get(format!("{}/api/sessions", door.base))
             .send()
             .await
@@ -14328,7 +14434,7 @@ async fn only_a_person_or_the_core_starts_an_oversight_session() {
             .json()
             .await
             .unwrap();
-        listed.len()
+        listed["sessions"].as_array().unwrap().len()
     };
     let before = count().await;
 
