@@ -27,7 +27,10 @@ depends on the engine.
   approves the integration pull request to `main` and every deploy. `main` is
   rebase-only with linear history, and releases are `v*` tags on `main`. The
   integration branch is rebased onto `origin/main`; `main` is never merged into
-  it, and no merge commit lands on `integrate/*`. See
+  it. From now on, oversight merges into `integrate/*` by rebase or
+  fast-forward only, and no merge commit lands there. `integrate/vogt-next`
+  still carries merge commits from earlier oversight merges; WI-1315 cleans
+  that up. See
   [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md#2-workflow) for the full flow.
 - Run `git status --short --branch` before editing. Preserve unrelated staged,
   unstaged, and untracked work; do not fold it into the task or rewrite it to
