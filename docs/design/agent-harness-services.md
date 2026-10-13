@@ -570,7 +570,28 @@ Hung-run detection (H17 (WI-1334)); flaky register (H18 (WI-1335)); person-armed
 Dependencies: H2 (WI-1319) → H3 (WI-1320), H11 (WI-1328), H13 (WI-1330); H1 (WI-1318) → H10 (WI-1327), H11 (WI-1328), H12 (WI-1329), H13 (WI-1330); H4 (WI-1321) → H5 (WI-1322); H6 (WI-1323) →
 H12 (WI-1329); WI-1298 → H7 (WI-1324) → H8 (WI-1325), H9 (WI-1326), H15 (WI-1332); WI-1304 → H8 (WI-1325); H9 (WI-1326) → H15 (WI-1332); WI-1312 → H17 (WI-1334), H18 (WI-1335).
 
-## 10. Open questions for the operator
+## 10. Operator decisions (answered 2026-10-13)
+
+The operator answered every question below on 2026-10-13, each with the
+recommended option, plus one sequencing decision: **the design is reviewed
+(Opus low) before any item starts**, including the phase-0 and phase-1
+grok/Haiku items. Decisions, in order:
+
+1. `work.land` callers: oversight-role sessions and persons.
+2. Agent-only done gate: on for vogt, msp-agent and rustnzb; off for codex
+   and msp-klaudia until their deploy lanes are collected.
+3. `override` on `session.start`: kept for the `oversight` role, audited,
+   with an Inbox row.
+4. Klaudia's gitguard turns itself off inside Vogt sessions once the engine
+   discard guard (WI-1326) is live on dev.
+5. Agent-auth mode: vogt-dev moves to `brokered` once WI-1331 is verified;
+   prod a week later.
+6. Decisions expire at 24 h with no implied answer; the asker decides what
+   expiry means. Maximum TTL 7 days.
+7. `dispatch.max_workers_per_overseer` defaults to 5.
+
+The questions as asked, kept for the record:
+
 
 1. **Who may call `work.land`.** Oversight sessions and persons (this
    design), or persons only, with oversight asking a decision? Recommended:
