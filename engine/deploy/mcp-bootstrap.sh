@@ -366,7 +366,9 @@ PY
 # Alongside the provider this writes a catalog of those groups (apply_patch
 # freeform, tool_mode omitted) and points model_catalog_json at it. The groups
 # are the router's own — grok, code, small, reasoning, vision, premium — and
-# nothing else (no DLab community or free models). That key is set only when
+# nothing else (no DLab community or free models). Priority is the index in
+# that order, because the fork sorts ascending and defaults to the first
+# visible model, so grok stays the default. premium is hidden from the picker.
 # absent or when it already names the file this writer owns; an operator's
 # catalog is left alone. Top-level model and model_provider are set only when
 # absent or when they already name this bundle (litellm, or theclawbay as the
@@ -388,20 +390,22 @@ path = os.environ["CODEX_CONFIG"]
 # tool; tool_mode is omitted, which is code mode off. availability_nux has no
 # serde default, so it must be present (null). The catalog deserializer rejects
 # a model with neither base_instructions nor model_messages.instructions_template,
-# so the template is a short non-empty string. Order is the router's, and the
-# default (grok) keeps priority 1.
+# so the template is a short non-empty string. The fork sorts by priority
+# ascending and marks the first visible model as the default, so priority is
+# the index in router order and grok stays first. premium is the router's
+# opt-in group, so its visibility is "hide": choosable by name, not in the picker.
 ROUTER_GROUPS = ("grok", "code", "small", "reasoning", "vision", "premium")
 
-def _catalog_model(slug: str) -> dict[str, object]:
+def _catalog_model(priority: int, slug: str) -> dict[str, object]:
     return {
         "slug": slug,
         "display_name": slug,
         "description": f"Estate LiteLLM {slug} group.",
         "supported_reasoning_levels": [],
         "shell_type": "unified_exec",
-        "visibility": "list",
+        "visibility": "hide" if slug == "premium" else "list",
         "supported_in_api": True,
-        "priority": 1 if slug == "grok" else 0,
+        "priority": priority,
         "availability_nux": None,
         "upgrade": None,
         "model_messages": {
@@ -424,7 +428,7 @@ def _catalog_model(slug: str) -> dict[str, object]:
         "experimental_supported_tools": [],
     }
 
-CATALOG = {"models": [_catalog_model(slug) for slug in ROUTER_GROUPS]}
+CATALOG = {"models": [_catalog_model(i, slug) for i, slug in enumerate(ROUTER_GROUPS)]}
 catalog_path = os.path.join(os.path.dirname(path), "vogt-model-catalog.json")
 try:
     with open(path, encoding="utf-8") as fh:

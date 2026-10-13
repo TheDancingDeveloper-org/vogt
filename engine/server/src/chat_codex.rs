@@ -140,10 +140,12 @@ model_catalog_json = "vogt-model-catalog.json"
 }
 
 /// The router-group catalog WI-1147 writes, one ModelsResponse entry per
-/// LiteLLM group (grok, code, small, reasoning, vision, premium). The default
-/// group is grok and keeps priority 1; the rest are listed at priority 0.
+/// LiteLLM group (grok, code, small, reasoning, vision, premium). The fork
+/// sorts by priority ascending and takes the first visible model as the
+/// default, so priority is the index in router order and grok stays first.
+/// premium is the router's opt-in group, hidden from the picker.
 pub fn model_catalog() -> String {
-    fn entry(slug: &str, priority: u8) -> String {
+    fn entry(slug: &str, priority: u8, visibility: &str) -> String {
         format!(
             r#"    {{
       "slug": "{slug}",
@@ -151,7 +153,7 @@ pub fn model_catalog() -> String {
       "description": "Estate LiteLLM {slug} group.",
       "supported_reasoning_levels": [],
       "shell_type": "unified_exec",
-      "visibility": "list",
+      "visibility": "{visibility}",
       "supported_in_api": true,
       "priority": {priority},
       "availability_nux": null,
@@ -176,17 +178,18 @@ pub fn model_catalog() -> String {
         )
     }
     // Same groups, in the same order, as ROUTER_GROUPS in mcp-bootstrap.sh.
-    let groups = [
-        ("grok", 1u8),
-        ("code", 0),
-        ("small", 0),
-        ("reasoning", 0),
-        ("vision", 0),
-        ("premium", 0),
-    ];
+    // Priority is the index: the fork sorts ascending and defaults to the first.
+    let groups = ["grok", "code", "small", "reasoning", "vision", "premium"];
     let body = groups
         .iter()
-        .map(|(slug, priority)| entry(slug, *priority))
+        .enumerate()
+        .map(|(priority, slug)| {
+            entry(
+                slug,
+                priority as u8,
+                if *slug == "premium" { "hide" } else { "list" },
+            )
+        })
         .collect::<Vec<_>>()
         .join(",\n");
     format!("{{\n  \"models\": [\n{body}\n  ]\n}}\n")
@@ -428,20 +431,22 @@ mod tests {
         assert!(cfg.contains(LITELLM_BASE));
         assert!(!cfg.contains("HOMELAB_LITELLM_SESSION_KEY"));
         let catalog: Value = serde_json::from_str(&model_catalog()).unwrap();
-        let slugs: Vec<&str> = catalog["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|model| model["slug"].as_str().unwrap())
-            .collect();
+        let models = catalog["models"].as_array().unwrap();
+        let mut sorted = models.clone();
+        sorted.sort_by_key(|model| model["priority"].as_i64().unwrap());
         assert_eq!(
-            slugs,
+            sorted
+                .iter()
+                .map(|model| model["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
             ["grok", "code", "small", "reasoning", "vision", "premium"]
         );
-        assert_eq!(catalog["models"][0]["priority"], 1);
-        assert!(catalog["models"]
-            .as_array()
-            .unwrap()
+        // The fork defaults to the first visible model after an ascending sort.
+        assert_eq!(sorted[0]["slug"], "grok");
+        assert_eq!(sorted[0]["visibility"], "list");
+        assert_eq!(sorted.last().unwrap()["slug"], "premium");
+        assert_eq!(sorted.last().unwrap()["visibility"], "hide");
+        assert!(sorted
             .iter()
             .all(|model| model["apply_patch_tool_type"] == "freeform"
                 && model.get("tool_mode").is_none()));
