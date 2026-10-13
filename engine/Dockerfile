@@ -230,7 +230,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # builds this target, then runs the binary inside the stack image, where
 # /etc/codex/requirements.toml is the shipped file and the real Codex fork
 # and klaudia are installed — the only place the e2e can execute.
-FROM server-build AS codex-gitguard-e2e
+FROM server-build AS codex-gitguard-e2e-build
 COPY engine/deploy/driven-session-codex-requirements.toml ./deploy/driven-session-codex-requirements.toml
 COPY engine/server/tests/codex_gitguard_e2e.rs ./server/tests/codex_gitguard_e2e.rs
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -240,6 +240,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       | sed -n 's/.*"executable":"\([^"]*codex_gitguard_e2e[^"]*\)".*/\1/p' \
       | xargs -I{} cp {} /codex_gitguard_e2e \
     && test -x /codex_gitguard_e2e
+
+# Only the test binary leaves the build: build.yml exports this target with
+# `type=local`, and exporting server-build itself (toolchain, sources) stalled
+# the publish runner for over half an hour.
+FROM scratch AS codex-gitguard-e2e
+COPY --from=codex-gitguard-e2e-build /codex_gitguard_e2e /codex_gitguard_e2e
 
 FROM ${UV_IMAGE} AS uv
 
