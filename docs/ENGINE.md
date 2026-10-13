@@ -685,6 +685,14 @@ than these routes.
   the agent's "blocked on a person" report, which rides on the summary and
   screen as `blocked`, publishes a `session-blocked` event and (when set)
   sends a push. Cleared when the session exits. Requires `sessions`.
+  The engine also clears it on its own (WI-1314), publishing the same
+  `session-blocked` event with `blocked` null, when a turn ends that dealt
+  with it: a turn begun after `/input` (or a person's typed keys on the
+  WebSocket, not terminal control replies) arrived after the report; the
+  turn an `/answer` to the session's dialog resumed; or a turn begun after
+  the report that ends with `AUTOPILOT: DONE` on screen. The engine's own
+  writes (autopilot nudge, budget warning, hibernate resume, task steering)
+  never count, and output nobody asked for leaves the report standing.
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
   `sessions` capability). MCP: `session_rename`.
 - `POST /api/sessions/:id/kill` `{"reason"?, "by"?}` -> `OkResponse`

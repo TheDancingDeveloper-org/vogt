@@ -15098,3 +15098,370 @@ async fn worktree_cleanup_waits_for_every_session_in_the_worktree() {
     assert!(linked.join("Cargo.toml").exists());
     assert!(repo.join("README").exists());
 }
+
+/// WI-1314 helpers: the session's blocked report, and waiting on the engine
+/// to settle a session at rest.
+async fn blocked_report(client: &reqwest::Client, base: &str, id: &str) -> Value {
+    let summary: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    summary["summary"]
+        .get("blocked")
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+async fn report_blocked(client: &reqwest::Client, base: &str, id: &str) {
+    let resp = client
+        .post(format!("{base}/api/sessions/{id}/blocked"))
+        .json(&json!({ "blocked": true, "reason": "push refused", "items": ["approve the push"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+async fn wait_for_activity(client: &reqwest::Client, base: &str, id: &str, want: &[&str]) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let screen: Value = client
+            .get(format!("{base}/api/sessions/{id}/screen"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if want.iter().any(|w| screen["activity"] == *w) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never {want:?}: {screen}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_unblocked(client: &reqwest::Client, base: &str, id: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let blocked = blocked_report(client, base, id).await;
+        if blocked.is_null() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "still blocked: {blocked}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A shell session that prints a prompt, then on each line of input (or
+/// each time `go` appears in `dir`) prints `what`'s output as one turn.
+fn turn_script(body: &str) -> Value {
+    json!([
+        "/bin/sh",
+        "-c",
+        format!("printf 'ready> '; {body}; sleep 60")
+    ])
+}
+
+const RESTING: &[&str] = &["idle", "waiting-for-input"];
+
+/// WI-1314 (a): input after the report, then a full turn, clears it; a turn
+/// of unrelated output with no input does not.
+#[tokio::test]
+async fn a_blocked_report_clears_after_input_and_the_turn_it_starts() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let go = dir.path().join("go");
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "blocked-input",
+            "command": turn_script(&format!(
+                "while [ ! -e {go} ]; do sleep 0.05; done; \
+                 printf 'unrelated build output\\r\\n'; \
+                 read l; printf 'pushed after %s\\r\\n' \"$l\"",
+                go = go.display()
+            )),
+        }),
+    )
+    .await;
+    wait_for_activity(&client, &base, &id, RESTING).await;
+    report_blocked(&client, &base, &id).await;
+    assert_eq!(
+        blocked_report(&client, &base, &id).await["reason"],
+        "push refused"
+    );
+
+    // Unrelated output: a turn runs and ends, nobody addressed the block.
+    std::fs::write(&go, b"").unwrap();
+    live_output_containing(&client, &base, &id, &["unrelated build output"]).await;
+    wait_for_activity(&client, &base, &id, RESTING).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        blocked_report(&client, &base, &id).await["reason"],
+        "push refused",
+        "output nobody asked for must not clear a block"
+    );
+
+    // Input, then the turn it starts: cleared.
+    let resp = client
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "approved", "submit": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    live_output_containing(&client, &base, &id, &["pushed after approved"]).await;
+    wait_for_unblocked(&client, &base, &id).await;
+}
+
+/// WI-1314 (b): `AUTOPILOT: DONE` at the end of a turn after the report
+/// clears it with no input; the reporting reply's own sign-off does not.
+#[tokio::test]
+async fn a_blocked_report_clears_when_a_later_turn_says_autopilot_done() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let go = dir.path().join("go");
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "blocked-done",
+            "command": turn_script(&format!(
+                "while [ ! -e {go} ]; do sleep 0.05; done; \
+                 printf 'disk freed, finished\\r\\nAUTOPILOT: DONE\\r\\n'",
+                go = go.display()
+            )),
+        }),
+    )
+    .await;
+    wait_for_activity(&client, &base, &id, RESTING).await;
+    report_blocked(&client, &base, &id).await;
+    assert_eq!(
+        blocked_report(&client, &base, &id).await["reason"],
+        "push refused"
+    );
+    std::fs::write(&go, b"").unwrap();
+    live_output_containing(&client, &base, &id, &["AUTOPILOT: DONE"]).await;
+    wait_for_unblocked(&client, &base, &id).await;
+}
+
+/// WI-1314: a reply that reports blocked and signs off with the marker in
+/// the same turn stays blocked; the marker is that turn's, not a later one.
+#[tokio::test]
+async fn a_done_marker_in_the_reporting_turn_leaves_it_blocked() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let go = dir.path().join("go");
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "blocked-same-turn",
+            "command": turn_script(&format!(
+                "while [ ! -e {go} ]; do printf .; sleep 0.05; done; \
+                 printf 'blocked on a person\\r\\nAUTOPILOT: DONE\\r\\n'",
+                go = go.display()
+            )),
+        }),
+    )
+    .await;
+    // Mid-turn (the dots keep it running): report, then sign off.
+    wait_for_activity(&client, &base, &id, &["running"]).await;
+    report_blocked(&client, &base, &id).await;
+    assert_eq!(
+        blocked_report(&client, &base, &id).await["reason"],
+        "push refused"
+    );
+    std::fs::write(&go, b"").unwrap();
+    live_output_containing(&client, &base, &id, &["AUTOPILOT: DONE"]).await;
+    wait_for_activity(&client, &base, &id, RESTING).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        blocked_report(&client, &base, &id).await["reason"],
+        "push refused"
+    );
+}
+
+/// WI-1314: the engine's own writes (autopilot nudge, budget warning,
+/// hibernate resume, task steering) go through `write_input` and do not
+/// address a block; only `note_addressed` (the API and a person's keys) do.
+#[tokio::test]
+async fn engine_input_does_not_clear_a_blocked_report() {
+    let (base, state, _h) = boot_with_state(test_config()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "blocked-nudged",
+            "command": turn_script("read l; printf 'got %s\\r\\n' \"$l\""),
+        }),
+    )
+    .await;
+    wait_for_activity(&client, &base, &id, RESTING).await;
+    report_blocked(&client, &base, &id).await;
+    assert_eq!(
+        blocked_report(&client, &base, &id).await["reason"],
+        "push refused"
+    );
+    let session = state.sessions.get(id.parse().unwrap()).unwrap();
+    session
+        .write_input(vogt_engine_server::autopilot::NUDGE.as_bytes())
+        .unwrap();
+    session.write_input(b"\r").unwrap();
+    live_output_containing(&client, &base, &id, &["got Autopilot"]).await;
+    wait_for_activity(&client, &base, &id, RESTING).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        blocked_report(&client, &base, &id).await["reason"],
+        "push refused",
+        "the engine's own input is not a person addressing the block"
+    );
+}
+
+/// WI-1314: input typed while the reporting turn still runs waits for a
+/// turn of its own; the end of the turn it arrived in does not clear.
+#[tokio::test]
+async fn input_during_the_reporting_turn_stays_blocked_until_its_own_turn() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let go = dir.path().join("go");
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "blocked-early-input",
+            "command": turn_script(&format!(
+                "while [ ! -e {go} ]; do printf .; sleep 0.05; done; \
+                 printf 'reporting turn over\\r\\n'; read l; sleep 1; \
+                 printf 'acted on %s\\r\\n' \"$l\"",
+                go = go.display()
+            )),
+        }),
+    )
+    .await;
+    wait_for_activity(&client, &base, &id, &["running"]).await;
+    report_blocked(&client, &base, &id).await;
+    assert_eq!(
+        blocked_report(&client, &base, &id).await["reason"],
+        "push refused"
+    );
+    let resp = client
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "fixed", "submit": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    std::fs::write(&go, b"").unwrap();
+    live_output_containing(&client, &base, &id, &["reporting turn over"]).await;
+    wait_for_activity(&client, &base, &id, RESTING).await;
+    assert_eq!(
+        blocked_report(&client, &base, &id).await["reason"],
+        "push refused",
+        "the turn the input arrived in is not the turn that acted on it"
+    );
+    live_output_containing(&client, &base, &id, &["acted on fixed"]).await;
+    wait_for_unblocked(&client, &base, &id).await;
+}
+
+/// WI-1314 (c): answering the dialog a report was about clears it when the
+/// resumed turn ends.
+#[tokio::test]
+async fn answering_the_dialog_clears_a_blocked_report() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let gate = dir.path().join("gate.py");
+    std::fs::write(
+        &gate,
+        r#"import sys, tty, os, time
+opts = ["Yes, I trust this folder", "No, exit"]
+sel = 0
+def draw():
+    sys.stdout.write("\x1b[2J\x1b[H")
+    sys.stdout.write("Quick safety check: Is this a project you created or one you trust?\r\n\r\n")
+    for i, o in enumerate(opts):
+        sys.stdout.write(("❯ " if i == sel else "  ") + f"{i+1}. {o}\r\n")
+    sys.stdout.flush()
+fd = sys.stdin.fileno()
+tty.setraw(fd)
+draw()
+buf = b""
+while True:
+    buf += os.read(fd, 16)
+    while buf:
+        if buf.startswith(b"\x1b[B"):
+            sel = min(sel + 1, len(opts) - 1); buf = buf[3:]; draw()
+        elif buf.startswith(b"\x1b[A"):
+            sel = max(sel - 1, 0); buf = buf[3:]; draw()
+        elif buf.startswith(b"\r"):
+            sys.stdout.write("\x1b[2J\x1b[H" + f"chose {sel+1}\r\n> ")
+            sys.stdout.flush()
+            time.sleep(60)
+        elif buf.startswith(b"\x1b") and len(buf) < 3:
+            break
+        else:
+            buf = buf[1:]
+"#,
+    )
+    .unwrap();
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "blocked-dialog", "command": ["python3", gate.to_string_lossy()] }),
+    )
+    .await;
+    wait_for_activity(&client, &base, &id, &["awaiting-approval"]).await;
+    report_blocked(&client, &base, &id).await;
+    assert_eq!(
+        blocked_report(&client, &base, &id).await["reason"],
+        "push refused"
+    );
+    let answered: Value = client
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "option": 1 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(answered["dismissed"], true, "{answered}");
+    live_output_containing(&client, &base, &id, &["chose 1"]).await;
+    wait_for_unblocked(&client, &base, &id).await;
+}

@@ -85,6 +85,13 @@ pub struct Session {
     approval: Mutex<Option<crate::approval::Pending>>,
     /// The agent's own report that it is blocked on a person.
     blocked: Mutex<Option<vogt_engine_contract::BlockedReport>>,
+    /// How far the standing blocked report has been addressed (WI-1314):
+    /// one of the `UNBLOCK_*` steps. A new report resets it.
+    unblock: std::sync::atomic::AtomicU8,
+    /// A turn has begun since the blocked report was set, so an
+    /// `AUTOPILOT: DONE` at the end of a turn is new, not the reporting
+    /// reply's own sign-off (WI-1314).
+    turn_since_report: AtomicBool,
     /// The agent conversation this session runs, when its id is known
     /// (set by the registry right after spawn).
     conversation: Mutex<Option<vogt_engine_contract::AgentConversation>>,
@@ -613,6 +620,33 @@ impl Session {
     /// already told about. The next hibernation re-reads whatever is here.
     pub fn restore_blocked(&self, report: Option<vogt_engine_contract::BlockedReport>) {
         *self.blocked.lock() = report;
+        self.reset_unblock();
+    }
+
+    /// A report starts unaddressed, with no turn run since it was made.
+    fn reset_unblock(&self) {
+        self.unblock.store(UNBLOCK_NONE, Ordering::Release);
+        self.turn_since_report.store(false, Ordering::Release);
+    }
+
+    /// Someone other than the engine addressed the standing blocked report:
+    /// input over `/input` or a person's keystrokes (`resumes_turn` false),
+    /// or an answer to the session's dialog (`resumes_turn` true). The report
+    /// clears when the turn that acts on it ends (WI-1314). Input only counts
+    /// once a turn has started after it, so input typed while the reporting
+    /// turn still runs does not clear the report when that turn ends; an
+    /// answer resumes the dialog's own turn, so that turn's end is enough.
+    /// The engine's own writes (`write_input` alone) never call this.
+    pub fn note_addressed(&self, resumes_turn: bool) {
+        if self.blocked.lock().is_none() {
+            return;
+        }
+        let step = if resumes_turn {
+            UNBLOCK_ADDRESSING
+        } else {
+            UNBLOCK_ARMED
+        };
+        self.unblock.fetch_max(step, Ordering::AcqRel);
     }
 
     /// Record (or, with `None`, clear) the agent's blocked report and
@@ -629,6 +663,7 @@ impl Session {
             ));
         }
         *self.blocked.lock() = report.clone();
+        self.reset_unblock();
         bus.publish(ServerEvent::SessionBlocked {
             id: self.id,
             blocked: report,
@@ -1220,6 +1255,8 @@ pub fn spawn(
         last_output_at: Mutex::new(None),
         approval: Mutex::new(None),
         blocked: Mutex::new(None),
+        unblock: std::sync::atomic::AtomicU8::new(UNBLOCK_NONE),
+        turn_since_report: AtomicBool::new(false),
         conversation: Mutex::new(None),
         keep_awake: AtomicBool::new(false),
         autopilot: AtomicBool::new(false),
@@ -1810,6 +1847,15 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
         // dialog in the middle of a turn, answered, resumes the same turn.
         if begins_turn(*a, new) {
             *session.turn_started_at.lock() = Some(now);
+            session.turn_since_report.store(true, Ordering::Release);
+            // Input that arrived at rest (or during the last turn) is what
+            // this turn acts on.
+            let _ = session.unblock.compare_exchange(
+                UNBLOCK_ARMED,
+                UNBLOCK_ADDRESSING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
         }
         if new != ActivityState::AwaitingApproval {
             *session.approval.lock() = None;
@@ -1817,7 +1863,9 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
         // An exited agent is blocked on nobody.
         if new.is_terminal() {
             *session.blocked.lock() = None;
+            session.reset_unblock();
         }
+        let ended = ends_turn(*a, new);
         *a = new;
         *session.activity_since.lock() = Instant::now();
         *session.activity_changed_at.lock() = now;
@@ -1829,7 +1877,78 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
             approval: session.approval_prompt(),
             turn_started_at: session.turn_started_at().map(format_rfc3339),
         });
+        drop(a);
+        if ended {
+            clear_addressed_block(session, bus);
+        }
     }
+}
+
+/// The blocked report has not been addressed.
+const UNBLOCK_NONE: u8 = 0;
+/// Input arrived; the next turn to start acts on it.
+const UNBLOCK_ARMED: u8 = 1;
+/// A turn acting on the input (or a dialog answer) is under way; its end
+/// clears the report.
+const UNBLOCK_ADDRESSING: u8 = 2;
+
+/// A turn ends when the session comes back to rest. A permission dialog is
+/// the middle of a turn, so reaching one does not end it.
+fn ends_turn(old: ActivityState, new: ActivityState) -> bool {
+    matches!(new, ActivityState::Idle | ActivityState::WaitingForInput)
+        && matches!(
+            old,
+            ActivityState::Running | ActivityState::AwaitingApproval
+        )
+}
+
+/// Why a turn's end clears the standing blocked report, if it does.
+fn unblock_cause(
+    addressed: bool,
+    turn_since_report: bool,
+    says_done: bool,
+) -> Option<&'static str> {
+    if addressed {
+        Some("addressed")
+    } else if turn_since_report && says_done {
+        Some("autopilot-done")
+    } else {
+        None
+    }
+}
+
+/// At a turn's end, drop a blocked report that turn dealt with (WI-1314):
+/// the turn acted on input or a dialog answer given after the report, or a
+/// turn begun after the report ended with `AUTOPILOT: DONE` on screen. The
+/// same `SessionBlocked { blocked: None }` that `report_unblocked` publishes
+/// goes out, so `session.changes`, sweeps and `wait_any` see it. Runs with
+/// the activity lock released: the screen render takes its own locks.
+fn clear_addressed_block(session: &Arc<Session>, bus: &EventBus) {
+    if session.blocked.lock().is_none() {
+        return;
+    }
+    let addressed = session.unblock.load(Ordering::Acquire) == UNBLOCK_ADDRESSING;
+    let turn_since_report = session.turn_since_report.load(Ordering::Acquire);
+    let says_done = !addressed
+        && turn_since_report
+        && crate::autopilot::says_done(&session.render_screen(0).0.lines);
+    let Some(cause) = unblock_cause(addressed, turn_since_report, says_done) else {
+        return;
+    };
+    if session.blocked.lock().take().is_none() {
+        return;
+    }
+    session.reset_unblock();
+    tracing::info!(
+        session = %session.id,
+        event = "session.unblocked",
+        cause,
+        "cleared a blocked report the session has dealt with"
+    );
+    bus.publish(ServerEvent::SessionBlocked {
+        id: session.id,
+        blocked: None,
+    });
 }
 
 /// Whether moving from `old` to `new` starts a new turn.
@@ -1882,7 +2001,7 @@ mod economics_tests {
 
 #[cfg(test)]
 mod turn_tests {
-    use super::{begins_turn, ActivityState::*};
+    use super::{begins_turn, ends_turn, unblock_cause, ActivityState::*};
 
     #[test]
     fn a_turn_starts_from_rest_and_survives_a_permission_dialog() {
@@ -1893,6 +2012,29 @@ mod turn_tests {
         assert!(!begins_turn(Running, Running));
         assert!(!begins_turn(Running, Idle));
         assert!(!begins_turn(Idle, AwaitingApproval));
+    }
+
+    #[test]
+    fn a_turn_ends_on_returning_to_rest_not_at_a_dialog() {
+        // WI-1314: an addressed block clears when the turn acting on it ends.
+        assert!(ends_turn(Running, Idle));
+        assert!(ends_turn(Running, WaitingForInput));
+        assert!(ends_turn(AwaitingApproval, Idle));
+        assert!(!ends_turn(AwaitingApproval, Running));
+        assert!(!ends_turn(Running, AwaitingApproval));
+        assert!(!ends_turn(Idle, Running));
+        assert!(!ends_turn(Idle, WaitingForInput));
+    }
+
+    #[test]
+    fn a_turn_end_clears_only_an_addressed_or_done_block() {
+        assert_eq!(unblock_cause(true, true, false), Some("addressed"));
+        assert_eq!(unblock_cause(true, false, false), Some("addressed"));
+        assert_eq!(unblock_cause(false, true, true), Some("autopilot-done"));
+        // The reporting reply's own sign-off is not new.
+        assert_eq!(unblock_cause(false, false, true), None);
+        // Unrelated output: a turn ran, nobody addressed it, no marker.
+        assert_eq!(unblock_cause(false, true, false), None);
     }
 }
 

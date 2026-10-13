@@ -538,6 +538,9 @@ async fn handle_socket(
                     // (allowed while no permission dialog shows) does not.
                     if crate::person_gate::is_person(Some(&identity), None) {
                         writer_session.note_person_input();
+                        if has_typed_bytes(&data) {
+                            writer_session.note_addressed(false);
+                        }
                     }
                 }
                 Message::Text(s) => {
@@ -570,6 +573,9 @@ async fn handle_socket(
                             }
                             if crate::person_gate::is_person(Some(&identity), None) {
                                 writer_session.note_person_input();
+                                if has_typed_bytes(s.as_bytes()) {
+                                    writer_session.note_addressed(false);
+                                }
                             }
                         }
                     }
@@ -775,8 +781,82 @@ async fn handle_socket(
     }
 }
 
+/// Whether a frame carries anything a person typed, once the terminal's own
+/// escape sequences are skipped. Opening or focusing a terminal sends focus
+/// reports, mouse events and device-attribute replies; none of those address
+/// a blocked report (WI-1314). Arrow keys are escape sequences too, and do
+/// not count; a bracketed paste does, by its text.
+fn has_typed_bytes(data: &[u8]) -> bool {
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] != 0x1b {
+            return true;
+        }
+        i += 1;
+        match data.get(i) {
+            // CSI: parameters, then a final byte in 0x40..=0x7e. A bare
+            // `ESC [ M` is an X10 mouse report with three raw bytes after it.
+            Some(b'[') => {
+                let start = i + 1;
+                i = start;
+                while i < data.len() && !(0x40..=0x7e).contains(&data[i]) {
+                    i += 1;
+                }
+                let x10 = i == start && data.get(i) == Some(&b'M');
+                i += 1;
+                if x10 {
+                    i += 3;
+                }
+            }
+            // OSC: up to BEL or ST (`ESC \`).
+            Some(b']') => {
+                i += 1;
+                while i < data.len() && data[i] != 0x07 && data[i] != 0x1b {
+                    i += 1;
+                }
+                i += if data.get(i) == Some(&0x1b) { 2 } else { 1 };
+            }
+            // SS3 (`ESC O x`, application-mode arrows) and other two-byte
+            // escapes; a lone Escape key press is not addressing anything.
+            Some(b'O') => i += 2,
+            Some(_) => i += 1,
+            None => {}
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_replies_are_not_typing_but_keys_and_pastes_are() {
+        use super::has_typed_bytes;
+        // WI-1314: what a terminal sends by itself does not address a block.
+        for frame in [
+            &b"\x1b[I"[..],
+            b"\x1b[O",
+            b"\x1b[?1;2c",
+            b"\x1b[<0;10;5M",
+            b"\x1b[M !!",
+            b"\x1b]11;rgb:0000/0000/0000\x07",
+            b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\",
+            b"\x1b[A",
+            b"\x1bOB",
+            b"\x1b",
+            b"",
+        ] {
+            assert!(!has_typed_bytes(frame), "{frame:?}");
+        }
+        for frame in [
+            &b"y"[..],
+            b"\r",
+            b"\x1b[Ihello",
+            b"\x1b[200~fixed it\x1b[201~",
+        ] {
+            assert!(has_typed_bytes(frame), "{frame:?}");
+        }
+    }
+
     use super::{coalesce, live_skip};
     use crate::pty::OutputChunk;
     use bytes::Bytes;
