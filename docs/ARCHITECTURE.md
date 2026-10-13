@@ -292,10 +292,12 @@ Two SQLite databases with different write disciplines:
   `events` feed and the `audit` log. Every write goes through the
   application layer with an actor and a reason. A project also carries an
   `agent_policy`: text a commit, branch or PR must not match, whether a merge
-  to a named branch deploys production, and guidance (a commit identity, a
-  test recipe, free-text rules). `project.update` replaces it wholesale.
+  to a named branch deploys production, guidance (a commit identity, a test
+  recipe, free-text rules), and three optional structured blocks — `landing`
+  (base branch, branch pattern, who lands, who merges and how, who deploys),
+  `review` and `verification`. `project.update` replaces it wholesale.
   Only the first two are enforced, and only by the session hooks the engine
-  writes (§4.2); the guidance is told to the agent in its brief and nothing
+  writes (§4.2); the rest is told to the agent in its brief and nothing
   else acts on it.
 - **`observed.sqlite3`** — what collectors found: `sweeps` (coverage records)
   and `observations` (immutable evidence rows), the derived

@@ -151,6 +151,32 @@ def _policy_section(project: Project | None) -> list[str]:
     return [f"## Project policy — {project.slug}", "", *rows, ""]
 
 
+def _landing_section(project: Project, item: WorkItem | None) -> list[str]:
+    """The landing rule, with `{n}` filled from the item the brief is for.
+
+    A project brief has no item, so the pattern is shown with `{n}` in place.
+    A project with no landing block renders nothing, which is what keeps a
+    brief for a project that states none byte-for-byte as it was.
+    """
+    landing = project.agent_policy.landing
+    if landing is None:
+        return []
+    number = ""
+    if item is not None and "-" in item.ref:
+        number = item.ref.split("-", 1)[1]
+    pattern = landing.branch_pattern.replace("{n}", number or "{n}")
+    return [
+        "## Landing rule for this repo",
+        "",
+        f"- **Base** `{landing.base_branch}`",
+        f"- **Branch pattern** `{pattern}`",
+        f"- **Lands by** {landing.worker_lands_by}",
+        f"- **Merge by** {landing.merge_by} ({landing.merge_mode})",
+        f"- **Deploy by** {landing.deploy_by}",
+        "",
+    ]
+
+
 def _companion(session_id: str, *, work_ref: str | None) -> str:
     """The boilerplate, written once beside the brief instead of into it."""
     bound = (
@@ -521,6 +547,8 @@ def brief_for_work_item(
         lines.append("")
 
     lines += _policy_section(project)
+    if project is not None:
+        lines += _landing_section(project, item)
     lines += ["## Deployment policy", "", _DEPLOYMENT_POLICY, ""]
     lines += _pointer(session_id, work_ref=item.ref)
     return ComposedBrief(
