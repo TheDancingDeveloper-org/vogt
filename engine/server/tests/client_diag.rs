@@ -68,6 +68,8 @@ fn test_config() -> Config {
         budget: vogt_engine_server::budget::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
+        worktree_clean_on_hibernate: false,
+        disk_warn_percent: 85,
         metrics_bind: None,
         chat: Default::default(),
         economics_tick: std::time::Duration::ZERO,
