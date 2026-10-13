@@ -4047,7 +4047,7 @@ class StartSessionParams(Params):
             "audited. Claude Code, Codex, opencode and Klaudia templates. "
             "Codex maps the same three postures: `default` is "
             "`-a on-request -s danger-full-access`; `accept_edits` adds "
-            "`approvals_reviewer=\"auto_review\"`; `bypass` is "
+            '`approvals_reviewer="auto_review"`; `bypass` is '
             "`--dangerously-bypass-approvals-and-sandbox` and stays "
             "people-only. A named Codex requirements file that is missing, "
             "empty or unreadable refuses the Codex launch (400) and does not "
