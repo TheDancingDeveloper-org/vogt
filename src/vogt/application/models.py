@@ -140,12 +140,14 @@ SessionRole = Literal["worker", "oversight"]
 class InboxAction(Result):
     """A typed target for the action a row can take."""
 
-    kind: Literal["drift", "observation", "session", "grant"]
+    kind: Literal["drift", "observation", "session", "grant", "decision"]
     drift_id: str | None = None
     subject_key: str | None = None
     session_id: str | None = None
     #: A pending grant a person approves or denies (WI-973).
     grant_id: str | None = None
+    #: A pending decision a person answers (WI-1321).
+    decision_id: str | None = None
 
 
 class InboxEntry(Result):
@@ -4649,6 +4651,104 @@ class ListGrantsParams(Params):
 
 class ListGrantsResult(Result):
     grants: list[SessionGrantView] = []
+
+
+# -- decisions a person makes (WI-1321) ------------------------------------
+#
+# An agent asks a person a question with 2-4 options, one recommended; the
+# person answers from the Inbox. Nothing is applied when it is answered.
+# `docs/design/agent-harness-services.md` §2.3.
+
+DecisionStateView = Literal["pending", "answered", "withdrawn", "expired"]
+
+
+class DecisionOptionModel(Params):
+    label: str = Field(min_length=1, max_length=60)
+    description: str = Field(default="", max_length=400)
+    recommended: bool = False
+
+
+class DecisionAnswerView(Result):
+    label: str
+    note: str = ""
+
+
+class DecisionView(Result):
+    """A decision as callers read it."""
+
+    id: str
+    asker: str = Field(description="identity_ref of who asked.")
+    asker_session: str | None = Field(
+        default=None, description="The asker's engine session id, if a session."
+    )
+    work_item: str | None = Field(default=None, description="WI ref, if any.")
+    question: str
+    options: list[DecisionOptionModel]
+    context: str = ""
+    state: DecisionStateView = Field(
+        description="`expired` is a pending decision past `expires_at`; "
+        "it implies no answer."
+    )
+    answer: DecisionAnswerView | None = None
+    answered_by: str | None = None
+    created_at: datetime
+    answered_at: datetime | None = None
+    expires_at: datetime
+    reason: str
+
+
+class DecisionResult(Result):
+    decision: DecisionView
+
+
+class AskDecisionParams(Params):
+    """Ask a person to decide between 2-4 options, one recommended."""
+
+    question: str = Field(min_length=1, max_length=2000)
+    options: list[DecisionOptionModel] = Field(
+        min_length=2,
+        max_length=4,
+        description="2-4 options; exactly one has recommended=true.",
+    )
+    context: str = Field(
+        default="",
+        max_length=4000,
+        description="The facts the person needs, in your words.",
+    )
+    work_item: str | None = Field(default=None, description="WI ref, if any.")
+    ttl_seconds: int = Field(
+        default=86_400,
+        ge=60,
+        le=604_800,
+        description="How long it stays answerable: default 24 h, at most 7 d. "
+        "Past it the decision reads `expired`, with no implied answer.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class AnswerDecisionParams(Params):
+    id: str = Field(description="The decision id (dec_…).")
+    label: str = Field(description="The label of the option chosen.")
+    note: str = Field(default="", max_length=2000)
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class WithdrawDecisionParams(Params):
+    id: str = Field(description="The decision id (dec_…).")
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ListDecisionsParams(Params):
+    state: DecisionStateView | None = None
+    work_item: str | None = Field(default=None, description="WI ref.")
+    asker: str | None = Field(
+        default=None, description="identity_ref of the asker, e.g. agent:session:…"
+    )
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class ListDecisionsResult(Result):
+    decisions: list[DecisionView] = []
 
 
 class ListSessionsParams(Params):

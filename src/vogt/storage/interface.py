@@ -23,6 +23,7 @@ from vogt.core.entities import (
     CodingSession,
     Comment,
     ContractExemption,
+    Decision,
     DepRef,
     DriftProposal,
     Event,
@@ -520,6 +521,19 @@ class ReadView(Protocol):
 
     def session_grant(self, grant_id: str) -> SessionGrant | None: ...
 
+    def decision(self, decision_id: str) -> Decision | None: ...
+
+    def list_decisions(
+        self,
+        *,
+        state: str | None = None,
+        work_item_id: str | None = None,
+        asker_actor_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Decision]:
+        """Decisions, newest first, optionally of one state, item or asker."""
+        ...
+
     def list_session_grants(
         self,
         *,
@@ -745,6 +759,12 @@ class WriteTxn(ReadView, Protocol):
     def insert_session(self, session: CodingSession) -> None: ...
 
     def insert_session_grant(self, grant: SessionGrant) -> None: ...
+
+    def insert_decision(self, decision: Decision) -> None: ...
+
+    def update_decision(self, decision: Decision) -> None:
+        """Replace a decision's state and answer fields."""
+        ...
 
     def update_session_grant(self, grant: SessionGrant) -> None:
         """Replace a grant's decision and revocation fields."""
