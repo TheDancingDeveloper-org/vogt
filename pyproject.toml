@@ -22,6 +22,7 @@ dependencies = [
   "fastapi>=0.111",
   "uvicorn>=0.52.1",
   "cryptography>=50.0.0",
+  "prometheus-client>=0.21",
 ]
 
 [project.urls]
