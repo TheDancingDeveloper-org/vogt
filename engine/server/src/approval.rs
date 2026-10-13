@@ -60,7 +60,7 @@ static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
 /// line of the rendered screen.
 static QUESTION: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|approve|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow|grant|send)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|allow .+ to run tool\b.*\?|.*\brequires approval\b.*|do you trust the files in this folder\??|.*\bis this a project you (?:created or one you )?trust\b.*\??|allow external claude\.md(?: file)? imports\??)$",
+        r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|.*\brequires approval\b.*|do you trust the files in this folder\??|.*\bis this a project you (?:created or one you )?trust\b.*\??|allow external claude\.md(?: file)? imports\??)$",
     )
     .expect("approval question regex compiles")
 });
@@ -1149,7 +1149,11 @@ mod tests {
             mentions_approval(&crate::activity::strip_ansi(&raw)),
             "{name}: prefilter"
         );
-        detect(&screen, &scrollback).unwrap_or_else(|| panic!("{name}: no dialog in {screen:#?}"))
+        // Found by the layout, not by the older question patterns.
+        let found = detect_codex(&screen, &scrollback)
+            .unwrap_or_else(|| panic!("{name}: no dialog in {screen:#?}"));
+        assert_eq!(detect(&screen, &scrollback), Some(found.clone()));
+        found
     }
 
     fn labels(d: &Detected) -> Vec<&str> {
@@ -1425,6 +1429,19 @@ mod tests {
              › Ask Codex to do anything",
         );
         assert_eq!(detect(&form_words, &[]), None);
+        // An agent reply quoting a Codex question above an ordinary list,
+        // with Codex's input box below: no dialog is up.
+        for quote in [
+            "Allow this app to run tool \"x\"?",
+            "Would you like to grant these permissions?",
+            "Would you like to send input to terminal 4?",
+            "Do you want to approve network access to \"example.com\"?",
+        ] {
+            let reply = lines(&format!(
+                "• Codex would show this:\n{quote}\n› 1. Allow\n  2. Cancel\n\n› Ask Codex to do anything\n  gpt-5 default · ~/vogt"
+            ));
+            assert_eq!(detect(&reply, &[]), None, "{quote}");
+        }
         // A picker's footer goes back rather than cancelling.
         let picker = lines(
             "  Select model\n› 1. gpt-5\n  2. gpt-5-mini\n\n  Press enter to confirm or esc to go back",
