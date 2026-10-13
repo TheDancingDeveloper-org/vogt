@@ -1956,6 +1956,21 @@ watch is
 First output can come earlier than that (the wrapper prints as it goes), so
 `vogt_session_first_output_seconds` is the measure for `direct` sessions.
 
+The voice sidecar has the same shape of scrape endpoint, on
+`VOGT_VOICE_METRICS_ADDR` (suggested `0.0.0.0:9465`), and it is likewise off
+when unset and never on the sidecar's API port. It exports the Prometheus
+process-collector names so one dashboard reads both processes, plus the
+on-disk size of the in-process weights (Whisper GGML and Piper ONNX) loaded
+at startup. That gauge is file size, not resident pages, so it does not
+double-count RSS. Request latency is not on this endpoint yet.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `process_resident_memory_bytes` | gauge | — |
+| `process_cpu_seconds_total` | counter | — |
+| `process_threads` | gauge | — |
+| `vogt_voice_model_bytes` | gauge | — |
+
 The engine logs without colour when its stdout is not a terminal, so these
 `key=value` fields reach the log pipeline intact.
 
