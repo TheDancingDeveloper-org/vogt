@@ -272,7 +272,9 @@ The recipe is **start with a task → wait until ready → read → answer → s
    cuts it from the project's integration branch (`agent_policy.base_branch`,
    or `main` when the project states none) onto `<work item>-<session>`, and
    the session's `cwd` is that worktree. The shared checkout is never written
-   to, so a dirty tree there cannot leak into the session. `resume` continues an earlier conversation, and
+   to, so a dirty tree there cannot leak into the session. The base is the
+   local ref and is not fetched first. `worktree` cannot be combined with
+   `resume`. `resume` continues an earlier conversation, and
    the session starts in the directory that conversation ran in (from its
    transcript), so give the project it belongs to or any project — the
    directory follows the conversation. If your `session_start` tool has no

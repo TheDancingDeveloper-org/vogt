@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -315,23 +314,20 @@ impl SessionRegistry {
         // worktree) (WI-871). The transcript's own record of that directory
         // wins when it is inside the workspace; otherwise the caller's cwd is
         // kept and the CLI reports the conversation as not found.
+        // A session that asked for its own worktree (WI-1298) is cut from
+        // `cwd`, the checkout, only after every refusal below has had its say,
+        // so a refused start leaves no worktree or branch behind. A resumed
+        // conversation would move `cwd` to its transcript's directory, which
+        // is not the checkout the caller named, so the two are refused
+        // together rather than cut from somewhere unasked.
+        let worktree = spec.worktree.take();
+        if worktree.is_some() && spec.resume.as_deref().is_some_and(|r| !r.trim().is_empty()) {
+            return Err(ApiError::BadRequest(
+                "a worktree cannot be cut for a resumed conversation; start it fresh, or resume in the worktree as cwd".into(),
+            ));
+        }
         if let Some(dir) = self.resume_cwd(&spec) {
             spec.cwd = Some(dir);
-        }
-        // A session that asked for its own worktree (WI-1298) is cut from
-        // `cwd` before that path is resolved: the checkout must exist, and the
-        // worktree is what the session then opens in. A failure here refuses
-        // the start and leaves no worktree behind.
-        if let Some(worktree) = spec.worktree.take() {
-            let checkout = spec.cwd.as_deref().map(str::trim).unwrap_or("");
-            if checkout.is_empty() {
-                return Err(ApiError::BadRequest(
-                    "a worktree needs the checkout it is cut from as cwd".into(),
-                ));
-            }
-            let created =
-                git::create_worktree(Path::new(checkout), &worktree.branch, &worktree.base_ref)?;
-            spec.cwd = Some(created.to_string_lossy().into_owned());
         }
         // Resolve client-supplied cwd against workspace_root. Reject anything
         // that escapes the workspace via `..` so a stray API call can't spawn
@@ -461,6 +457,33 @@ impl SessionRegistry {
             }
         }
 
+        // Every refusal has passed: cut the worktree now. Its destination is
+        // checked against the workspace root first — a checkout at the root
+        // has its sibling outside it. From here on the guard removes the
+        // worktree and its branch again unless the child is spawned.
+        let mut cut = CutWorktree::default();
+        if let Some(worktree) = worktree {
+            let checkout = spec.cwd.clone().ok_or_else(|| {
+                ApiError::BadRequest("a worktree needs the checkout it is cut from as cwd".into())
+            })?;
+            let checkout = std::path::PathBuf::from(checkout);
+            let destination = git::worktree_destination(&checkout, &worktree.branch)?;
+            let parent = destination.parent().unwrap_or(&destination);
+            workspace_path::resolve_existing_allow_absolute(
+                &self.cfg.workspace_root,
+                &parent.to_string_lossy(),
+            )
+            .map_err(|_| {
+                ApiError::BadRequest(format!(
+                    "worktree {} would be outside the workspace",
+                    destination.display()
+                ))
+            })?;
+            let created = git::create_worktree(&checkout, &worktree.branch, &worktree.base_ref)?;
+            spec.cwd = Some(created.to_string_lossy().into_owned());
+            cut.0 = Some((checkout, created, worktree.branch.trim().to_string()));
+        }
+
         let prompt_file = match brief {
             Some(text) => Some(prompt_files::write_session_prompt(
                 &self.cfg.state_dir,
@@ -584,6 +607,8 @@ impl SessionRegistry {
                 return Err(e);
             }
         };
+        // The child runs in the worktree now; it stays.
+        cut.keep();
         let session = spawned.session;
         session.set_conversation(conversation.clone());
         // The posture as the wire names it, `None` for the default one.
@@ -2040,6 +2065,27 @@ fn normalize_session_name(name: &str) -> Result<String> {
         )));
     }
     Ok(trimmed.to_string())
+}
+
+/// A session worktree cut during a start that has not spawned yet (WI-1298).
+/// Dropped while it still holds one, it removes the worktree and its branch,
+/// so a start that fails after the cut — a prompt file that cannot be written,
+/// a PTY that cannot be spawned — leaves nothing behind.
+#[derive(Default)]
+struct CutWorktree(Option<(std::path::PathBuf, std::path::PathBuf, String)>);
+
+impl CutWorktree {
+    fn keep(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CutWorktree {
+    fn drop(&mut self) {
+        if let Some((checkout, path, branch)) = self.0.take() {
+            git::remove_worktree(&checkout, &path, &branch);
+        }
+    }
 }
 
 /// A Codex launch whose named policy cannot be read (WI-1143). Claude and

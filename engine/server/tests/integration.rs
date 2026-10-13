@@ -14477,3 +14477,222 @@ async fn only_a_person_or_the_core_starts_an_oversight_session() {
         assert_eq!(row["role"], "oversight", "{token} {row}");
     }
 }
+
+/// git in `dir` for the worktree tests, failing the test if git does.
+fn worktree_git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A committed checkout at `repo` with a dirty edit, as the shared checkout is.
+fn worktree_checkout(repo: &std::path::Path) {
+    std::fs::create_dir_all(repo).unwrap();
+    worktree_git(repo, &["init", "-q", "-b", "main"]);
+    worktree_git(repo, &["config", "user.email", "t@example"]);
+    worktree_git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("f.txt"), "base\n").unwrap();
+    worktree_git(repo, &["add", "f.txt"]);
+    worktree_git(repo, &["commit", "-q", "-m", "base"]);
+    std::fs::write(repo.join("f.txt"), "dirty\n").unwrap();
+}
+
+fn has_branch(repo: &std::path::Path, branch: &str) -> bool {
+    std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[tokio::test]
+async fn a_worktree_session_opens_in_its_worktree_and_wakes_back_into_it() {
+    let (tmp, cfg, stub) = hibernation_sandbox();
+    let repo = tmp.path().join("repo");
+    worktree_checkout(&repo);
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "worktree agent",
+            "command": [stub.to_string_lossy()],
+            "cwd": repo.to_string_lossy(),
+            "worktree": { "branch": "wi-1-worker", "base_ref": "main" },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created: Value = created.json().await.unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let worktree = tmp.path().canonicalize().unwrap().join("wi-1-worker");
+    assert_eq!(created["cwd"], worktree.to_string_lossy().as_ref());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
+        "base\n"
+    );
+    assert_eq!(
+        worktree_git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "wi-1-worker"
+    );
+    // The checkout it was cut from is untouched.
+    assert_eq!(
+        std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+        "dirty\n"
+    );
+    live_output_containing(&client, &base, &id, &["> "]).await;
+
+    let hibernated = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({ "reason": "worktree wake test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hibernated.status(), StatusCode::OK);
+    let woken = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(woken.status(), StatusCode::OK);
+    let woken: Value = woken.json().await.unwrap();
+    // Back in the same worktree; no second one was cut.
+    assert_eq!(woken["cwd"], worktree.to_string_lossy().as_ref());
+    let listed = worktree_git(&repo, &["worktree", "list", "--porcelain"]);
+    assert_eq!(listed.matches("worktree ").count(), 2, "{listed}");
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn a_refused_worktree_session_leaves_no_worktree_or_branch() {
+    let (tmp, mut cfg, stub) = hibernation_sandbox();
+    let repo = tmp.path().join("repo");
+    worktree_checkout(&repo);
+    let codex = tmp.path().join("bin").join("codex");
+    std::fs::copy(&stub, &codex).unwrap();
+    cfg.agent_onboarding.codex_policy =
+        Err("Codex driven-session policy /no/such/requirements.toml cannot be read".into());
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let refused = |name: &str, body: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        let name = name.to_string();
+        async move {
+            let res = client
+                .post(format!("{base}/api/sessions"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            let status = res.status();
+            let text = res.text().await.unwrap();
+            assert!(
+                status.is_client_error() || status.is_server_error(),
+                "{name}: {status} {text}"
+            );
+        }
+    };
+    let worktree = |branch: &str| json!({ "branch": branch, "base_ref": "main" });
+    let cases = [
+        // The codex policy refuses the launch.
+        (
+            "wt-codex",
+            json!({ "name": "c", "command": [codex.to_string_lossy()],
+                    "cwd": repo.to_string_lossy(), "worktree": worktree("wt-codex") }),
+        ),
+        // The agent CLI refuses the posture.
+        (
+            "wt-launch",
+            json!({ "name": "l", "command": [stub.to_string_lossy()],
+                    "permission_mode": "nonsense",
+                    "cwd": repo.to_string_lossy(), "worktree": worktree("wt-launch") }),
+        ),
+        // Resume plus worktree is refused outright.
+        (
+            "wt-resume",
+            json!({ "name": "r", "command": [stub.to_string_lossy()],
+                    "resume": "00000000-0000-4000-8000-000000000000",
+                    "cwd": repo.to_string_lossy(), "worktree": worktree("wt-resume") }),
+        ),
+        // The PTY cannot spawn a command that does not exist — after the cut.
+        (
+            "wt-spawn",
+            json!({ "name": "s", "command": [tmp.path().join("no-such-bin").to_string_lossy()],
+                    "cwd": repo.to_string_lossy(), "worktree": worktree("wt-spawn") }),
+        ),
+    ];
+    for (branch, body) in cases {
+        refused(branch, body).await;
+        assert!(
+            !tmp.path().join(branch).exists(),
+            "{branch}: directory left"
+        );
+        assert!(!has_branch(&repo, branch), "{branch}: branch left");
+    }
+    let listed = worktree_git(&repo, &["worktree", "list", "--porcelain"]);
+    assert_eq!(listed.matches("worktree ").count(), 1, "{listed}");
+}
+
+#[tokio::test]
+async fn a_worktree_outside_the_workspace_is_refused_before_it_is_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    worktree_checkout(&workspace);
+    let outside = tmp.path().join("other");
+    worktree_checkout(&outside);
+    let mut cfg = test_config();
+    cfg.default_cwd = workspace.clone();
+    cfg.workspace_root = workspace.canonicalize().unwrap();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // A checkout outside the workspace, and the workspace root itself, whose
+    // sibling is outside it.
+    for (checkout, branch) in [(&outside, "wt-outside"), (&workspace, "wt-root")] {
+        let res = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({
+                "name": "escape",
+                "command": ["/bin/cat"],
+                "cwd": checkout.to_string_lossy(),
+                "worktree": { "branch": branch, "base_ref": "main" },
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{branch}");
+        assert!(
+            !tmp.path().join(branch).exists(),
+            "{branch}: directory left"
+        );
+        assert!(!has_branch(checkout, branch), "{branch}: branch left");
+    }
+}
