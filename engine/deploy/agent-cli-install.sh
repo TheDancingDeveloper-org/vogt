@@ -363,8 +363,11 @@ install_github_release() {
         rm -rf "$dir"
         return 1
     fi
+    # Two release layouts exist. Older forks list the archive itself in
+    # SHA256SUMS and unpack flat; newer ones list each member as
+    # `<target>/<file>` and unpack into `<target>/`. Check whichever applies.
     sum="$(awk -v asset="$asset" '$2 == asset { print $1; exit }' "$dir/SHA256SUMS")"
-    if [[ -z "$sum" ]] || ! echo "$sum  $dir/$asset" | sha256sum -c - >/dev/null 2>&1; then
+    if [[ -n "$sum" ]] && ! echo "$sum  $dir/$asset" | sha256sum -c - >/dev/null 2>&1; then
         log "$asset does not match the SHA256SUMS published for fork-$version"
         rm -rf "$dir"
         return 1
@@ -374,23 +377,33 @@ install_github_release() {
         rm -rf "$dir"
         return 1
     fi
+    local root="$dir"
+    if [[ -z "$sum" ]]; then
+        if ! grep -qF "  ${target}/" "$dir/SHA256SUMS" \
+                || ! (cd "$dir" && grep -F "  ${target}/" SHA256SUMS | sha256sum -c - >/dev/null 2>&1); then
+            log "$asset members do not match the SHA256SUMS published for fork-$version"
+            rm -rf "$dir"
+            return 1
+        fi
+        root="$dir/$target"
+    fi
     recorded="$(recorded_member_sha "$binary")"
     if [[ "$version" == "${VOGT_CODEX_SHA:-}" && -n "$recorded" ]]; then
-        if ! echo "$recorded  $dir/$binary" | sha256sum -c - >/dev/null 2>&1; then
+        if ! echo "$recorded  $root/$binary" | sha256sum -c - >/dev/null 2>&1; then
             log "$binary does not match the sha256 recorded for $version"
             rm -rf "$dir"
             return 1
         fi
-    elif [[ ! -x "$dir/$binary" ]]; then
+    elif [[ ! -x "$root/$binary" ]]; then
         log "$asset carries no $binary"
         rm -rf "$dir"
         return 1
     fi
     mkdir -p "$prefix/bin"
-    install -m 0755 "$dir/$binary" "$prefix/bin/$binary"
-    [[ -f "$dir/bwrap" ]] && install -m 0755 "$dir/bwrap" "$prefix/bin/bwrap"
-    [[ -f "$dir/codex-code-mode-host" ]] && \
-        install -m 0755 "$dir/codex-code-mode-host" "$prefix/bin/codex-code-mode-host"
+    install -m 0755 "$root/$binary" "$prefix/bin/$binary"
+    [[ -f "$root/bwrap" ]] && install -m 0755 "$root/bwrap" "$prefix/bin/bwrap"
+    [[ -f "$root/codex-code-mode-host" ]] && \
+        install -m 0755 "$root/codex-code-mode-host" "$prefix/bin/codex-code-mode-host"
     printf '%s@%s\n' "$source" "$version" > "$prefix/source"
     rm -rf "$dir"
 }
