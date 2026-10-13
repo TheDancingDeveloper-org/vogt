@@ -308,7 +308,7 @@ pub fn record_report(session: &Session, report: &LaunchReport, request_id: &str)
             "launch stage"
         );
         if name == "secrets" {
-            metrics().launch_secret_reads.inc(&[
+            metrics().launch_vault_read_count.inc(&[
                 ("mode", if mode.is_empty() { "other" } else { mode }),
                 ("outcome", one_of(&stage.outcome, &["ok", "bulk-failed"])),
             ]);
