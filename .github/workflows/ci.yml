@@ -279,15 +279,21 @@ jobs:
         run: cargo fmt --all -- --check
 
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
 
       # `rust-version` is a promise about the oldest toolchain that builds the
       # locked tree. CI builds with current stable, so nothing else would
       # notice a dependency bump that raised the real floor past the declared
       # one; this reads `cargo metadata` and fails when it does.
       - name: declared rust-version covers the lockfile
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         run: uv run --no-project python scripts/check_rust_version.py engine
 
       - name: audit Rust dependencies
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         working-directory: engine
         run: |
           set -euo pipefail
@@ -317,20 +323,28 @@ jobs:
             --deny warnings --ignore RUSTSEC-2023-0071
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         with:
           version: 11
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         with:
           node-version: "22"
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
       - name: install the PWA's dependencies
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         working-directory: web
         run: pnpm install --frozen-lockfile
 
       - name: audit the PWA's dependencies
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         working-directory: web
         # Fatal on advisories, resilient to registry timeouts.
         run: bash ../scripts/pnpm-audit.sh
@@ -339,6 +353,8 @@ jobs:
       # so a type error is reported as a type error rather than as a failed
       # bundle, which is how the engine's pipeline reported it.
       - name: typecheck the PWA
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         working-directory: web
         run: pnpm typecheck
 
@@ -358,14 +374,20 @@ jobs:
       # Before the bundle is built, because a failing test is a cheaper
       # failure to reach than a bundle, and these need no `dist`.
       - name: test the PWA
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         working-directory: web
         run: pnpm test
 
       - name: install the demo browser
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         working-directory: web
         run: pnpm exec playwright install --with-deps chromium
 
       - name: demo routes, phone composition, split layouts, and screenshots
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         working-directory: web
         env:
           CI: "true"
@@ -397,6 +419,8 @@ jobs:
       # here the bundle is a few seconds of work, so there is no reason to
       # check the engine against assets it will never serve.
       - name: build the PWA
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         working-directory: web
         env:
           VOGT_SOURCE_REF: ${{ github.ref_name }}
@@ -404,6 +428,8 @@ jobs:
         run: pnpm build
 
       - name: normal and demo packaging share one PWA artifact
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         run: |
           set -euo pipefail
           cp -a web/dist web/dist-normal
@@ -427,9 +453,13 @@ jobs:
       # library and nothing else, so it does not need this repo's Python
       # environment synced into a job that is otherwise Rust and Node.
       - name: the first screen stays inside its budget
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         run: uv run --no-project python scripts/check_bundle.py
 
       - name: web/dist exists even when the PWA was not built
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         run: |
           set -euo pipefail
           # `engine/server/src/assets.rs` embeds `../../web/dist/`. That
@@ -447,6 +477,8 @@ jobs:
           fi
 
       - name: ripgrep and git are present
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         run: |
           set -eu
           # `server/src/files.rs` shells out to `rg` and `server/src/git.rs`
@@ -482,12 +514,32 @@ jobs:
       # `-D warnings` because the engine's pipeline denied them, and a lint
       # that does not fail is a lint nobody reads.
       - name: cargo clippy
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         working-directory: engine
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      - name: cargo test
+      # cargo-nextest runs each test in its own process, so a test that hangs
+      # is terminated by `engine/.config/nextest.toml` (terminate-after) and
+      # reported as a failure, instead of holding the job until its timeout
+      # (WI-1312). `--no-fail-fast` lists every failing test in one round.
+      - name: cargo nextest
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
         working-directory: engine
-        run: cargo test --workspace
+        run: |
+          set -euo pipefail
+          if ! cargo nextest --version 2>/dev/null | grep -Fq 'cargo-nextest 0.9.103'; then
+            cargo install --locked cargo-nextest --version 0.9.103 --force
+          fi
+          cargo nextest run --locked --workspace --no-fail-fast
+
+      # nextest does not run doctests, so they keep their own step.
+      - name: cargo test (doctests)
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
+        working-directory: engine
+        run: cargo test --locked --workspace --doc
 
   voice:
     name: fmt, clippy, test (voice sidecar foundation)
