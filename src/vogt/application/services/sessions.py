@@ -121,6 +121,7 @@ from vogt.application.services._brief import (
     brief_for_work_item,
     review_brief_for_work_item,
 )
+from vogt.application.services.preferences import dispatch_settings
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
 from vogt.core import delivery, oversight, runtime
@@ -245,6 +246,11 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         )
         raise RoleRefused(msg)
     engine = _engine(ctx)
+    # Resolved only after both guards above, and a profile carries neither a
+    # role nor a permission posture, so naming a purpose can never raise a
+    # start past what the caller could ask for directly (WI-1323).
+    params, overrides, read_only = _resolve_purpose(ctx, params)
+    started_by_session, started_by_kind = _started_by(ctx, engine)
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
     actor_ref = f"agent:session:{session_id}"
@@ -268,7 +274,11 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 ctx, session_id, credential.secret, work_item=subject.work_item_ref
             ),
             brief=_brief_with_task(
-                subject.brief, params, cwd=subject.cwd, autopilot=autopilot
+                subject.brief,
+                params,
+                cwd=subject.cwd,
+                autopilot=autopilot,
+                read_only=read_only,
             ),
             companion=subject.brief.companion,
             model=params.model,
@@ -355,6 +365,9 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             model=params.model,
             effort=params.effort,
             reason=reason,
+            purpose=params.purpose,
+            started_by_session=started_by_session,
+            started_by_kind=started_by_kind,
             started_at=now,
             stopped_at=None,
         )
@@ -412,6 +425,16 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 "permission_mode": params.permission_mode,
                 # Which Claude Code account it was asked to run under.
                 "account": params.account,
+                # The dispatch purpose and what it resolved (WI-1323): the
+                # start fields the caller set over the profile are listed in
+                # `overrides`, so a reader sees which defaults were not used.
+                "purpose": params.purpose,
+                "overrides": list(overrides),
+                "budget": None if budget is None else _budget_wire(budget),
+                "worktree": params.worktree,
+                "repo_map": params.repo_map,
+                "started_by_session": started_by_session,
+                "started_by_kind": started_by_kind,
                 # How long the engine took to start it (WI-927); the launch
                 # inside it is timed by the engine's own launch report.
                 "engine_spawn_ms": engine_spawn_ms,
@@ -3245,6 +3268,7 @@ def _brief_with_task(
     *,
     cwd: str,
     autopilot: bool = False,
+    read_only: bool = False,
 ) -> str:
     """Fold an explicit task, and its touch points, into the session's brief.
 
@@ -3261,6 +3285,8 @@ def _brief_with_task(
         # Said in the brief, not enforced: the engine cannot make an agent
         # keep going, but an agent that was told to will (WI-878).
         text = f"{text.rstrip()}\n\n{AUTOPILOT}"
+    if read_only:
+        text = f"{text.rstrip()}\n\n{READ_ONLY}"
     task = (params.task or "").strip()
     touch = _touch_points(params, cwd=cwd)
     if task:
@@ -3458,6 +3484,85 @@ def _budget_params(raw: dict[str, Any] | None) -> SessionBudgetParams | None:
     return SessionBudgetParams(**limits) if limits else None
 
 
+#: The start fields a dispatch profile fills, in the order `overrides` lists
+#: them. No `role` and no `permission_mode`: those are never defaults.
+_PROFILE_FIELDS = (
+    "template",
+    "model",
+    "effort",
+    "budget",
+    "worktree",
+    "repo_map",
+    "autopilot",
+)
+
+#: The review profile's hint (WI-1323). Advisory, like autopilot's text.
+READ_ONLY = (
+    "## Read only\n\n"
+    "This session was started to review. Read, run the checks and report; do "
+    "not edit, commit or push."
+)
+
+
+def _resolve_purpose(
+    ctx: AppContext, params: StartSessionParams
+) -> tuple[StartSessionParams, tuple[str, ...], bool]:
+    """Fill a start's unset fields from its purpose's dispatch profile.
+
+    Returns the filled params, the profile fields the caller set explicitly
+    (the overrides), and whether the profile asks for a read-only session.
+    The profile is the deployment's (`dispatch.profiles`, written by a
+    person, over the code defaults), never the caller's own preference. A
+    start with no purpose is returned unchanged.
+    """
+    if params.purpose is None:
+        return params, (), False
+    with ctx.declared.read() as view:
+        profile = dispatch_settings(view).profiles[params.purpose]
+    given = params.model_fields_set
+    supplied: dict[str, object] = {
+        "template": profile.template,
+        "model": profile.model,
+        "effort": profile.effort,
+        "budget": SessionBudgetParams(
+            turns=profile.budget_turns,
+            wall_clock_minutes=profile.budget_wall_clock_minutes,
+        )
+        if profile.budget_turns or profile.budget_wall_clock_minutes
+        else None,
+        "worktree": profile.worktree,
+        "repo_map": profile.repo_map,
+        "autopilot": profile.autopilot,
+    }
+    filled = {field: value for field, value in supplied.items() if field not in given}
+    overrides = tuple(field for field in _PROFILE_FIELDS if field in given)
+    return params.model_copy(update=filled), overrides, profile.read_only
+
+
+def _started_by(
+    ctx: AppContext, engine: EngineClient
+) -> tuple[str | None, Literal["person", "oversight", "worker"] | None]:
+    """Who is starting this session, from the caller's verified identity.
+
+    A person (the check `session.grant_decide` makes) is `person` with no
+    session. A session is named by its token's actor, and its kind is its
+    engine role right now; None when the engine cannot say. Nothing here is
+    read from the start's parameters.
+    """
+    if ctx.principal.kind != "agent":
+        return None, "person"
+    caller = _caller_engine_session_id(ctx)
+    if caller is None:
+        return None, None
+    try:
+        live = engine.get_session(caller)
+    except EngineUnavailable:
+        live = None
+    if live is None or live.role not in ("oversight", "worker"):
+        return caller, None
+    return caller, "oversight" if live.role == "oversight" else "worker"
+
+
 def _autopilot(params: StartSessionParams) -> bool:
     """Whether a start runs on autopilot (WI-949): as asked, or — asked
     nothing — on for an agent template given a task, the shape of a session
@@ -3569,6 +3674,9 @@ def _audited_payload(session: CodingSession) -> dict[str, object]:
         "template": session.template,
         "model": session.model,
         "effort": session.effort,
+        "purpose": session.purpose,
+        "started_by_session": session.started_by_session,
+        "started_by_kind": session.started_by_kind,
         "started_at": session.started_at.isoformat(),
         "stopped_at": None
         if session.stopped_at is None
@@ -3610,6 +3718,9 @@ def _summarize(
         model=session.model,
         effort=session.effort,
         reason=session.reason,
+        purpose=session.purpose,
+        started_by_session=session.started_by_session,
+        started_by_kind=session.started_by_kind,
         started_at=session.started_at,
         stopped_at=session.stopped_at,
         activity=None if engine_session is None else engine_session.activity,

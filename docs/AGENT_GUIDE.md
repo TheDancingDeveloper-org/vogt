@@ -178,6 +178,44 @@ follow-up.
 $ uv run vogt session start --work-item WI-42 --reason "start on the login-timeout fix"
 ```
 
+#### Start for a purpose
+
+`session_start` takes `purpose`, one of `implement`, `implement-careful`,
+`review`, `mechanical`, `investigate` or `design`. The deployment's dispatch
+profile for that purpose fills `template`, `model`, `effort`, `budget`,
+`worktree`, `repo_map` and `autopilot` wherever the start leaves them unset:
+
+| Purpose | Template | Model | Effort | Budget | Other |
+| --- | --- | --- | --- | --- | --- |
+| `implement` | klaudia | grok-4.7 | — | 120 turns, 90 min | worktree, repo map, autopilot |
+| `implement-careful` | claude | opus | low | 150 turns | autopilot |
+| `review` | claude | opus | low | 40 turns | no autopilot, a read-only hint in the brief |
+| `mechanical` | claude | haiku | — | 60 turns | autopilot |
+| `investigate`, `design` | claude | opus | low | 60 turns | autopilot |
+
+A field you pass yourself wins, and the `session.started` event lists it
+under `overrides`. A profile never sets `role` or `permission_mode`: it is
+applied after the checks that stop an agent starting an overseer or granting
+`bypass`. `worktree` is recorded but not yet acted on (WI-1298).
+
+The table is the deployment's, not yours. A person overrides fields with
+`preference_set` on `dispatch.profiles` (for example
+`{"implement": {"model": "grok-4.8"}}` changes only that one field). The same
+store holds `dispatch.max_workers_per_overseer` (`{"value": 5}`),
+`dispatch.escalate_after_failed_reviews` (`{"value": 2}`) and
+`dispatch.review_by_oversight_only` (`{"value": true}`). An agent cannot set
+any `dispatch.*` key.
+
+Every session records `purpose`, `started_by_session` (the engine id of the
+session that started it) and `started_by_kind` (`person`, or the starter's
+engine role at that moment: `oversight` or `worker`). Vogt reads the last two
+from the caller's credential, never from the start's parameters. They show
+in `session_list` full mode and never change after the start.
+
+```console
+$ uv run vogt session start --work-item WI-42 --purpose review --reason "review WI-42"
+```
+
 The session is linked back to the item: the item shows a live-activity badge
 while you work, and the session's findings become collectable evidence against
 the item. If you are running as a **scheduled agent task** instead, bind the task
