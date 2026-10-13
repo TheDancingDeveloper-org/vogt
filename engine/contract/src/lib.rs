@@ -363,6 +363,11 @@ pub struct SessionBudget {
     /// signature and hibernates at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_clock_minutes: Option<u32>,
+    /// Minutes of running the whole session may accumulate across all its
+    /// turns (WI-1281). Separate from `wall_clock_minutes`, which is per turn;
+    /// unset by default, so only a session or project that names it is capped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_wall_clock_minutes: Option<u32>,
 }
 
 /// Wall-clock gaps between consecutive assistant turns, in milliseconds.

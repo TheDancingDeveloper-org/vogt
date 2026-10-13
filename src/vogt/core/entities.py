@@ -111,6 +111,17 @@ class AgentPolicy(Entity):
     test_recipe: str = ""
     #: Free-text rules. Guidance only; a hook never reads these.
     rules: list[str] = []
+    #: Minutes of running a worker session may accumulate across all its turns
+    #: before the engine hibernates it at a turn boundary (WI-1281). Added to
+    #: the default budget a start gets; None, the default, is no such limit.
+    session_wall_clock_minutes: int | None = None
+
+    @field_validator("session_wall_clock_minutes")
+    @classmethod
+    def _positive_minutes(cls, minutes: int | None) -> int | None:
+        if minutes is not None and minutes <= 0:
+            raise ValueError("session_wall_clock_minutes must be positive")
+        return minutes
 
     @field_validator("forbidden_text")
     @classmethod

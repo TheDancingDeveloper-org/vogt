@@ -255,7 +255,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # A refusal raises before any audit write, so it is logged here; the
     # engine audits its own side (`event=session.start`) either way.
     autopilot = _autopilot(params)
-    budget = _budget(params)
+    budget = _budget(params, subject.policy)
     spawn_started = time.monotonic()
     try:
         started = _start_on_engine(
@@ -3345,14 +3345,18 @@ def _enforced_policy(policy: AgentPolicy | None) -> dict[str, Any] | None:
     return enforced
 
 
-def _budget(params: StartSessionParams) -> SessionBudgetParams | None:
+def _budget(
+    params: StartSessionParams, policy: AgentPolicy | None = None
+) -> SessionBudgetParams | None:
     """The limits a start carries (C7, WI-1245).
 
     Asked explicitly, that object is the answer — even an empty one, which is
     how a caller declines the default rather than inheriting it. Asked nothing,
     an agent template given a task in the worker role gets the default (120
-    turns, 90 minutes of wall clock, no context limit). An oversight session
-    and a shell or no-task start get none: there is nothing to bound.
+    turns, 90 minutes of wall clock per turn, no context limit), plus the
+    project's whole-session wall clock when its `agent_policy` sets one
+    (WI-1281; unset by default). An oversight session and a shell or no-task
+    start get none: there is nothing to bound.
     """
     if params.budget is not None:
         return params.budget
@@ -3362,7 +3366,13 @@ def _budget(params: StartSessionParams) -> SessionBudgetParams | None:
         and params.task.strip()
         and params.role == "worker"
     ):
-        return SessionBudgetParams(turns=120, wall_clock_minutes=90)
+        return SessionBudgetParams(
+            turns=120,
+            wall_clock_minutes=90,
+            session_wall_clock_minutes=(
+                policy.session_wall_clock_minutes if policy else None
+            ),
+        )
     return None
 
 
@@ -3380,6 +3390,7 @@ def _budget_wire(budget: SessionBudgetParams | None) -> dict[str, int] | None:
             ("turns", budget.turns),
             ("context_tokens", budget.context_tokens),
             ("wall_clock_minutes", budget.wall_clock_minutes),
+            ("session_wall_clock_minutes", budget.session_wall_clock_minutes),
         )
         if value is not None
     }
@@ -3395,7 +3406,12 @@ def _budget_params(raw: dict[str, Any] | None) -> SessionBudgetParams | None:
         return None
     limits = {
         key: value
-        for key in ("turns", "context_tokens", "wall_clock_minutes")
+        for key in (
+            "turns",
+            "context_tokens",
+            "wall_clock_minutes",
+            "session_wall_clock_minutes",
+        )
         if isinstance(value := raw.get(key), int) and value > 0
     }
     return SessionBudgetParams(**limits) if limits else None
