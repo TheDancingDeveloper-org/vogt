@@ -757,6 +757,19 @@ than these routes.
   `✦ WI-n` chip. Requires `sessions`. This is an additive field on
   `SessionSpec`/`SessionSummary`, the same shape as `role`; WI-956 slice 2's
   `supervisor` is to be added beside it the same way.
+- `SessionSpec.worktree` `{"branch": "...", "base_ref": "..."}` (WI-1298),
+  sent by vogt-core when `session.start` is called with `worktree: true`.
+  The engine creates a git worktree of `cwd` as a sibling directory named
+  for `branch`, on a new branch of that name cut from `base_ref`, and the
+  session's working directory is that worktree. `cwd` must be the checkout
+  the worktree is cut from. The checkout's own tree is never written to, so
+  a dirty shared checkout cannot leak into the session. Refused (`400`) when
+  `cwd` is not a git checkout, when `base_ref` is not already in it (the
+  engine does not fetch), when `branch` is not a single ref name, or when
+  the sibling directory already exists; a refusal leaves no worktree behind.
+  Absent means the session opens in `cwd`, byte-identical to a request from
+  before the field existed. A wake returns to the worktree already cut and
+  does not cut another.
 - `POST /api/sessions/:id/conversation` `{"agent", "id", "ended"?}` ->
   `SessionSummary` (WI-962). Links the agent conversation running in the
   session, or with `ended` unlinks it while it is still the session's. See

@@ -157,6 +157,14 @@ pub struct SessionSpec {
     /// the record, so a wake keeps it, and in history, so a resume can.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// Start the session in a git worktree of its own (WI-1298). When set,
+    /// the engine creates the worktree under `cwd` — which must be the
+    /// checkout the worktree is cut from — on branch `worktree.branch` off
+    /// `worktree.base_ref`, and the session's working directory becomes that
+    /// worktree rather than `cwd`. Absent means the session opens in `cwd`,
+    /// byte-identical to a request from before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +177,19 @@ pub struct SessionSpec {
     /// sends that to refuse the default it would otherwise apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<SessionBudget>,
+}
+
+/// Where a session's own git worktree comes from (WI-1298).
+///
+/// `branch` is the new branch, created by `git worktree add -b`. `base_ref`
+/// is what it is cut from — a branch, a tag, or a commit the checkout already
+/// has. Both are ref names the engine passes to git as arguments, never
+/// through a shell, so a name with spaces or shell metacharacters is a git
+/// error rather than a command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeSpec {
+    pub branch: String,
+    pub base_ref: String,
 }
 
 /// The part of a project's agent policy the engine enforces (WI-1243).

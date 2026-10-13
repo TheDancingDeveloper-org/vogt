@@ -98,6 +98,144 @@ async fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// A ref name safe to hand git as one argument: no whitespace, no control
+/// characters, and none of the characters git treats as starting an option or
+/// a path. The caller is asking for a branch and a base, not a command.
+fn clean_ref_name(what: &str, name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest(format!("{what} must not be empty")));
+    }
+    if name.starts_with('-') || name.contains("..") {
+        return Err(ApiError::BadRequest(format!(
+            "{what} {name:?} is not a ref name"
+        )));
+    }
+    if name.chars().any(|c| {
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(c, '~' | '^' | ':' | '\\' | '?' | '*' | '[' | '@' | '{')
+    }) {
+        return Err(ApiError::BadRequest(format!(
+            "{what} {name:?} is not a ref name"
+        )));
+    }
+    Ok(name.to_string())
+}
+
+/// A directory name for a worktree: one path component, so the worktree can
+/// only land beside the checkout and never outside it or over a nested path.
+fn clean_worktree_dirname(branch: &str) -> Result<String> {
+    if branch.contains(['/', '\\']) || branch == "." {
+        return Err(ApiError::BadRequest(format!(
+            "branch {branch:?} is not a single worktree directory name"
+        )));
+    }
+    Ok(branch.to_string())
+}
+
+/// Create a git worktree of `checkout` for a session (WI-1298).
+///
+/// The worktree is a sibling of the checkout, named for `branch`, on a new
+/// branch of that name cut from `base_ref`. `checkout` is the main working
+/// tree or a worktree of it; git cuts either way. The checkout's own tree is
+/// never written to: a dirty tree is left exactly as it was, because the new
+/// branch comes from `base_ref` rather than from the working tree.
+///
+/// Refuses before running git when the checkout is not a git tree, when
+/// either name is not a ref name, or when the sibling directory already
+/// exists. When git itself refuses — an unknown base, a branch that already
+/// exists — the error names what git said and no directory is left behind.
+pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<PathBuf> {
+    let branch = clean_ref_name("branch", branch)?;
+    let base_ref = clean_ref_name("base ref", base_ref)?;
+    let dirname = clean_worktree_dirname(&branch)?;
+    if !checkout.is_dir() {
+        return Err(ApiError::BadRequest(format!(
+            "worktree checkout {} does not exist",
+            checkout.display()
+        )));
+    }
+    if git_output(checkout, &["rev-parse", "--is-inside-work-tree"])
+        .map(|out| out.trim() != "true")
+        .unwrap_or(true)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "{} is not a git checkout to cut a worktree from",
+            checkout.display()
+        )));
+    }
+    let parent = checkout.parent().ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "worktree checkout {} has no parent directory",
+            checkout.display()
+        ))
+    })?;
+    let destination = parent.join(&dirname);
+    if destination.exists() {
+        return Err(ApiError::BadRequest(format!(
+            "worktree {} already exists",
+            destination.display()
+        )));
+    }
+    // The base must already be in the checkout. Fetching it here would reach
+    // the network and could move a remote-tracking ref the caller did not ask
+    // to move; an unknown base is a plain refusal.
+    if git_output(checkout, &["rev-parse", "--verify", "--quiet", &base_ref]).is_err() {
+        return Err(ApiError::BadRequest(format!(
+            "base ref {base_ref:?} is not in {}",
+            checkout.display()
+        )));
+    }
+    git_output(
+        checkout,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            &branch,
+            &destination.display().to_string(),
+            &base_ref,
+        ],
+    )
+    .map_err(|error| {
+        // git can leave the destination behind when it fails part way.
+        if destination.is_dir() {
+            let _ = std::process::Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(&destination)
+                .current_dir(checkout)
+                .output();
+        }
+        ApiError::BadRequest(format!("could not create the worktree: {error}"))
+    })?;
+    Ok(destination)
+}
+
+/// git, synchronously, with its stdout on success and its stderr in the error.
+///
+/// The session start that calls [`create_worktree`] is itself synchronous, and
+/// the worktree has to exist before the session's cwd is resolved, so this
+/// cannot wait on the async runtime.
+fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .map_err(|e| ApiError::Internal(format!("spawn git: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        return Err(ApiError::Internal(format!(
+            "git {}: {}",
+            args.join(" "),
+            stderr.trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 fn clean_repo_rel(path: &str) -> Result<String> {
     let path = path.trim();
     if path.is_empty() {
@@ -1265,5 +1403,78 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A committed repo with one uncommitted edit, the state the shared
+    /// checkout is in when a worker must not touch it (WI-1298).
+    fn dirty_checkout(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "base\n").unwrap();
+        git(&repo, &["add", "f.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        git(&repo, &["branch", "integrate"]);
+        std::fs::write(repo.join("f.txt"), "dirty\n").unwrap();
+        repo
+    }
+
+    #[test]
+    fn a_worktree_is_cut_from_the_base_and_leaves_the_dirty_checkout_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let before = std::fs::read_to_string(repo.join("f.txt")).unwrap();
+
+        let worktree = create_worktree(&repo, "wi-1298-worker", "integrate").unwrap();
+
+        assert_eq!(worktree, tmp.path().join("wi-1298-worker"));
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
+            "base\n"
+        );
+        // The checkout the worktree was cut from is byte-for-byte as it was.
+        assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), before);
+        let head = git_output(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap();
+        assert_eq!(head.trim(), "wi-1298-worker");
+    }
+
+    #[test]
+    fn a_worktree_is_refused_for_a_bad_name_an_unknown_base_or_a_taken_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+
+        let bad_name = create_worktree(&repo, "has space", "integrate").unwrap_err();
+        assert!(
+            bad_name.to_string().contains("not a ref name"),
+            "{bad_name}"
+        );
+        let option = create_worktree(&repo, "--upload-pack=evil", "integrate").unwrap_err();
+        assert!(option.to_string().contains("not a ref name"), "{option}");
+        let unknown = create_worktree(&repo, "wi-1", "no-such-ref").unwrap_err();
+        assert!(unknown.to_string().contains("not in"), "{unknown}");
+
+        std::fs::create_dir(tmp.path().join("taken")).unwrap();
+        let taken = create_worktree(&repo, "taken", "integrate").unwrap_err();
+        assert!(taken.to_string().contains("already exists"), "{taken}");
+        // None of the refusals created a branch or a directory.
+        assert!(git_output(&repo, &["rev-parse", "--verify", "wi-1"]).is_err());
+        assert!(!tmp.path().join("has space").exists());
+    }
+
+    #[test]
+    fn a_worktree_can_be_cut_from_a_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let first = create_worktree(&repo, "first", "integrate").unwrap();
+        let second = create_worktree(&first, "second", "first").unwrap();
+        assert_eq!(second, tmp.path().join("second"));
+        assert_eq!(
+            git_output(&second, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap()
+                .trim(),
+            "second"
+        );
     }
 }

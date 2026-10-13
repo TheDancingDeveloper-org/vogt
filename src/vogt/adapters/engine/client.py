@@ -771,6 +771,7 @@ class EngineClient:
         companion: str | None = None,
         policy: dict[str, Any] | None = None,
         budget: dict[str, Any] | None = None,
+        worktree: dict[str, str] | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -844,6 +845,11 @@ class EngineClient:
             # Present even when empty (WI-1245): `{}` is "no limits", which
             # the engine reads differently from a start that named no budget.
             spec["budget"] = budget
+        if worktree:
+            # Cut a worktree and start in it (WI-1298). Sent only when asked,
+            # so a start that did not is byte-for-byte the request this client
+            # has always made.
+            spec["worktree"] = worktree
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 

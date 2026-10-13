@@ -101,6 +101,10 @@ class AgentPolicy(Entity):
     merge_deploys_prod: bool = False
     #: The branches a merge onto counts as deploying. Empty means `main`.
     main_branches: list[str] = []
+    #: The branch a session's own worktree is cut from (WI-1298): the
+    #: project's integration branch. Empty means `main`. Guidance for the
+    #: worktree, not a fact a hook refuses on.
+    base_branch: str = ""
     #: How a commit should be attributed, in the project's own words.
     commit_identity: str = ""
     #: The short named block that says how this project is tested.

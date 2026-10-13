@@ -267,7 +267,12 @@ The recipe is **start with a task → wait until ready → read → answer → s
    task goes into the brief as its `## Task` section, and the agent starts on a
    first prompt telling it to read the brief and carry the task out. You do not
    type the task in. Without `template` you get a plain shell, which does
-   nothing until typed into. `resume` continues an earlier conversation, and
+   nothing until typed into. `worktree: true` starts the session in a git
+   worktree of its own instead of the project's shared checkout: the engine
+   cuts it from the project's integration branch (`agent_policy.base_branch`,
+   or `main` when the project states none) onto `<work item>-<session>`, and
+   the session's `cwd` is that worktree. The shared checkout is never written
+   to, so a dirty tree there cannot leak into the session. `resume` continues an earlier conversation, and
    the session starts in the directory that conversation ran in (from its
    transcript), so give the project it belongs to or any project — the
    directory follows the conversation. If your `session_start` tool has no

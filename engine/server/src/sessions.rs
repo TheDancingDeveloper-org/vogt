@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -17,6 +18,7 @@ use crate::{
     config::Config,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
+    git,
     hibernation::{self, Record},
     history::{ArchiveRecord, SessionHistory, SessionIdentity},
     prompt_files,
@@ -351,6 +353,21 @@ impl SessionRegistry {
         // kept and the CLI reports the conversation as not found.
         if let Some(dir) = self.resume_cwd(&spec) {
             spec.cwd = Some(dir);
+        }
+        // A session that asked for its own worktree (WI-1298) is cut from
+        // `cwd` before that path is resolved: the checkout must exist, and the
+        // worktree is what the session then opens in. A failure here refuses
+        // the start and leaves no worktree behind.
+        if let Some(worktree) = spec.worktree.take() {
+            let checkout = spec.cwd.as_deref().map(str::trim).unwrap_or("");
+            if checkout.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "a worktree needs the checkout it is cut from as cwd".into(),
+                ));
+            }
+            let created =
+                git::create_worktree(Path::new(checkout), &worktree.branch, &worktree.base_ref)?;
+            spec.cwd = Some(created.to_string_lossy().into_owned());
         }
         // Resolve client-supplied cwd against workspace_root. Reject anything
         // that escapes the workspace via `..` so a stray API call can't spawn
@@ -1381,6 +1398,9 @@ impl SessionRegistry {
             policy: record.policy.clone(),
             role: record.role,
             work_item: record.work_item.clone(),
+            // A wake returns to the worktree the first start already cut; it
+            // does not cut another (WI-1298).
+            worktree: None,
             resume: record.conversation.as_ref().map(|c| c.id.clone()),
             cols: req.cols.or(record.cols),
             rows: req.rows.or(record.rows),
