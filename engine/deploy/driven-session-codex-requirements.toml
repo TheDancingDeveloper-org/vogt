@@ -22,9 +22,19 @@
 # write_stdin; `apply_patch` (aliases Write/Edit) for patches; `write_stdin`
 # for the approval path of stdin writes. The matcher is a regex over them.
 #
+# Managed hooks run only while the `hooks` feature is on, and a session can
+# turn it off (`-c features.hooks=false`, `--disable hooks`, `[features]` in
+# $CODEX_HOME or a project `.codex/config.toml`, a nested `codex exec`). The
+# `[features]` table here is FeatureRequirementsToml: a pinned value wins over
+# every config layer and CLI override (core/src/config/managed_features.rs),
+# so gitguard stays on.
+#
 # A Codex that cannot parse this file refuses to start; it does not run
 # without the hook. `engine/server/tests/codex_gitguard_e2e.rs` launches the
 # real fork binary against this file and proves the refusals.
+
+[features]
+hooks = true
 
 [[hooks.SessionStart]]
 

@@ -252,10 +252,21 @@ const GITGUARD_TOOLS: &[&str] = &["Bash", "apply_patch"];
 /// `[[hooks.PreToolUse]]` groups, each holding a `type = "command"` handler
 /// that runs `klaudia hook gitguard` with `failClosed = true`, and the
 /// PreToolUse group's matcher must select every name in [`GITGUARD_TOOLS`].
+/// It must also pin `[features] hooks = true`: the fork runs managed hooks
+/// only while that feature is on, and without the pin a session could switch
+/// it off with `-c features.hooks=false` or `--disable hooks`.
 /// A comments-only file — what WI-1146 shipped — fails here, so the launch
 /// is refused rather than run unguarded.
 pub fn check_codex_policy(text: &str) -> std::result::Result<(), String> {
     let value: toml::Table = toml::from_str(text).map_err(|e| format!("not TOML: {e}"))?;
+    let pinned = value
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .and_then(|features| features.get("hooks"))
+        .and_then(toml::Value::as_bool);
+    if pinned != Some(true) {
+        return Err("no [features] hooks = true pin".to_string());
+    }
     let hooks = value
         .get("hooks")
         .and_then(toml::Value::as_table)
@@ -1092,6 +1103,24 @@ mod driven_policy_tests {
         // Another command.
         assert!(check(&SHIPPED_CODEX_POLICY.replace("klaudia hook gitguard", "true")).is_err());
         assert!(check("not = [toml").is_err());
+        // The hooks feature not pinned on: a session could disable it.
+        let err = check(&without("[features]\nhooks = true\n", "")).unwrap_err();
+        assert!(err.contains("[features] hooks = true"), "{err}");
+        assert!(check(&without(
+            "[features]\nhooks = true",
+            "[features]\nhooks = false"
+        ))
+        .is_err());
+        assert!(check(&without(
+            "[features]\nhooks = true",
+            "[features]\nhooks = \"true\""
+        ))
+        .is_err());
+        assert!(check(&without(
+            "[features]\nhooks = true",
+            "[features]\nother = true"
+        ))
+        .is_err());
     }
 
     #[test]
