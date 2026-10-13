@@ -33,7 +33,10 @@ from vogt.application.services import (
     set_write_back,
     start_session,
 )
-from vogt.application.services._brief import brief_for_work_item
+from vogt.application.services._brief import (
+    brief_for_work_item,
+    review_brief_for_work_item,
+)
 from vogt.core.entities import HandoffFields
 from vogt.errors import InvalidRequest
 
@@ -270,3 +273,124 @@ def test_a_handoff_on_an_upstream_item_is_refused(tmp_path: Path) -> None:
             ),
         )
     assert forge.mutations == []
+
+
+def test_a_review_brief_checks_the_diff_against_the_items_own_criteria(
+    instance: AppContext,
+) -> None:
+    register_project(
+        instance, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    item = native_work_item(
+        instance,
+        title="Brief me",
+        project="vogt",
+        body="Done means the brief names the diff and the acceptance criteria.",
+    )
+    comment_work(
+        instance,
+        CommentParams(ref=item.ref, body="a remark, not the review", reason=WHY),
+    )
+    comment_work(
+        instance,
+        CommentParams(
+            ref=item.ref,
+            body="I finished the composer",
+            kind="handoff",
+            handoff=_fields(branch="wi-1299-review-brief", base="integrate/vogt-next"),
+            reason=WHY,
+        ),
+    )
+
+    with instance.declared.read() as view:
+        stored = view.work_item_by_ref(item.ref)
+        assert stored is not None
+        worker = brief_for_work_item(view, stored, "ses-1").text
+        review = review_brief_for_work_item(view, stored, "ses-1").text
+
+    assert review.startswith("# Review ")
+    assert "## Done means" in review
+    assert "the brief names the diff" in review
+    assert "## The diff" in review
+    assert "wi-1299-review-brief" in review
+    assert "integrate/vogt-next" in review
+    assert "git diff" in review
+    # The worker's claim is quoted as a claim. The remark thread and the
+    # ranking — both of which read as "carry on" — are not the review.
+    assert "I finished the composer" in review
+    assert "a remark, not the review" not in review
+    assert "## Why this is ranked" not in review
+    assert "## Comments" not in review
+    assert "## Hand-off" in worker and "## The diff" not in worker
+
+
+def test_a_review_with_no_handoff_says_there_is_no_diff(instance: AppContext) -> None:
+    register_project(
+        instance, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    item = native_work_item(instance, title="Bare", project="vogt", body="")
+
+    with instance.declared.read() as view:
+        stored = view.work_item_by_ref(item.ref)
+        assert stored is not None
+        review = review_brief_for_work_item(view, stored, "ses-1").text
+
+    assert "no hand-off" in review
+    assert "states no acceptance criteria" in review
+    assert "git diff" not in review
+
+
+def test_review_of_opens_a_session_on_the_review_brief(instance: AppContext) -> None:
+    engine = StandInEngine()
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    register_project(
+        ctx, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    item = native_work_item(
+        ctx, title="Review me", project="vogt", body="Done means it builds."
+    )
+    comment_work(
+        ctx,
+        CommentParams(
+            ref=item.ref,
+            body="ready",
+            kind="handoff",
+            handoff=_fields(base="main"),
+            reason=WHY,
+        ),
+    )
+
+    started = start_session(
+        ctx,
+        StartSessionParams(review_of=item.ref, task="watch the migration", reason=WHY),
+    )
+    assert started.session.work_item == item.ref
+    prompt = engine.last_spec["prompt"]
+    assert "# Review " in prompt
+    assert "## The diff" in prompt
+    assert "## Task" not in prompt
+    assert "## Also asked" in prompt
+    assert "watch the migration" in prompt
+
+
+def test_review_of_refuses_a_different_item(instance: AppContext) -> None:
+    engine = StandInEngine()
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    register_project(
+        ctx, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    first = native_work_item(ctx, title="One", project="vogt")
+    second = native_work_item(ctx, title="Two", project="vogt")
+
+    with pytest.raises(InvalidRequest, match="work_item names"):
+        start_session(
+            ctx,
+            StartSessionParams(review_of=first.ref, work_item=second.ref, reason=WHY),
+        )
+    assert engine.sent == []

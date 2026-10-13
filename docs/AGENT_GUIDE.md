@@ -191,9 +191,19 @@ is done, what remains, and the free-text body. Resume is only for recovering a
 session that died mid-turn, and only once.
 
 An overseer resumes (that is what a long-running investigation is for) and
-writes a checkpoint before any planned restart. A review session is fresh too:
-its input is the diff plus the hand-off comment, never the worker's screen or
-transcript.
+writes a checkpoint before any planned restart. A review session is fresh too,
+and it is started as one: `session_start(review_of=WI-n)` (a template and a
+model on top, the same as any other start). Its brief is not the worker's. It
+carries the item's own description under **Done means** — the acceptance
+criteria the item itself states — and **The diff**, taken from the latest
+hand-off's branch and base (`git diff <base>...<head>`). It does not carry the
+ranking, the comment thread, or an instruction to continue the work, and a
+`task` given alongside lands under **Also asked** rather than as a Task to go
+and do. The hand-off's own words are quoted as what the worker claims, which
+the review checks rather than trusts. When the item has no hand-off, or the
+hand-off names no branch and base, the brief says there is no diff to review
+and the reviewer reports that and stops. A reviewer reads the diff and that
+brief, never the worker's screen or transcript.
 
 The same hand-off is how a budget ends. A worker session carries a budget
 (120 turns and 90 minutes, unless the start named one), and when it crosses
