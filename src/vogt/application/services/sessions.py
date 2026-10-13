@@ -119,6 +119,7 @@ from vogt.application.services._brief import (
     ComposedBrief,
     brief_for_project,
     brief_for_work_item,
+    review_brief_for_work_item,
 )
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
@@ -403,6 +404,9 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 # Recorded so that "which session was the overseer?" has an
                 # answer after the engine has forgotten it (WI-957).
                 "role": params.role,
+                # Whether this session was started to review rather than to
+                # do the work, so the audit trail says which brief it got.
+                "review_of": params.review_of,
                 # Named on the audit row: who started an unguarded session,
                 # and why, is what an operator looks for afterwards.
                 "permission_mode": params.permission_mode,
@@ -3058,7 +3062,36 @@ def _worktree_base(policy: AgentPolicy) -> str:
     return stated or "main"
 
 
+def _review_subject(ctx: AppContext, params: StartSessionParams) -> StartSessionParams:
+    """Fold `review_of` into the subject, or refuse a review of nothing.
+
+    A review is of one work item. Naming it is enough — the same sugar as
+    `from_handoff` — and naming a second, different item is a contradiction,
+    refused before a terminal exists. Whether the item has a hand-off is the
+    brief's to say: a review of an item that names no diff still starts, and
+    reports that there is nothing to diff.
+    """
+    if params.review_of is None:
+        return params
+    if params.work_item is not None and params.work_item != params.review_of:
+        msg = (
+            f"review_of names {params.review_of}, but work_item names "
+            f"{params.work_item}"
+        )
+        raise InvalidRequest(msg)
+    if params.from_handoff is not None and params.from_handoff != params.review_of:
+        msg = (
+            f"review_of names {params.review_of}, but from_handoff names "
+            f"{params.from_handoff}"
+        )
+        raise InvalidRequest(msg)
+    with ctx.declared.read() as view:
+        item = _resolve.work_item(view, params.review_of)
+    return params.model_copy(update={"work_item": item.ref, "review_of": item.ref})
+
+
 def _subject(ctx: AppContext, params: StartSessionParams, session_id: str) -> _Subject:
+    params = _review_subject(ctx, params)
     if params.from_handoff is not None:
         # Sugar for "fresh session on the item the hand-off belongs to".
         # The brief carries the hand-off because the brief always does,
@@ -3143,8 +3176,12 @@ def _resolve_subject(
             project_slug=project.slug,
             cwd=project.root_path,
             work_item=item,
-            brief=brief_for_work_item(
-                view, item, session_id, _ranking(ctx, item.ref), project=project
+            brief=(
+                review_brief_for_work_item(view, item, session_id, project=project)
+                if params.review_of is not None
+                else brief_for_work_item(
+                    view, item, session_id, _ranking(ctx, item.ref), project=project
+                )
             ),
             policy=project.agent_policy,
         )
@@ -3227,7 +3264,11 @@ def _brief_with_task(
     task = (params.task or "").strip()
     touch = _touch_points(params, cwd=cwd)
     if task:
-        text = f"{text.rstrip()}\n\n## Task\n\n{task}\n"
+        # A reviewer already has its task — check the diff — and a caller's
+        # task would read as new work to go and do. It is recorded under the
+        # review instead, as what the review was asked to look at.
+        heading = "## Also asked" if params.review_of is not None else "## Task"
+        text = f"{text.rstrip()}\n\n{heading}\n\n{task}\n"
     if touch:
         text = f"{text.rstrip()}\n\n{touch}"
     return text

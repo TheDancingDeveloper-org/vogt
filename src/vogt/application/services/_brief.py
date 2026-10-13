@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vogt.application.models import WhyResult
-from vogt.core.entities import Project, WorkItem
+from vogt.core.entities import Comment, HandoffFields, Project, WorkItem
 from vogt.storage.interface import ReadView
 
 #: The deployment's own rules, which are the same for every project and live
@@ -198,6 +198,136 @@ def _pointer(session_id: str, *, work_ref: str | None) -> list[str]:
     ]
 
 
+#: What a reviewer is for. Said once, in place of the worker brief's ranking
+#: and thread: a reviewer checks a diff against the item's own acceptance
+#: criteria and reports, and it does not carry the work on.
+_REVIEW = (
+    "## Review\n"
+    "\n"
+    "You are reviewing this item, not carrying it out. Read the diff named "
+    "below and check it against **Done means**, which is the item's own "
+    "acceptance criteria. Report what holds and what does not, with the "
+    "place in the diff each finding comes from. Do not implement the "
+    "remaining work, do not resume the worker's session, and do not read "
+    "the worker's screen or transcript — the diff and this brief are the "
+    "whole of what you review.\n"
+)
+
+#: Where a review looks for the change. A line, because the diff itself is
+#: the repository's and is not copied into the brief.
+_REVIEW_DIFF = (
+    "The diff is `git diff <base>...<head>` on **branch**, against **base**. "
+    "Review that and nothing older."
+)
+
+
+def _latest_handoff(view: ReadView, item: WorkItem) -> Comment | None:
+    """The newest hand-off comment, or nothing when the item has none."""
+    comments = view.comments_for(item.id, limit=200, order="newest")
+    return next((one for one in comments if one.kind == "handoff"), None)
+
+
+def _handoff_facts(fields: HandoffFields) -> list[str]:
+    """The structured half of a hand-off, one bullet a line, blanks dropped."""
+    rows: list[str] = []
+    for label, value in (
+        ("branch", fields.branch),
+        ("head", fields.head_sha),
+        ("base", fields.base),
+        ("session", fields.session),
+    ):
+        if value:
+            rows.append(f"- **{label}** {value}")
+    for label, values in (
+        ("done", fields.done),
+        ("remaining", fields.remaining),
+        ("touch points", fields.touch_points),
+        ("gates run", fields.gates_run),
+        ("blockers", fields.blockers),
+    ):
+        if values:
+            rows.append(f"- **{label}** {'; '.join(values)}")
+    return rows
+
+
+def review_brief_for_work_item(
+    view: ReadView,
+    item: WorkItem,
+    session_id: str,
+    *,
+    project: Project | None = None,
+) -> ComposedBrief:
+    """A reviewer's brief: the diff against the item's own "done means".
+
+    Deliberately not the worker brief. A worker is told why the item ranks
+    and where the last session stopped, which reads as "carry on"; a reviewer
+    is told what the change has to satisfy and where the change is, and
+    nothing that would start it working. The acceptance criteria are the
+    item's description — what the item itself says done looks like — and the
+    hand-off's `done` is reported as what the worker claims, which a review
+    checks rather than trusts.
+
+    With no hand-off there is no branch to diff, so the brief says the diff
+    was not named rather than inventing `main`.
+    """
+    lines: list[str] = [f"# Review {item.ref} — {item.title}", ""]
+    facts = [
+        f"**Kind** {item.kind}",
+        f"**State** {item.state}",
+        f"**Priority** {item.priority}",
+    ]
+    if item.project_slug:
+        facts.append(f"**Project** {item.project_slug}")
+    lines += [" · ".join(facts), "", _REVIEW]
+
+    lines += ["## Done means", ""]
+    if item.body.strip():
+        lines += [item.body.strip(), ""]
+    else:
+        lines += [
+            "This item records no description, so it states no acceptance "
+            "criteria. Say so in the review; do not invent ones.",
+            "",
+        ]
+
+    lines += ["## The diff", ""]
+    handoff = _latest_handoff(view, item)
+    if handoff is not None and handoff.handoff is not None:
+        fields = handoff.handoff
+        lines += _handoff_facts(fields)
+        lines.append("")
+        if fields.branch and fields.base:
+            lines += [_REVIEW_DIFF, ""]
+        else:
+            lines += [
+                "The hand-off does not name both a branch and a base, so "
+                "there is no diff to review yet. Report that and stop.",
+                "",
+            ]
+        claimed = handoff.body.strip()
+        if claimed:
+            lines += [
+                "What the worker reports, in its own words — a claim to "
+                "check, not a finding:",
+                "",
+                claimed,
+                "",
+            ]
+    else:
+        lines += [
+            "This item has no hand-off, so no branch or base was named and "
+            "there is no diff to review yet. Report that and stop.",
+            "",
+        ]
+
+    lines += _policy_section(project)
+    lines += ["## Deployment policy", "", _DEPLOYMENT_POLICY, ""]
+    lines += _pointer(session_id, work_ref=item.ref)
+    return ComposedBrief(
+        text="\n".join(lines), companion=_companion(session_id, work_ref=item.ref)
+    )
+
+
 def brief_for_work_item(
     view: ReadView,
     item: WorkItem,
@@ -278,25 +408,7 @@ def brief_for_work_item(
     if handoff is not None and handoff.handoff is not None:
         # The latest hand-off is its own section, ahead of the remarks, so a
         # fresh session reads where the last one stopped before the thread.
-        fields = handoff.handoff
-        lines += ["## Hand-off", ""]
-        for label, value in (
-            ("branch", fields.branch),
-            ("head", fields.head_sha),
-            ("base", fields.base),
-            ("session", fields.session),
-        ):
-            if value:
-                lines.append(f"- **{label}** {value}")
-        for label, values in (
-            ("done", fields.done),
-            ("remaining", fields.remaining),
-            ("touch points", fields.touch_points),
-            ("gates run", fields.gates_run),
-            ("blockers", fields.blockers),
-        ):
-            if values:
-                lines.append(f"- **{label}** {'; '.join(values)}")
+        lines += ["## Hand-off", "", *_handoff_facts(handoff.handoff)]
         lines += ["", handoff.body.strip(), ""]
     notes = [one for one in comments if one.kind == "note"][:20]
     if notes:
@@ -354,4 +466,5 @@ __all__ = [
     "ComposedBrief",
     "brief_for_project",
     "brief_for_work_item",
+    "review_brief_for_work_item",
 ]
