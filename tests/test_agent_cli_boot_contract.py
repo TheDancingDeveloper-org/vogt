@@ -598,8 +598,8 @@ class ReleaseSandbox:
             "while [ $# -gt 0 ]; do\n"
             '  case "$1" in\n'
             "    -o) out=$2; shift 2 ;;\n"
-            '    -*) shift ;;\n'
-            '    *) url=$1; shift ;;\n'
+            "    -*) shift ;;\n"
+            "    *) url=$1; shift ;;\n"
             "  esac\n"
             "done\n"
             'name=$(basename "$url")\n'
@@ -638,7 +638,9 @@ class ReleaseSandbox:
             {
                 "PATH": f"{self.bin}:{env['PATH']}",
                 "VOGT_AGENT_CLI_ROOT": str(self.root),
-                "VOGT_AGENT_CLI_BAKED_MANIFEST": str(self.share / "agent-versions.resolved"),
+                "VOGT_AGENT_CLI_BAKED_MANIFEST": str(
+                    self.share / "agent-versions.resolved"
+                ),
                 "VOGT_AGENT_CLI_TOOLS": str(self.share / "agent-clis.tools"),
                 "VOGT_CODEX_SHA": FORK_SHA,
             }
