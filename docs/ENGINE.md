@@ -1934,7 +1934,11 @@ the report says so (`mode=cli`).
 
 `ENGINE_METRICS_ADDR` (`0.0.0.0:9464`) serves `GET /metrics`, in the
 Prometheus text format, on a listener of its own. It is never on the API port,
-which is the front door. Unset, nothing listens.
+which is the front door. Unset, nothing listens. The core does the same on
+`VOGT_METRICS_ADDR` (`0.0.0.0:9465`), serving the process collectors
+(`process_resident_memory_bytes`, `process_cpu_seconds_total`,
+`process_open_fds`, `python_gc_collections_total`) labelled
+`component="core"`, so one scrape can tell the two processes apart.
 
 | Metric | Type | Labels |
 |---|---|---|
