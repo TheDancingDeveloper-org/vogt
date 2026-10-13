@@ -411,6 +411,43 @@ def test_text_submits_by_default(wired: AppContext, engine: Engine) -> None:
     assert result.delivery != "typed"
 
 
+def test_keys_alone_press_only_the_keys(wired: AppContext, engine: Engine) -> None:
+    result = session_input(
+        wired,
+        SessionInputParams.model_validate(
+            {"id": UNLINKED, "keys": ["esc"], "reason": WHY}
+        ),
+    )
+    assert engine.inputs() == [(UNLINKED, {"text": "\x1b", "submit": False})]
+    assert result.submitted is False
+
+
+def test_text_and_enter_key_press_enter_once(wired: AppContext, engine: Engine) -> None:
+    result = session_input(
+        wired,
+        SessionInputParams(id=UNLINKED, text="go on", keys=["enter"], reason=WHY),
+    )
+    assert engine.inputs() == [
+        (UNLINKED, {"text": "go on", "submit": False}),
+        (UNLINKED, {"text": "\r", "submit": False}),
+    ]
+    assert result.submitted is True
+
+
+def test_text_and_a_non_enter_key_still_submit(
+    wired: AppContext, engine: Engine
+) -> None:
+    session_input(
+        wired,
+        SessionInputParams(id=UNLINKED, text="ls", keys=["tab"], reason=WHY),
+    )
+    assert engine.inputs() == [
+        (UNLINKED, {"text": "ls", "submit": False}),
+        (UNLINKED, {"text": "\t", "submit": False}),
+        (UNLINKED, {"text": "", "submit": True}),
+    ]
+
+
 def test_draft_types_without_pressing_enter(wired: AppContext, engine: Engine) -> None:
     result = session_input(
         wired,
@@ -482,6 +519,10 @@ def test_input_is_audited_without_the_text(wired: AppContext, engine: Engine) ->
         events = view.list_events(after=0, limit=50)
     row = next(one for one in audit if one.operation == "session.input")
     assert row.entity_id == UNLINKED
+    assert engine.inputs() == [
+        (UNLINKED, {"text": secret, "submit": False}),
+        (UNLINKED, {"text": "\r", "submit": False}),
+    ], "Enter as a key is the submit: no second, blind Enter after it"
     assert row.reason == WHY
     event = next(one for one in events if one.kind == "session.input")
     assert event.summary["bytes"] == len(secret)

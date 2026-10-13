@@ -1489,10 +1489,13 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     # for typing without sending, and an explicit `submit=false` means the
     # same thing. A call that names only keys keeps its old behaviour: the
     # keys are pressed and nothing else, unless `submit` is given explicitly.
+    # An "enter" among the keys is already the submit, so the default adds no
+    # second, blind Enter after it.
+    explicit_submit = "submit" in params.model_fields_set
     submit = (
         params.submit
         and not params.draft
-        and (bool(text) or "submit" in params.model_fields_set)
+        and (explicit_submit or (bool(text) and "enter" not in keys))
     )
     if not text and not keys and not submit:
         msg = "nothing to send: give text, keys, or submit"
