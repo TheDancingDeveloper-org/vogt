@@ -466,6 +466,45 @@ def test_the_enforced_policy_reaches_the_engine_and_guidance_does_not(
     }
 
 
+def test_the_whole_session_clock_is_unset_unless_the_project_sets_it(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1281 (operator, 2026-10-13): the whole-session wall clock is off by
+    default. A project's agent_policy turns it on for the default budget; the
+    per-turn 90 minutes and the 120 turns stay as they are."""
+    task = StartSessionParams(
+        project="vogt", template="klaudia", task="work the backlog", reason=WHY
+    )
+    start_session(wired, task)
+    assert "session_wall_clock_minutes" not in engine.last_spec["budget"]
+    assert AgentPolicy().session_wall_clock_minutes is None
+    with pytest.raises(ValueError):
+        AgentPolicy(session_wall_clock_minutes=0)
+
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(session_wall_clock_minutes=240),
+            reason=WHY,
+        ),
+    )
+    start_session(wired, task)
+    assert engine.last_spec["budget"] == {
+        "turns": 120,
+        "wall_clock_minutes": 90,
+        "session_wall_clock_minutes": 240,
+    }
+    # A session's own budget is used exactly, and can name the clock itself.
+    start_session(
+        wired,
+        task.model_copy(
+            update={"budget": SessionBudgetParams(session_wall_clock_minutes=30)}
+        ),
+    )
+    assert engine.last_spec["budget"] == {"session_wall_clock_minutes": 30}
+
+
 def test_a_worker_agent_task_gets_the_default_budget(
     wired: AppContext, engine: StandInEngine
 ) -> None:

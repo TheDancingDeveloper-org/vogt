@@ -150,15 +150,20 @@ pub struct Session {
     /// is deliberately not `budget_soft_sent`, which a soft warning sets first
     /// and which a wall-clock hard can fire before.
     budget_refusal_noted: AtomicBool,
-    /// When the budget watcher last saw this session actually running. Set when
-    /// a running stretch begins and cleared when it ends (idle, the prompt, a
-    /// permission dialog, or blocked on a person), so a pause is not counted.
-    /// It is only the current stretch: the total lives in
-    /// `budget_running_total`, which a pause does not clear (WI-1281).
+    /// When the budget watcher last saw this session actually running, cleared
+    /// whenever it is idle, at its prompt, at a permission dialog, or blocked.
+    /// The budget's per-turn wall clock is measured from this, not from
+    /// `turn_started_at`: a dialog resumes the same turn, so measuring from the
+    /// turn would count the time a person spent answering it.
     budget_running_since: Mutex<Option<time::OffsetDateTime>>,
-    /// Running time already accumulated from stretches that have ended. The
-    /// stretch in progress is added on top at each tick.
-    budget_running_total: Mutex<Duration>,
+    /// Running time banked from stretches that have ended, for the
+    /// whole-session wall clock (WI-1281). A pause banks the stretch instead of
+    /// discarding it. Kept on the hibernation record, so a wake resumes it.
+    budget_session_banked: Mutex<Duration>,
+    /// A budget action (a soft warning or a hard stop) is due and waits for the
+    /// prompt. While set, autopilot does not re-prompt the session, so it comes
+    /// to rest at its prompt and the action lands at a turn boundary (WI-1281).
+    budget_hold: AtomicBool,
 }
 
 impl Session {
@@ -319,18 +324,42 @@ impl Session {
         *self.budget_running_since.lock()
     }
 
-    /// Remember or forget when the current running stretch began.
+    /// Remember or forget when the budget's wall clock started counting.
     pub fn set_budget_running_since(&self, since: Option<time::OffsetDateTime>) {
         *self.budget_running_since.lock() = since;
     }
 
-    pub fn budget_running_total(&self) -> Duration {
-        *self.budget_running_total.lock()
+    /// Running time banked from finished stretches.
+    pub fn budget_session_banked(&self) -> Duration {
+        *self.budget_session_banked.lock()
     }
 
-    /// Add a finished stretch to the accumulated running time.
-    pub fn add_budget_running(&self, elapsed: Duration) {
-        *self.budget_running_total.lock() += elapsed;
+    pub fn set_budget_session_banked(&self, banked: Duration) {
+        *self.budget_session_banked.lock() = banked;
+    }
+
+    /// The whole session's running time at `now`: what is banked, plus the
+    /// stretch in progress.
+    pub fn budget_session_running(&self, now: time::OffsetDateTime) -> Duration {
+        let current = self
+            .budget_running_since()
+            .map(|since| {
+                Duration::from_secs(
+                    now.unix_timestamp()
+                        .saturating_sub(since.unix_timestamp())
+                        .max(0) as u64,
+                )
+            })
+            .unwrap_or_default();
+        self.budget_session_banked() + current
+    }
+
+    pub fn budget_hold(&self) -> bool {
+        self.budget_hold.load(Ordering::Acquire)
+    }
+
+    pub fn set_budget_hold(&self, hold: bool) {
+        self.budget_hold.store(hold, Ordering::Release);
     }
 
     pub fn role(&self) -> vogt_engine_contract::SessionRole {
@@ -1216,7 +1245,8 @@ pub fn spawn(
         budget_hard_done: AtomicBool::new(false),
         budget_refusal_noted: AtomicBool::new(false),
         budget_running_since: Mutex::new(None),
-        budget_running_total: Mutex::new(Duration::ZERO),
+        budget_session_banked: Mutex::new(Duration::ZERO),
+        budget_hold: AtomicBool::new(false),
     });
 
     spawn_reader_thread(

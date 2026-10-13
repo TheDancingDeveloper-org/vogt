@@ -3951,6 +3951,14 @@ class SessionBudgetParams(Params):
         gt=0,
         description="Wall-clock limit in minutes, counted only while a turn runs.",
     )
+    session_wall_clock_minutes: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Whole-session wall-clock limit in minutes: running time summed "
+            "across every turn, kept across hibernation. Unset by default."
+        ),
+    )
 
 
 class StartSessionParams(Params):

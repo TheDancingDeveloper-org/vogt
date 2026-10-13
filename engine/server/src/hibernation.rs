@@ -111,6 +111,10 @@ pub struct Record {
     pub budget_soft_sent: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub budget_hard_done: bool,
+    /// Seconds of running the whole-session wall clock had counted (WI-1281);
+    /// a wake resumes from here rather than from nothing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub budget_session_secs: u64,
     /// What the session is for (WI-957); a wake keeps it.
     #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
     pub role: SessionRole,
@@ -143,6 +147,10 @@ pub struct Record {
     pub blocked: Option<vogt_engine_contract::BlockedReport>,
 }
 
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 impl Record {
     pub fn new(id: Uuid, name: String, created_at: String) -> Self {
         Self {
@@ -167,6 +175,7 @@ impl Record {
             budget: None,
             budget_soft_sent: false,
             budget_hard_done: false,
+            budget_session_secs: 0,
             role: SessionRole::Worker,
             work_item: None,
             superseded_by: None,

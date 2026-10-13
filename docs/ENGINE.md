@@ -1675,8 +1675,10 @@ waiting for it to be (`GET /wait?until=ready`) only ever timed out.
 
 A session may carry a `budget` (`SessionSpec`; vogt-core sets one by default
 for an agent template given a task and the worker role: 120 turns and 90
-minutes, no context limit). An explicit empty object sets no limits and
-declines that default. Zero is not a limit. The budget is kept on the summary
+minutes per turn, no context limit, and no whole-session clock unless the
+project's `agent_policy.session_wall_clock_minutes` names one). An explicit
+budget object is used exactly as given; an explicit empty object sets no
+limits and declines that default. Zero is not a limit. The budget is kept on the summary
 and in the hibernation record, so a wake brings the same limits back
 (WI-1245, C7).
 
@@ -1684,8 +1686,8 @@ The numbers come from the economics the tailer last published on the summary.
 A watcher checks every `ENGINE_BUDGET_TICK_SECS` (default 15; `0` enforces
 nothing) and acts at two levels:
 
-- **soft**, once, at `ENGINE_BUDGET_SOFT_PCT` (default 80) of a turn or context
-  limit: a `budget` change, and — only while the session is at its prompt — one
+- **soft**, once, at `ENGINE_BUDGET_SOFT_PCT` (default 80) of a turn, context
+  or whole-session clock limit: a `budget` change, and — only while the session is at its prompt — one
   typed line: `[vogt] budget: {what} ({n} of {limit}). Commit your work in
   progress on your branch, write a hand-off comment (work_comment
   kind=handoff), then stop.` Mid-turn, the line waits for the next tick that
@@ -1695,20 +1697,47 @@ nothing) and acts at two levels:
   limit, soft and hard, therefore acts only for the agents the engine re-drives
   (claude, codex, opencode, klaudia); the wall clock acts for every session.
 - **hard**, once, at the limit: the same change, then the session is hibernated
-  with trigger `budget`. A turn or context limit waits for the prompt first; a
+  with trigger `budget`. A turn, context or whole-session clock limit waits for
+  the prompt first, so the stop lands at a turn boundary and never in the
+  middle of a tool call, a file write or a git operation; a per-turn
   wall-clock limit does not. Wall clock is the looping signature — one turn
   running longer than `wall_clock_minutes` — and it hibernates at once, because
   that turn may never end. It has no soft level, and a finished turn never
   counts toward it. Neither does time spent at a permission dialog, blocked on
   a person, or back at the prompt: each ends the stretch, and the clock starts
   again from nothing when the session is next seen running, so a dialog that
-  sat for an hour does not count toward the limit once it is answered. A session the engine cannot hibernate (no conversation to resume)
+  sat for an hour does not count toward the limit once it is answered. A
+  session the engine cannot hibernate (no conversation to resume)
   stays running; the watcher publishes one `budget` change saying so
   (`budget exceeded; session cannot be hibernated (no resumable conversation)`)
   and retries the hibernation once a conversation is pinned.
 
 A missing economics reading counts as zero used, so a limit is not tripped
 before the tailer has published anything.
+
+**Holding autopilot for a due action (WI-1281).** Waiting for the prompt only
+works if the session is let reach it. An autopilot worker is re-prompted as
+soon as it settles there, so a turn limit that merely waited landed many turns
+late, or never (Klaudia workers ran 186–482 turns against a 120-turn budget).
+While a soft warning or a waiting hard stop is due and the session is not at
+its prompt, the watcher holds it: autopilot does not nudge a held session, the
+turn in progress finishes, the session rests at its prompt, and the next tick
+types the warning or hibernates. The hold lifts once the warning is typed, and
+is never set for a session the engine could not hibernate anyway. The hard
+stop therefore lands at most one turn after the limit, for every re-driven
+agent alike.
+
+**Whole-session wall clock (WI-1281).** `session_wall_clock_minutes` is a
+separate limit beside the per-turn `wall_clock_minutes`, which keeps its
+looping-detector meaning unchanged. It sums running time across every turn: a
+pause (prompt, dialog, blocked) stops it without clearing it. It has a soft
+level like turns, and its hard stop waits for the prompt. It is **unset by
+default** (operator decision, 2026-10-13): it applies only when a session's
+`budget` or its project's `agent_policy.session_wall_clock_minutes` sets it;
+the 120-turn and per-turn 90-minute defaults are unchanged. The running total
+is written to the hibernation record (`budget_session_secs`), so a wake, and
+the hibernate-and-wake a redeploy does, resumes from it. An engine that dies
+without hibernating loses what was counted since the last hibernation.
 
 The hard flag persists in the hibernation record. A manual wake of a
 budget-hibernated session therefore brings it back without its hard limit:

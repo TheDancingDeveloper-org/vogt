@@ -640,6 +640,9 @@ impl SessionRegistry {
                 session.set_budget(record.budget.clone());
                 session.set_budget_soft_sent(record.budget_soft_sent);
                 session.set_budget_hard_done(record.budget_hard_done);
+                session.set_budget_session_banked(std::time::Duration::from_secs(
+                    record.budget_session_secs,
+                ));
                 // A forced wake does not undo the handoff. The next hibernation
                 // rebuilds the record from the live session, so the mark has to
                 // live there too.
@@ -1114,6 +1117,9 @@ impl SessionRegistry {
         record.budget = session.budget();
         record.budget_soft_sent = session.budget_soft_sent();
         record.budget_hard_done = session.budget_hard_done();
+        record.budget_session_secs = session
+            .budget_session_running(time::OffsetDateTime::now_utc())
+            .as_secs();
         record.hibernation = Some(Hibernation {
             at: now_rfc3339(),
             trigger,

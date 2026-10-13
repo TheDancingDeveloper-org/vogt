@@ -14477,3 +14477,227 @@ async fn only_a_person_or_the_core_starts_an_oversight_session() {
         assert_eq!(row["role"], "oversight", "{token} {row}");
     }
 }
+
+/// A stand-in Klaudia TUI for the budget tests (WI-1281). It announces its
+/// state in the window title the way Klaudia does, draws its idle input box at
+/// rest, and per line of input runs one turn: about 1.5 s of `(esc to
+/// interrupt)` spinner output (so the engine reads it running), then one
+/// assistant line appended to the transcript named in `transcript_at` and a
+/// line to `turns.log`. Nothing types into it but autopilot.
+fn fake_klaudia_tui(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("klaudia");
+    std::fs::write(
+        &stub,
+        format!(
+            r#"#!/usr/bin/env bash
+ready() {{
+  printf '\033]0;klaudia: ready\007\033[2J\033[H'
+  printf '╭──────────────────────╮\r\n│ › Ask Klaudia…       │\r\n╰──────────────────────╯\r\n  grok · stand-in\r\n'
+}}
+ready
+n=0
+while IFS= read -r _; do
+  printf '\033]0;klaudia: working\007'
+  for _ in 1 2 3 4 5 6; do printf '  ⣟  thinking…  (esc to interrupt)\r\n'; sleep 0.25; done
+  n=$((n+1))
+  printf '{{"type":"assistant","timestamp":"2026-10-13T00:%02d:00Z","message":{{"content":"turn %s"}}}}\n' "$n" "$n" >> "$(cat '{at}')"
+  echo "$n" >> '{log}'
+  ready
+done
+"#,
+            at = dir.join("transcript_at").display(),
+            log = dir.join("turns.log").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    stub
+}
+
+/// A config for the budget tests: the economics tailer reads the sandbox's
+/// `.klaudia`, autopilot re-prompts quickly, and the budget watcher ticks
+/// slower than autopilot — the race an autopilot worker won in production,
+/// where it was re-prompted before the watcher ever saw it at rest.
+fn budget_sandbox(dir: &std::path::Path) -> Config {
+    let mut cfg = test_config();
+    cfg.default_cwd = dir.to_path_buf();
+    cfg.workspace_root = dir.canonicalize().unwrap();
+    cfg.state_dir = dir.join("state");
+    cfg.economics_home = Some(dir.to_path_buf());
+    cfg.economics_tick = Duration::from_millis(200);
+    cfg.autopilot = vogt_engine_server::autopilot::Policy {
+        nudge_after: Duration::from_millis(600),
+        max_nudges: 40,
+    };
+    cfg.budget = vogt_engine_server::budget::Policy {
+        soft_pct: 100,
+        tick: Duration::from_millis(1_000),
+        enabled: true,
+    };
+    std::fs::create_dir_all(dir.join(".klaudia/sessions/k")).unwrap();
+    cfg
+}
+
+async fn wait_hibernated(client: &reqwest::Client, base: &str, id: &str, secs: u64) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let row = session_row(client, base, id).await;
+        if row.get("hibernation").is_some_and(|h| !h.is_null()) {
+            return row;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never hibernated: {row}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn turns_run(dir: &std::path::Path) -> usize {
+    std::fs::read_to_string(dir.join("turns.log"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// WI-1281: a Klaudia autopilot session is hibernated with trigger `budget`
+/// at its turn limit, at a turn boundary, and not many turns later. Before,
+/// autopilot re-prompted it each time it reached its prompt, and the watcher,
+/// which waits for the prompt, rarely saw it there.
+#[tokio::test]
+async fn a_klaudia_autopilot_session_hibernates_at_its_turn_budget() {
+    const LIMIT: usize = 3;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let stub = fake_klaudia_tui(dir);
+    let (base, _h) = boot_with_config(budget_sandbox(dir)).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "klaudia on a budget",
+            "command": [stub.to_string_lossy()],
+            "autopilot": true,
+            "budget": { "turns": LIMIT, "wall_clock_minutes": 90 },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["conversation"]["agent"], "klaudia", "{created}");
+    let conversation = created["conversation"]["id"].as_str().unwrap();
+    // The whole-session clock is not set unless asked for.
+    assert!(created["budget"]
+        .get("session_wall_clock_minutes")
+        .is_none());
+    std::fs::write(
+        dir.join("transcript_at"),
+        dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl"))
+            .display()
+            .to_string(),
+    )
+    .unwrap();
+
+    let row = wait_hibernated(&client, &base, &id, 60).await;
+    assert_eq!(row["hibernation"]["trigger"], "budget", "{row}");
+    let reason = row["hibernation"]["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("budget: turns"), "{reason}");
+    let turns = turns_run(dir);
+    // The watcher may first see the limit while the next turn is already
+    // under way; it holds autopilot off and stops at that turn's end.
+    assert!(
+        (LIMIT..=LIMIT + 1).contains(&turns),
+        "stopped after {turns} turns against a limit of {LIMIT}"
+    );
+    // Hibernated at the prompt, never mid-turn: every turn that began ended.
+    let transcript =
+        std::fs::read_to_string(dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl")))
+            .unwrap();
+    assert_eq!(transcript.lines().count(), turns);
+}
+
+/// WI-1281: the whole-session wall clock banks running time across turns and
+/// across a hibernation. A session hibernated with 55 s already counted
+/// against a one-minute session clock is woken, runs a few short turns — none
+/// near the per-turn limit — and is hibernated with trigger `budget` at a turn
+/// boundary once the total passes the minute. The record it leaves carries
+/// the total, so the next wake would resume from there.
+#[tokio::test]
+async fn a_klaudia_session_clock_survives_a_wake_and_hibernates_at_its_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let stub = fake_klaudia_tui(dir);
+    let cfg = budget_sandbox(dir);
+    let id = uuid::Uuid::new_v4();
+    let conversation = uuid::Uuid::new_v4();
+    std::fs::write(
+        dir.join("transcript_at"),
+        dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl"))
+            .display()
+            .to_string(),
+    )
+    .unwrap();
+    let sessions = cfg.state_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(
+        sessions.join(format!("{id}.json")),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "id": id,
+            "name": "klaudia on the clock",
+            "created_at": "2026-10-13T00:00:00Z",
+            "command": [stub.to_string_lossy()],
+            "cwd": dir,
+            "conversation": { "agent": "klaudia", "id": conversation },
+            "autopilot": true,
+            "budget": { "wall_clock_minutes": 90, "session_wall_clock_minutes": 1 },
+            "budget_session_secs": 55,
+            "hibernation": {
+                "at": "2026-10-13T00:00:00Z",
+                "trigger": "manual",
+                "resumable": true,
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let state_dir = cfg.state_dir.clone();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = id.to_string();
+    client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let row = wait_hibernated(&client, &base, &id, 60).await;
+    assert_eq!(row["hibernation"]["trigger"], "budget", "{row}");
+    let reason = row["hibernation"]["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("session wall clock"), "{reason}");
+    // A few 1.5 s turns: 5 s of running on top of the banked 55 s, plus at
+    // most the turn under way when the watcher saw it.
+    let turns = turns_run(dir);
+    assert!((2..=6).contains(&turns), "ran {turns} turns");
+    let record: Value = serde_json::from_slice(
+        &std::fs::read(state_dir.join(format!("sessions/{id}.json"))).unwrap(),
+    )
+    .unwrap();
+    let banked = record["budget_session_secs"].as_u64().unwrap();
+    assert!((60..120).contains(&banked), "banked {banked} s: {record}");
+}
