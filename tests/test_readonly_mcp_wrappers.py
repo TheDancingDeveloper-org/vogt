@@ -713,7 +713,9 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     assert parsed["model_catalog_json"] == str(catalog_path)
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     # The router's groups, and only those: no DLab community or free models.
-    assert [model["slug"] for model in catalog["models"]] == [
+    # The fork sorts by priority ascending and defaults to the first visible one.
+    by_priority = sorted(catalog["models"], key=lambda model: model["priority"])
+    assert [model["slug"] for model in by_priority] == [
         "grok",
         "code",
         "small",
@@ -721,9 +723,11 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
         "vision",
         "premium",
     ]
-    model = catalog["models"][0]
-    assert model["apply_patch_tool_type"] == "freeform"
-    assert "tool_mode" not in model
+    assert by_priority[0]["slug"] == "grok"
+    assert by_priority[0]["visibility"] == "list"
+    assert by_priority[-1]["slug"] == "premium"
+    assert by_priority[-1]["visibility"] == "hide"
+    model = by_priority[0]
     assert all(
         row["apply_patch_tool_type"] == "freeform" and "tool_mode" not in row
         for row in catalog["models"]
