@@ -1508,23 +1508,28 @@ checks decide what it can finish on its own (WI-926; the design is
   `engine/deploy/driven-session-codex-requirements.toml` to that path and
   to `/usr/local/share/vogt/driven-session-codex-requirements.toml`.
   `ENGINE_AGENT_CODEX_POLICY` names a deployment's own file (the engine
-  checks that the named path exists and is non-empty, then still lets Codex
-  load `/etc/codex/requirements.toml` — a deployment that points elsewhere
-  has to put the file where Codex reads it). Empty tries the image path,
-  then `/etc/codex/requirements.toml`; if neither exists the session starts
-  with no policy. `off` is the only way a deployment that has the file
-  starts Codex without that check. A *named* path that is missing, empty
-  or unreadable is `400`, and the session does not fall through to bypass.
-  On stock Codex 0.160.0 the shipped file is comments only. The gitguard
-  managed hook (`klaudia hook gitguard` on `SessionStart` / `PreToolUse`)
-  and the destructive-git execpolicy prefix rules are not a requirements
-  shape that has been shown to load: hooks are parsed from an
-  enterprise-managed layer whose table was not confirmed, prefix rules are
-  Starlark (`prefix_rule`) rather than a TOML table, requirements reject
-  decision `allow`, and `failClosed` is a fork key (WI-1129) that stock
-  does not have. Acceptance of that hook waits on the fork image (WI-1142)
-  and on WI-1136 / WI-1128. Claude and opencode launches are not blocked by
-  a Codex policy error.
+  checks that the named path exists, is non-empty and wires the gitguard
+  hook, then still lets Codex load `/etc/codex/requirements.toml` — a
+  deployment that points elsewhere has to put the file where Codex reads
+  it). Empty tries the image path, then `/etc/codex/requirements.toml`; if
+  neither exists the session starts with no policy. `off` is the only way a
+  deployment that has the file starts Codex without that check. A path that
+  is missing, empty, unreadable, or does not wire the hook is `400`, and the
+  session does not fall through to bypass. The shipped file (WI-1356) wires
+  the gitguard managed hook for the fork: `[[hooks.SessionStart]]` and
+  `[[hooks.PreToolUse]]` (matcher `Bash`, `shell`, `exec_command`,
+  `write_stdin`, `apply_patch`) run `klaudia hook gitguard` with
+  `failClosed = true` (WI-1129), so a hook that fails blocks the tool call.
+  A table Codex cannot parse stops Codex at start-up; it does not run
+  unguarded. `server/tests/codex_gitguard_e2e.rs` runs the real fork against
+  the shipped file and a scripted model and proves `git stash`,
+  `git checkout -- .`, `git clean -f`, `git reset --hard` and
+  `git -C <other repo> restore` are refused while the session's own commit
+  lands; it runs where `/etc/codex/requirements.toml` is the shipped file
+  (set `VOGT_CODEX_GITGUARD_E2E=1` to make a missing prerequisite fail).
+  Destructive-git execpolicy prefix rules stay out: they are Starlark
+  (`prefix_rule`), not a requirements table. Claude and opencode launches
+  are not blocked by a Codex policy error.
 - **opencode** (WI-932) has its own permission model, a `permission` block
   in its config. Unconfigured, it stops at "Access external directory —
   Allow once / Allow always / Reject" with nobody there to answer. The

@@ -352,8 +352,8 @@ COPY engine/deploy/driven-session-settings.json /usr/local/share/vogt/driven-ses
 COPY engine/deploy/driven-session-opencode.json /usr/local/share/vogt/driven-session-opencode.json
 # Codex requirements (WI-1143, WI-1146). Stock Codex reads
 # /etc/codex/requirements.toml with no flag; the image copy is what
-# ENGINE_AGENT_CODEX_POLICY resolves to when unset. The file is comments only
-# until the gitguard hook table is confirmed on the installed Codex — see the
+# ENGINE_AGENT_CODEX_POLICY resolves to when unset. The file wires the
+# gitguard managed hook fail-closed for the Codex fork (WI-1356) — see the
 # file. Do not add a flag Codex does not have.
 COPY engine/deploy/driven-session-codex-requirements.toml /usr/local/share/vogt/driven-session-codex-requirements.toml
 COPY engine/deploy/driven-session-codex-requirements.toml /etc/codex/requirements.toml
