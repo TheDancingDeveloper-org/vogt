@@ -879,11 +879,12 @@ positional prompt as `-p` (answer once, then exit), so the session would end
 after its first turn. The pinned Klaudia must have that flag (msp-klaudia
 WI-953); a runtime pin to an older commit starts and refuses it. A bare
 Codex launch is pinned the same way — `--session-id <engine session id>` —
-only when the deployment's Codex is the fork that accepts the flag
-(`VOGT_CODEX_SESSION_ID=true`; the WI-1126 fork, pinned by WI-1142). Stock
-Codex refuses an unknown flag, so with the setting off (the default) a fresh
-Codex session still mints its own id, which the engine does not guess; find
-it with `codex resume` (its picker) inside the pod. A Codex resume keeps
+by default, because the image bakes the WI-1126 fork that accepts the flag
+(WI-1142, WI-1354). Set `VOGT_CODEX_SESSION_ID=false` only when the binary is
+stock npm Codex, which refuses an unknown flag and would not start; with the
+setting off a fresh Codex session mints its own id, which the engine does
+not guess, and hibernation is refused until the conversation is named.
+A Codex resume keeps
 `codex resume <id>` and does not also pass `--session-id`. OpenCode cannot
 be told an id at launch. OpenCode's
 is **captured** after launch (WI-930): the engine reads opencode's own store
@@ -1628,8 +1629,8 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   `resume`. The summary's `conversation` names it. A fresh OpenCode session
   can hibernate once its id is captured (a few seconds after launch; see
   "Which conversation id a session has"). A fresh Codex session is pinned to
-  the engine id only when `VOGT_CODEX_SESSION_ID=true`; otherwise it mints
-  its own id, and the engine does not guess it. A shell
+  the engine id by default (`VOGT_CODEX_SESSION_ID`, WI-1354); with the
+  setting off it mints its own id, and the engine does not guess it. A shell
   hibernates only with `allow_shell`, and wakes as a fresh process in the
   same directory (`hibernation.resumable: false`). An agent-task run is
   never hibernated. A refusal is `409` with the reason.
