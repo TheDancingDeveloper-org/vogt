@@ -111,8 +111,51 @@ def test_the_report_is_passed_through_as_the_engine_gave_it(
     assert claude.upstream_latest == "2.1.261"
     assert claude.update_available is True
     assert result.tools[1].source == "absent"
+    # A report from before kinds existed is the npm row the engine still defaults.
+    assert claude.kind == "npm"
     # The upstream ask is forwarded, not decided here.
     assert engine.sent[0]["url"].endswith("/api/agent-clis?upstream=true")
+
+
+def test_a_github_release_row_is_listed(instance: AppContext) -> None:
+    """The Codex fork (WI-1142) is kind github-release; rejecting it broke the list.
+
+    The engine's tool table names four kinds (`npm`, `go-dist`, `go-src`,
+    `github-release`); a row of any of them has to come back through the list.
+    """
+    from vogt.application.models import AgentCliRow
+
+    fork = {
+        "tool": "codex",
+        "package": "sprooty/codex",
+        "binary": "codex",
+        "env_var": "VOGT_CODEX_SHA",
+        "kind": "github-release",
+        "baked_version": "b7bd55c96dbf07566bd6ef13641104e067ab9eac",
+        "active_version": "b7bd55c96dbf07566bd6ef13641104e067ab9eac",
+        "source": "runtime",
+        "installed_versions": ["b7bd55c96dbf07566bd6ef13641104e067ab9eac"],
+    }
+
+    def answer(
+        url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
+    ) -> tuple[int, bytes]:
+        del url, headers, body, method
+        return 200, json.dumps({"installer_present": True, "tools": [fork]}).encode()
+
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=answer),
+    )
+    result = agent_cli_list(ctx, AgentCliListParams())
+    assert [row.tool for row in result.tools] == ["codex"]
+    assert result.tools[0].kind == "github-release"
+    assert result.tools[0].source == "runtime"
+
+    for kind in ("npm", "go-dist", "go-src"):
+        row = dict(fork)
+        row["kind"] = kind
+        assert AgentCliRow.model_validate(row).kind == kind
 
 
 def test_no_engine_is_a_stated_answer_for_the_read(instance: AppContext) -> None:

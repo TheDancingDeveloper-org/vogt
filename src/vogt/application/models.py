@@ -5087,6 +5087,14 @@ class AgentCliRow(Result):
     tool: str
     package: str
     binary: str
+    kind: str = Field(
+        default="npm",
+        description=(
+            "How a version of it is fetched, as the engine's tool table names "
+            "it: npm, go-dist, go-src or github-release. A report from before "
+            "kinds existed is npm."
+        ),
+    )
     env_var: str = Field(description="The variable that pins it at container start.")
     baked_version: str | None = None
     active_version: str | None = None
