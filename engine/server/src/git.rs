@@ -134,22 +134,41 @@ fn clean_worktree_dirname(branch: &str) -> Result<String> {
     Ok(branch.to_string())
 }
 
+/// Where [`create_worktree`] would put a worktree for `branch`: a sibling of
+/// `checkout`, named for the branch. Checks the names without touching git or
+/// the disk, so a caller can vet the destination before anything is cut.
+pub fn worktree_destination(checkout: &Path, branch: &str) -> Result<PathBuf> {
+    let branch = clean_ref_name("branch", branch)?;
+    let dirname = clean_worktree_dirname(&branch)?;
+    let parent = checkout.parent().ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "worktree checkout {} has no parent directory",
+            checkout.display()
+        ))
+    })?;
+    Ok(parent.join(dirname))
+}
+
 /// Create a git worktree of `checkout` for a session (WI-1298).
 ///
-/// The worktree is a sibling of the checkout, named for `branch`, on a new
-/// branch of that name cut from `base_ref`. `checkout` is the main working
-/// tree or a worktree of it; git cuts either way. The checkout's own tree is
-/// never written to: a dirty tree is left exactly as it was, because the new
-/// branch comes from `base_ref` rather than from the working tree.
+/// The worktree is [`worktree_destination`], on a new branch of that name cut
+/// from `base_ref`. `checkout` is the main working tree or a worktree of it;
+/// git cuts either way. The checkout's own tree is never written to: a dirty
+/// tree is left exactly as it was, because the new branch comes from
+/// `base_ref` rather than from the working tree.
+///
+/// `base_ref` is resolved in the checkout as it stands: it is never fetched,
+/// so a local branch that is behind its remote is cut where it is. A caller
+/// that wants the remote's tip names `origin/<branch>`.
 ///
 /// Refuses before running git when the checkout is not a git tree, when
-/// either name is not a ref name, or when the sibling directory already
-/// exists. When git itself refuses — an unknown base, a branch that already
-/// exists — the error names what git said and no directory is left behind.
+/// either name is not a ref name, when the branch already exists, or when the
+/// destination already exists. When git itself refuses part way, neither the
+/// directory nor the branch is left behind.
 pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<PathBuf> {
+    let destination = worktree_destination(checkout, branch)?;
     let branch = clean_ref_name("branch", branch)?;
     let base_ref = clean_ref_name("base ref", base_ref)?;
-    let dirname = clean_worktree_dirname(&branch)?;
     if !checkout.is_dir() {
         return Err(ApiError::BadRequest(format!(
             "worktree checkout {} does not exist",
@@ -165,17 +184,19 @@ pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<
             checkout.display()
         )));
     }
-    let parent = checkout.parent().ok_or_else(|| {
-        ApiError::BadRequest(format!(
-            "worktree checkout {} has no parent directory",
-            checkout.display()
-        ))
-    })?;
-    let destination = parent.join(&dirname);
     if destination.exists() {
         return Err(ApiError::BadRequest(format!(
             "worktree {} already exists",
             destination.display()
+        )));
+    }
+    // Checked here rather than left to git so that, past this point, a branch
+    // of this name is one this call made and is safe to delete on failure.
+    let local = format!("refs/heads/{branch}");
+    if git_output(checkout, &["rev-parse", "--verify", "--quiet", &local]).is_ok() {
+        return Err(ApiError::BadRequest(format!(
+            "branch {branch:?} already exists in {}",
+            checkout.display()
         )));
     }
     // The base must already be in the checkout. Fetching it here would reach
@@ -200,17 +221,37 @@ pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<
         ],
     )
     .map_err(|error| {
-        // git can leave the destination behind when it fails part way.
-        if destination.is_dir() {
-            let _ = std::process::Command::new("git")
-                .args(["worktree", "remove", "--force"])
-                .arg(&destination)
-                .current_dir(checkout)
-                .output();
-        }
+        // git can leave the directory, the branch, or both when it fails
+        // part way.
+        remove_worktree(checkout, &destination, &branch);
         ApiError::BadRequest(format!("could not create the worktree: {error}"))
     })?;
     Ok(destination)
+}
+
+/// Undo [`create_worktree`]: remove the worktree at `path` and delete
+/// `branch`. Best effort — each half runs whether or not the other did, and a
+/// failure is logged rather than returned, because the caller is already
+/// reporting the error that made it undo the cut.
+pub fn remove_worktree(checkout: &Path, path: &Path, branch: &str) {
+    if path.exists() {
+        let removed = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .current_dir(checkout)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output();
+        if !removed.as_ref().is_ok_and(|o| o.status.success()) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+    let _ = git_output(checkout, &["worktree", "prune"]);
+    let local = format!("refs/heads/{branch}");
+    if git_output(checkout, &["rev-parse", "--verify", "--quiet", &local]).is_ok() {
+        if let Err(e) = git_output(checkout, &["branch", "-D", branch]) {
+            tracing::warn!(branch, error = %e, "could not delete a session worktree's branch");
+        }
+    }
 }
 
 /// git, synchronously, with its stdout on success and its stderr in the error.
@@ -1461,6 +1502,22 @@ mod tests {
         // None of the refusals created a branch or a directory.
         assert!(git_output(&repo, &["rev-parse", "--verify", "wi-1"]).is_err());
         assert!(!tmp.path().join("has space").exists());
+    }
+
+    #[test]
+    fn an_existing_branch_is_refused_and_a_removed_worktree_takes_its_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let taken = create_worktree(&repo, "integrate", "main").unwrap_err();
+        assert!(taken.to_string().contains("already exists"), "{taken}");
+        assert!(!tmp.path().join("integrate").exists());
+
+        let worktree = create_worktree(&repo, "wi-2-gone", "integrate").unwrap();
+        remove_worktree(&repo, &worktree, "wi-2-gone");
+        assert!(!worktree.exists());
+        assert!(git_output(&repo, &["rev-parse", "--verify", "refs/heads/wi-2-gone"]).is_err());
+        // The branch it was cut from is not touched.
+        assert!(git_output(&repo, &["rev-parse", "--verify", "refs/heads/integrate"]).is_ok());
     }
 
     #[test]
