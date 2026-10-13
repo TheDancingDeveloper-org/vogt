@@ -225,6 +225,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/vogt-engine /usr/local/bin/vogt-engine \
     && strip /usr/local/bin/vogt-engine
 
+# ─── Test-only: the Codex gitguard e2e binary (WI-1356) ─────────────────────
+# Not part of the shipped image; nothing below copies from it. `build.yml`
+# builds this target, then runs the binary inside the stack image, where
+# /etc/codex/requirements.toml is the shipped file and the real Codex fork
+# and klaudia are installed — the only place the e2e can execute.
+FROM server-build AS codex-gitguard-e2e
+COPY engine/deploy/driven-session-codex-requirements.toml ./deploy/driven-session-codex-requirements.toml
+COPY engine/server/tests/codex_gitguard_e2e.rs ./server/tests/codex_gitguard_e2e.rs
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/engine/target \
+    cargo test --release -p vogt-engine-server --test codex_gitguard_e2e --no-run --message-format=json \
+      | sed -n 's/.*"executable":"\([^"]*codex_gitguard_e2e[^"]*\)".*/\1/p' \
+      | xargs -I{} cp {} /codex_gitguard_e2e \
+    && test -x /codex_gitguard_e2e
+
 FROM ${UV_IMAGE} AS uv
 
 # ─── Stage 3: the Python core, taken from the published image ───────────────

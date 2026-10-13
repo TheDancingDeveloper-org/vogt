@@ -1520,13 +1520,20 @@ checks decide what it can finish on its own (WI-926; the design is
   `[[hooks.PreToolUse]]` (matcher `Bash`, `shell`, `exec_command`,
   `write_stdin`, `apply_patch`) run `klaudia hook gitguard` with
   `failClosed = true` (WI-1129), so a hook that fails blocks the tool call.
+  The file also pins `[features] hooks = true`: the fork runs managed hooks
+  only while that feature is on, and the pin beats `-c features.hooks=false`,
+  `--disable hooks` and any `[features]` in `$CODEX_HOME` or a project
+  `.codex/config.toml`. The engine refuses a policy without the pin.
   A table Codex cannot parse stops Codex at start-up; it does not run
   unguarded. `server/tests/codex_gitguard_e2e.rs` runs the real fork against
   the shipped file and a scripted model and proves `git stash`,
   `git checkout -- .`, `git clean -f`, `git reset --hard` and
   `git -C <other repo> restore` are refused while the session's own commit
-  lands; it runs where `/etc/codex/requirements.toml` is the shipped file
-  (set `VOGT_CODEX_GITGUARD_E2E=1` to make a missing prerequisite fail).
+  lands, with no override and under each of those feature overrides; it
+  runs where `/etc/codex/requirements.toml` is the shipped file (set
+  `VOGT_CODEX_GITGUARD_E2E=1` to make a missing prerequisite fail). CI runs
+  it inside the stack image candidate (`build.yml`, `stack-image`, the
+  `codex-gitguard-e2e` Dockerfile target) before the image is pushed.
   Destructive-git execpolicy prefix rules stay out: they are Starlark
   (`prefix_rule`), not a requirements table. Claude and opencode launches
   are not blocked by a Codex policy error.

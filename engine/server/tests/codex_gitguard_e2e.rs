@@ -10,6 +10,12 @@
 //! `VOGT_CODEX_GITGUARD_E2E=1`, which turns a missing prerequisite into a
 //! failure.
 //!
+//! It repeats the run under every way a session could switch the `hooks`
+//! feature off (`-c`, `--disable`, `$CODEX_HOME/config.toml`, a project
+//! `.codex/config.toml`); the shipped `[features] hooks = true` pin must win.
+//! A nested `codex exec --disable hooks` from a session's shell is the
+//! `--disable` case.
+//!
 //! The model is a scripted Responses API on loopback: each turn it asks for
 //! the next shell command, and records what Codex sent back for the last one.
 
@@ -194,6 +200,48 @@ fn scripted_model(cmds: Vec<String>) -> (u16, Arc<Mutex<Vec<String>>>) {
     (port, outputs)
 }
 
+/// How a session might try to switch the `hooks` feature off. The shipped
+/// file pins `[features] hooks = true`, so every case must still be refused.
+struct Override {
+    name: &'static str,
+    args: &'static [&'static str],
+    codex_home_config: Option<&'static str>,
+    project_config: Option<&'static str>,
+}
+
+const OVERRIDES: &[Override] = &[
+    Override {
+        name: "none",
+        args: &[],
+        codex_home_config: None,
+        project_config: None,
+    },
+    Override {
+        name: "-c features.hooks=false",
+        args: &["-c", "features.hooks=false"],
+        codex_home_config: None,
+        project_config: None,
+    },
+    Override {
+        name: "--disable hooks",
+        args: &["--disable", "hooks"],
+        codex_home_config: None,
+        project_config: None,
+    },
+    Override {
+        name: "$CODEX_HOME/config.toml",
+        args: &[],
+        codex_home_config: Some("[features]\nhooks = false\n"),
+        project_config: None,
+    },
+    Override {
+        name: "project .codex/config.toml",
+        args: &[],
+        codex_home_config: None,
+        project_config: Some("[features]\nhooks = false\n"),
+    },
+];
+
 #[test]
 fn codex_with_the_shipped_requirements_refuses_destructive_git() {
     let codex = match prerequisites() {
@@ -206,7 +254,12 @@ fn codex_with_the_shipped_requirements_refuses_destructive_git() {
             return;
         }
     };
+    for case in OVERRIDES {
+        refuses_destructive_git(&codex, case);
+    }
+}
 
+fn refuses_destructive_git(codex: &Path, case: &Override) {
     let root = tempfile::tempdir().unwrap();
     let repo = root.path().join("repo");
     let other = root.path().join("other");
@@ -214,6 +267,20 @@ fn codex_with_the_shipped_requirements_refuses_destructive_git() {
     std::fs::create_dir_all(&home).unwrap();
     dirty_repo(&repo);
     dirty_repo(&other);
+    let mut home_config = case.codex_home_config.unwrap_or_default().to_string();
+    if let Some(project) = case.project_config {
+        // Committed, so it is not part of the work gitguard protects, and the
+        // project trusted, so Codex loads its config layer.
+        std::fs::create_dir_all(repo.join(".codex")).unwrap();
+        std::fs::write(repo.join(".codex/config.toml"), project).unwrap();
+        git(&repo, &["add", ".codex/config.toml"]);
+        git(&repo, &["commit", "-q", "-m", "project config"]);
+        home_config.push_str(&format!(
+            "\n[projects.{:?}]\ntrust_level = \"trusted\"\n",
+            repo.display().to_string()
+        ));
+    }
+    std::fs::write(home.join("config.toml"), home_config).unwrap();
 
     let refused = [
         "git stash".to_string(),
@@ -233,12 +300,13 @@ fn codex_with_the_shipped_requirements_refuses_destructive_git() {
     let provider = format!(
         "model_providers.mock={{name=\"mock\",base_url=\"http://127.0.0.1:{port}/v1\",wire_api=\"responses\",env_key=\"VOGT_E2E_MOCK_KEY\"}}"
     );
-    let out = Command::new(&codex)
+    let out = Command::new(codex)
         .current_dir(&repo)
         .env("CODEX_HOME", &home)
         .env("VOGT_E2E_MOCK_KEY", "unused")
         .args(["exec", "--skip-git-repo-check", "--json"])
         .arg("--dangerously-bypass-approvals-and-sandbox")
+        .args(case.args)
         .args(["-c", "model_provider=mock", "-c", &provider, "-m", "gpt-5"])
         .arg("run the script")
         .stdin(std::process::Stdio::null())
@@ -246,7 +314,8 @@ fn codex_with_the_shipped_requirements_refuses_destructive_git() {
         .unwrap();
     let outputs = outputs.lock().unwrap().clone();
     let context = format!(
-        "codex exit {:?}\nstderr tail: {}\ntool outputs: {outputs:#?}",
+        "override {}\ncodex exit {:?}\nstderr tail: {}\ntool outputs: {outputs:#?}",
+        case.name,
         out.status,
         String::from_utf8_lossy(&out.stderr)
             .lines()
