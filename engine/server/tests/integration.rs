@@ -12424,6 +12424,93 @@ async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {
     );
 }
 
+/// WI-1313: a session that sits at its prompt through its whole nudge budget
+/// is not driven forever. Once the cap is spent, autopilot turns off and the
+/// session reports itself blocked, which is what the inbox reads as needing a
+/// person.
+#[tokio::test]
+async fn an_autopilot_session_that_never_finishes_escalates_when_its_nudges_run_out() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("input.log");
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(
+        &claude,
+        format!(
+            "#!/usr/bin/env bash\nprintf '  ┃\\r\\n  ╹▀▀▀▀▀▀▀▀\\r\\n'\nwhile IFS= read -r _; do echo x >> '{}'; done\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut cfg = test_config();
+    cfg.autopilot = vogt_engine_server::autopilot::Policy {
+        nudge_after: Duration::from_millis(400),
+        max_nudges: 2,
+    };
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "trailed-off",
+            "command": [claude.display().to_string()],
+            "autopilot": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let summary = loop {
+        let detail: Value = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let summary = detail["summary"].clone();
+        if summary.get("autopilot").is_none() && summary.get("blocked").is_some() {
+            break summary;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a trailed-off session never escalated: {summary}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(summary["autopilot_nudges"], 2);
+    assert!(
+        summary["blocked"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("needs a person"),
+        "{summary}"
+    );
+    let nudged = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        nudged.lines().count(),
+        2,
+        "exactly the cap, then stop: {nudged:?}"
+    );
+
+    // Escalation is final: sitting longer adds neither a nudge nor a second report.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let nudged = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(nudged.lines().count(), 2);
+}
+
 /// WI-1005: every route that returns file content holds to the one policy
 /// in `workspace_path::may_show` — the viewer, the download, the ripgrep
 /// search and the git diff — judged on the resolved path, so neither a

@@ -17,7 +17,9 @@
 //!   `AUTOPILOT: DONE` near the bottom of its screen (the brief asks for it);
 //! - the deployment's cap on nudges is reached, so a confused agent that
 //!   answers every nudge with "nothing to do" in other words cannot be
-//!   driven forever.
+//!   driven forever. Hitting the cap also records a blocked report, so the
+//!   session surfaces as needing a person instead of sitting quiet with
+//!   autopilot simply switched off (WI-1313).
 //!
 //! What is never nudged: a session blocked on a person (it said so; a person
 //! acts next), one at a permission dialog or mid-turn, a plain shell, and a
@@ -136,8 +138,24 @@ pub fn decide(policy: &Policy, seen: Seen) -> Step {
     Step::Nudge
 }
 
+/// Why a session that has used its nudges needs a person.
+fn cap_report(nudges: u32) -> vogt_engine_contract::BlockedReport {
+    vogt_engine_contract::BlockedReport {
+        reason: format!(
+            "autopilot nudged this session {nudges} times and it never said it \
+             was done or that it was blocked, so it needs a person"
+        ),
+        items: vec![
+            "read the session and either give it the next instruction or stop it".to_string(),
+        ],
+        since: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
+    }
+}
+
 /// Look at every autopilot session once.
-pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
+pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus, policy: &Policy) {
     for session in registry.live_sessions() {
         if !session.autopilot() || !session.is_alive() {
             continue;
@@ -190,12 +208,22 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
                 );
             }
             Step::Capped => {
+                let nudges = session.autopilot_nudges();
                 let _ = registry.set_autopilot(session.id, false);
+                // A blocked report is what the inbox reads as needing a person,
+                // so the cap escalates instead of only dropping a log line.
+                if let Err(e) = session.set_blocked(Some(cap_report(nudges)), bus) {
+                    tracing::warn!(
+                        session = %session.id,
+                        error = %e,
+                        "could not report an autopilot session blocked at its nudge cap"
+                    );
+                }
                 tracing::warn!(
                     session = %session.id,
-                    nudges = session.autopilot_nudges(),
+                    nudges,
                     event = "autopilot.capped",
-                    "autopilot nudge cap reached; autopilot off"
+                    "autopilot nudge cap reached; autopilot off, needs a person"
                 );
             }
             Step::Nudge => {
@@ -236,7 +264,7 @@ pub fn spawn_watcher(state: Arc<AppState>) {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            run_once(&state.sessions, &policy).await;
+            run_once(&state.sessions, &state.bus, &policy).await;
         }
     });
 }
