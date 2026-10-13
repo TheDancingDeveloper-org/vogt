@@ -8,12 +8,13 @@
 //!   telling the agent to commit, write a hand-off, and stop. Mid-turn, the
 //!   line waits for the next tick that finds it ready.
 //! - **hard**, once: the same change, then the session is hibernated with
-//!   trigger `budget`. A turn or context limit waits for the prompt first; a
-//!   wall-clock limit (one turn running longer than `wall_clock_minutes`, the
-//!   looping signature) hibernates at once, because that turn may never end.
-//!   That clock counts only time the session is seen running: it starts when the
-//!   session is seen working and stops, reset to nothing, while it is idle, at
-//!   its prompt, at a permission dialog, or blocked on a person. A session the
+//!   trigger `budget`. A turn, context, or wall-clock limit hibernates at once,
+//!   without waiting for the prompt: an autopilot worker is re-prompted the
+//!   moment it reaches one, so a limit that waited for idle landed late, and a
+//!   turn that never paused never tripped it at all (WI-1281). The wall clock is
+//!   the session's own, not one turn's: it accumulates every stretch the session
+//!   is seen running, and a pause (idle, the prompt, a permission dialog, blocked
+//!   on a person) stops it without clearing what already elapsed. A session the
 //!   engine cannot hibernate (no conversation to resume) is not marked done: the
 //!   overseer hears once that it cannot be stopped, and the watcher tries again
 //!   next tick.
@@ -105,27 +106,25 @@ fn worse(
     }
 }
 
-/// The decision, pure over what was read. `running_since` is when the session
-/// was last seen actually running and has been running continuously since: the
-/// caller passes it only while the session is working, and passes `None` after
-/// any idle, prompt, dialog, or blocked stretch, so time spent waiting on a
-/// person never counts toward the wall clock and does not resume afterwards.
+/// The decision, pure over what was read. `running` is the time the session has
+/// spent actually working, accumulated across every stretch and not reset by a
+/// pause: the caller adds the stretch in progress and passes the total. Time
+/// spent idle, at the prompt, at a dialog, or blocked on a person is never
+/// added, but what already elapsed stays.
 pub fn assess(
     budget: &SessionBudget,
     economics: Option<&SessionEconomics>,
-    running_since: Option<OffsetDateTime>,
-    now: OffsetDateTime,
+    running: Duration,
     soft_pct: u32,
 ) -> Level {
-    let (level, _) = assess_with(budget, economics, running_since, now, soft_pct);
+    let (level, _) = assess_with(budget, economics, running, soft_pct);
     level
 }
 
 fn assess_with(
     budget: &SessionBudget,
     economics: Option<&SessionEconomics>,
-    running_since: Option<OffsetDateTime>,
-    now: OffsetDateTime,
+    running: Duration,
     soft_pct: u32,
 ) -> (Level, Option<Dimension>) {
     let turns = against(
@@ -145,16 +144,14 @@ fn assess_with(
     if level == Level::Hard {
         return (level, from);
     }
-    // Wall clock is the looping signature: hard the moment one turn has run
-    // longer than the limit, with no soft warning ahead of it.
-    if let (Some(limit), Some(started)) = (budget.wall_clock_minutes, running_since) {
-        if limit > 0 {
-            let elapsed = now
-                .unix_timestamp()
-                .saturating_sub(started.unix_timestamp());
-            if elapsed >= i64::from(limit) * 60 {
-                return (Level::Hard, Some(Dimension::WallClock));
-            }
+    // Wall clock is cumulative across the whole session, not one turn: an
+    // autopilot worker that pauses between turns would otherwise reset it, and
+    // one that never pauses would only trip if a single stretch outlasted it.
+    // Hard the moment the accumulated running time reaches the limit, with no
+    // soft warning ahead of it.
+    if let Some(limit) = budget.wall_clock_minutes.filter(|m| *m > 0) {
+        if running.as_secs() >= u64::from(limit) * 60 {
+            return (Level::Hard, Some(Dimension::WallClock));
         }
     }
     (level, from)
@@ -165,8 +162,7 @@ fn describe(
     dimension: Dimension,
     budget: &SessionBudget,
     economics: Option<&SessionEconomics>,
-    running_since: Option<OffsetDateTime>,
-    now: OffsetDateTime,
+    running: Duration,
 ) -> (String, String, String) {
     match dimension {
         Dimension::Turns => (
@@ -183,16 +179,11 @@ fn describe(
                 .unwrap_or_else(|| "0".into()),
             budget.context_tokens.unwrap_or(0).to_string(),
         ),
-        Dimension::WallClock => {
-            let minutes = running_since
-                .map(|s| now.unix_timestamp().saturating_sub(s.unix_timestamp()) / 60)
-                .unwrap_or(0);
-            (
-                "wall clock".to_string(),
-                format!("{minutes} min"),
-                format!("{} min", budget.wall_clock_minutes.unwrap_or(0)),
-            )
-        }
+        Dimension::WallClock => (
+            "wall clock".to_string(),
+            format!("{} min", running.as_secs() / 60),
+            format!("{} min", budget.wall_clock_minutes.unwrap_or(0)),
+        ),
     }
 }
 
@@ -210,27 +201,28 @@ pub enum Action {
     Leave,
     /// Publish the soft change and, because it is at its prompt, type the line.
     Soft { summary: String },
-    /// Publish the hard change, then hibernate. `at_once` is the wall-clock
-    /// case, which does not wait for the prompt.
-    Hard { summary: String, at_once: bool },
+    /// Publish the hard change, then hibernate. Every hard limit fires at once:
+    /// a turn limit that waited for the prompt never landed on a worker that is
+    /// re-prompted the moment it reaches one (WI-1281).
+    Hard { summary: String },
 }
 
 /// The decision for one session this tick. `ready` is the screen's own: at its
-/// prompt and not mid-turn. A soft or a turn/context hard that is not ready is
-/// [`Action::Leave`], so the flags stay unset and the next tick retries.
+/// prompt and not mid-turn. A soft warning that is not ready is
+/// [`Action::Leave`], so the flag stays unset and the next tick retries. A hard
+/// limit does not wait: the session is hibernated wherever the tick finds it.
 fn decide(
     level: Level,
     dimension: Option<Dimension>,
     ready: bool,
     budget: &SessionBudget,
     economics: Option<&SessionEconomics>,
-    running_since: Option<OffsetDateTime>,
-    now: OffsetDateTime,
+    running: Duration,
 ) -> Action {
     let Some(dimension) = dimension else {
         return Action::Leave;
     };
-    let (what, n, limit) = describe(dimension, budget, economics, running_since, now);
+    let (what, n, limit) = describe(dimension, budget, economics, running);
     match level {
         Level::None => Action::Leave,
         Level::Soft => {
@@ -241,16 +233,9 @@ fn decide(
                 summary: summary_line(&what, &n, &limit),
             }
         }
-        Level::Hard => {
-            let at_once = dimension == Dimension::WallClock;
-            if !at_once && !ready {
-                return Action::Leave;
-            }
-            Action::Hard {
-                summary: summary_line(&what, &n, &limit),
-                at_once,
-            }
-        }
+        Level::Hard => Action::Hard {
+            summary: summary_line(&what, &n, &limit),
+        },
     }
 }
 
@@ -286,18 +271,34 @@ async fn at_prompt(session: &Arc<Session>, settle: Duration) -> bool {
         .unwrap_or(false)
 }
 
-/// The next value of the wall-clock stretch. Running with nothing stored starts
-/// it at `now`; running with a stored start keeps it; not running clears it, so
-/// the stretch that follows a dialog begins from nothing.
-fn observe_running(
-    stored: Option<OffsetDateTime>,
-    running: bool,
-    now: OffsetDateTime,
-) -> Option<OffsetDateTime> {
+/// The running time to judge this tick against: stretches already finished,
+/// plus the one in progress when the session is running now.
+///
+/// A pause ends the stretch and banks it, so the next one starts from nothing
+/// while the total keeps what came before. Time spent idle, at the prompt, at a
+/// dialog, or blocked on a person is never added.
+fn account_running(session: &Session, running: bool, now: OffsetDateTime) -> Duration {
+    let since = session.budget_running_since();
     if running {
-        stored.or(Some(now))
+        let started = since.unwrap_or(now);
+        if since.is_none() {
+            session.set_budget_running_since(Some(started));
+        }
+        let elapsed = now
+            .unix_timestamp()
+            .saturating_sub(started.unix_timestamp())
+            .max(0) as u64;
+        session.budget_running_total() + Duration::from_secs(elapsed)
     } else {
-        None
+        if let Some(started) = since {
+            let elapsed = now
+                .unix_timestamp()
+                .saturating_sub(started.unix_timestamp())
+                .max(0) as u64;
+            session.add_budget_running(Duration::from_secs(elapsed));
+            session.set_budget_running_since(None);
+        }
+        session.budget_running_total()
     }
 }
 
@@ -351,23 +352,16 @@ pub async fn run_once(
         let Some(budget) = session.budget() else {
             continue;
         };
-        // The wall clock counts only uninterrupted running. A dialog, a blocked
-        // report, or a return to the prompt ends the stretch, so the next one
-        // starts from nothing rather than resuming the turn the dialog paused.
-        let running_since = observe_running(
-            session.budget_running_since(),
+        // The wall clock is the session's own: every stretch of uninterrupted
+        // running is added, and a dialog, a blocked report, or a return to the
+        // prompt stops the clock without clearing what already elapsed.
+        let running = account_running(
+            &session,
             is_running(session.activity(), session.blocked().is_some()),
             now,
         );
-        session.set_budget_running_since(running_since);
         let economics = session.summary().economics;
-        let (level, dimension) = assess_with(
-            &budget,
-            economics.as_ref(),
-            running_since,
-            now,
-            policy.soft_pct,
-        );
+        let (level, dimension) = assess_with(&budget, economics.as_ref(), running, policy.soft_pct);
         if level == Level::None {
             continue;
         }
@@ -383,8 +377,7 @@ pub async fn run_once(
             ready,
             &budget,
             economics.as_ref(),
-            running_since,
-            now,
+            running,
         );
         match action {
             Action::Leave => {}
@@ -411,7 +404,7 @@ pub async fn run_once(
                     "{summary}"
                 );
             }
-            Action::Hard { summary, .. } => {
+            Action::Hard { summary } => {
                 let id = session.id;
                 // The refusal is read against the session the registry holds
                 // now, not the snapshot this tick started with: the session
@@ -516,10 +509,6 @@ pub fn spawn_watcher(state: Arc<AppState>) {
 mod tests {
     use super::*;
 
-    fn now() -> OffsetDateTime {
-        OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap()
-    }
-
     fn budget(turns: Option<u32>, context: Option<u64>, wall: Option<u32>) -> SessionBudget {
         SessionBudget {
             turns,
@@ -536,17 +525,19 @@ mod tests {
         }
     }
 
+    fn mins(n: u64) -> Duration {
+        Duration::from_secs(n * 60)
+    }
+
     #[test]
     fn each_dimension_crosses_soft_then_hard_and_zero_is_no_limit() {
-        let at = now();
         // Turns: 80 of 100 is soft, 100 of 100 is hard, and no economics at
         // all is nothing.
         assert_eq!(
             assess(
                 &budget(Some(100), None, None),
                 Some(&economics(79, 0)),
-                None,
-                at,
+                mins(0),
                 80
             ),
             Level::None
@@ -555,8 +546,7 @@ mod tests {
             assess(
                 &budget(Some(100), None, None),
                 Some(&economics(80, 0)),
-                None,
-                at,
+                mins(0),
                 80
             ),
             Level::Soft
@@ -565,14 +555,13 @@ mod tests {
             assess(
                 &budget(Some(100), None, None),
                 Some(&economics(100, 0)),
-                None,
-                at,
+                mins(0),
                 80
             ),
             Level::Hard
         );
         assert_eq!(
-            assess(&budget(Some(100), None, None), None, None, at, 80),
+            assess(&budget(Some(100), None, None), None, mins(0), 80),
             Level::None
         );
         // A zero ceiling, like a missing one, is not a limit.
@@ -580,8 +569,7 @@ mod tests {
             assess(
                 &budget(Some(0), None, None),
                 Some(&economics(5, 0)),
-                None,
-                at,
+                mins(0),
                 80
             ),
             Level::None
@@ -591,8 +579,7 @@ mod tests {
             assess(
                 &budget(None, Some(1_000), None),
                 Some(&economics(0, 800)),
-                None,
-                at,
+                mins(0),
                 80
             ),
             Level::Soft
@@ -601,8 +588,7 @@ mod tests {
             assess(
                 &budget(None, Some(1_000), None),
                 Some(&economics(0, 1_000)),
-                None,
-                at,
+                mins(0),
                 80
             ),
             Level::Hard
@@ -611,8 +597,7 @@ mod tests {
             assess(
                 &budget(None, Some(0), None),
                 Some(&economics(0, 5_000)),
-                None,
-                at,
+                mins(0),
                 80
             ),
             Level::None
@@ -621,14 +606,12 @@ mod tests {
 
     #[test]
     fn hard_beats_soft_when_both_apply() {
-        let at = now();
         // Turns are merely soft; context is already hard.
         assert_eq!(
             assess(
                 &budget(Some(100), Some(1_000), None),
                 Some(&economics(80, 1_000)),
-                None,
-                at,
+                mins(0),
                 80
             ),
             Level::Hard
@@ -636,50 +619,38 @@ mod tests {
     }
 
     #[test]
-    fn wall_clock_is_hard_only_while_a_turn_is_running() {
-        let at = now();
-        let started = at - time::Duration::minutes(90);
-        // 90 minutes into a turn, against a 60 minute ceiling.
+    fn wall_clock_is_cumulative_running_time() {
+        // 90 minutes of running against a 60 minute ceiling is hard, whether it
+        // came as one stretch or as several that a pause separated.
         assert_eq!(
-            assess(&budget(None, None, Some(60)), None, Some(started), at, 80),
+            assess(&budget(None, None, Some(60)), None, mins(90), 80),
             Level::Hard
         );
-        // The same elapsed time, but no turn is running: the caller passes
-        // None, and nothing fires.
-        assert_eq!(
-            assess(&budget(None, None, Some(60)), None, None, at, 80),
-            Level::None
-        );
         // Under the ceiling.
-        let recent = at - time::Duration::minutes(30);
         assert_eq!(
-            assess(&budget(None, None, Some(60)), None, Some(recent), at, 80),
+            assess(&budget(None, None, Some(60)), None, mins(30), 80),
             Level::None
         );
-        // A zero ceiling is not a limit.
+        // A pause adds nothing, so time spent waiting never trips it.
         assert_eq!(
-            assess(&budget(None, None, Some(0)), None, Some(started), at, 80),
+            assess(&budget(None, None, Some(60)), None, mins(0), 80),
+            Level::None
+        );
+        // A zero ceiling is not a limit, however long the session has run.
+        assert_eq!(
+            assess(&budget(None, None, Some(0)), None, mins(90), 80),
             Level::None
         );
     }
 
     #[test]
-    fn a_dialog_resets_the_wall_clock_instead_of_pausing_it() {
-        let at = now();
+    fn a_pause_keeps_the_wall_clock_it_already_counted() {
         let limit = budget(None, None, Some(90));
-        // 80 minutes of running is inside a 90 minute ceiling.
-        let running = at - time::Duration::minutes(80);
-        assert_eq!(assess(&limit, None, Some(running), at, 80), Level::None);
-        // A dialog, a blocked report, or a return to the prompt clears the
-        // clock: the caller passes None, however long the pause lasted.
-        assert_eq!(assess(&limit, None, None, at, 80), Level::None);
-        // Back to work. Only the new stretch counts, so 5 minutes of it does
-        // not inherit the 80 that came before the dialog.
-        let resumed = at - time::Duration::minutes(5);
-        assert_eq!(assess(&limit, None, Some(resumed), at, 80), Level::None);
-        // The new stretch on its own still trips once it passes the ceiling.
-        let long = at - time::Duration::minutes(90);
-        assert_eq!(assess(&limit, None, Some(long), at, 80), Level::Hard);
+        // 80 minutes, then a pause, then 20 more. The pause adds nothing, but
+        // the 80 stays, so the total crosses the ceiling where a per-turn clock
+        // would have started again at nothing.
+        assert_eq!(assess(&limit, None, mins(80), 80), Level::None);
+        assert_eq!(assess(&limit, None, mins(80) + mins(20), 80), Level::Hard);
     }
 
     #[test]
@@ -689,21 +660,6 @@ mod tests {
         // cannot suppress this or be suppressed by it.
         assert!(refusal_notice(false).publish);
         assert!(!refusal_notice(true).publish);
-    }
-
-    #[test]
-    fn a_dialog_clears_the_running_stretch() {
-        let at = now();
-        let earlier = at - time::Duration::minutes(80);
-        // Nothing stored and running: the stretch starts now.
-        assert_eq!(observe_running(None, true, at), Some(at));
-        // Already running: the stored start is kept, not moved forward.
-        assert_eq!(observe_running(Some(earlier), true, at), Some(earlier));
-        // A dialog, a blocked report, or the prompt: the stretch is cleared
-        // however long it had been running.
-        assert_eq!(observe_running(Some(earlier), false, at), None);
-        // The next stretch starts from nothing, not from the 80 minutes before.
-        assert_eq!(observe_running(None, true, at), Some(at));
     }
 
     #[test]
@@ -717,28 +673,30 @@ mod tests {
     }
 
     #[test]
-    fn a_warning_waits_for_the_prompt_but_wall_clock_does_not() {
-        let at = now();
+    fn a_hard_limit_hibernates_without_waiting_for_the_prompt() {
         let b = budget(Some(100), None, None);
+        // Soft still waits: mid-turn there is nothing to type into.
         let econ = economics(80, 0);
-        let soft = assess_with(&b, Some(&econ), None, at, 80);
+        let soft = assess_with(&b, Some(&econ), mins(0), 80);
         assert_eq!(
-            decide(soft.0, soft.1, false, &b, Some(&econ), None, at),
+            decide(soft.0, soft.1, false, &b, Some(&econ), mins(0)),
             Action::Leave
         );
         assert!(matches!(
-            decide(soft.0, soft.1, true, &b, Some(&econ), None, at),
+            decide(soft.0, soft.1, true, &b, Some(&econ), mins(0)),
             Action::Soft { .. }
         ));
-        let hard_econ = economics(100, 0);
-        let hard = assess_with(&b, Some(&hard_econ), None, at, 80);
-        assert_eq!(
-            decide(hard.0, hard.1, false, &b, Some(&hard_econ), None, at),
-            Action::Leave
-        );
-        // Wall clock: hard at once, even though the session is not ready.
-        let started = at - time::Duration::minutes(90);
-        let wall = assess_with(&budget(None, None, Some(60)), None, Some(started), at, 80);
+        // A turn limit that is already over does not. An autopilot worker is
+        // re-prompted the moment it reaches its prompt, so waiting for one let
+        // it run on past the limit (WI-1281).
+        let hard_econ = economics(120, 0);
+        let hard = assess_with(&b, Some(&hard_econ), mins(0), 80);
+        assert!(matches!(
+            decide(hard.0, hard.1, false, &b, Some(&hard_econ), mins(0)),
+            Action::Hard { .. }
+        ));
+        // The wall clock, the same: hard at once, mid-turn.
+        let wall = assess_with(&budget(None, None, Some(60)), None, mins(90), 80);
         assert!(matches!(
             decide(
                 wall.0,
@@ -746,10 +704,9 @@ mod tests {
                 false,
                 &budget(None, None, Some(60)),
                 None,
-                Some(started),
-                at
+                mins(90)
             ),
-            Action::Hard { at_once: true, .. }
+            Action::Hard { .. }
         ));
     }
 }
