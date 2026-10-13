@@ -2148,3 +2148,193 @@ def test_touch_points_render_and_the_map_stays_inside_the_tree(
     assert "passwd" not in outline
     start_session(ctx, StartSessionParams(project="mapped", reason=WHY))
     assert "## Touch points" not in engine.last_spec["prompt"]
+
+
+# -- dispatch purposes and start provenance (WI-1323) -----------------------
+
+
+def _last_started(ctx: AppContext) -> dict[str, Any]:
+    started = [
+        event
+        for event in list_events(ctx, ListEventsParams()).events
+        if event.kind == "session.started"
+    ]
+    return dict(started[-1].summary)
+
+
+def test_purpose_implement_resolves_the_implement_profile(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="implement", task="fix it", reason=WHY
+        ),
+    )
+    spec = engine.last_spec
+    assert spec["template"] == "klaudia"
+    assert spec["model"] == "grok-4.7"
+    assert "effort" not in spec
+    assert spec["budget"] == {"turns": 120, "wall_clock_minutes": 90}
+    assert spec["autopilot"] is True
+    summary = _last_started(wired)
+    assert summary["purpose"] == "implement"
+    assert summary["worktree"] is True
+    assert summary["repo_map"] is True
+    assert summary["overrides"] == []
+    assert result.session.purpose == "implement"
+
+
+def test_purpose_review_resolves_opus_low_forty_turns_read_only(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="review", reason=WHY)
+    )
+    spec = engine.last_spec
+    assert (spec["template"], spec["model"], spec["effort"]) == (
+        "claude",
+        "opus",
+        "low",
+    )
+    assert spec["budget"] == {"turns": 40}
+    assert "autopilot" not in spec
+    assert "## Read only" in spec["prompt"]
+
+
+def test_an_explicit_param_wins_over_the_profile_and_is_audited(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="implement", model="grok-4.8", reason=WHY
+        ),
+    )
+    assert engine.last_spec["model"] == "grok-4.8"
+    assert engine.last_spec["template"] == "klaudia"
+    assert _last_started(wired)["overrides"] == ["model"]
+
+
+def test_no_purpose_leaves_a_start_as_it_was(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert "model" not in engine.last_spec
+    assert result.session.purpose is None
+    assert _last_started(wired)["overrides"] == []
+
+
+def test_the_deployment_profile_preference_overrides_one_field(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    from vogt.application.models import PreferenceSetParams
+    from vogt.application.services import set_preference
+
+    set_preference(
+        wired,
+        PreferenceSetParams(
+            key="dispatch.profiles",
+            value={"implement": {"model": "grok-4.8"}},
+            reason=WHY,
+        ),
+    )
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="implement", reason=WHY)
+    )
+    spec = engine.last_spec
+    assert spec["model"] == "grok-4.8"
+    assert spec["template"] == "klaudia"
+    assert spec["budget"] == {"turns": 120, "wall_clock_minutes": 90}
+
+
+def test_an_agent_cannot_set_the_dispatch_table(wired: AppContext) -> None:
+    from vogt.application.models import PreferenceSetParams
+    from vogt.application.services import set_preference
+    from vogt.errors import PersonRequired
+
+    with pytest.raises(PersonRequired):
+        set_preference(
+            _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+            PreferenceSetParams(
+                key="dispatch.profiles",
+                value={"review": {"model": "grok-4.7"}},
+                reason=WHY,
+            ),
+        )
+
+
+def test_a_profile_cannot_grant_the_oversight_role(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Resolved after the role guard, and no profile field carries a role."""
+    from vogt.application.models import PreferenceSetParams
+    from vogt.application.services import set_preference
+    from vogt.errors import InvalidPreference
+
+    with pytest.raises(InvalidPreference, match="role"):
+        set_preference(
+            wired,
+            PreferenceSetParams(
+                key="dispatch.profiles",
+                value={"implement": {"role": "oversight"}},
+                reason=WHY,
+            ),
+        )
+    agent = _as(wired, f"agent:engine:{ENGINE_SESSION}")
+    with pytest.raises(RoleRefused):
+        start_session(
+            agent,
+            StartSessionParams(
+                work_item="WI-1", purpose="implement", role="oversight", reason=WHY
+            ),
+        )
+    start_session(
+        agent, StartSessionParams(work_item="WI-1", purpose="implement", reason=WHY)
+    )
+    assert "role" not in engine.last_spec
+
+
+def test_a_person_start_records_person_and_no_session(
+    wired: AppContext,
+) -> None:
+    result = start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="review", reason=WHY)
+    )
+    assert result.session.started_by_kind == "person"
+    assert result.session.started_by_session is None
+    [listed] = list_sessions(wired, ListSessionsParams(mode="full")).sessions
+    assert (listed.purpose, listed.started_by_kind) == ("review", "person")
+
+
+@pytest.mark.parametrize("role", ["oversight", "worker"])
+def test_a_session_start_records_the_starters_engine_role(
+    wired: AppContext, engine: StandInEngine, role: str
+) -> None:
+    engine.roles[ENGINE_SESSION] = role
+    result = start_session(
+        _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+        StartSessionParams(work_item="WI-1", purpose="mechanical", reason=WHY),
+    )
+    assert result.session.started_by_session == ENGINE_SESSION
+    assert result.session.started_by_kind == role
+    summary = _last_started(wired)
+    assert summary["started_by_kind"] == role
+    assert summary["started_by_session"] == ENGINE_SESSION
+
+
+def test_a_vogt_started_session_is_named_by_its_engine_id(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    parent = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    child = start_session(
+        _as(wired, f"agent:session:{parent.session.id}"),
+        StartSessionParams(work_item="WI-1", reason=WHY),
+    )
+    assert child.session.started_by_session == parent.session.engine_session_id
+    assert child.session.started_by_kind == "worker"
+
+
+def test_a_purpose_outside_the_six_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        StartSessionParams(work_item="WI-1", purpose="anything", reason=WHY)  # type: ignore[arg-type]

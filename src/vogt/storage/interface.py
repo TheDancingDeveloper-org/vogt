@@ -503,6 +503,14 @@ class ReadView(Protocol):
         """Every setting the actor has written, ordered by key."""
         ...
 
+    def latest_human_preference(self, key: str) -> ActorPreference | None:
+        """The most recent write of `key` by a human actor (`{}` = cleared).
+
+        How a deployment-level setting is read (the `dispatch.*` table,
+        WI-1323): a person's write, never an agent's, and the newest wins.
+        """
+        ...
+
     def inbox_triage_by_keys(self, entry_keys: list[str]) -> dict[str, InboxTriage]:
         """Every triage decision among `entry_keys`, keyed by entry key.
 

@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from vogt.core.dispatch import Purpose
 from vogt.core.entities import (
     Actor,
     AgentPolicy,
@@ -1160,6 +1161,29 @@ class SessionSummary(Result):
         description=(
             "Why Vogt started the session. Null for an unlinked engine "
             "session, which declares no reason."
+        ),
+    )
+    purpose: str | None = Field(
+        default=None,
+        description=(
+            "The dispatch purpose the start named (WI-1323): implement, "
+            "implement-careful, review, mechanical, investigate or design. "
+            "Null when it named none, and for an unlinked engine session."
+        ),
+    )
+    started_by_session: str | None = Field(
+        default=None,
+        description=(
+            "Engine id of the session that started this one (WI-1323), read "
+            "from the starter's verified identity. Null for a person's start."
+        ),
+    )
+    started_by_kind: Literal["person", "oversight", "worker"] | None = Field(
+        default=None,
+        description=(
+            "Who started it (WI-1323): `person`, or the starting session's "
+            "engine role at that moment. Null when the engine could not be "
+            "asked, and for a session started before this was recorded."
         ),
     )
     started_at: datetime | None = Field(
@@ -4134,6 +4158,25 @@ class StartSessionParams(Params):
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+    purpose: Purpose | None = Field(
+        default=None,
+        description=(
+            "What the session is for (WI-1323, design §2.4): implement, "
+            "implement-careful, review, mechanical, investigate or design. "
+            "The deployment's dispatch profile for it fills template, model, "
+            "effort, budget, worktree, repo_map and autopilot wherever this "
+            "start leaves them unset; a value given here wins and is audited "
+            "as an override. Recorded on the session."
+        ),
+    )
+    worktree: bool | None = Field(
+        default=None,
+        description=(
+            "Run in a worktree of the project's checkout (WI-1298). Resolved "
+            "from the purpose's profile when unset and recorded on the audit "
+            "row; cutting the worktree itself is WI-1298's."
+        ),
+    )
 
 
 #: The two id forms every session operation accepts. A session Vogt started

@@ -400,6 +400,17 @@ class CodingSession(Entity):
     reason: str
     started_at: datetime
     stopped_at: datetime | None = None
+    #: Start provenance (WI-1323, design §2.4 and §3), facts about the start
+    #: that are never updated. `purpose` is the dispatch purpose the start
+    #: named. `started_by_session` is the engine id of the session that
+    #: started this one, and `started_by_kind` is `person` for a person's
+    #: start, otherwise the starting session's engine role at that moment
+    #: (`oversight` or `worker`). Both are read from the caller's verified
+    #: identity, never from its parameters. All three are None on a session
+    #: from before migration 0024.
+    purpose: str | None = None
+    started_by_session: str | None = None
+    started_by_kind: Literal["person", "oversight", "worker"] | None = None
 
 
 class Token(Entity):
