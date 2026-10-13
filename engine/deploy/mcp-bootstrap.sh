@@ -702,6 +702,111 @@ install_readonly_servers() {
     done
 }
 
+# The browser and the isolated sub-agent (WI-1358). Both are stdio servers the
+# klaudia binary already serves — `klaudia mcp browser` (WI-1137) and
+# `klaudia mcp codex-subagent` (WI-1138) — and Codex is the CLI that has neither
+# of its own. Claude and Klaudia carry a browser inside the binary, so only
+# Codex's config is written here.
+#
+# Nothing secret goes in the file: the command and its arguments only. The
+# sub-agent's `--codex` must be the real binary, not `codex` on PATH — on a Vogt
+# pod that name is the full-access wrapper, which prepends
+# `--dangerously-bypass-approvals-and-sandbox` and so would hand every child an
+# unsandboxed shell (WI-1138). `--root` is this session's own working directory,
+# the one confinement the server applies when the engine has not cut a worktree.
+codex_klaudia_tools() {
+    local config="$1" lockdir klaudia
+    command -v codex >/dev/null 2>&1 || return 0
+    klaudia="$(command -v klaudia 2>/dev/null || true)"
+    [[ -n "$klaudia" ]] || return 0
+    lockdir="$(dirname "$config")"
+    mkdir -p "$lockdir"
+    (
+        flock 9
+        CODEX_CONFIG="$config" CODEX_KLAUDIA="$klaudia" CODEX_REAL="${CODEX_REAL:-/usr/local/libexec/codex-real}" CODEX_ROOT="$PWD" \
+            python3 - <<'PY'
+import os, sys, tempfile
+
+path = os.environ["CODEX_CONFIG"]
+klaudia = os.environ["CODEX_KLAUDIA"]
+real = os.environ["CODEX_REAL"]
+root = os.environ["CODEX_ROOT"]
+
+def block(name: str, args: list[str], extra: str = "") -> str:
+    rendered = ", ".join(f'"{arg}"' for arg in args)
+    return (
+        f"[mcp_servers.{name}]\n"
+        f'command = "{klaudia}"\n'
+        f"args = [{rendered}]\n"
+        f"{extra}"
+    )
+
+wanted = {
+    "browser": block("browser", ["mcp", "browser"], "tool_timeout_sec = 60\n"),
+    "codex-subagent": block(
+        "codex-subagent",
+        ["mcp", "codex-subagent", "--codex", real, "--root", root],
+    ),
+}
+
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+if text.strip():
+    try:
+        import tomllib
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+lines = text.splitlines(keepends=True)
+kept: list[str] = []
+index = 0
+while index < len(lines):
+    stripped = lines[index].strip()
+    header = next(
+        (name for name in wanted if stripped == f"[mcp_servers.{name}]"
+         or stripped.startswith(f"[mcp_servers.{name}].")),
+        None,
+    )
+    if header is not None:
+        index += 1
+        while index < len(lines) and not lines[index].lstrip().startswith("["):
+            index += 1
+        continue
+    kept.append(lines[index])
+    index += 1
+
+body = "".join(kept).rstrip("\n")
+addition = "\n\n".join(wanted[name] for name in ("browser", "codex-subagent"))
+new = f"{body}\n\n{addition}\n" if body else addition + "\n"
+if new == text:
+    sys.exit(0)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
 # Vogt registrations are best-effort: a failure here must not cost an agent its
 # git/gh credentials.
 install_vogt_bridge
@@ -714,6 +819,8 @@ if command -v codex >/dev/null 2>&1; then
         || printf 'mcp-bootstrap: could not disable the Codex app-server daemon\n' >&2
     codex_litellm_provider "${CODEX_HOME:-$HOME/.codex}/config.toml" \
         || printf 'mcp-bootstrap: could not write the Codex LiteLLM provider\n' >&2
+    codex_klaudia_tools "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        || printf 'mcp-bootstrap: could not register the Codex browser and sub-agent\n' >&2
 fi
 install_readonly_servers
 
