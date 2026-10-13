@@ -58,9 +58,12 @@ project space. Security reports go to the channel in
   - The operator approves the integration pull request from
     `integrate/vogt-next` to `main`, and approves every deploy.
 - The integration branch is rebased onto `origin/main`. Never merge `main`
-  into `integrate/*`, and never leave a merge commit on `integrate/*`. The
-  integration pull request therefore lands on `main` by rebase, and a merge
-  commit in its range is the usual reason a green pull request cannot land.
+  into `integrate/*`. From now on, oversight merges into `integrate/*` by
+  rebase or fast-forward only, so no merge commit lands there. The integration
+  pull request is meant to land on `main` by rebase, and a merge commit in its
+  range is the usual reason a green pull request cannot land. `integrate/vogt-next`
+  still holds merge commits from earlier oversight merges; WI-1315 linearises
+  it and adds the check.
 - A change that does not go through an integration branch, such as a fork pull
   request, branches from `origin/main` and opens its pull request against
   `main`, under the same linear-history rule.
