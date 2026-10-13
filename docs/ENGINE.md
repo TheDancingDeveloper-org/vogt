@@ -1723,16 +1723,19 @@ stop: opencode ends a *run* at every natural stop of the model, and any
 agent may stop to announce its next step. So the engine re-drives it
 (`autopilot.rs`):
 
-- a Claude Code, Codex or opencode session on autopilot that is at its
-  prompt (`ready`, below), not blocked on a person, and quiet for
+- a Claude Code, Codex, opencode or Klaudia session on autopilot that is at
+  its prompt (`ready`, below), not blocked on a person, and quiet for
   `ENGINE_AUTOPILOT_NUDGE_AFTER` (default `60s`) is sent a one-line "carry
   on" and Enter, logged as `event=autopilot.nudge`, and counted on the
-  summary as `autopilot_nudges`;
+  summary as `autopilot_nudges`. A Klaudia session whose own goal loop is
+  driving it (`klaudia: goal-loop` in its title, or its status bar on older
+  builds) is left alone, since two drivers of one loop would interleave;
 - a line reading `AUTOPILOT: DONE` among the last lines of its screen turns
   its autopilot off for good (`event=autopilot.done`), as does reaching
   `ENGINE_AUTOPILOT_MAX_NUDGES` (default 100; `event=autopilot.capped`).
-  `0` never nudges, leaving autopilot as the idle exemption alone;
-- Klaudia is never nudged: it runs its own goal loop.
+  Hitting the cap also records a blocked report, so the session surfaces as
+  needing a person rather than going quiet unnoticed. `0` never nudges,
+  leaving autopilot as the idle exemption alone;
 
 The summary's `autopilot` reads `false` once it is off. A nudge is input, so
 it restarts the quiet clock and nudges cannot stack up.
