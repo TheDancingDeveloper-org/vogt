@@ -45,7 +45,7 @@ const BORDER: &[char] = &[
 /// because a TUI may position words with cursor moves rather than spaces.
 static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
     regex::bytes::Regex::new(
-        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow)|allow\s*command|automatically\s*den|requires\s*approval|trust\s*the\s*files|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director",
+        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow)|allow\s*command|automatically\s*den|requires\s*approval|trust\s*the\s*files|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director|\(y\)\s*es\s*/\s*\(n\)\s*o",
     )
     .expect("approval prefilter compiles")
 });
@@ -94,6 +94,25 @@ static OPENCODE_BUTTONS: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^(Allow once\s{2,}Allow always\s{2,}Reject|Confirm\s{2,}Cancel)\b")
         .expect("opencode buttons compile")
 });
+
+/// Klaudia's prompt line (WI-1279): "Change this machine? (y)es / (n)o /
+/// (s)omething else", "Allow Bash(…)? (y)es / (n)o / (s)omething else", "Run
+/// these hooks? (y)es / (n)o". The question is everything before the answers.
+static KLAUDIA_PROMPT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(.*?\?)\s+\(y\)es\s*/\s*\(n\)o(?:\s*/\s*\(s\)omething else)?\b")
+        .expect("klaudia prompt regex compiles")
+});
+
+/// The head line of Klaudia's host-change card, which the excerpt reaches up
+/// to: what changes, why, and the paths, services and commands it covers.
+static KLAUDIA_CARD_HEAD: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?:This changes your machine|This repository wants to run its own commands|This wasn't part of what you approved)$")
+        .expect("klaudia card head compiles")
+});
+
+/// Klaudia keeps its live prompt in the bottom view, within this many lines
+/// of the bottom of the screen.
+const KLAUDIA_PROMPT_BOTTOM_LINES: usize = 8;
 
 /// At most this many lines above the question are read for the command.
 const MAX_CONTEXT_LINES: usize = 40;
@@ -229,7 +248,69 @@ fn is_rule(line: &str) -> bool {
 /// screen, with a numbered option within the next eight lines; the command
 /// excerpt may reach up into the scrollback.
 pub fn detect(visible: &[String], scrollback: &[String]) -> Option<Detected> {
-    detect_numbered(visible, scrollback).or_else(|| detect_opencode(visible))
+    detect_numbered(visible, scrollback)
+        .or_else(|| detect_opencode(visible))
+        .or_else(|| detect_klaudia(visible, scrollback))
+}
+
+/// Klaudia's person-only prompts (WI-1279): a `RequestHostChange` card
+///
+/// ```text
+/// This changes your machine
+///   write the Komodo header for the deploy
+///   why: the API needs it
+///   paths: /tmp/komodo-header
+///   approving covers every step inside that scope, for this session only
+/// Change this machine? (y)es / (n)o / (s)omething else
+/// ```
+///
+/// and its tool permissions ("Allow Bash(…)? (y)es / (n)o / …"). The answers
+/// are letter keys, not a menu, so no options are offered: an agent's answer
+/// refuses before any key is written and a person answers at the screen. The
+/// excerpt is the card, from its head line down, when one is above the prompt.
+fn detect_klaudia(visible: &[String], scrollback: &[String]) -> Option<Detected> {
+    let from = visible.len().saturating_sub(KLAUDIA_PROMPT_BOTTOM_LINES);
+    let at = from
+        + visible[from..]
+            .iter()
+            .rposition(|line| KLAUDIA_PROMPT.is_match(strip(line).trim()))?;
+    let question = KLAUDIA_PROMPT.captures(strip(&visible[at]).trim())?[1]
+        .trim()
+        .to_string();
+    let above: Vec<&str> = scrollback
+        .iter()
+        .chain(visible[..at].iter())
+        .map(|l| l.trim_end())
+        .collect();
+    let window = &above[above.len().saturating_sub(MAX_CONTEXT_LINES)..];
+    let card: Vec<&str> = match window
+        .iter()
+        .rposition(|l| KLAUDIA_CARD_HEAD.is_match(l.trim()))
+    {
+        Some(head) => window[head..]
+            .iter()
+            .copied()
+            .filter(|l| !l.trim().is_empty())
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut command_excerpt = if card.is_empty() {
+        question.clone()
+    } else {
+        card.join("\n")
+    };
+    if command_excerpt.chars().count() > MAX_EXCERPT_CHARS {
+        command_excerpt = command_excerpt.chars().take(MAX_EXCERPT_CHARS).collect();
+        command_excerpt.push('…');
+    }
+    Some(Detected {
+        kind: kind_of(&question, &command_excerpt),
+        question,
+        command_excerpt,
+        deadline_seconds: None,
+        options: Vec::new(),
+        horizontal: false,
+    })
 }
 
 /// opencode's permission dialog (WI-933), read off the screen:
@@ -685,5 +766,62 @@ mod tests {
         // opencode's ordinary screen is not a dialog.
         let idle = lines("  ┃  Build · DeepSeek\n  ┃  > ask anything");
         assert_eq!(detect(&idle, &[]), None);
+    }
+
+    /// WI-1279: Klaudia's host-change card and prompt, as its TUI draws them
+    /// (`internal/tui/hostcard.go`), with the card partly in the scrollback.
+    #[test]
+    fn klaudia_host_change_prompts_are_person_only_dialogs() {
+        let scrollback = lines(
+            "› deploy the stack\n\
+             \x20 ⚙ Write /tmp/komodo-header\n\
+             This changes your machine",
+        );
+        let screen = lines(
+            "  write the Komodo API header for the deploy\n\
+             \x20 why: the deploy call needs the key in a header file\n\
+             \x20 paths: /tmp/komodo-header\n\
+             \x20 approving covers every step inside that scope, for this session only\n\
+             \n\
+             Change this machine? (y)es / (n)o / (s)omething else\n\
+             \x20 grok-4.7 · 12 turns · 1.1M in+out",
+        );
+        let found = detect(&screen, &scrollback).expect("the host change is a dialog");
+        assert_eq!(found.question, "Change this machine?");
+        assert_eq!(found.kind, "permission");
+        assert!(found.options.is_empty(), "letter keys are not offered");
+        assert!(found
+            .command_excerpt
+            .starts_with("This changes your machine\n"));
+        assert!(found.command_excerpt.contains("paths: /tmp/komodo-header"));
+        assert!(found.command_excerpt.contains("why: the deploy call"));
+        assert!(!found.command_excerpt.contains("deploy the stack"));
+        assert!(mentions_approval(
+            b"Change this machine? (y)es / (n)o / (s)omething else"
+        ));
+
+        // The hooks and drift variants, and a plain tool permission.
+        let hooks = lines("This repository wants to run its own commands\n  .klaudia/hooks.toml\nRun these hooks? (y)es / (n)o");
+        let found = detect(&hooks, &[]).expect("hooks prompt");
+        assert_eq!(found.question, "Run these hooks?");
+        assert!(found.command_excerpt.contains(".klaudia/hooks.toml"));
+
+        let drift = lines("This wasn't part of what you approved\n  paths: ~/.klaudia/config.toml\nApprove this too? (y)es / (n)o / (s)omething else");
+        let found = detect(&drift, &[]).expect("drift prompt");
+        assert_eq!(found.question, "Approve this too?");
+        assert!(found.command_excerpt.contains("config.toml"));
+
+        let tool = crate::screen::klaudia_frames::approval();
+        let found = detect(&tool, &[]).expect("tool permission");
+        assert_eq!(found.question, "Allow Bash(cargo test --workspace)?");
+        assert_eq!(found.command_excerpt, found.question);
+
+        // An answered prompt is echoed as an answer line, not the prompt; and
+        // a prompt quoted far up the screen is not live.
+        let answered = lines("This changes your machine\n  paths: /tmp/x\ndeclined — Klaudia will carry on without it\n› ");
+        assert_eq!(detect(&answered, &[]), None);
+        let mut quoted = lines("Change this machine? (y)es / (n)o / (s)omething else");
+        quoted.extend(std::iter::repeat_n(String::new(), 10));
+        assert_eq!(detect(&quoted, &[]), None);
     }
 }
