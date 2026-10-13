@@ -439,14 +439,14 @@ RUN set -eu; \
         asset="codex-${target}.tar.gz"; \
         curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${codex_sha}/${asset}" -o "/tmp/${asset}"; \
         curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${codex_sha}/SHA256SUMS" -o /tmp/SHA256SUMS; \
-        (cd /tmp && grep -F "  ${asset}" SHA256SUMS | sha256sum -c -); \
         tar -xzf "/tmp/${asset}" -C /tmp; \
-        echo "$codex_sum  /tmp/codex" | sha256sum -c -; \
+        (cd /tmp && grep -F "  ${target}/" SHA256SUMS | sha256sum -c -); \
+        echo "$codex_sum  /tmp/${target}/codex" | sha256sum -c -; \
         install -d /usr/local/libexec; \
-        install -m 0755 /tmp/codex /usr/local/libexec/codex-real; \
-        install -m 0755 /tmp/bwrap /usr/local/libexec/bwrap; \
-        install -m 0755 /tmp/codex-code-mode-host /usr/local/libexec/codex-code-mode-host; \
-        rm -f "/tmp/${asset}" /tmp/SHA256SUMS /tmp/codex /tmp/bwrap /tmp/codex-code-mode-host; \
+        install -m 0755 "/tmp/${target}/codex" /usr/local/libexec/codex-real; \
+        install -m 0755 "/tmp/${target}/bwrap" /usr/local/libexec/bwrap; \
+        install -m 0755 "/tmp/${target}/codex-code-mode-host" /usr/local/libexec/codex-code-mode-host; \
+        rm -rf "/tmp/${asset}" /tmp/SHA256SUMS "/tmp/${target}"; \
         ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex; \
         /usr/local/libexec/codex-real --version; \
     fi
