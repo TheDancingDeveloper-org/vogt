@@ -211,13 +211,33 @@ _REVIEW = (
     "remaining work, do not resume the worker's session, and do not read "
     "the worker's screen or transcript — the diff and this brief are the "
     "whole of what you review.\n"
+    "\n"
+    "This review is read-only. Make no edits to the branch or the checkout, "
+    "and no commits, pushes, merges or deploys; do not open, approve or "
+    "merge a pull request. Run the gates in a scratch worktree checked out "
+    "at the head below. The one thing you write is your verdict.\n"
 )
 
-#: Where a review looks for the change. A line, because the diff itself is
-#: the repository's and is not copied into the brief.
-_REVIEW_DIFF = (
-    "The diff is `git diff <base>...<head>` on **branch**, against **base**. "
-    "Review that and nothing older."
+#: The shape of the answer. Fixed text so a driver can read the first line
+#: without parsing prose, and pinned to a sha so a verdict on an older head
+#: is never taken for one on the branch as it stands.
+_REVIEW_VERDICT = (
+    "## Verdict\n"
+    "\n"
+    "Post the verdict as one `work_comment` on this item. Its first line is "
+    "exactly one of:\n"
+    "\n"
+    "- `no blockers (head <sha>)` — every line of **Done means** holds at "
+    "that head;\n"
+    "- `blockers (head <sha>):` followed by a numbered list, one blocker a "
+    "line, each naming the line of **Done means** it fails and the place "
+    "in the diff.\n"
+    "\n"
+    "`<sha>` is the commit you reviewed. Then say **which deployment paths "
+    "the tests cover**: in-process only, or the deployed topology described "
+    "under **Deployed setup**. A test that passed in-process is not "
+    "evidence for a path it never ran. Do not write `no blockers` while "
+    "describing a regression or a gap — that is a blocker.\n"
 )
 
 
@@ -227,8 +247,8 @@ def _latest_handoff(view: ReadView, item: WorkItem) -> Comment | None:
     return next((one for one in comments if one.kind == "handoff"), None)
 
 
-def _handoff_facts(fields: HandoffFields) -> list[str]:
-    """The structured half of a hand-off, one bullet a line, blanks dropped."""
+def _handoff_where(fields: HandoffFields) -> list[str]:
+    """Where the hand-off says its work is, one bullet a line."""
     rows: list[str] = []
     for label, value in (
         ("branch", fields.branch),
@@ -238,16 +258,87 @@ def _handoff_facts(fields: HandoffFields) -> list[str]:
     ):
         if value:
             rows.append(f"- **{label}** {value}")
-    for label, values in (
-        ("done", fields.done),
-        ("remaining", fields.remaining),
-        ("touch points", fields.touch_points),
-        ("gates run", fields.gates_run),
-        ("blockers", fields.blockers),
-    ):
-        if values:
-            rows.append(f"- **{label}** {'; '.join(values)}")
     return rows
+
+
+def _handoff_lists(fields: HandoffFields) -> list[tuple[str, list[str]]]:
+    return [
+        (label, values)
+        for label, values in (
+            ("done", fields.done),
+            ("remaining", fields.remaining),
+            ("touch points", fields.touch_points),
+            ("gates run", fields.gates_run),
+            ("blockers", fields.blockers),
+        )
+        if values
+    ]
+
+
+def _handoff_facts(fields: HandoffFields) -> list[str]:
+    """The structured half of a hand-off, one bullet a line, blanks dropped."""
+    rows = _handoff_where(fields)
+    for label, values in _handoff_lists(fields):
+        rows.append(f"- **{label}** {'; '.join(values)}")
+    return rows
+
+
+def _handoff_claims(fields: HandoffFields) -> list[str]:
+    """The hand-off's lists, each line marked as the worker's claim."""
+    rows: list[str] = []
+    for label, values in _handoff_lists(fields):
+        rows.append(f"- **{label}** (claimed)")
+        rows.extend(f"  - claimed, not verified: {value}" for value in values)
+    return rows
+
+
+def _review_diff(fields: HandoffFields) -> list[str]:
+    """The concrete diff command, with the hand-off's own base and head."""
+    head = fields.head_sha or fields.branch
+    lines = [
+        f"Review `git diff {fields.base}...{head}` — branch `{fields.branch}` "
+        f"against `{fields.base}` — and nothing older.",
+        "",
+    ]
+    if fields.head_sha:
+        lines += [
+            f"Check the branch tip first (`git rev-parse {fields.branch}`). If "
+            f"it is not `{fields.head_sha}`, review `{fields.head_sha}` and say "
+            "the branch has moved.",
+            "",
+        ]
+    else:
+        lines += [
+            "The hand-off names no head sha. Resolve one with "
+            f"`git rev-parse {fields.branch}` before you start, review that "
+            "sha, and say in the verdict that the hand-off left it out.",
+            "",
+        ]
+    return lines
+
+
+def _review_project(project: Project | None) -> list[str]:
+    """What a reviewer needs from the project: its gates and how it is deployed.
+
+    Not `_policy_section`: that carries the worker's landing rules — commit,
+    push, hand off — which a read-only review must not follow.
+    """
+    lines: list[str] = []
+    policy = project.agent_policy if project is not None else None
+    if policy is not None and policy.test_recipe:
+        lines += ["## Gates", "", f"- **Tests** {policy.test_recipe}", ""]
+    lines += ["## Deployed setup", ""]
+    if policy is not None and policy.deployed_setup.strip():
+        lines += [policy.deployed_setup.strip(), ""]
+    else:
+        lines += [
+            "This project records no deployed-setup notes "
+            "(`agent_policy.deployed_setup`). Say so in the verdict, and do "
+            "not count an in-process test as covering how the project is "
+            "deployed.",
+            "",
+        ]
+    return lines
 
 
 def review_brief_for_work_item(
@@ -294,25 +385,32 @@ def review_brief_for_work_item(
     handoff = _latest_handoff(view, item)
     if handoff is not None and handoff.handoff is not None:
         fields = handoff.handoff
-        lines += _handoff_facts(fields)
+        lines += _handoff_where(fields)
         lines.append("")
         if fields.branch and fields.base:
-            lines += [_REVIEW_DIFF, ""]
+            lines += _review_diff(fields)
         else:
             lines += [
                 "The hand-off does not name both a branch and a base, so "
                 "there is no diff to review yet. Report that and stop.",
                 "",
             ]
+        claims = _handoff_claims(fields)
         claimed = handoff.body.strip()
-        if claimed:
+        if claims or claimed:
             lines += [
-                "What the worker reports, in its own words — a claim to "
-                "check, not a finding:",
+                "## What the worker claims",
                 "",
-                claimed,
+                "Everything in this section is the worker's hand-off: a claim, "
+                "not evidence. Check each line against the diff and the gates "
+                "you run yourself; do not repeat it as a finding.",
                 "",
+                *claims,
             ]
+            if claims:
+                lines.append("")
+            if claimed:
+                lines += ["In its own words:", "", claimed, ""]
     else:
         lines += [
             "This item has no hand-off, so no branch or base was named and "
@@ -320,7 +418,8 @@ def review_brief_for_work_item(
             "",
         ]
 
-    lines += _policy_section(project)
+    lines += _review_project(project)
+    lines += [_REVIEW_VERDICT]
     lines += ["## Deployment policy", "", _DEPLOYMENT_POLICY, ""]
     lines += _pointer(session_id, work_ref=item.ref)
     return ComposedBrief(
@@ -410,7 +509,11 @@ def brief_for_work_item(
         # fresh session reads where the last one stopped before the thread.
         lines += ["## Hand-off", "", *_handoff_facts(handoff.handoff)]
         lines += ["", handoff.body.strip(), ""]
-    notes = [one for one in comments if one.kind == "note"][:20]
+    # A hand-off supersedes the thread before it — old root causes, old
+    # verdicts — so only the remarks made since the latest one are pasted.
+    # `comments` is newest first, so the ones ahead of the hand-off are later.
+    since = comments if handoff is None else comments[: comments.index(handoff)]
+    notes = [one for one in since if one.kind == "note"][:20]
     if notes:
         lines += ["## Comments", ""]
         for comment in notes:
