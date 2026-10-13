@@ -45,7 +45,7 @@ const BORDER: &[char] = &[
 /// because a TUI may position words with cursor moves rather than spaces.
 static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
     regex::bytes::Regex::new(
-        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow)|allow\s*command|automatically\s*den|requires\s*approval|trust\s*the\s*files|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director|\(y\)\s*es\s*/\s*\(n\)\s*o",
+        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow)|allow\s*(?:command|the\s*\S+\s*mcp\s*server)|automatically\s*den|requires\s*approval|trust\s*the\s*files|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director|\(y\)\s*es\s*/\s*\(n\)\s*o",
     )
     .expect("approval prefilter compiles")
 });
@@ -54,7 +54,7 @@ static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
 /// line of the rendered screen.
 static QUESTION: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|.*\brequires approval\b.*|do you trust the files in this folder\??|.*\bis this a project you (?:created or one you )?trust\b.*\??|allow external claude\.md(?: file)? imports\??)$",
+        r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|allow the \S+ mcp server to run tool\b.*\?|.*\brequires approval\b.*|do you trust the files in this folder\??|.*\bis this a project you (?:created or one you )?trust\b.*\??|allow external claude\.md(?: file)? imports\??)$",
     )
     .expect("approval question regex compiles")
 });
@@ -456,7 +456,11 @@ fn detect_numbered(visible: &[String], scrollback: &[String]) -> Option<Detected
             }
             options.push(MenuOption {
                 number,
-                label: c[3].to_string(),
+                // Codex's MCP approval prints the choice and its description on
+                // one line, split by a run of spaces (WI-1355): "Allow
+                //                   Run the tool and continue". The choice is
+                // the part before that run.
+                label: c[3].split("   ").next().unwrap_or(&c[3]).trim().to_string(),
                 selected: c.get(1).is_some(),
             });
         } else if !options.is_empty()
@@ -556,6 +560,36 @@ mod tests {
         );
         assert!(!d.command_excerpt.contains("older output"), "{d:?}");
         assert_eq!(d.deadline_seconds, None);
+    }
+
+    #[test]
+    fn codex_mcp_tool_approval() {
+        // Captured from the WI-1127 Codex fork's TUI (v0.162.0) while an MCP
+        // tool call waited on its person (WI-1355). The window title at the
+        // time was "[ ! ] Action Required", not `codex: awaiting approval`, so
+        // the screen text is what has to be recognised.
+        let screen = lines(
+            "Field 1/1\n\
+             Allow the vogt MCP server to run tool \"board_list\"?\n\
+              cells: [{\"state\": \"\"}]\n\
+             › 1. Allow                   Run the tool and continue\n\
+               2. Allow for this session  Run the tool and remember this choice for this session\n\
+               3. Always allow            Run the tool and remember this choice for future tool calls\n\
+               4. Cancel                  Cancel this tool call\n\
+             enter to submit | esc to cancel",
+        );
+        let d = detect(&screen, &[]).expect("mcp approval detected");
+        assert_eq!(
+            d.question,
+            "Allow the vogt MCP server to run tool \"board_list\"?"
+        );
+        assert_eq!(d.kind, "permission");
+        assert_eq!(d.options.len(), 4);
+        assert!(d.options[0].selected && !d.options[1].selected);
+        assert_eq!(d.options[0].label, "Allow");
+        assert_eq!(d.options[3].label, "Cancel");
+        assert!(d.command_excerpt.contains("cells:"), "{d:?}");
+        assert!(mentions_approval(screen.join("\n").as_bytes()));
     }
 
     #[test]

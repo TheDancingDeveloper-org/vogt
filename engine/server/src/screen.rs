@@ -319,12 +319,14 @@ pub fn shows_opencode_prompt(lines: &[String]) -> bool {
 ///
 /// Klaudia (WI-1090) writes `klaudia: ready`, `klaudia: working`,
 /// `klaudia: awaiting approval` and `klaudia: goal-loop`. The WI-1127 Codex
-/// fork (WI-1145) writes the same words under `codex:` — `codex: ready`,
-/// `codex: working`, `codex: awaiting approval` — and has no goal loop, so a
-/// `codex:` title never reads [`AgentTitle::GoalLoop`]. Matched on the start
-/// of what follows the prefix, so a suffix (`klaudia: working · fixing tests`)
-/// is allowed. A build that sets no such title reads `None`, and its screen is
-/// consulted instead.
+/// fork (WI-1145) was built to write the same words under `codex:` — `codex:
+/// ready`, `codex: working`, `codex: awaiting approval` — and has no goal loop,
+/// so a `codex:` title never reads [`AgentTitle::GoalLoop`]. What the fork
+/// actually sets while a turn is blocked on a person is `[ ! ] Action
+/// Required` (WI-1355), blinking with `[ . ] Action Required`; both are read
+/// as awaiting approval. Matched on the start of what follows the prefix, so a
+/// suffix (`klaudia: working · fixing tests`) is allowed. A build that sets no
+/// such title reads `None`, and its screen is consulted instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTitle {
     Ready,
@@ -348,6 +350,13 @@ pub enum TitleAgent {
 /// titles this engine trusts.
 pub fn agent_title(title: Option<&str>) -> Option<(TitleAgent, AgentTitle)> {
     let title = title?.trim().to_lowercase();
+    // The fork's approval title carries no `codex:` prefix (WI-1355):
+    // `[ ! ] Action Required | <cwd>` while a turn waits on a person, blinking
+    // with `[ . ]`. Only the bang form is read, so the blink does not churn the
+    // activity every frame.
+    if title.starts_with("[ ! ] action required") {
+        return Some((TitleAgent::Codex, AgentTitle::AwaitingApproval));
+    }
     let (who, state) = if let Some(state) = title.strip_prefix("klaudia:") {
         (TitleAgent::Klaudia, state)
     } else {
@@ -1192,6 +1201,13 @@ mod klaudia_tests {
             agent_title(Some("codex: awaiting approval")),
             Some((Codex, AwaitingApproval))
         );
+        // What the fork actually sets while a turn waits on a person (WI-1355),
+        // and the blink frame it alternates with, which is not approval.
+        assert_eq!(
+            agent_title(Some("[ ! ] Action Required | vogt")),
+            Some((Codex, AwaitingApproval))
+        );
+        assert_eq!(agent_title(Some("[ . ] Action Required | vogt")), None);
         assert_eq!(
             agent_title(Some("codex: approval")),
             Some((Codex, AwaitingApproval))
@@ -1218,7 +1234,11 @@ mod klaudia_tests {
             c,
             ready
         ));
-        for title in ["codex: working", "codex: awaiting approval"] {
+        for title in [
+            "codex: working",
+            "codex: awaiting approval",
+            "[ ! ] Action Required | vogt",
+        ] {
             assert!(
                 !is_ready(ActivityState::Idle, true, &[], c, Some(title)),
                 "{title}"
