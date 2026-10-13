@@ -36,6 +36,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import _resolve
 from vogt.application.services.grants import _own_engine_session
+from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.entities import Actor, Decision, DecisionAnswer, DecisionOption
 from vogt.errors import Conflict, GrantRefused, InvalidRequest, NotFound, PersonRequired
 from vogt.storage.interface import ReadView, WriteTxn
@@ -76,7 +77,7 @@ def ask_decision(ctx: AppContext, params: AskDecisionParams) -> DecisionResult:
     # The asker's session is the token's, never a parameter.
     asker_session = _own_engine_session(ctx) if ctx.principal.kind == "agent" else None
 
-    def body(txn: WriteTxn, actor: Actor) -> writes.WriteOutcome[DecisionResult]:
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[DecisionResult]:
         now = ctx.clock()
         decision = Decision(
             id=ctx.id_factory("dec"),
@@ -93,7 +94,7 @@ def ask_decision(ctx: AppContext, params: AskDecisionParams) -> DecisionResult:
         txn.insert_decision(decision)
         return _outcome(txn, ctx, decision, DECISION_ASKED_EVENT)
 
-    return writes.audited_write(ctx, operation=DECISION_ASK, reason=reason, body=body)
+    return audited_write(ctx, operation=DECISION_ASK, reason=reason, body=body)
 
 
 def answer_decision(ctx: AppContext, params: AnswerDecisionParams) -> DecisionResult:
@@ -112,7 +113,7 @@ def answer_decision(ctx: AppContext, params: AnswerDecisionParams) -> DecisionRe
         msg = f"{label!r} is not an option of {decision.id}; it offers {offered}"
         raise InvalidRequest(msg)
 
-    def body(txn: WriteTxn, actor: Actor) -> writes.WriteOutcome[DecisionResult]:
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[DecisionResult]:
         current = _pending(txn, ctx, decision.id)
         answered = current.model_copy(
             update={
@@ -125,9 +126,7 @@ def answer_decision(ctx: AppContext, params: AnswerDecisionParams) -> DecisionRe
         txn.update_decision(answered)
         return _outcome(txn, ctx, answered, DECISION_ANSWERED_EVENT)
 
-    return writes.audited_write(
-        ctx, operation=DECISION_ANSWER, reason=reason, body=body
-    )
+    return audited_write(ctx, operation=DECISION_ANSWER, reason=reason, body=body)
 
 
 def withdraw_decision(
@@ -143,16 +142,14 @@ def withdraw_decision(
         )
         raise GrantRefused(msg)
 
-    def body(txn: WriteTxn, actor: Actor) -> writes.WriteOutcome[DecisionResult]:
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[DecisionResult]:
         del actor
         current = _pending(txn, ctx, decision.id)
         withdrawn = current.model_copy(update={"state": "withdrawn"})
         txn.update_decision(withdrawn)
         return _outcome(txn, ctx, withdrawn, DECISION_WITHDRAWN_EVENT)
 
-    return writes.audited_write(
-        ctx, operation=DECISION_WITHDRAW, reason=reason, body=body
-    )
+    return audited_write(ctx, operation=DECISION_WITHDRAW, reason=reason, body=body)
 
 
 def list_decisions(ctx: AppContext, params: ListDecisionsParams) -> ListDecisionsResult:
@@ -223,8 +220,8 @@ def _pending(txn: WriteTxn, ctx: AppContext, decision_id: str) -> Decision:
 
 def _outcome(
     txn: WriteTxn, ctx: AppContext, decision: Decision, event: str
-) -> writes.WriteOutcome[DecisionResult]:
-    return writes.WriteOutcome(
+) -> WriteOutcome[DecisionResult]:
+    return WriteOutcome(
         result=DecisionResult(decision=_view(txn, decision, ctx)),
         entity_kind="decision",
         entity_id=decision.id,

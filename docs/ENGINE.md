@@ -3489,6 +3489,10 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.grant_decide` | Operator-only | Unavailable: A person's approval of a grant, made deliberately in the Inbox, never by voice. |
 | `session.grant_revoke` | Operator-only | Unavailable: Revoking a grant; for the GUI and for agents over MCP/CLI/REST. |
 | `session.grant_list` | Operator-only | Unavailable: Lists grants to sessions; for the GUI and for agents over MCP/CLI/REST. |
+| `decision.ask` | Operator-only | Unavailable: An agent's question for a person; for agents over MCP/CLI/REST. |
+| `decision.answer` | Operator-only | Unavailable: A person's answer, made deliberately in the Inbox, never by voice. |
+| `decision.list` | Operator-only | Unavailable: Lists decisions; for the GUI and for agents over MCP/CLI/REST. |
+| `decision.withdraw` | Operator-only | Unavailable: Withdrawing a decision; for the GUI and for agents over MCP/CLI/REST. |
 | `token.issue` | Operator-only | Unavailable: Issues credentials that must never enter model context. |
 | `token.list` | Operator-only | Unavailable: Admin credential inventory. |
 | `token.revoke` | Operator-only | Unavailable: Admin credential revocation. |
