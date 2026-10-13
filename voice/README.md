@@ -93,6 +93,24 @@ precedence over a subprocess command for the same half.
 Run the sidecar on an internal network only; `stack.compose.yml` never
 publishes it to the host — the engine stays the only front door.
 
+## Metrics
+
+`VOGT_VOICE_METRICS_ADDR` (for example `0.0.0.0:9465`) serves `GET /metrics`
+in the Prometheus text format, on a listener of its own. It is never on the
+API port. Unset or empty, nothing listens — the same opt-in as the engine's
+`ENGINE_METRICS_ADDR`.
+
+| Metric | Type | What |
+|---|---|---|
+| `process_resident_memory_bytes` | gauge | `VmRSS`, the Prometheus process-collector name |
+| `process_cpu_seconds_total` | counter | user + system CPU seconds |
+| `process_threads` | gauge | OS thread count |
+| `vogt_voice_model_bytes` | gauge | on-disk bytes of the in-process Whisper GGML and Piper ONNX files loaded at startup; `0` when those backends are not configured |
+
+No labels. The model gauge is file size, not allocator residency, so it does
+not overlap `process_resident_memory_bytes`. Publish or route the port only
+where the scraper sits.
+
 ## Developing it
 
 Run from this directory:
