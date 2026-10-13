@@ -518,6 +518,21 @@ mod tests {
         assert_eq!(project_of(&root.path().join("nowhere")), None);
     }
 
+    /// Only the per-session gauge lines of a scrape, so a failing assertion
+    /// prints these and not every other family.
+    fn session_lines() -> String {
+        crate::metrics::metrics()
+            .render()
+            .lines()
+            .filter(|l| {
+                l.starts_with("vogt_session_rss_bytes{")
+                    || l.starts_with("vogt_session_cpu_percent{")
+                    || l.starts_with("vogt_session_processes{")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn session_gauges_carry_their_labels_and_drop_ended_sessions() {
         let resources = |rss_bytes| SessionResources {
@@ -541,7 +556,7 @@ mod tests {
             (labels_a, resources(1 << 30)),
             (labels_b, resources(1 << 20)),
         ]);
-        let out = crate::metrics::metrics().render();
+        let out = session_lines();
         assert!(
             out.contains(&format!(
                 "vogt_session_rss_bytes{{session=\"{a}\",template=\"klaudia\",agent=\"klaudia\",model=\"opus\",project=\"vogt\"}} 1073741824"
@@ -558,7 +573,7 @@ mod tests {
 
         // `a` stopped: the next round has only `b`.
         publish_session_gauges(&[(session_labels(b, None, None, None, None), resources(5))]);
-        let out = crate::metrics::metrics().render();
+        let out = session_lines();
         assert!(!out.contains(&a.to_string()), "{out}");
         assert!(out.contains(&b.to_string()), "{out}");
     }

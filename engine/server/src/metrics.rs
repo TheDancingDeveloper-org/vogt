@@ -324,7 +324,7 @@ pub struct Metrics {
     pub session_starts: CounterVec,
     /// Secret projects read at launch, by how (`bulk`: one request; `cli`:
     /// one vendor-CLI run per secret, the slow fallback) and outcome.
-    pub launch_secret_reads: CounterVec,
+    pub launch_vault_read_count: CounterVec,
     /// Turns a session had when it ended, by template and model. Observed once,
     /// at exit or hibernation, from the session's economics snapshot.
     pub session_turns: ValueHistogramVec,
@@ -368,7 +368,7 @@ impl Metrics {
                 "vogt_session_starts_total",
                 "Sessions the engine started, by origin and outcome.",
             ),
-            launch_secret_reads: CounterVec::new(
+            launch_vault_read_count: CounterVec::new(
                 "vogt_session_launch_secret_reads_total",
                 "Secret projects read at session launch, by mode (bulk or cli) and outcome.",
             ),
@@ -425,7 +425,7 @@ impl Metrics {
         self.launch.render(&mut out);
         self.launch_stage.render(&mut out);
         self.session_starts.render(&mut out);
-        self.launch_secret_reads.render(&mut out);
+        self.launch_vault_read_count.render(&mut out);
         self.session_turns.render(&mut out);
         self.session_peak_context.render(&mut out);
         self.session_compactions.render(&mut out);
