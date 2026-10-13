@@ -14,6 +14,11 @@ A key with a known shape (`KNOWN_SHAPES`) is validated on write, so a
 malformed value is refused with a useful error rather than stored and
 silently ignored by its reader. Unknown keys are accepted as opaque objects,
 bounded in size.
+
+The `dispatch.*` keys (WI-1323) are the exception to "settings that follow a
+login": they are the deployment's dispatch table, which `session.start`
+reads. Only a person writes them, so an agent cannot hand itself defaults by
+proxy, and the reader takes the newest person's write (`dispatch_settings`).
 """
 
 from __future__ import annotations
@@ -32,8 +37,9 @@ from vogt.application.models import (
     PreferenceView,
 )
 from vogt.application.writes import WriteOutcome, audited_write
+from vogt.core import dispatch
 from vogt.core.entities import Actor, ActorPreference
-from vogt.errors import InvalidPreference, PreferenceVersionConflict
+from vogt.errors import InvalidPreference, PersonRequired, PreferenceVersionConflict
 from vogt.storage.interface import ReadView, WriteTxn
 
 PREFERENCE_SET_EVENT = "preference.set"
@@ -64,6 +70,12 @@ def get_preferences(
 
 def set_preference(ctx: AppContext, params: PreferenceSetParams) -> PreferenceSetResult:
     value = _validated(params.key, params.value)
+    if params.key.startswith(dispatch.KEY_PREFIX) and ctx.principal.kind == "agent":
+        msg = (
+            f"{params.key} is the deployment's dispatch table and only a person "
+            f"sets it, not an agent ({ctx.principal.identity_ref})"
+        )
+        raise PersonRequired(msg)
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[PreferenceSetResult]:
         existing = txn.actor_preference(actor_id=actor.id, key=params.key)
@@ -119,6 +131,18 @@ def saved_inbox_filter(ctx: AppContext, view: ReadView) -> InboxSavedFilter | No
     return None if parsed.is_default() else parsed
 
 
+def dispatch_settings(view: ReadView) -> dispatch.DispatchSettings:
+    """The deployment's dispatch table: each `dispatch.*` key as a person
+    last wrote it, over the code defaults (WI-1323). Never the caller's own
+    row — an agent's preference cannot change what its starts resolve to."""
+    stored: dict[str, dict[str, object]] = {}
+    for key in dispatch.KEYS:
+        row = view.latest_human_preference(key)
+        if row is not None and row.value:
+            stored[key] = row.value
+    return dispatch.resolve(stored)
+
+
 def _validated(key: str, value: dict[str, object]) -> dict[str, object]:
     try:
         encoded = json.dumps(value, sort_keys=True)
@@ -127,6 +151,11 @@ def _validated(key: str, value: dict[str, object]) -> dict[str, object]:
     if len(encoded.encode("utf-8")) > MAX_VALUE_BYTES:
         msg = f"preference values are limited to {MAX_VALUE_BYTES} bytes of JSON"
         raise InvalidPreference(msg)
+    if key.startswith(dispatch.KEY_PREFIX):
+        try:
+            return dispatch.validate(key, value)
+        except dispatch.DispatchError as error:
+            raise InvalidPreference(str(error)) from None
     shape = KNOWN_SHAPES.get(key)
     if shape is None or not value:
         return value
@@ -148,6 +177,7 @@ def _view(row: ActorPreference) -> PreferenceView:
 
 __all__ = [
     "INBOX_FILTER_KEY",
+    "dispatch_settings",
     "get_preferences",
     "saved_inbox_filter",
     "set_preference",

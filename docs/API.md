@@ -260,6 +260,20 @@ sessions no longer look like crashes (WI-913).
   started itself (the GUI, a protected template): `session.token` (below)
   gives such a session its own agent credential.
 
+`session.start` takes `purpose` (WI-1323): `implement`,
+`implement-careful`, `review`, `mechanical`, `investigate` or `design`. The
+deployment's dispatch profile for it fills `template`, `model`, `effort`,
+`budget`, `worktree`, `repo_map` and `autopilot` where the start leaves them
+unset. Explicit fields win and are listed under `overrides` on the
+`session.started` event, which also carries the resolved `budget`,
+`worktree` and `repo_map`. A profile never sets `role` or `permission_mode`,
+and it is resolved after the `role_refused` and `bypass_refused` checks.
+Session rows (`session.list` full mode) carry `purpose`,
+`started_by_session` and `started_by_kind` (`person`, `oversight`, `worker`,
+or null when the engine could not report the starter's role). The core
+derives both `started_by_*` fields from the caller's principal and engine
+role, never from the start's parameters.
+
 `session.token` (`work.write`, audited, `POST /api/sessions/token`) is the
 session engine's call, refused to every other caller (`403 engine_only`).
 For an agent session the engine starts without a credential of its own
@@ -495,6 +509,17 @@ docker exec <core-container> \
   caller's own row. `inbox.filter` is validated:
   `{"sources": [...] | null, "actor": "any|external|org|bot",
   "triage_states": ["active", ...]}`.
+  The `dispatch.*` keys are the deployment's dispatch table, not
+  per-caller settings: only a person sets them (an agent gets `403
+  person_required`), and `session.start` reads the newest person's write.
+  `dispatch.profiles` is `{"<purpose>": {field: value}}` and overrides only
+  the fields it names (`template`, `model`, `effort`, `budget_turns`,
+  `budget_wall_clock_minutes`, `worktree`, `repo_map`, `autopilot`,
+  `read_only`). `dispatch.max_workers_per_overseer` (default 5),
+  `dispatch.escalate_after_failed_reviews` (2) and
+  `dispatch.review_by_oversight_only` (true) are each `{"value": …}`. Each
+  key is validated against its own shape, and any other `dispatch.*` key is
+  refused.
 - **`place.metrics`** — `inbox_active` is the badge: the count under the
   caller's saved `inbox.filter` (the same answer `inbox.list` gives under it;
   free-text search is client-side and never counted). `inbox_active_unfiltered`

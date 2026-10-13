@@ -1091,6 +1091,16 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_actor_preference(row) for row in rows]
 
+    def latest_human_preference(self, key: str) -> ActorPreference | None:
+        row = self._conn.execute(
+            "SELECT p.actor_id, p.key, p.value, p.version, p.updated_at "
+            "FROM actor_preferences p JOIN actors a ON a.id = p.actor_id "
+            "WHERE p.key = ? AND a.kind = 'human' "
+            "ORDER BY p.updated_at DESC, p.actor_id LIMIT 1",
+            (key,),
+        ).fetchone()
+        return None if row is None else _row_to_actor_preference(row)
+
     # -- inbox triage -------------------------------------------------------
 
     def inbox_triage_by_key(self, entry_key: str) -> InboxTriage | None:
@@ -2127,7 +2137,8 @@ class SqliteWriteTxn(SqliteReadView):
         self._conn.execute(
             "INSERT INTO coding_sessions (id, engine_session_id, project_id, "
             "work_item_id, actor_id, cwd, template, model, effort, reason, "
-            "started_at, stopped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "purpose, started_by_session, started_by_kind, started_at, stopped_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session.id,
                 session.engine_session_id,
@@ -2139,6 +2150,9 @@ class SqliteWriteTxn(SqliteReadView):
                 session.model,
                 session.effort,
                 session.reason,
+                session.purpose,
+                session.started_by_session,
+                session.started_by_kind,
                 to_iso(session.started_at),
                 None if session.stopped_at is None else to_iso(session.stopped_at),
             ),
@@ -2922,6 +2936,9 @@ def _row_to_session(row: sqlite3.Row) -> CodingSession:
         model=None if row["model"] is None else str(row["model"]),
         effort=None if row["effort"] is None else str(row["effort"]),
         reason=str(row["reason"]),
+        purpose=_opt(row, "purpose"),
+        started_by_session=_opt(row, "started_by_session"),
+        started_by_kind=_opt(row, "started_by_kind"),  # type: ignore[arg-type]
         started_at=from_iso(str(row["started_at"])),
         stopped_at=None if stopped is None else from_iso(str(stopped)),
     )
