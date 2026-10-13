@@ -2018,6 +2018,91 @@ def test_a_project_policy_is_in_the_brief_and_only_the_enforced_slice_is_sent(
     }
 
 
+def test_a_landing_block_is_stored_and_rendered_with_the_item_number(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1318: the three blocks round-trip, and the brief fills `{n}` in."""
+    from vogt.core.entities import LandingPolicy, ReviewPolicy, VerificationPolicy
+
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(
+                landing=LandingPolicy(
+                    base_branch="integrate/vogt-next",
+                    worker_lands_by="push_branch",
+                    merge_by="oversight",
+                    merge_mode="rebase",
+                ),
+                review=ReviewPolicy(never_models=["grok-4.7"]),
+                verification=VerificationPolicy(
+                    required_for_done=True, lanes=["vogt-dev"]
+                ),
+            ),
+            reason=WHY,
+        ),
+    )
+    with wired.declared.read() as view:
+        stored = view.project_by_slug("vogt")
+    assert stored is not None and stored.agent_policy.landing is not None
+    assert stored.agent_policy.landing.merge_mode == "rebase"
+    assert stored.agent_policy.review is not None
+    assert stored.agent_policy.review.never_models == ["grok-4.7"]
+    assert stored.agent_policy.verification is not None
+    assert stored.agent_policy.verification.required_for_done is True
+
+    item = native_work_item(wired, title="land me", project="vogt")
+    start_session(wired, StartSessionParams(work_item=item.ref, reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert "## Landing rule for this repo" in brief
+    assert f"`^wi-{item.ref.split('-', 1)[1]}-[a-z0-9-]+$`" in brief
+    assert "**Base** `integrate/vogt-next`" in brief
+    assert "**Lands by** push_branch" in brief
+    assert "**Merge by** oversight (rebase)" in brief
+    assert "**Deploy by** operator" in brief
+    # The blocks are recorded, not enforced: the hook payload is unchanged.
+    assert "policy" not in engine.last_spec
+
+
+def test_a_project_without_a_landing_block_renders_no_landing_rule(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "Landing rule" not in engine.last_spec["prompt"]
+
+
+def test_a_bad_branch_pattern_or_a_merge_commit_mode_is_refused(
+    wired: AppContext,
+) -> None:
+    from vogt.core.entities import LandingPolicy
+
+    with pytest.raises(ValidationError, match="branch_pattern"):
+        update_project(
+            wired,
+            UpdateProjectParams(
+                slug="vogt",
+                agent_policy=AgentPolicy(
+                    landing=LandingPolicy(
+                        base_branch="main",
+                        branch_pattern="(unclosed",
+                        worker_lands_by="push_branch",
+                        merge_by="oversight",
+                        merge_mode="rebase",
+                    )
+                ),
+                reason=WHY,
+            ),
+        )
+    with pytest.raises(ValidationError, match="merge_mode"):
+        LandingPolicy(
+            base_branch="main",
+            worker_lands_by="push_branch",
+            merge_by="oversight",
+            merge_mode="merge",  # type: ignore[arg-type]
+        )
+
+
 def test_a_policy_with_nothing_to_enforce_sends_no_hook_payload(
     wired: AppContext, engine: StandInEngine
 ) -> None:

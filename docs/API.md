@@ -649,6 +649,18 @@ fits in context.
   default `work.create` and label edits refuse `project_not_linked`, and that
   refusal says so.
 
+- **A project's agent policy.** `project.update` takes `agent_policy` and
+  replaces the whole policy. Besides `forbidden_text`, `merge_deploys_prod`,
+  `main_branches`, `commit_identity`, `test_recipe` and `rules`, it may carry
+  `landing` (`base_branch`, `branch_pattern` with `{n}` for the work item
+  number, `worker_lands_by` of `push_branch` or `open_pr`, `merge_by` of
+  `oversight` or `operator`, `merge_mode` of `fast_forward` or `rebase`,
+  `linear_history`, `deploy_by`), `review` (`template`, `model`, `effort`,
+  `never_models`, `budget_turns`) and `verification` (`required_for_done`,
+  `lanes`). `branch_pattern` must compile as a regex once `{n}` is a number,
+  and `merge_mode` of `merge` is refused; both refusals name the field.
+  `project.get` returns the blocks as stored. Nothing enforces them yet.
+
 ## Deploy diagnostics
 
 `instance.diagnostics` (`GET /api/instance/diagnostics`, `vogt diagnostics`,

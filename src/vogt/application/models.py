@@ -649,8 +649,11 @@ class UpdateProjectParams(Params):
         default=None,
         description=(
             "Replaces the project's agent policy entirely. Leave unset to keep "
-            "it. `forbidden_text` entries are regexes and must compile; a "
-            "pattern that does not is refused rather than stored."
+            "it. `forbidden_text` entries are regexes and must compile, and so "
+            "must `landing.branch_pattern` once `{n}` stands for a number; "
+            "`landing.merge_mode` is `fast_forward` or `rebase` — `merge` is "
+            "refused. A pattern that does not compile is refused rather than "
+            "stored."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")

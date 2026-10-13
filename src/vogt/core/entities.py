@@ -82,12 +82,70 @@ class Actor(Entity):
     created_at: datetime
 
 
+#: `{n}` in a landing branch pattern stands for the work item's number.
+_BRANCH_NUMBER = "{n}"
+
+
+class LandingPolicy(Entity):
+    """How a worker's branch is cut and landed on this project.
+
+    Recorded so a brief can state the rule and, later, so the engine can
+    enforce it. Nothing here is enforced yet: a later item reads it.
+    """
+
+    #: The branch workers cut from and land onto.
+    base_branch: str
+    #: `{n}` is the work item number. Validated by compiling it with `{n}`
+    #: replaced by `\d+`, so a pattern that could never match is refused.
+    branch_pattern: str = r"^wi-{n}-[a-z0-9-]+$"
+    worker_lands_by: Literal["push_branch", "open_pr"]
+    merge_by: Literal["oversight", "operator"]
+    #: A merge commit is refused outright: landing is a fast-forward or a rebase.
+    merge_mode: Literal["fast_forward", "rebase"]
+    linear_history: bool = True
+    deploy_by: str = "operator"
+
+    @field_validator("branch_pattern")
+    @classmethod
+    def _pattern_compiles(cls, pattern: str) -> str:
+        compiled_from = pattern.replace(_BRANCH_NUMBER, r"\d+")
+        try:
+            re.compile(compiled_from)
+        except re.error as exc:
+            raise ValueError(
+                f"branch_pattern {pattern!r} does not compile once {{n}} is "
+                f"replaced with a number: {exc}"
+            ) from exc
+        return pattern
+
+
+class ReviewPolicy(Entity):
+    """How a review of this project's work is run. Guidance until enforced."""
+
+    template: str = "claude"
+    model: str = "opus"
+    effort: str = "low"
+    #: A review that names one of these models is refused once enforcement lands.
+    never_models: list[str] = []
+    budget_turns: int = 40
+
+
+class VerificationPolicy(Entity):
+    """Whether closing an item needs a verification record, and where."""
+
+    required_for_done: bool = False
+    #: The deploy lanes a verification must have been exercised on.
+    lanes: list[str] = []
+
+
 class AgentPolicy(Entity):
     """A project's agent policy, stored as data and shown in every session brief.
 
     `forbidden_text` and `merge_deploys_prod` are the two facts the session
-    hooks refuse on. Everything else is guidance the brief carries and nothing
-    enforces: compliance stays a fact to read, never a precondition.
+    hooks refuse on. `landing`, `review` and `verification` are recorded so
+    the brief can state them; nothing enforces them yet. Everything else is
+    guidance the brief carries and nothing enforces: compliance stays a fact
+    to read, never a precondition.
     """
 
     #: Regexes matched against commit messages, authors, trailers, PR text and
@@ -107,6 +165,10 @@ class AgentPolicy(Entity):
     test_recipe: str = ""
     #: Free-text rules. Guidance only; a hook never reads these.
     rules: list[str] = []
+    #: Absent means the project states no landing rule, and the brief says none.
+    landing: LandingPolicy | None = None
+    review: ReviewPolicy | None = None
+    verification: VerificationPolicy | None = None
 
     @field_validator("forbidden_text")
     @classmethod
