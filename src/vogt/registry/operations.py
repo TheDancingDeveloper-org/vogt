@@ -24,7 +24,9 @@ from vogt.application.models import (
     AgentCliListResult,
     AgentCliUpdateParams,
     AgentCliUpdateResult,
+    AnswerDecisionParams,
     AnswerSessionParams,
+    AskDecisionParams,
     AuditListResult,
     AuthDecisionListParams,
     AuthDecisionListResult,
@@ -81,6 +83,7 @@ from vogt.application.models import (
     CreateUserParams,
     CreateWorkParams,
     DecideGrantParams,
+    DecisionResult,
     DeployedVersionsParams,
     DeployedVersionsResult,
     DepsParams,
@@ -139,6 +142,8 @@ from vogt.application.models import (
     LabelResult,
     ListActorsParams,
     ListAuditParams,
+    ListDecisionsParams,
+    ListDecisionsResult,
     ListEventsParams,
     ListGrantsParams,
     ListGrantsResult,
@@ -250,6 +255,7 @@ from vogt.application.models import (
     WhoamiResult,
     WhyParams,
     WhyResult,
+    WithdrawDecisionParams,
     WorkflowListParams,
     WorkflowListResult,
     WorkListResult,
@@ -1316,6 +1322,67 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.list_grants,
             route=HttpRoute("GET", "/sessions/grants"),
             cli=CliBinding(("session", "grants")),
+        ),
+        Operation(
+            name="decision.ask",
+            summary=(
+                "Ask a person to decide (WI-1321): a question, 2-4 options "
+                "(label, description) with exactly one recommended, and the "
+                "context they need. It appears in the Inbox; you do not block — "
+                "carry on with what does not depend on it and read the answer "
+                "with decision.list. Pending past expires_at (default 24 h, "
+                "max 7 d) it reads `expired`, with no implied answer. Your "
+                "session is recorded from your token."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=AskDecisionParams,
+            result_model=DecisionResult,
+            handler=services.ask_decision,
+            route=HttpRoute("POST", "/decisions"),
+            cli=CliBinding(("decision", "ask")),
+        ),
+        Operation(
+            name="decision.answer",
+            summary=(
+                "Answer a pending decision with one of its option labels and "
+                "an optional note. A person only: every agent is refused "
+                "(403 person_required). Nothing is applied when it is answered."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=AnswerDecisionParams,
+            result_model=DecisionResult,
+            handler=services.answer_decision,
+            route=HttpRoute("POST", "/decisions/answer"),
+            cli=CliBinding(("decision", "answer")),
+        ),
+        Operation(
+            name="decision.list",
+            summary=(
+                "Decisions, newest first, by state (pending, answered, "
+                "withdrawn, expired), work item or asker (identity_ref)."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=ListDecisionsParams,
+            result_model=ListDecisionsResult,
+            handler=services.list_decisions,
+            route=HttpRoute("GET", "/decisions"),
+            cli=CliBinding(("decision", "list")),
+        ),
+        Operation(
+            name="decision.withdraw",
+            summary=(
+                "Withdraw a pending decision. A person, or the session that asked, may."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=WithdrawDecisionParams,
+            result_model=DecisionResult,
+            handler=services.withdraw_decision,
+            route=HttpRoute("POST", "/decisions/withdraw"),
+            cli=CliBinding(("decision", "withdraw")),
         ),
         Operation(
             name="session.answer",

@@ -727,6 +727,58 @@ class SessionGrant(Entity):
         return self.state
 
 
+DecisionState = Literal["pending", "answered", "withdrawn"]
+
+
+class DecisionOption(Entity):
+    """One answer a decision offers; exactly one per decision is recommended."""
+
+    label: str
+    description: str = ""
+    recommended: bool = False
+
+
+class DecisionAnswer(Entity):
+    """The option a person chose, and what they added."""
+
+    label: str
+    note: str = ""
+
+
+class Decision(Entity):
+    """A question an agent put to a person, with options (WI-1321).
+
+    Shaped like `SessionGrant` so the Inbox and the person-only rule are
+    reused (`docs/design/agent-harness-services.md` §2.3). Nothing is applied
+    when it is answered: the asker reads the answer and acts through the op
+    that checks the action. `expired` is not a state: it is a pending
+    decision past `expires_at`, computed on read, and it implies no answer.
+    """
+
+    id: str
+    asker_actor_id: str
+    asker_session: str | None = None
+    work_item_id: str | None = None
+    question: str
+    options: list[DecisionOption]
+    context: str = ""
+    state: DecisionState = "pending"
+    answer: DecisionAnswer | None = None
+    answered_by_actor_id: str | None = None
+    created_at: datetime
+    answered_at: datetime | None = None
+    expires_at: datetime
+    reason: str
+
+    def effective_state(
+        self, now: datetime
+    ) -> Literal["pending", "answered", "withdrawn", "expired"]:
+        """`expired` for a pending decision past its expiry, else the state."""
+        if self.state == "pending" and self.expires_at <= now:
+            return "expired"
+        return self.state
+
+
 class DepRef(Entity):
     """One reference from a project to another project.
 
