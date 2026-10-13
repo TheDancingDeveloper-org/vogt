@@ -33,7 +33,7 @@ readonly VOGT_SRC="${VOGT_SRC:-$HOME/Working/Active/apps/vogt}"
 # is trusted: anything else (no jq, no file, a project-scope .mcp.json, a stale
 # entry) falls through to the CLI path below, which is unchanged.
 claude_runs() {
-    local name="$1" command="$2" arg="${3:-}" config="$HOME/.claude.json"
+    local name="$1" command="$2" arg="${3:-}" config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
     command -v jq >/dev/null 2>&1 && [[ -f "$config" ]] || return 1
     jq -e --arg n "$name" --arg c "$command" --arg a "$arg" --arg cwd "$PWD" '
         [.mcpServers[$n]?, .projects[$cwd].mcpServers[$n]?]
@@ -44,10 +44,11 @@ claude_runs() {
 }
 
 # Whether `name` appears in no Claude Code config this session can see: user
-# or local scope in ~/.claude.json, or the project's .mcp.json. Lets an
+# or local scope in Claude Code's config (`$CLAUDE_CONFIG_DIR/.claude.json`, else
+# ~/.claude.json: a profile has its own), or the project's .mcp.json. Lets an
 # unwanted read-only server be skipped without asking the CLI to look for it.
 claude_lacks() {
-    local name="$1" config="$HOME/.claude.json"
+    local name="$1" config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
     command -v jq >/dev/null 2>&1 && [[ -f "$config" ]] || return 1
     jq -e --arg n "$name" --arg cwd "$PWD" '
         (.mcpServers[$n]? == null) and (.projects[$cwd].mcpServers[$n]? == null)' \

@@ -1024,6 +1024,9 @@ components:
           type: string
           enum: [accept-edits, bypass]
           description: The permission posture when not the default (docs/ENGINE.md, "Permission posture").
+        account:
+          type: string
+          description: The named Claude Code account the session runs under, when one was named (docs/ENGINE.md, "Claude accounts").
     SessionBudget:
       type: object
       description: >-
@@ -1269,6 +1272,14 @@ components:
             For `claude` and `codex` the session starts in the directory the
             conversation's transcript records, when that is inside the
             workspace, instead of `cwd`.
+        account:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,31}$"
+          description: >-
+            Run under a named Claude Code account from
+            `ENGINE_AGENT_CLAUDE_ACCOUNTS`; the engine sets that account's
+            `CLAUDE_CONFIG_DIR`. Refused (`400`) for an unknown name or a
+            command that is not Claude Code. Kept in the hibernation record.
         role:
           $ref: "#/components/schemas/SessionRole"
         work_item:

@@ -75,6 +75,10 @@ pub struct Record {
     /// quietly change it (WI-926).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The Claude Code account it was started under; a wake keeps it, and its
+    /// `CLAUDE_CONFIG_DIR` rides in `env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// The launch posture actually applied at the first start (WI-1250): the
     /// driven-session settings file, and every extra directory the agent was
     /// given. A wake replays these instead of reading the deployment's current
@@ -157,6 +161,7 @@ impl Record {
             model: None,
             effort: None,
             permission_mode: None,
+            account: None,
             settings_file: None,
             add_dirs: Vec::new(),
             conversation: None,

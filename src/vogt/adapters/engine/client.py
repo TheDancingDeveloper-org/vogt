@@ -187,6 +187,8 @@ class EngineSession:
     template: str | None = None
     #: The permission posture, when not the default (WI-926).
     permission_mode: str | None = None
+    #: The Claude Code account it runs under, when one was named.
+    account: str | None = None
     #: Who asked the session to stop, and why (WI-913).
     stopped_by: str | None = None
     stop_reason: str | None = None
@@ -233,6 +235,7 @@ class EngineSession:
             resources=EngineResources.from_payload(payload.get("resources")),
             template=_optional_str(payload.get("template")),
             permission_mode=_optional_str(payload.get("permission_mode")),
+            account=_optional_str(payload.get("account")),
             stopped_by=_optional_str((payload.get("stop") or {}).get("by"))
             if isinstance(payload.get("stop"), dict)
             else None,
@@ -761,6 +764,7 @@ class EngineClient:
         effort: str | None = None,
         resume: str | None = None,
         permission_mode: str | None = None,
+        account: str | None = None,
         autopilot: bool = False,
         role: str = "worker",
         work_item: str | None = None,
@@ -810,6 +814,11 @@ class EngineClient:
             # Sent only when not the default, so a default start is the
             # request this client has always made.
             spec["permission_mode"] = permission_mode.replace("_", "-")
+        if account:
+            # A Claude Code account *name* from the engine's own allowlist;
+            # the engine maps it to a config directory and refuses a name it
+            # does not know. Sent only when named, like the fields above.
+            spec["account"] = account
         if autopilot:
             # The engine keeps it awake and re-prompts it at its prompt
             # (WI-949); sent only when on, like the fields above.

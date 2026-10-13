@@ -304,7 +304,43 @@ impl SessionRegistry {
         // the template and caller gave them, before the engine adds its own
         // launch arguments and variables (a wake adds those again).
         let base_command = spec.command.clone();
-        let base_env = spec.env.clone().unwrap_or_default();
+        let mut base_env = spec.env.clone().unwrap_or_default();
+
+        // A named Claude Code account becomes that account's config directory,
+        // which the engine looked up itself: the caller never supplies a path.
+        // It goes into the recorded environment (a directory, not a secret),
+        // so a wake runs on the same login, and it comes after the caller's
+        // own pairs so it has the last word. A woken session replays the
+        // directory already in its record.
+        let account = spec
+            .account
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_string);
+        if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), &creating) {
+            if base_command
+                .as_deref()
+                .and_then(agent_cli::agent_name)
+                .as_deref()
+                != Some("claude")
+            {
+                return Err(ApiError::BadRequest(
+                    "account is applied to Claude Code only; the command is not `claude`".into(),
+                ));
+            }
+            let dir = self
+                .cfg
+                .agent_onboarding
+                .account_dir(name)
+                .map_err(ApiError::BadRequest)?;
+            base_env.retain(|(k, _)| k != "CLAUDE_CONFIG_DIR");
+            base_env.push((
+                "CLAUDE_CONFIG_DIR".into(),
+                dir.to_string_lossy().into_owned(),
+            ));
+            spec.env = Some(base_env.clone());
+        }
 
         // A resumed conversation starts where it ran, not where the caller
         // would have opened a fresh session: `claude --resume <id>` only finds
@@ -561,6 +597,7 @@ impl SessionRegistry {
             .map(|m| m.replace('_', "-"))
             .filter(|m| !m.is_empty() && m != "default");
         session.set_permission_mode(posture.clone());
+        session.set_account(account.clone());
         session.set_autopilot(spec.autopilot);
         session.set_policy(spec.policy.clone());
         session.set_budget(spec.budget.clone());
@@ -600,6 +637,7 @@ impl SessionRegistry {
                 record.model = spec.model.clone();
                 record.effort = spec.effort.clone();
                 record.permission_mode = posture.clone();
+                record.account = account.clone();
                 record.settings_file = self.cfg.agent_onboarding.settings_file.clone();
                 record.add_dirs = prompt_file
                     .as_ref()
@@ -706,7 +744,12 @@ impl SessionRegistry {
         }
         let agent = agent_cli::agent_name(spec.command.as_deref()?)?;
         let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
-        let dir = crate::transcripts::conversation_cwd(&agent, id, &home)?;
+        let dir = crate::transcripts::conversation_cwd(
+            &agent,
+            id,
+            &home,
+            &self.cfg.agent_onboarding.claude_dirs(),
+        )?;
         let dir = dir.to_str()?;
         match workspace_path::resolve_existing_allow_absolute(&self.cfg.workspace_root, dir) {
             Ok(canon) => Some(canon.to_string_lossy().into_owned()),
@@ -1317,6 +1360,7 @@ impl SessionRegistry {
             model: record.model.clone(),
             effort: record.effort.clone(),
             permission_mode: record.permission_mode.clone(),
+            account: record.account.clone(),
             autopilot: record.autopilot,
             policy: record.policy.clone(),
             role: record.role,
@@ -1820,6 +1864,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         resources: None,
         template: record.template.clone(),
         permission_mode: record.permission_mode.clone(),
+        account: record.account.clone(),
         stop: None,
         economics: None,
         budget: record.budget.clone(),

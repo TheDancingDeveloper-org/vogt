@@ -275,6 +275,13 @@ plain shell keeps the pod's token, because the person at it is a person.
 The posture shows on session rows as `permission_mode`. See
 [`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture).
 
+`session.start` also takes `account`, the name of a Claude Code subscription
+account from the engine's `ENGINE_AGENT_CLAUDE_ACCOUNTS`. Omitted runs the
+engine's default login. The name is sent to the engine as is: it maps the name
+to a config directory itself, and refuses an unknown name or a command that is
+not Claude Code (`400`). It shows on session rows and on `session.economics` as
+`account`. See [`ENGINE.md`, "Claude accounts"](ENGINE.md#claude-accounts).
+
 `session.answer` (`work.write`, audited) answers the dialog a session
 shows. The session must be `awaiting-approval`, which covers permission
 dialogs and the startup gates `folder-trust`, `external-imports` and

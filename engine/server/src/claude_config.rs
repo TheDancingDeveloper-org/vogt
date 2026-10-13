@@ -48,6 +48,83 @@ pub struct Onboarding {
     /// default posture, as `OPENCODE_CONFIG_CONTENT`. Read and checked once,
     /// at start. See [`opencode_config_from`].
     pub opencode_config: Option<String>,
+    /// The named Claude Code accounts a session may be started under
+    /// (`ENGINE_AGENT_CLAUDE_ACCOUNTS`), each a config directory holding its
+    /// own login. See [`parse_accounts`].
+    pub accounts: Vec<ClaudeAccount>,
+}
+
+/// One Claude Code subscription account: a name callers use, and the
+/// `CLAUDE_CONFIG_DIR` that holds its login, `.claude.json` and transcripts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeAccount {
+    pub name: String,
+    pub dir: PathBuf,
+}
+
+/// The longest account name accepted.
+const ACCOUNT_NAME_MAX: usize = 32;
+
+/// Whether `name` is usable as an account name: lowercase letters, digits,
+/// `-` and `_`, starting with a letter or digit. Names appear on the wire and
+/// in records, so they stay boring.
+pub fn is_account_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= ACCOUNT_NAME_MAX
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// `ENGINE_AGENT_CLAUDE_ACCOUNTS`, read: comma-separated `name=/abs/dir`
+/// pairs. The engine, not the caller, maps a name to a directory, so a
+/// session can only be pointed at a directory the operator listed. A malformed
+/// or duplicate entry, or a relative directory, is skipped with a warning:
+/// one bad entry must not stop the engine or disable the others.
+pub fn parse_accounts(value: Option<&str>) -> Vec<ClaudeAccount> {
+    let mut accounts: Vec<ClaudeAccount> = Vec::new();
+    for entry in value.unwrap_or_default().split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((name, dir)) = entry.split_once('=') else {
+            tracing::warn!(
+                entry,
+                "ENGINE_AGENT_CLAUDE_ACCOUNTS entry is not name=dir; ignored"
+            );
+            continue;
+        };
+        let (name, dir) = (name.trim(), dir.trim());
+        if !is_account_name(name) {
+            tracing::warn!(
+                name,
+                "ENGINE_AGENT_CLAUDE_ACCOUNTS name is not [a-z0-9][a-z0-9_-]{{0,31}}; ignored"
+            );
+            continue;
+        }
+        if !Path::new(dir).is_absolute() {
+            tracing::warn!(
+                name,
+                dir,
+                "ENGINE_AGENT_CLAUDE_ACCOUNTS directory is not absolute; ignored"
+            );
+            continue;
+        }
+        if accounts.iter().any(|a| a.name == name) {
+            tracing::warn!(
+                name,
+                "ENGINE_AGENT_CLAUDE_ACCOUNTS names the account twice; the first wins"
+            );
+            continue;
+        }
+        accounts.push(ClaudeAccount {
+            name: name.to_string(),
+            dir: PathBuf::from(dir),
+        });
+    }
+    accounts
 }
 
 /// `ENGINE_AGENT_CLAUDE_SETTINGS`, read: a path names a deployment's own
@@ -142,7 +219,45 @@ impl Onboarding {
                     .ok()
                     .as_deref(),
             ),
+            accounts: parse_accounts(
+                std::env::var("ENGINE_AGENT_CLAUDE_ACCOUNTS")
+                    .ok()
+                    .as_deref(),
+            ),
         }
+    }
+
+    /// The `CLAUDE_CONFIG_DIR` for the account `name`, or why there is none.
+    pub fn account_dir(&self, name: &str) -> std::result::Result<&Path, String> {
+        self.accounts
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.dir.as_path())
+            .ok_or_else(|| {
+                let known: Vec<&str> = self.accounts.iter().map(|a| a.name.as_str()).collect();
+                if known.is_empty() {
+                    format!("account {name:?}: no accounts are configured (ENGINE_AGENT_CLAUDE_ACCOUNTS)")
+                } else {
+                    format!("account {name:?} is not one of {}", known.join(", "))
+                }
+            })
+    }
+
+    /// Every Claude Code config directory whose `projects/` may hold a
+    /// transcript: the engine's own `CLAUDE_CONFIG_DIR` when set, then each
+    /// configured account. The default `~/.claude` is the caller's to add.
+    pub fn claude_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+        for account in &self.accounts {
+            if !dirs.contains(&account.dir) {
+                dirs.push(account.dir.clone());
+            }
+        }
+        dirs
     }
 
     /// Claude Code's global config file for a session with `env`.
@@ -278,12 +393,54 @@ mod tests {
     }
 
     #[test]
+    fn accounts_parse_to_named_absolute_directories() {
+        let accounts = parse_accounts(Some(" main=/home/a/.claude , acct2=/home/a/.claude-acct2,"));
+        assert_eq!(
+            accounts,
+            vec![
+                ClaudeAccount {
+                    name: "main".into(),
+                    dir: PathBuf::from("/home/a/.claude")
+                },
+                ClaudeAccount {
+                    name: "acct2".into(),
+                    dir: PathBuf::from("/home/a/.claude-acct2")
+                },
+            ]
+        );
+        assert!(parse_accounts(None).is_empty());
+    }
+
+    #[test]
+    fn a_bad_account_entry_is_skipped_and_the_rest_kept() {
+        let accounts = parse_accounts(Some(
+            "noequals,Upper=/x,rel=relative/dir,ok=/ok,ok=/second,=/empty,../up=/y",
+        ));
+        assert_eq!(accounts.len(), 1, "{accounts:?}");
+        assert_eq!(accounts[0].dir, PathBuf::from("/ok"));
+    }
+
+    #[test]
+    fn an_unknown_account_is_refused_with_the_known_names() {
+        let onboarding = Onboarding {
+            accounts: parse_accounts(Some("a=/a,b=/b")),
+            ..Default::default()
+        };
+        assert_eq!(onboarding.account_dir("b"), Ok(Path::new("/b")));
+        let err = onboarding.account_dir("c").unwrap_err();
+        assert!(err.contains("a, b"), "{err}");
+        let none = Onboarding::default().account_dir("a").unwrap_err();
+        assert!(none.contains("no accounts are configured"), "{none}");
+    }
+
+    #[test]
     fn the_session_config_dir_wins() {
         let onboarding = Onboarding {
             enabled: true,
             default_dir: Some(PathBuf::from("/home/pod")),
             settings_file: None,
             opencode_config: None,
+            accounts: Vec::new(),
         };
         let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())];
         assert_eq!(

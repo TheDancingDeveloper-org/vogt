@@ -121,6 +121,13 @@ pub struct SessionSpec {
     /// permission check. Claude Code only; refused for anything else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// Which Claude Code subscription account to run under: a name from the
+    /// deployment's `ENGINE_AGENT_CLAUDE_ACCOUNTS`, which the engine maps to
+    /// that account's `CLAUDE_CONFIG_DIR`. Absent runs the engine's default
+    /// account. Claude Code only; an unknown name, or a command that is not
+    /// Claude Code, is refused rather than started on the wrong login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// Keep the agent working through its backlog unattended (WI-949): the
     /// idle policy leaves the session alone, and when the agent stops at its
     /// prompt without reporting itself blocked, the engine tells it to carry
@@ -272,6 +279,9 @@ pub struct SessionSummary {
     /// (`accept-edits`, `bypass`) (WI-926).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The Claude Code account it was started under, when one was named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// The session template it was started from, by the name the caller
     /// gave (`claude`, `Codex (protected)`), when one was named (WI-919).
     /// Absent for a session started with an explicit command.

@@ -274,6 +274,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             effort=params.effort,
             resume=params.resume,
             permission_mode=params.permission_mode,
+            account=params.account,
             autopilot=autopilot,
             role=params.role,
             work_item=subject.work_item_ref,
@@ -392,6 +393,8 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 # Named on the audit row: who started an unguarded session,
                 # and why, is what an operator looks for afterwards.
                 "permission_mode": params.permission_mode,
+                # Which Claude Code account it was asked to run under.
+                "account": params.account,
                 # How long the engine took to start it (WI-927); the launch
                 # inside it is timed by the engine's own launch report.
                 "engine_spawn_ms": engine_spawn_ms,
@@ -1084,7 +1087,11 @@ def economics(
     if engine_session is None and declared is None:
         msg = f"no session {params.id!r}"
         raise NotFound(msg)
-    result = SessionEconomicsResult(id=params.id, engine_session_id=engine_id)
+    result = SessionEconomicsResult(
+        id=params.id,
+        engine_session_id=engine_id,
+        account=None if engine_session is None else engine_session.account,
+    )
     reported = None if engine_session is None else engine_session.economics
     if reported:
         # The engine's tailer already metered the transcript. Re-reading the
@@ -3366,6 +3373,7 @@ def _start_on_engine(
     effort: str | None = None,
     resume: str | None = None,
     permission_mode: str | None = None,
+    account: str | None = None,
     autopilot: bool = False,
     role: str = "worker",
     work_item: str | None = None,
@@ -3394,6 +3402,7 @@ def _start_on_engine(
         effort=effort,
         resume=resume,
         permission_mode=permission_mode,
+        account=account,
         autopilot=autopilot,
         role=role,
         work_item=work_item,
@@ -3545,6 +3554,7 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "conversation_id": engine_session.conversation_id,
         "resources": _resources(engine_session.resources),
         "permission_mode": engine_session.permission_mode,
+        "account": engine_session.account,
         "stopped_by": engine_session.stopped_by,
         "stop_reason": engine_session.stop_reason,
         "budget": _budget_params(engine_session.budget),

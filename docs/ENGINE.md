@@ -1411,6 +1411,7 @@ checks decide what it can finish on its own (WI-926; the design is
   stores, deploy targets, sensitive hosts. Empty means the image's policy;
   `off` turns the policy off. Prod-mutating, destructive, shared-resource and secret-exposing
   actions keep their built-in rules and stay denied.
+- **`account` on `POST /api/sessions`**: see [Claude accounts](#claude-accounts).
 - **`permission_mode` on `POST /api/sessions`**: `accept-edits` maps to
   `--permission-mode acceptEdits` (edits accepted, everything else asks).
   `bypass` maps to `--dangerously-skip-permissions` (no checks). Klaudia
@@ -1459,6 +1460,42 @@ checks decide what it can finish on its own (WI-926; the design is
   action, so `session.answer` has nothing to answer. The brief tells every
   agent to report a denial with `session_report_blocked` and stop. It then
   shows as `blocked` in the Inbox and on the Oversight board.
+
+#### Claude accounts
+
+One deployment can run Claude Code under more than one subscription login. An
+account is a Claude Code config directory (`CLAUDE_CONFIG_DIR`) holding that
+login's credentials, `.claude.json` and transcripts. The operator names them:
+
+```sh
+ENGINE_AGENT_CLAUDE_ACCOUNTS=main=/home/agent/.claude-accounts/main,acct2=/home/agent/.claude-accounts/acct2
+```
+
+Entries are `name=/absolute/dir`, comma-separated; a name is
+`[a-z0-9][a-z0-9_-]{0,31}`. A malformed or duplicate entry is skipped with a
+warning and the rest are kept.
+
+- **`account` on `POST /api/sessions`** (and `session.start`) names one. The
+  engine looks the name up itself and sets `CLAUDE_CONFIG_DIR` for the session,
+  after the caller's own `env`, so a caller can pick a listed account but never
+  a path. An unknown name, or a command that is not Claude Code, is `400`
+  rather than a session on the default login. Omitted runs the engine's
+  default account.
+- The directory rides in the hibernation record's `env` (it is not a secret),
+  and the name in `account`, so a wake runs on the same login. The summary and
+  `session.economics` report `account`.
+- Transcripts follow the account. Resuming a conversation (the directory a
+  `resume` starts in) and the economics tailer search `~/.claude/projects`,
+  then `projects/` in the engine's own `CLAUDE_CONFIG_DIR` and in every listed
+  account, so a session on another login is still found.
+- Folder-trust pre-acceptance writes to the session's own config directory
+  (above). Create a profile with `claude-profile prepare <name>`: it makes the
+  directory, links the main account's settings, skills and agents in, sets the
+  auto-mode flag, and registers the MCP servers there by running
+  `vogt-mcp-bootstrap` with `CLAUDE_CONFIG_DIR` set. Then log in once with
+  `CLAUDE_CONFIG_DIR=<dir> claude` and `/login`.
+- Logins are never copied between accounts. Claude Code's OAuth refresh token
+  rotates on use, so a copied credentials file signs one of the two copies out.
 
 #### Hibernation
 

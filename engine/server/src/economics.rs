@@ -503,25 +503,34 @@ fn read_tail(path: &Path, offset: u64) -> Option<(u64, Vec<u8>)> {
 /// Where a reported conversation keeps its transcript, under `home`. A
 /// klaudia conversation is a session file under `~/.klaudia/sessions`, which
 /// the claude layout already names.
-pub(crate) fn transcript_path(home: &Path, conversation: &AgentConversation) -> Option<PathBuf> {
+pub(crate) fn transcript_path(
+    home: &Path,
+    claude_dirs: &[PathBuf],
+    conversation: &AgentConversation,
+) -> Option<PathBuf> {
     // The id is the only part of the path the agent chose. Anything that is
     // not a conversation id could walk out of the transcript root.
     if !crate::agent_cli::is_conversation_id(&conversation.id) {
         return None;
     }
-    let root = match conversation.agent.as_str() {
-        "claude" => home.join(".claude/projects"),
+    // A Claude conversation lives under whichever account's config directory
+    // it ran in, so each root is tried until one holds it.
+    let roots = match conversation.agent.as_str() {
+        "claude" => crate::transcripts::claude_roots(home, claude_dirs),
         // Klaudia files Claude Code's layout under its own root (WI-950).
-        "klaudia" => home.join(".klaudia/sessions"),
-        "codex" => home.join(".codex/sessions"),
+        "klaudia" => vec![home.join(".klaudia/sessions")],
+        "codex" => vec![home.join(".codex/sessions")],
         _ => return None,
     };
-    let root = root.canonicalize().ok()?;
-    let found = if conversation.agent == "codex" {
-        crate::transcripts::codex_transcript(&root, &conversation.id)?
-    } else {
-        crate::transcripts::claude_transcript(&root, &conversation.id)?
-    };
+    let (root, found) = roots.into_iter().find_map(|root| {
+        let root = root.canonicalize().ok()?;
+        let found = if conversation.agent == "codex" {
+            crate::transcripts::codex_transcript(&root, &conversation.id)?
+        } else {
+            crate::transcripts::claude_transcript(&root, &conversation.id)?
+        };
+        Some((root, found))
+    })?;
     // `is_file` follows links. A symlink planted in the transcript tree must
     // not be opened, so the entry itself has to be a regular file, and its
     // canonical path has to stay inside the canonical root.
@@ -609,6 +618,7 @@ fn feed_bytes(tail: &mut Tail, bytes: &[u8]) {
 /// snapshot current. `tick` is `ENGINE_ECONOMICS_TICK_SECS`; the caller does
 /// not spawn this when that is zero.
 pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duration) {
+    let claude_dirs = state.config.agent_onboarding.claude_dirs();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tick);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -623,6 +633,7 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                     .take_economics_tail()
                     .unwrap_or_else(|| Tail::start(&agent));
                 let home = home.clone();
+                let claude_dirs = claude_dirs.clone();
                 // One bad transcript must not stall the rest of the tick, so
                 // the blocking work is bounded and a timeout skips the session
                 // until the next tick.
@@ -632,7 +643,7 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                         let now = Instant::now();
                         let path = match tail.path.clone() {
                             Some(path) => path,
-                            None => match transcript_path(&home, &conversation) {
+                            None => match transcript_path(&home, &claude_dirs, &conversation) {
                                 Some(path) => path,
                                 None => return (tail, None),
                             },
