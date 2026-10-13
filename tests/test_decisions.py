@@ -80,8 +80,8 @@ def test_an_agent_asks_and_its_session_comes_from_the_token(
 ) -> None:
     decision = ask_decision(
         as_agent(instance, SESSION),
-        AskDecisionParams(
-            question="Merge the branch?", options=OPTIONS, reason="reviewed"
+        AskDecisionParams.model_validate(
+            {"question": "Merge the branch?", "options": OPTIONS, "reason": "reviewed"}
         ),
     ).decision
     assert decision.id.startswith("dec")
