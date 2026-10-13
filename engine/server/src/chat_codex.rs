@@ -139,42 +139,57 @@ model_catalog_json = "vogt-model-catalog.json"
     )
 }
 
-/// The one-model catalog WI-1147 writes, so grok is a real ModelsResponse.
+/// The router-group catalog WI-1147 writes, one ModelsResponse entry per
+/// LiteLLM group (grok, code, small, reasoning, vision, premium). The default
+/// group is grok and keeps priority 1; the rest are listed at priority 0.
 pub fn model_catalog() -> String {
-    r#"{
-  "models": [
-    {
-      "slug": "grok",
-      "display_name": "grok",
-      "description": "Estate LiteLLM grok group.",
+    fn entry(slug: &str, priority: u8) -> String {
+        format!(
+            r#"    {{
+      "slug": "{slug}",
+      "display_name": "{slug}",
+      "description": "Estate LiteLLM {slug} group.",
       "supported_reasoning_levels": [],
       "shell_type": "unified_exec",
       "visibility": "list",
       "supported_in_api": true,
-      "priority": 1,
+      "priority": {priority},
       "availability_nux": null,
       "upgrade": null,
-      "model_messages": {
-        "instructions_template": "You are Codex, running through the estate LiteLLM router as grok.",
+      "model_messages": {{
+        "instructions_template": "You are Codex, running through the estate LiteLLM router as {slug}.",
         "approvals": null,
         "collaboration_modes": null,
         "auto_review": null,
         "permissions": null,
         "multi_agent": null
-      },
+      }},
       "default_reasoning_summary": "none",
       "support_verbosity": false,
       "default_verbosity": null,
       "apply_patch_tool_type": "freeform",
-      "truncation_policy": {"mode": "bytes", "limit": 10000},
+      "truncation_policy": {{"mode": "bytes", "limit": 10000}},
       "context_window": 256000,
       "effective_context_window_percent": 95,
       "experimental_supported_tools": []
+    }}"#
+        )
     }
-  ]
-}
-"#
-    .to_string()
+    // Same groups, in the same order, as ROUTER_GROUPS in mcp-bootstrap.sh.
+    let groups = [
+        ("grok", 1u8),
+        ("code", 0),
+        ("small", 0),
+        ("reasoning", 0),
+        ("vision", 0),
+        ("premium", 0),
+    ];
+    let body = groups
+        .iter()
+        .map(|(slug, priority)| entry(slug, *priority))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("{{\n  \"models\": [\n{body}\n  ]\n}}\n")
 }
 
 /// What one server line means for the chat transcript.
@@ -413,7 +428,23 @@ mod tests {
         assert!(cfg.contains(LITELLM_BASE));
         assert!(!cfg.contains("HOMELAB_LITELLM_SESSION_KEY"));
         let catalog: Value = serde_json::from_str(&model_catalog()).unwrap();
-        assert_eq!(catalog["models"][0]["slug"], "grok");
+        let slugs: Vec<&str> = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["slug"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            slugs,
+            ["grok", "code", "small", "reasoning", "vision", "premium"]
+        );
+        assert_eq!(catalog["models"][0]["priority"], 1);
+        assert!(catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model["apply_patch_tool_type"] == "freeform"
+                && model.get("tool_mode").is_none()));
     }
 
     #[test]

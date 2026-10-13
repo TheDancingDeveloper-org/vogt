@@ -712,10 +712,22 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     catalog_path = codex_home / "vogt-model-catalog.json"
     assert parsed["model_catalog_json"] == str(catalog_path)
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    assert [model["slug"] for model in catalog["models"]] == ["grok"]
+    # The router's groups, and only those: no DLab community or free models.
+    assert [model["slug"] for model in catalog["models"]] == [
+        "grok",
+        "code",
+        "small",
+        "reasoning",
+        "vision",
+        "premium",
+    ]
     model = catalog["models"][0]
     assert model["apply_patch_tool_type"] == "freeform"
     assert "tool_mode" not in model
+    assert all(
+        row["apply_patch_tool_type"] == "freeform" and "tool_mode" not in row
+        for row in catalog["models"]
+    )
     # ModelsResponse rejects a missing availability_nux (no serde default) and a
     # model with neither base_instructions nor model_messages.instructions_template.
     assert model["availability_nux"] is None
