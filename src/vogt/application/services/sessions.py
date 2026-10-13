@@ -279,6 +279,14 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             work_item=subject.work_item_ref,
             policy=subject.policy,
             budget=budget,
+            worktree=(
+                {
+                    "branch": _worktree_branch(subject, session_id),
+                    "base_ref": _worktree_base(subject.policy),
+                }
+                if params.worktree
+                else None
+            ),
         )
     except VogtError as error:
         _LOG.warning(
@@ -302,9 +310,14 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
 
     # A resumed conversation is started by the engine in the directory its
     # transcript records, which may be below or beside the project root
-    # (WI-871). Record where it actually runs; every other session runs at
-    # the registry's root, which is what the engine reports back anyway.
-    cwd = started.cwd if params.resume and started.cwd else subject.cwd
+    # (WI-871). A session given its own worktree runs in that worktree, which
+    # the engine reports back as its cwd (WI-1298). Every other session runs
+    # at the registry's root, which is what the engine reports back anyway.
+    cwd = (
+        started.cwd
+        if started.cwd and (params.resume or params.worktree)
+        else subject.cwd
+    )
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
         del actor
@@ -3017,6 +3030,27 @@ class _Subject:
         return self.work_item_ref or self.project_slug
 
 
+def _worktree_branch(subject: _Subject, session_id: str) -> str:
+    """The branch a session's own worktree is cut onto (WI-1298).
+
+    `<work item>-<session>` when the session serves an item, otherwise
+    `<project>-<session>`. The session id's tail keeps two sessions on the
+    same item apart, and a ref or slug that is not itself a legal branch
+    name is flattened so git is handed one path component.
+    """
+    head = subject.work_item_ref or subject.project_slug
+    flat = re.sub(r"[^A-Za-z0-9._-]+", "-", head).strip("-") or "session"
+    tail = session_id.removeprefix("ses_")
+    return f"{flat}-{tail}"
+
+
+def _worktree_base(policy: AgentPolicy) -> str:
+    """What the worktree's branch is cut from: the project's integration
+    branch when it states one, otherwise `main`."""
+    stated = policy.base_branch.strip()
+    return stated or "main"
+
+
 def _subject(ctx: AppContext, params: StartSessionParams, session_id: str) -> _Subject:
     if params.from_handoff is not None:
         # Sugar for "fresh session on the item the hand-off belongs to".
@@ -3387,6 +3421,7 @@ def _start_on_engine(
     work_item: str | None = None,
     policy: AgentPolicy | None = None,
     budget: SessionBudgetParams | None = None,
+    worktree: dict[str, str] | None = None,
 ) -> EngineSession:
     enforced = _enforced_policy(policy)
     return engine.create_session(
@@ -3416,6 +3451,7 @@ def _start_on_engine(
         companion=companion or None,
         policy=enforced,
         budget=_budget_wire(budget),
+        worktree=worktree,
     )
 
 

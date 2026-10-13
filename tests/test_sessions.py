@@ -133,7 +133,9 @@ class StandInEngine:
                     "name": payload.get("name", ""),
                     "activity": "running",
                     "cwd": (
-                        self.resume_cwd
+                        str(Path(payload["cwd"]).parent / payload["worktree"]["branch"])
+                        if payload.get("worktree")
+                        else self.resume_cwd
                         if self.resume_cwd and payload.get("resume")
                         else payload.get("cwd", "")
                     ),
@@ -464,6 +466,49 @@ def test_the_enforced_policy_reaches_the_engine_and_guidance_does_not(
         "merge_deploys_prod": True,
         "main_branches": ["main", "release"],
     }
+
+
+def test_a_worktree_session_is_cut_from_the_integration_branch(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1298: the session opens in its own worktree, never the checkout.
+
+    The branch is the work item plus the session, cut from the project's
+    integration branch. The engine reports the worktree back as the cwd, and
+    that is what the session records — the shared checkout stays untouched.
+    """
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(base_branch="integrate/vogt-next"),
+            reason=WHY,
+        ),
+    )
+    result = start_session(
+        wired, StartSessionParams(work_item="WI-1", worktree=True, reason=WHY)
+    )
+    spec = engine.last_spec["worktree"]
+    assert spec["base_ref"] == "integrate/vogt-next"
+    assert spec["branch"].startswith("WI-1-")
+    assert engine.last_spec["cwd"] == ROOT
+    worktree = str(Path(ROOT).parent / spec["branch"])
+    assert result.session.cwd == worktree
+
+    # No stated integration branch means main, and a session with no work
+    # item takes the project's slug.
+    update_project(
+        wired,
+        UpdateProjectParams(slug="vogt", agent_policy=AgentPolicy(), reason=WHY),
+    )
+    start_session(wired, StartSessionParams(project="vogt", worktree=True, reason=WHY))
+    spec = engine.last_spec["worktree"]
+    assert spec["base_ref"] == "main"
+    assert spec["branch"].startswith("vogt-")
+
+    # The default leaves the request exactly as it was.
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "worktree" not in engine.last_spec
 
 
 def test_a_worker_agent_task_gets_the_default_budget(
