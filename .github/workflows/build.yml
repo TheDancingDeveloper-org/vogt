@@ -741,11 +741,17 @@ jobs:
           E2E_DIR: ${{ runner.temp }}/codex-gitguard-e2e
         run: |
           set -euo pipefail
-          docker run --rm \
-            -v "$E2E_DIR/codex_gitguard_e2e:/usr/local/bin/codex_gitguard_e2e:ro" \
+          test -x "$E2E_DIR/codex_gitguard_e2e"
+          # The runner's dockerd lives in a sidecar that cannot see the job
+          # workspace, so a bind mount of $E2E_DIR arrives as an empty
+          # directory. Copy the binary into the container instead.
+          cid="$(docker create \
             -e VOGT_CODEX_GITGUARD_E2E=1 \
             --entrypoint /usr/local/bin/codex_gitguard_e2e \
-            "$CANDIDATE" --nocapture
+            "$CANDIDATE" --nocapture)"
+          trap 'docker rm -f "$cid" >/dev/null' EXIT
+          docker cp "$E2E_DIR/codex_gitguard_e2e" "$cid:/usr/local/bin/codex_gitguard_e2e"
+          docker start --attach "$cid"
 
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: push
