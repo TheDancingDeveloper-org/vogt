@@ -407,6 +407,13 @@ class StatusResult(Result):
             "backup (`vogt clone`); absent on an instance that never was."
         ),
     )
+    disk: EngineDiskStatus | None = Field(
+        default=None,
+        description=(
+            "The workspace volume, when a session engine answers. "
+            "needs_attention once used space passes its threshold."
+        ),
+    )
 
 
 class DiagnosticsParams(Params):

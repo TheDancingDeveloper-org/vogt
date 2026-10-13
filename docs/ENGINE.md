@@ -1746,7 +1746,17 @@ when a `Cargo.toml` sits beside it, so a directory of notes named `target` is
 left alone. The cleanup is best-effort: a failure is logged and the session
 still hibernates or stops.
 
-`sweep` and `engine.status` report the workspace volume as `disk`: its size,
+It fails closed, because it deletes files. Nothing is removed when:
+
+- git cannot say whether a directory is tracked — any `git ls-files` outcome
+  other than "no such path" (exit 1) counts as tracked;
+- another running or hibernated session has its directory in the same
+  worktree;
+- any process of the session's tree is still running ten seconds after the
+  stop (a stop with cleanup on kills the whole tree, not only the leader), or
+  the tree cannot be read (no pid, or not Linux).
+
+`sweep`, `status` and `engine.status` report the workspace volume as `disk`: its size,
 what is free, the percent used, and `needs_attention` once that passes
 `ENGINE_DISK_WARN_PERCENT` (`85`). A deployment with no engine reports no row,
 which is a different fact from a volume that is fine.

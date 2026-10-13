@@ -50,7 +50,20 @@ pub fn linked_worktree(cwd: &Path) -> Option<PathBuf> {
     if worktrees != "worktrees" {
         return None;
     }
-    Some(std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()))
+    // Without a canonical root the escape check below means nothing.
+    std::fs::canonicalize(cwd).ok()
+}
+
+/// Whether any of `cwds` (other sessions' directories) is inside the linked
+/// worktree at `root`, so that a cleanup would delete build output another
+/// session may be using. A directory that cannot be canonicalised is compared
+/// as given.
+pub fn shared_with<'a>(root: &Path, cwds: impl IntoIterator<Item = &'a str>) -> bool {
+    cwds.into_iter().any(|cwd| {
+        let path = Path::new(cwd);
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        path.starts_with(root)
+    })
 }
 
 /// Remove regenerable build output under `cwd` when it is a linked worktree.
@@ -120,20 +133,43 @@ pub fn clean(cwd: &Path) -> Vec<Cleaned> {
     removed
 }
 
-/// Whether `path` is tracked in the checkout at `root`. A git failure is
-/// treated as tracked: when the answer is uncertain, nothing is deleted.
+/// Whether `path` is tracked in the checkout at `root`, or might be.
+///
+/// Only `git ls-files --error-unmatch` exiting 1 — git ran and found no such
+/// path — counts as untracked. Every other outcome (git missing, killed, a
+/// "dubious ownership" or missing-gitdir 128, a lock) is treated as tracked:
+/// when the answer is uncertain, nothing is deleted. `--literal-pathspecs`
+/// keeps a directory name with glob characters from matching anything else.
 fn tracked(root: &Path, path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return true;
     };
-    Command::new("git")
+    let Ok(out) = Command::new("git")
+        .arg("--literal-pathspecs")
         .arg("-C")
         .arg(root)
         .args(["ls-files", "--error-unmatch", "--"])
         .arg(relative)
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(true)
+    else {
+        return true;
+    };
+    out.status.code() != Some(1)
+}
+
+/// Wait up to `wait` for every pid in `pids` to stop running; `true` once
+/// none is. A zombie counts as stopped: it writes nothing.
+pub fn tree_gone(pids: &[u32], wait: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if !pids.iter().any(|&p| crate::hibernation::running(p)) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 fn dir_bytes(path: &Path) -> u64 {
@@ -292,6 +328,105 @@ mod tests {
         );
 
         assert!(clean(&main).is_empty());
+    }
+
+    /// A worktree git cannot answer for — its gitdir is gone — keeps
+    /// everything: a git error reads as tracked.
+    #[test]
+    fn a_git_error_deletes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                tmp.path().join("gone/.git/worktrees/wt").display()
+            ),
+        )
+        .unwrap();
+        assert!(linked_worktree(&wt).is_some());
+        std::fs::write(wt.join("Cargo.toml"), "").unwrap();
+        std::fs::create_dir(wt.join("target")).unwrap();
+        std::fs::write(wt.join("target").join("out"), "x").unwrap();
+        std::fs::create_dir(wt.join("node_modules")).unwrap();
+
+        let root = linked_worktree(&wt).unwrap();
+        assert!(tracked(&root, &root.join("target")));
+        assert!(clean(&wt).is_empty());
+        assert!(wt.join("target").join("out").exists());
+        assert!(wt.join("node_modules").exists());
+    }
+
+    /// A directory reached through a symlinked parent that leads out of the
+    /// worktree is never walked into, whatever it holds.
+    #[test]
+    fn a_symlinked_parent_out_of_the_worktree_is_not_walked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        std::fs::create_dir(&main).unwrap();
+        repo(&main);
+        let linked = tmp.path().join("linked");
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(["worktree", "add", "-q"])
+            .arg(&linked)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(outside.join("crate").join("target")).unwrap();
+        std::fs::write(outside.join("crate").join("Cargo.toml"), "").unwrap();
+        std::fs::write(outside.join("crate").join("target").join("out"), "x").unwrap();
+        std::fs::create_dir_all(outside.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(&outside, linked.join("vendor")).unwrap();
+
+        assert!(clean(&linked).is_empty());
+        assert!(outside.join("crate").join("target").join("out").exists());
+        assert!(outside.join("node_modules").exists());
+
+        // A worktree reached through a symlink is cleaned at its real path
+        // only, and the escape check uses that real path.
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&linked, &alias).unwrap();
+        assert_eq!(
+            linked_worktree(&alias),
+            Some(std::fs::canonicalize(&linked).unwrap())
+        );
+    }
+
+    #[test]
+    fn another_session_inside_the_worktree_shares_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        let inside = root.join("sub").to_string_lossy().into_owned();
+        let at_root = root.to_string_lossy().into_owned();
+        assert!(shared_with(&root, [inside.as_str()]));
+        assert!(shared_with(&root, [at_root.as_str()]));
+        assert!(!shared_with(&root, ["/elsewhere", "/"]));
+        assert!(!shared_with(&root, std::iter::empty::<&str>()));
+        // A sibling whose name merely starts the same is not inside.
+        let sibling = format!("{at_root}-other");
+        assert!(!shared_with(&root, [sibling.as_str()]));
+    }
+
+    /// The cleanup waits on the whole tree and refuses while any of it runs.
+    #[test]
+    fn tree_gone_waits_for_every_process() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let me = std::process::id();
+        assert!(!tree_gone(&[pid], std::time::Duration::from_millis(100)));
+        assert!(!tree_gone(&[me], std::time::Duration::ZERO));
+        child.kill().unwrap();
+        // Not yet reaped: a zombie writes nothing and counts as gone.
+        assert!(tree_gone(&[pid], std::time::Duration::from_secs(5)));
+        child.wait().unwrap();
+        assert!(tree_gone(&[pid], std::time::Duration::ZERO));
+        assert!(tree_gone(&[], std::time::Duration::ZERO));
     }
 
     #[test]

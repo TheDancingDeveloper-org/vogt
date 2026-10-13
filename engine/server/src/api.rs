@@ -920,7 +920,19 @@ pub async fn sweep_sessions(
 /// (WI-1304). A volume that cannot be read is reported as needing attention
 /// rather than as empty and fine.
 fn disk_status(path: &std::path::Path, threshold_percent: u8) -> DiskStatus {
-    match crate::worktree_clean::volume_usage(path) {
+    disk_status_from(
+        path,
+        crate::worktree_clean::volume_usage(path),
+        threshold_percent,
+    )
+}
+
+fn disk_status_from(
+    path: &std::path::Path,
+    usage: Option<crate::worktree_clean::VolumeUsage>,
+    threshold_percent: u8,
+) -> DiskStatus {
+    match usage {
         Some(usage) => DiskStatus {
             path: path.display().to_string(),
             total_bytes: usage.total_bytes,
@@ -1619,5 +1631,41 @@ async fn check_backup_agreement(
             // over it would take the terminals with it.
             fatal: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod disk_status_tests {
+    use super::*;
+    use crate::worktree_clean::VolumeUsage;
+
+    fn at(percent: u8) -> Option<VolumeUsage> {
+        Some(VolumeUsage {
+            total_bytes: 100,
+            free_bytes: 100 - u64::from(percent),
+            used_percent: percent,
+        })
+    }
+
+    #[test]
+    fn needs_attention_from_the_threshold_up() {
+        let path = std::path::Path::new("/w");
+        assert!(!disk_status_from(path, at(84), 85).needs_attention);
+        assert!(disk_status_from(path, at(85), 85).needs_attention);
+        assert!(disk_status_from(path, at(100), 85).needs_attention);
+        assert!(!disk_status_from(path, at(95), 100).needs_attention);
+        let row = disk_status_from(path, at(50), 85);
+        assert_eq!(row.threshold_percent, 85);
+        assert_eq!(row.used_percent, 50);
+        assert_eq!(row.path, "/w");
+    }
+
+    /// A volume that cannot be read is not reported as an empty, fine one.
+    #[test]
+    fn an_unreadable_volume_needs_attention() {
+        let missing = std::path::Path::new("/nonexistent/vogt-wi-1304/volume");
+        let row = disk_status(missing, 85);
+        assert!(row.needs_attention);
+        assert_eq!(row.total_bytes, 0);
     }
 }

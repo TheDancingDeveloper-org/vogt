@@ -999,20 +999,14 @@ pub fn load(
             }
             _ => None,
         },
-        worktree_clean_on_hibernate: match engine_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE") {
-            Ok(v) if !v.trim().is_empty() => {
-                parse_bool_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE", &v)?
-            }
-            _ => false,
-        },
-        disk_warn_percent: match engine_env("ENGINE_DISK_WARN_PERCENT") {
-            Ok(v) if !v.trim().is_empty() => v.trim().parse::<u8>().map_err(|_| {
-                ApiError::Config(format!(
-                    "ENGINE_DISK_WARN_PERCENT={v:?} is not a whole percent from 1 to 100"
-                ))
-            })?,
-            _ => 85,
-        },
+        worktree_clean_on_hibernate: parse_worktree_clean(
+            engine_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE")
+                .ok()
+                .as_deref(),
+        )?,
+        disk_warn_percent: parse_disk_warn_percent(
+            engine_env("ENGINE_DISK_WARN_PERCENT").ok().as_deref(),
+        )?,
         metrics_bind: match engine_env("ENGINE_METRICS_ADDR") {
             Ok(v) if !v.trim().is_empty() => Some(v.trim().parse().map_err(|_| {
                 ApiError::Config(format!(
@@ -1205,6 +1199,32 @@ fn read_token_file(name: &str) -> Result<Option<String>> {
 /// engine setting is read the same way.
 fn engine_env(name: &str) -> std::result::Result<String, std::env::VarError> {
     std::env::var(name)
+}
+
+/// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`: off unless set to a true value.
+/// Unset or blank is off; this removes files, so it is never on by accident.
+fn parse_worktree_clean(raw: Option<&str>) -> Result<bool> {
+    match raw {
+        Some(v) if !v.trim().is_empty() => parse_bool_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE", v),
+        _ => Ok(false),
+    }
+}
+
+/// `ENGINE_DISK_WARN_PERCENT`: a whole percent from 1 to 100, 85 when unset.
+fn parse_disk_warn_percent(raw: Option<&str>) -> Result<u8> {
+    match raw {
+        Some(v) if !v.trim().is_empty() => v
+            .trim()
+            .parse::<u8>()
+            .ok()
+            .filter(|p| (1..=100).contains(p))
+            .ok_or_else(|| {
+                ApiError::Config(format!(
+                    "ENGINE_DISK_WARN_PERCENT={v:?} is not a whole percent from 1 to 100"
+                ))
+            }),
+        _ => Ok(85),
+    }
 }
 
 fn parse_bool_env(name: &str, raw: &str) -> Result<bool> {
@@ -1937,6 +1957,34 @@ mod tests {
 #[cfg(test)]
 mod prefix_tests {
     use super::*;
+
+    /// Worktree cleanup deletes files, so only an explicit true turns it on.
+    #[test]
+    fn worktree_clean_is_off_unless_asked_for() {
+        assert!(!parse_worktree_clean(None).unwrap());
+        assert!(!parse_worktree_clean(Some("")).unwrap());
+        assert!(!parse_worktree_clean(Some("  ")).unwrap());
+        assert!(!parse_worktree_clean(Some("0")).unwrap());
+        assert!(!parse_worktree_clean(Some("false")).unwrap());
+        assert!(parse_worktree_clean(Some("1")).unwrap());
+        assert!(parse_worktree_clean(Some("true")).unwrap());
+        assert!(parse_worktree_clean(Some("maybe")).is_err());
+    }
+
+    #[test]
+    fn disk_warn_percent_is_a_percent_from_1_to_100() {
+        assert_eq!(parse_disk_warn_percent(None).unwrap(), 85);
+        assert_eq!(parse_disk_warn_percent(Some(" ")).unwrap(), 85);
+        assert_eq!(parse_disk_warn_percent(Some("1")).unwrap(), 1);
+        assert_eq!(parse_disk_warn_percent(Some(" 90 ")).unwrap(), 90);
+        assert_eq!(parse_disk_warn_percent(Some("100")).unwrap(), 100);
+        for bad in ["0", "101", "255", "256", "-5", "85%", "eighty"] {
+            assert!(
+                parse_disk_warn_percent(Some(bad)).is_err(),
+                "{bad} accepted"
+            );
+        }
+    }
 
     /// The document comes from a file when one is named, the inline
     /// environment value is accepted but withdrawn from the environment, and

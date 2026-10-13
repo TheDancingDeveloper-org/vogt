@@ -110,6 +110,10 @@ pub struct SessionRegistry {
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
 
+/// How long a worktree cleanup waits for a stopped session's process tree to
+/// be gone before it gives up and leaves the directory alone (WI-1304).
+const CLEAN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Which sessions a hibernation may take, and how a session was created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
@@ -1147,6 +1151,10 @@ impl SessionRegistry {
         session.mark_hibernating();
         self.records.insert(id, record);
 
+        let tree = session
+            .pid()
+            .map(hibernation::descendants)
+            .unwrap_or_default();
         match session.pid() {
             Some(pid) => {
                 let watched = Arc::clone(&session);
@@ -1167,7 +1175,7 @@ impl SessionRegistry {
         }
         self.sessions.remove(&id);
         self.secret_broker.revoke(id);
-        self.clean_worktree(&session.cwd);
+        self.clean_worktree(id, &session.cwd, session.pid(), tree);
         self.bus
             .publish(ServerEvent::SessionHibernated { id, trigger });
         tracing::info!(session = %id, ?trigger, "session hibernated");
@@ -1780,27 +1788,106 @@ impl SessionRegistry {
         if s.is_alive() {
             s.request_stop(request);
         }
+        let tree = self.tree_for_clean(&s);
         s.kill()?;
-        self.clean_worktree(&s.cwd);
+        self.finish_for_clean(id, &s, tree);
         Ok(())
+    }
+
+    /// The session's process tree, read before it is signalled, when a
+    /// cleanup may follow; empty otherwise, so a stop with cleanup off is
+    /// exactly what it was.
+    fn tree_for_clean(&self, s: &Session) -> Vec<u32> {
+        match s.pid() {
+            Some(pid) if self.cfg.worktree_clean_on_hibernate => hibernation::descendants(pid),
+            _ => Vec::new(),
+        }
+    }
+
+    /// After a stop's `SIGKILL` to the leader: with cleanup on, take the rest
+    /// of the tree too (a cargo or node grandchild in its own group would
+    /// otherwise keep writing into the directory), then clean.
+    fn finish_for_clean(&self, id: Uuid, s: &Session, tree: Vec<u32>) {
+        if !self.cfg.worktree_clean_on_hibernate {
+            return;
+        }
+        if let Some(pid) = s.pid() {
+            hibernation::kill_tree(pid, &tree);
+        }
+        self.clean_worktree(id, &s.cwd, s.pid(), tree);
     }
 
     /// Drop regenerable build output in a session's linked worktree, when the
     /// deployment asked for it (WI-1304). Off unless
     /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` is set. Best-effort and off the
     /// runtime: a cleanup that fails must not fail the hibernation or stop.
-    fn clean_worktree(&self, cwd: &str) {
+    ///
+    /// Fails closed. Nothing is removed when the session's leader pid is
+    /// unknown, while any process of its tree (`pid` and `tree`) is still
+    /// running after a short wait, or while another session — running, or
+    /// hibernated, which a wake brings back — has its directory inside the
+    /// same worktree. An exited session left in the registry builds nothing.
+    fn clean_worktree(&self, id: Uuid, cwd: &str, pid: Option<u32>, tree: Vec<u32>) {
         if !self.cfg.worktree_clean_on_hibernate {
             return;
         }
-        let cwd = std::path::PathBuf::from(cwd);
+        let Some(root) = crate::worktree_clean::linked_worktree(std::path::Path::new(cwd)) else {
+            return;
+        };
+        // Off Linux the process tree cannot be read, so whether a grandchild
+        // still writes into the worktree cannot be known.
+        let Some(pid) = pid.filter(|_| cfg!(target_os = "linux")) else {
+            tracing::info!(session = %id, "worktree cleanup skipped: the session's process tree cannot be read");
+            return;
+        };
+        let others: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|e| *e.key() != id && e.value().is_alive())
+            .map(|e| e.value().cwd.clone())
+            .chain(
+                self.records
+                    .iter()
+                    .filter(|e| *e.key() != id)
+                    .filter_map(|e| e.value().cwd.clone()),
+            )
+            .collect();
+        if crate::worktree_clean::shared_with(&root, others.iter().map(String::as_str)) {
+            tracing::info!(
+                session = %id,
+                worktree = %root.display(),
+                "worktree cleanup skipped: another session works in the same worktree"
+            );
+            return;
+        }
+        let mut pids = tree;
+        pids.push(pid);
+        let job = move || {
+            if !crate::worktree_clean::tree_gone(&pids, CLEAN_WAIT) {
+                tracing::warn!(
+                    session = %id,
+                    worktree = %root.display(),
+                    "worktree cleanup skipped: a process of the session is still running"
+                );
+                return;
+            }
+            let removed = crate::worktree_clean::clean(&root);
+            if !removed.is_empty() {
+                let bytes: u64 = removed.iter().map(|c| c.bytes).sum();
+                tracing::info!(
+                    session = %id,
+                    worktree = %root.display(),
+                    dirs = removed.len(),
+                    bytes,
+                    "cleaned build output from the session's worktree"
+                );
+            }
+        };
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
-                runtime.spawn_blocking(move || crate::worktree_clean::clean(&cwd));
+                runtime.spawn_blocking(job);
             }
-            Err(_) => {
-                crate::worktree_clean::clean(&cwd);
-            }
+            Err(_) => job(),
         }
     }
 
@@ -1824,9 +1911,9 @@ impl SessionRegistry {
             return Err(ApiError::NotFound);
         }
         if let Some(s) = live {
-            let cwd = s.cwd.clone();
+            let tree = self.tree_for_clean(&s);
             let _ = s.kill();
-            self.clean_worktree(&cwd);
+            self.finish_for_clean(id, &s, tree);
         }
         // Forgetting the session forgets its leave to ask the broker.
         self.secret_broker.revoke(id);

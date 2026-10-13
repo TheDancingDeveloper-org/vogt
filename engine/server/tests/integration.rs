@@ -85,6 +85,8 @@ fn test_config() -> Config {
         budget: vogt_engine_server::budget::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
+        worktree_clean_on_hibernate: false,
+        disk_warn_percent: 85,
         metrics_bind: None,
         chat: Default::default(),
         economics_tick: std::time::Duration::ZERO,
@@ -14476,4 +14478,84 @@ async fn only_a_person_or_the_core_starts_an_oversight_session() {
         let row: Value = res.json().await.unwrap();
         assert_eq!(row["role"], "oversight", "{token} {row}");
     }
+}
+
+/// WI-1304: with cleanup on, stopping a session in a linked worktree removes
+/// its build output, but not while another running session shares the
+/// worktree; the main checkout is never touched.
+#[tokio::test]
+async fn worktree_cleanup_waits_for_every_session_in_the_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "seed@vogt.invalid"]);
+    git(&repo, &["config", "user.name", "seed"]);
+    std::fs::write(repo.join("README"), "r").unwrap();
+    git(&repo, &["add", "README"]);
+    git(&repo, &["commit", "-qm", "init"]);
+    let linked = tmp.path().join("linked");
+    git(&repo, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+    std::fs::write(linked.join("Cargo.toml"), "[package]\nname=\"t\"\n").unwrap();
+    let target = linked.join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("out"), "built").unwrap();
+
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    cfg.worktree_clean_on_hibernate = true;
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let cwd = linked.to_string_lossy().into_owned();
+    let a = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "a", "command": ["/bin/cat"], "cwd": cwd }),
+    )
+    .await;
+    let b = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "b", "command": ["/bin/cat"], "cwd": cwd }),
+    )
+    .await;
+
+    let kill = client
+        .post(format!("{base}/api/sessions/{a}/kill"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(kill.status(), StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        target.join("out").exists(),
+        "session b still works in the worktree"
+    );
+
+    let kill = client
+        .post(format!("{base}/api/sessions/{b}/kill"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(kill.status(), StatusCode::OK);
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while target.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!target.exists(), "the last session out cleans the worktree");
+    assert!(linked.join("Cargo.toml").exists());
+    assert!(repo.join("README").exists());
 }
