@@ -449,6 +449,20 @@ and ends a driver's `session_wait`. Call `session_report_unblocked` once you
 can go on. A driver that sees `blocked` does what it asks, or relays it to
 the operator — it does not re-prompt the agent to "continue".
 
+**A choice, not a stop.** When what you need is a person's *choice* between
+known options and you have other work to do meanwhile, ask it with
+`decision_ask` instead: a `question`, two to four `options` (`label` ≤ 60,
+`description`, exactly one `recommended: true`), the `context` the person
+needs, and optionally the `work_item`. It shows in the Inbox as
+`decision.pending` with the options and your recommendation; you do not
+block. Read the answer with `decision_list` (by `state`, `work_item` or
+`asker`). Only a person answers (`decision_answer`); an agent gets
+`person_required`. Unanswered past `expires_at` (default 24 h, `ttl_seconds`
+up to 7 days) it reads `expired`, which implies no answer — what that means
+is yours to decide. `decision_withdraw` takes back one you no longer need.
+Nothing is applied when a decision is answered: act on the answer through the
+op that checks the action.
+
 **Autopilot.** `session_start` with `autopilot: true` adds an Autopilot
 section to the brief: when the agent's next step needs no person, it carries
 on in the same turn instead of ending it to announce the next item, and
