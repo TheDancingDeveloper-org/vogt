@@ -1,0 +1,6 @@
+# cargo-nextest runs every test in its own process, so one hung test no
+# longer holds the whole `cargo test` run. A test that is still running after
+# `period` x `terminate-after` is killed and reported as a failure (WI-1312):
+# a test that panics while holding a PTY session hangs forever otherwise.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 10 }
