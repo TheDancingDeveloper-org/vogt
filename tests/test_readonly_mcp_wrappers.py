@@ -614,7 +614,9 @@ def test_parallel_codex_bootstraps_write_one_table_each(tmp_path: Path) -> None:
     assert config.read_text(encoding="utf-8") == duplicate
 
 
-def _codex_bootstrap(tmp_path: Path, extra: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _codex_bootstrap(
+    tmp_path: Path, extra: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     codex = bindir / "codex"
@@ -684,7 +686,9 @@ def test_daemon_flag_merges_into_an_existing_features_table(tmp_path: Path) -> N
     shutil.which("python3") is None or shutil.which("flock") is None,
     reason="the Codex config rewrite needs python3 and flock",
 )
-def test_codex_litellm_provider_is_the_default_and_stores_no_secret(tmp_path: Path) -> None:
+def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
+    tmp_path: Path,
+) -> None:
     """WI-1147: Codex sessions default to the estate router. The session key
     is named, never written, and an operator's other provider survives."""
     import tomllib
