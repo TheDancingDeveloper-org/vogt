@@ -218,7 +218,16 @@ pub fn codex_policy_from(value: Option<&str>) -> Result<Option<PathBuf>, String>
 
 fn readable_policy(path: PathBuf) -> Result<Option<PathBuf>, String> {
     match std::fs::read(&path) {
-        Ok(bytes) if !bytes.is_empty() => Ok(Some(path)),
+        Ok(bytes) if !bytes.is_empty() => {
+            let text = String::from_utf8_lossy(&bytes);
+            check_codex_policy(&text).map_err(|why| {
+                format!(
+                    "Codex driven-session policy {} does not wire the gitguard hook ({why}); refusing to start a Codex session without it",
+                    path.display()
+                )
+            })?;
+            Ok(Some(path))
+        }
         Ok(_) => Err(format!(
             "Codex driven-session policy {} is empty; refusing to start a Codex session without the gitguard hook",
             path.display()
@@ -227,6 +236,67 @@ fn readable_policy(path: PathBuf) -> Result<Option<PathBuf>, String> {
             "Codex driven-session policy {} cannot be read ({e}); refusing to start a Codex session without the gitguard hook",
             path.display()
         )),
+    }
+}
+
+/// The hook command the Codex requirements file must run (WI-1136).
+const GITGUARD_HOOK: &str = "klaudia hook gitguard";
+
+/// PreToolUse tool names the gitguard matcher must select: the fork sends
+/// `Bash` for shell, exec_command and write_stdin, and `apply_patch` for
+/// patches (WI-1356).
+const GITGUARD_TOOLS: &[&str] = &["Bash", "apply_patch"];
+
+/// Why a Codex requirements file would let a session run without gitguard
+/// (WI-1356). It must be TOML with `[[hooks.SessionStart]]` and
+/// `[[hooks.PreToolUse]]` groups, each holding a `type = "command"` handler
+/// that runs `klaudia hook gitguard` with `failClosed = true`, and the
+/// PreToolUse group's matcher must select every name in [`GITGUARD_TOOLS`].
+/// A comments-only file — what WI-1146 shipped — fails here, so the launch
+/// is refused rather than run unguarded.
+pub fn check_codex_policy(text: &str) -> std::result::Result<(), String> {
+    let value: toml::Table = toml::from_str(text).map_err(|e| format!("not TOML: {e}"))?;
+    let hooks = value
+        .get("hooks")
+        .and_then(toml::Value::as_table)
+        .ok_or("no [hooks] table")?;
+    for event in ["SessionStart", "PreToolUse"] {
+        let groups = hooks
+            .get(event)
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| format!("no [[hooks.{event}]]"))?;
+        let guarded = groups.iter().any(|group| {
+            let matcher = group.get("matcher").and_then(toml::Value::as_str);
+            let selects_tools = event != "PreToolUse" || matcher_selects_gitguard_tools(matcher);
+            let handlers = group.get("hooks").and_then(toml::Value::as_array);
+            selects_tools
+                && handlers.is_some_and(|handlers| {
+                    handlers.iter().any(|h| {
+                        h.get("type").and_then(toml::Value::as_str) == Some("command")
+                            && h.get("command")
+                                .and_then(toml::Value::as_str)
+                                .map(str::trim)
+                                == Some(GITGUARD_HOOK)
+                            && h.get("failClosed").and_then(toml::Value::as_bool) == Some(true)
+                    })
+                })
+        });
+        if !guarded {
+            return Err(format!(
+                "no [[hooks.{event}]] runs `{GITGUARD_HOOK}` with failClosed = true"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a Codex hook matcher selects every gitguard tool. Codex treats a
+/// missing, empty or `*` matcher as match-all and anything else as a regex.
+fn matcher_selects_gitguard_tools(matcher: Option<&str>) -> bool {
+    match matcher.map(str::trim) {
+        None | Some("") | Some("*") => true,
+        Some(pattern) => regex::Regex::new(pattern)
+            .is_ok_and(|re| GITGUARD_TOOLS.iter().all(|tool| re.is_match(tool))),
     }
 }
 
@@ -966,7 +1036,7 @@ mod driven_policy_tests {
 
     #[test]
     fn codex_policy_named_file_must_be_readable_and_non_empty() {
-        let (dir, path) = policy_file(b"# requirements\n");
+        let (dir, path) = policy_file(SHIPPED_CODEX_POLICY.as_bytes());
         let got = super::codex_policy_from(Some(path.to_str().unwrap()))
             .unwrap()
             .unwrap();
@@ -980,6 +1050,48 @@ mod driven_policy_tests {
         let err = super::codex_policy_from(Some(missing.to_str().unwrap())).unwrap_err();
         assert!(err.contains("cannot be read"), "{err}");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    const SHIPPED_CODEX_POLICY: &str =
+        include_str!("../../deploy/driven-session-codex-requirements.toml");
+
+    #[test]
+    fn the_shipped_codex_policy_wires_gitguard() {
+        super::check_codex_policy(SHIPPED_CODEX_POLICY).unwrap();
+    }
+
+    #[test]
+    fn a_codex_policy_without_a_fail_closed_gitguard_hook_is_refused() {
+        // The comments-only file WI-1146 shipped: Codex ran unguarded.
+        let (dir, path) = policy_file(b"# requirements\n");
+        let err = super::codex_policy_from(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("does not wire the gitguard hook"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+
+        let check = super::check_codex_policy;
+        let without = |from: &str, to: &str| {
+            assert!(SHIPPED_CODEX_POLICY.contains(from), "{from}");
+            SHIPPED_CODEX_POLICY.replacen(from, to, 1)
+        };
+        // failClosed missing or false on either event.
+        assert!(check(&without("\nfailClosed = true", "\nfailClosed = false")).is_err());
+        assert!(check(&SHIPPED_CODEX_POLICY.replace("failClosed = true\n", "")).is_err());
+        // No SessionStart group: PreToolUse would have no baseline to compare.
+        assert!(check(&without("[[hooks.SessionStart]]", "[[hooks.Stop]]")).is_err());
+        // A matcher that misses apply_patch, or one that is not a regex.
+        assert!(check(&SHIPPED_CODEX_POLICY.replace(
+            "^(Bash|shell|exec_command|write_stdin|apply_patch)$",
+            "^Bash$"
+        ))
+        .is_err());
+        assert!(check(&SHIPPED_CODEX_POLICY.replace(
+            "^(Bash|shell|exec_command|write_stdin|apply_patch)$",
+            "(Bash"
+        ))
+        .is_err());
+        // Another command.
+        assert!(check(&SHIPPED_CODEX_POLICY.replace("klaudia hook gitguard", "true")).is_err());
+        assert!(check("not = [toml").is_err());
     }
 
     #[test]
