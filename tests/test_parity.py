@@ -614,6 +614,43 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "reason": WHY,
         },
     ),
+    # Decisions (WI-1321): one asked, listed and withdrawn; a second asked
+    # and answered by the harness's person.
+    (
+        "decision.ask",
+        {
+            "question": "Merge the branch?",
+            "options": [
+                {"label": "Merge", "description": "now", "recommended": True},
+                {"label": "Hold", "description": "later", "recommended": False},
+            ],
+            "reason": WHY,
+        },
+    ),
+    ("decision.list", {"state": "pending"}),
+    (
+        "decision.withdraw",
+        lambda seen: {"id": seen["decision.ask"]["decision"]["id"], "reason": WHY},
+    ),
+    (
+        "decision.ask",
+        {
+            "question": "Merge the branch?",
+            "options": [
+                {"label": "Merge", "description": "now", "recommended": True},
+                {"label": "Hold", "description": "later", "recommended": False},
+            ],
+            "reason": WHY,
+        },
+    ),
+    (
+        "decision.answer",
+        lambda seen: {
+            "id": seen["decision.ask"]["decision"]["id"],
+            "label": "Merge",
+            "reason": WHY,
+        },
+    ),
     (
         "session.stop",
         lambda seen: {
