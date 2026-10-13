@@ -1555,9 +1555,26 @@ impl SessionRegistry {
         }
         if let (Some(history), Some(conversation)) = (self.history.clone(), next.clone()) {
             tokio::spawn(async move {
-                if let Err(e) = history.set_identity(id, None, Some(&conversation)).await {
-                    tracing::warn!(session = %id, error = %e, "could not record the session's conversation in history");
+                // The provisional row is written by a task of its own and can
+                // still be queued behind the pool when an agent reports its
+                // conversation straight after the session starts. An update
+                // then finds no row and used to return success anyway, so
+                // History never learned the conversation (WI-1309). Wait for
+                // the row, briefly — a conversation History lost is a session
+                // a SIGKILL cannot resume.
+                for _ in 0..50 {
+                    match history.set_identity(id, None, Some(&conversation)).await {
+                        Ok(true) => return,
+                        Ok(false) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                        }
+                        Err(e) => {
+                            tracing::warn!(session = %id, error = %e, "could not record the session's conversation in history");
+                            return;
+                        }
+                    }
                 }
+                tracing::warn!(session = %id, "no history row to record the session's conversation in");
             });
         }
         tracing::info!(
@@ -1638,9 +1655,22 @@ impl SessionRegistry {
         if let Some(history) = self.history.clone() {
             if live.is_some() || updated.is_some() {
                 tokio::spawn(async move {
-                    if let Err(e) = history.set_identity(id, Some(role.as_str()), None).await {
-                        tracing::warn!(session = %id, error = %e, "could not record the session's role in history");
+                    // Same race as a reported conversation: the provisional row
+                    // may not exist yet, and a role History lost is a restart
+                    // that no longer knows the session is oversight.
+                    for _ in 0..50 {
+                        match history.set_identity(id, Some(role.as_str()), None).await {
+                            Ok(true) => return,
+                            Ok(false) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                            }
+                            Err(e) => {
+                                tracing::warn!(session = %id, error = %e, "could not record the session's role in history");
+                                return;
+                            }
+                        }
                     }
+                    tracing::warn!(session = %id, "no history row to record the session's role in");
                 });
             }
         }
