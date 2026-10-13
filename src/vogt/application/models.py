@@ -4147,6 +4147,17 @@ class StartSessionParams(Params):
             "different item. The brief carries the latest hand-off."
         ),
     )
+    review_of: str | None = Field(
+        default=None,
+        description=(
+            "Start a reviewer on this work item (e.g. WI-7) instead of a "
+            "worker. The brief checks the diff named by the item's latest "
+            "hand-off against the item's own acceptance criteria, and it "
+            "does not carry the work on. Refused without a work item — a "
+            "review is of an item — and when `work_item` or `from_handoff` "
+            "names a different one."
+        ),
+    )
     budget: SessionBudgetParams | None = Field(
         default=None,
         description=(
