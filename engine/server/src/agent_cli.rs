@@ -72,7 +72,10 @@ pub const CLAUDE_QUIET_ENV: &[(&str, &str)] = &[
 ];
 
 /// What a session asked of the agent CLI it runs, beyond the command itself.
-#[derive(Debug, Default, Clone)]
+///
+/// Not `Default`: `codex_session_id` is on unless a caller opts out, and a
+/// derived default would silently turn the pin off (WI-1354).
+#[derive(Debug, Clone)]
 pub struct LaunchRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
@@ -84,12 +87,14 @@ pub struct LaunchRequest<'a> {
     /// The engine's id for the session. A fresh, bare Claude Code, Klaudia or
     /// fork-Codex launch uses it as the conversation id, so the conversation
     /// can later be resumed by the id every session and history listing
-    /// already shows. Stock Codex does not take `--session-id`, so it is
-    /// pinned only when [`LaunchRequest::codex_session_id`] is set.
+    /// already shows. Codex is pinned when
+    /// [`LaunchRequest::codex_session_id`] is set, which it is by default:
+    /// the image bakes the fork that accepts the flag (WI-1354).
     pub session_id: Option<Uuid>,
-    /// The Codex binary accepts `--session-id` (the WI-1126 fork). Stock
-    /// Codex refuses an unknown flag and would not start, so a fresh Codex
-    /// launch is pinned only when this is true.
+    /// The Codex binary accepts `--session-id` (the WI-1126 fork the image
+    /// bakes). A fresh Codex launch is pinned when this is true, the default.
+    /// Stock npm Codex refuses an unknown flag, so a deployment that pins
+    /// that binary sets it false and the launch is left unpinned.
     pub codex_session_id: bool,
     /// `default` / `accept-edits` / `bypass` (WI-926). Klaudia takes
     /// `default` and `bypass` only. Codex takes all three (WI-1143); its
@@ -108,6 +113,25 @@ pub struct LaunchRequest<'a> {
     /// The deployment's opencode driven-session policy (an opencode config
     /// with a `permission` block), for the default posture (WI-932).
     pub opencode_config: Option<&'a str>,
+}
+
+impl<'a> LaunchRequest<'a> {
+    /// A launch that asks for nothing extra. Codex is pinned (`codex_session_id`
+    /// true): the image bakes the fork that accepts `--session-id` (WI-1354).
+    pub fn bare() -> Self {
+        Self {
+            model: None,
+            effort: None,
+            resume: None,
+            brief_file: None,
+            session_id: None,
+            codex_session_id: true,
+            permission_mode: None,
+            settings_file: None,
+            add_dirs: &[],
+            opencode_config: None,
+        }
+    }
 }
 
 /// opencode's `accept-edits` posture: file work is allowed, everything else
@@ -231,7 +255,7 @@ pub fn apply(
         &LaunchRequest {
             model,
             effort,
-            ..LaunchRequest::default()
+            ..LaunchRequest::bare()
         },
     )?
     .command)
@@ -433,9 +457,10 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 "-c".to_string(),
                 "tui.animations=false".to_string(),
             ]);
-            // Fresh only, and only the fork (WI-1126): stock Codex refuses an
-            // unknown flag. A resume already names its id via the subcommand,
-            // and a template with arguments of its own is left alone.
+            // Fresh only, and only when the binary accepts the flag (WI-1126,
+            // on by default since WI-1354). A resume already names its id via
+            // the subcommand, and a template with arguments of its own is left
+            // alone.
             if resume.is_none() && bare && req.codex_session_id {
                 if let Some(id) = req.session_id {
                     rewritten.extend(["--session-id".to_string(), id.to_string()]);
@@ -526,9 +551,9 @@ pub fn agent_name(command: &[String]) -> Option<String> {
 /// id is known before the CLI says anything: the one it resumes, or — for a
 /// bare launch [`launch`] pins with `--session-id` — the engine's own id for
 /// the session. Claude Code and Klaudia are always pinned that way. Codex is
-/// pinned only when `codex_session_id` is set (the WI-1126 fork); stock Codex
-/// and OpenCode mint their own id, and guessing one could continue somebody
-/// else's conversation.
+/// pinned when `codex_session_id` is set (the WI-1126 fork the image bakes, on
+/// by default); stock Codex (`codex_session_id` false) and OpenCode mint their
+/// own id, and guessing one could continue somebody else's conversation.
 pub fn conversation(
     command: Option<&[String]>,
     resume: Option<&str>,
@@ -827,7 +852,7 @@ mod tests {
     fn with_brief() -> LaunchRequest<'static> {
         LaunchRequest {
             brief_file: Some(Path::new(BRIEF)),
-            ..LaunchRequest::default()
+            ..LaunchRequest::bare()
         }
     }
 
@@ -912,7 +937,7 @@ mod tests {
         let req = LaunchRequest {
             resume: Some(id),
             model: Some("m1"),
-            ..LaunchRequest::default()
+            ..LaunchRequest::bare()
         };
         assert_eq!(
             launch(Some(&protected("claude")), &req)
@@ -974,7 +999,7 @@ mod tests {
                 Some(&protected("opencode")),
                 &LaunchRequest {
                     resume: Some("ses_abc123"),
-                    ..LaunchRequest::default()
+                    ..LaunchRequest::bare()
                 }
             )
             .unwrap()
@@ -988,7 +1013,7 @@ mod tests {
     fn resume_on_a_shell_is_refused() {
         let req = LaunchRequest {
             resume: Some("abc"),
-            ..LaunchRequest::default()
+            ..LaunchRequest::bare()
         };
         assert!(launch(Some(&cmd(&["bash"])), &req).is_err());
         assert!(launch(None, &req).is_err());
@@ -1007,7 +1032,7 @@ mod tests {
         ] {
             let req = LaunchRequest {
                 resume: Some(hostile),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             };
             assert!(
                 launch(Some(&protected("claude")), &req).is_err(),
@@ -1023,7 +1048,7 @@ mod tests {
         let sid = Uuid::new_v4();
         let req = LaunchRequest {
             session_id: Some(sid),
-            ..LaunchRequest::default()
+            ..LaunchRequest::bare()
         };
         assert_eq!(
             launch(Some(&protected("claude")), &req)
@@ -1054,15 +1079,19 @@ mod tests {
         .unwrap();
         assert!(!resumed.contains(&"--session-id".to_string()));
         // Stock Codex refuses `--session-id`, so that flag is added only when
-        // the deployment says its binary is the fork (WI-1126 / WI-1144). The
-        // `agent-state` title overrides are added either way (WI-1145): stock
-        // Codex accepts `-c` and ignores a `tui` key it does not know.
-        let titled = launch(Some(&protected("codex")), &req)
+        // the deployment says its binary is the fork (WI-1126 / WI-1144).
+        // The image bakes that fork, so the pin is on by default (WI-1354):
+        // a fresh bare Codex launch gets the engine id without the caller
+        // having to set the flag, and hibernation then has a conversation to
+        // resume. The `agent-state` title overrides are added either way
+        // (WI-1145): stock Codex accepts `-c` and ignores a `tui` key it does
+        // not know.
+        let pinned = launch(Some(&protected("codex")), &req)
             .unwrap()
             .command
             .unwrap();
         assert_eq!(
-            titled,
+            pinned,
             [
                 protected("codex"),
                 cmd(&[
@@ -1073,11 +1102,23 @@ mod tests {
                     "-c",
                     "tui.terminal_title=[\"agent-state\"]",
                     "-c",
-                    "tui.animations=false"
+                    "tui.animations=false",
+                    "--session-id",
+                    &sid.to_string()
                 ])
             ]
             .concat()
         );
+        // An explicit opt-out (stock npm Codex, which refuses the flag) leaves
+        // the launch unpinned. The title overrides stay.
+        let stock = LaunchRequest {
+            codex_session_id: false,
+            ..req
+        };
+        let titled = launch(Some(&protected("codex")), &stock)
+            .unwrap()
+            .command
+            .unwrap();
         assert!(!titled.iter().any(|arg| arg == "--session-id"));
         let forked = LaunchRequest {
             codex_session_id: true,
@@ -1137,7 +1178,7 @@ mod tests {
     fn claude_sessions_get_the_quiet_defaults_and_others_do_not() {
         // WI-832: prompt suggestions are accepted by a bare Enter, which a
         // driving agent sends.
-        let env = launch(Some(&protected("claude")), &LaunchRequest::default())
+        let env = launch(Some(&protected("claude")), &LaunchRequest::bare())
             .unwrap()
             .env;
         assert!(env.contains(&(
@@ -1148,11 +1189,11 @@ mod tests {
             "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY".to_string(),
             "1".to_string()
         )));
-        assert!(launch(Some(&protected("codex")), &LaunchRequest::default())
+        assert!(launch(Some(&protected("codex")), &LaunchRequest::bare())
             .unwrap()
             .env
             .is_empty());
-        assert!(launch(Some(&cmd(&["bash"])), &LaunchRequest::default())
+        assert!(launch(Some(&cmd(&["bash"])), &LaunchRequest::bare())
             .unwrap()
             .env
             .is_empty());
@@ -1175,7 +1216,7 @@ mod opencode_posture_tests {
             &LaunchRequest {
                 permission_mode: mode,
                 opencode_config: policy,
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1211,7 +1252,7 @@ mod opencode_posture_tests {
             Some(&command),
             &LaunchRequest {
                 permission_mode: Some("bypass"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .expect("codex takes a posture");
@@ -1255,10 +1296,11 @@ mod conversation_tests {
     #[test]
     fn an_unknown_id_is_none_not_a_guess() {
         let id = Uuid::new_v4();
-        // Stock Codex mints its own id. The fork (codex_session_id) is pinned
-        // to the engine id when the command is bare, and not when it carries
-        // arguments of its own. A claude with arguments of its own may carry
-        // `--continue` or a session id the engine did not pin.
+        // The fork (codex_session_id, on by default) is pinned to the engine
+        // id when the command is bare, and not when it carries arguments of
+        // its own. Stock Codex (the flag explicitly off) mints its own id. A
+        // claude with arguments of its own may carry `--continue` or a session
+        // id the engine did not pin.
         assert!(conversation(Some(&argv(&["codex"])), None, id, false).is_none());
         let forked = conversation(Some(&argv(&["codex"])), None, id, true).unwrap();
         assert_eq!(
@@ -1342,7 +1384,7 @@ mod permission_tests {
             &LaunchRequest {
                 permission_mode: Some("bypass"),
                 settings_file: Some(policy),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1362,7 +1404,7 @@ mod permission_tests {
             Some(&cmd(&["bash"])),
             &LaunchRequest {
                 permission_mode: Some("bypass"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         );
         assert!(refused.is_err(), "bash");
@@ -1371,7 +1413,7 @@ mod permission_tests {
             &LaunchRequest {
                 permission_mode: Some("bypass"),
                 settings_file: Some(policy),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1386,7 +1428,7 @@ mod permission_tests {
             Some(&cmd(&["codex"])),
             &LaunchRequest {
                 permission_mode: Some("accept-edits"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1405,7 +1447,7 @@ mod permission_tests {
                 Some(&cmd(&["codex"])),
                 &LaunchRequest {
                     settings_file: Some(policy),
-                    ..LaunchRequest::default()
+                    ..LaunchRequest::bare()
                 }
             )
             .unwrap()
@@ -1429,7 +1471,7 @@ mod permission_tests {
             Some(&cmd(&["codex", "exec"])),
             &LaunchRequest {
                 permission_mode: Some("accept-edits"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1441,7 +1483,7 @@ mod permission_tests {
             .any(|w| w == ["-c", "approvals_reviewer=\"auto_review\""]));
         assert!(exec.windows(2).any(|w| w == ["-s", "danger-full-access"]));
         assert_eq!(
-            launch(Some(&cmd(&["codex", "exec"])), &LaunchRequest::default())
+            launch(Some(&cmd(&["codex", "exec"])), &LaunchRequest::bare())
                 .unwrap()
                 .command
                 .unwrap(),
@@ -1468,7 +1510,7 @@ mod permission_tests {
                 model: Some("grok-4.7"),
                 brief_file: Some(brief),
                 session_id: Some(id),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap();
@@ -1513,7 +1555,7 @@ mod permission_tests {
             &LaunchRequest {
                 settings_file: Some(Path::new("/state/policy.json")),
                 brief_file: Some(Path::new("/state/sessions/x.md")),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1530,7 +1572,7 @@ mod permission_tests {
             &LaunchRequest {
                 resume: Some("72d33a6b-bed4-4229-8f35-ac6bbcf960f5"),
                 session_id: Some(Uuid::new_v4()),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1550,7 +1592,7 @@ mod permission_tests {
             Some(&cmd(&["klaudia"])),
             &LaunchRequest {
                 model: Some("opus"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1566,7 +1608,7 @@ mod permission_tests {
             &LaunchRequest {
                 permission_mode: Some("bypass"),
                 session_id: Some(Uuid::nil()),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1583,7 +1625,7 @@ mod permission_tests {
                 settings_file: Some(settings),
                 add_dirs: &dirs,
                 session_id: Some(Uuid::nil()),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1598,7 +1640,7 @@ mod permission_tests {
             Some(&cmd(&["klaudia"])),
             &LaunchRequest {
                 effort: Some("high"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap_err();
@@ -1608,7 +1650,7 @@ mod permission_tests {
             Some(&cmd(&["klaudia"])),
             &LaunchRequest {
                 permission_mode: Some("accept-edits"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap_err();
