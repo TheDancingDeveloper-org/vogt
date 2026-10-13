@@ -1540,6 +1540,24 @@ checks decide what it can finish on its own (WI-926; the design is
   Destructive-git execpolicy prefix rules stay out: they are Starlark
   (`prefix_rule`), not a requirements table. Claude and opencode launches
   are not blocked by a Codex policy error.
+  **Workspace guidance (WI-1357).** Codex reads no `CLAUDE.md`,
+  `.claude/rules` or `.claude/skills`, and no `AGENTS.md` above its git
+  root, so the engine (`server/src/codex_guidance.rs`) gathers the set
+  Claude Code would load and inserts it after the binary as one
+  `-c developer_instructions="…"` (a TOML basic string). Inside `$HOME` the
+  walk climbs from the working directory to `$HOME`, past the git root, so
+  `~/Working/AGENTS.md`, `CLAUDE.md` and `.claude/rules/*.md` arrive;
+  outside `$HOME` it stops at the git root. `~/.claude/CLAUDE.md` and
+  `~/.claude/rules` come first; the `AGENTS.md` files Codex already reads
+  (git root to working directory) are skipped. Skills from each
+  `.claude/skills` and `~/.claude/skills` go in as an index of name,
+  description and `SKILL.md` path. Every file is resolved through symlinks
+  and kept only if it is a `.md` file inside the walk's top or `$HOME`,
+  outside `.codex`, `.ssh`, `.git`, `.config`, `.local` and the other
+  credential directories, and at most 32 KiB; the body is capped at 96 KiB,
+  and anything left out for size is named. `CODEX_HOME` is never changed, so
+  the user's `~/.codex` (MCP servers, providers, trust, login, transcripts)
+  stays the config Codex reads.
 - **opencode** (WI-932) has its own permission model, a `permission` block
   in its config. Unconfigured, it stops at "Access external directory —
   Allow once / Allow always / Reject" with nobody there to answer. The

@@ -524,6 +524,23 @@ impl SessionRegistry {
             cut.0 = Some((checkout, created, worktree.branch.trim().to_string()));
         }
 
+        // WI-1357. Codex reads no CLAUDE.md, .claude/rules or .claude/skills,
+        // and no AGENTS.md above its git root, so the workspace guidance a
+        // Claude session gets is handed over as one `-c` override. Built after
+        // the worktree is cut, because that is where the session runs.
+        if let Some(command) = spec.command.as_deref() {
+            let cwd = spec
+                .cwd
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| self.cfg.default_cwd.clone());
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            if let Some(rewritten) = agent_cli::with_codex_guidance(command, &cwd, home.as_deref())
+            {
+                spec.command = Some(rewritten);
+            }
+        }
+
         let prompt_file = match brief {
             Some(text) => Some(prompt_files::write_session_prompt(
                 &self.cfg.state_dir,
