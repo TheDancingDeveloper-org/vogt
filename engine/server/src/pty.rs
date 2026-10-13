@@ -118,6 +118,7 @@ pub struct Session {
     superseded_by: Mutex<Option<String>>,
     /// The permission posture, when not the default (WI-926).
     permission_mode: Mutex<Option<String>>,
+    account: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
     stop: Mutex<Option<vogt_engine_contract::StopRequest>>,
     /// What runs first in the session: `agent-auth` when the launch wrapper
@@ -457,6 +458,7 @@ impl Session {
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
+            account: self.account.lock().clone(),
             stop: self.stop.lock().clone(),
             economics: self.economics_snapshot.lock().clone(),
             budget: self.budget(),
@@ -517,6 +519,10 @@ impl Session {
 
     pub fn set_permission_mode(&self, mode: Option<String>) {
         *self.permission_mode.lock() = mode;
+    }
+
+    pub fn set_account(&self, account: Option<String>) {
+        *self.account.lock() = account;
     }
 
     pub fn set_template(&self, template: Option<String>) {
@@ -1159,6 +1165,7 @@ pub fn spawn(
         work_item: Mutex::new(None),
         superseded_by: Mutex::new(None),
         permission_mode: Mutex::new(None),
+        account: Mutex::new(None),
         stop: Mutex::new(None),
         launcher: if spawning_agent_auth_helper {
             "agent-auth"

@@ -52,8 +52,11 @@ def _write(root: Path, conversation: str, lines: list[str]) -> None:
 
 
 class Engine:
-    def __init__(self, economics: dict[str, object] | None = None) -> None:
+    def __init__(
+        self, economics: dict[str, object] | None = None, account: str | None = None
+    ) -> None:
         self.economics = economics
+        self.account = account
 
     def __call__(
         self, url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
@@ -62,6 +65,7 @@ class Engine:
         summary = {
             "id": ENGINE_ID,
             "economics": self.economics,
+            "account": self.account,
             "name": "agent",
             "activity": "idle",
             "cwd": ROOT,
@@ -181,3 +185,17 @@ def test_engine_economics_is_used_and_the_transcript_is_not_read(
     assert result.usage_measured is True
     assert result.budget_line == "7 turns, 2 compactions"
     assert result.detail is None
+
+
+def test_economics_names_the_account_the_session_ran_under(wired: AppContext) -> None:
+    started = start_session(
+        wired, StartSessionParams(project="vogt", template="claude", reason=WHY)
+    )
+    transport = wired.engine.transport if wired.engine is not None else None
+    assert isinstance(transport, Engine)
+    assert (
+        economics(wired, SessionEconomicsParams(id=started.session.id)).account is None
+    )
+    transport.account = "acct2"
+    result = economics(wired, SessionEconomicsParams(id=started.session.id))
+    assert result.account == "acct2"

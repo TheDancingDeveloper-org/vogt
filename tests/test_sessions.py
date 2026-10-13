@@ -1531,6 +1531,40 @@ def test_a_person_can_grant_one_task_a_posture_and_it_is_on_the_record(
     assert engine.last_spec["permission_mode"] == "accept-edits"
 
 
+def test_no_account_sends_nothing_and_a_named_one_is_sent_and_audited(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert "account" not in engine.last_spec
+    assert _last_started_summary(wired)["account"] is None
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", template="claude", account="acct2", reason=WHY
+        ),
+    )
+    # The name only: the engine owns the mapping to a config directory, so no
+    # path (and no CLAUDE_CONFIG_DIR) comes from Vogt.
+    assert engine.last_spec["account"] == "acct2"
+    assert "CLAUDE_CONFIG_DIR" not in engine.env_of_last_start()
+    assert _last_started_summary(wired)["account"] == "acct2"
+
+
+@pytest.mark.parametrize("bad", ["../x", "Acct", "a b", "/etc", "", "x" * 33])
+def test_an_account_must_be_a_plain_name(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        StartSessionParams(work_item="WI-1", account=bad, reason=WHY)
+
+
+def test_a_sessions_account_comes_back_from_the_engine() -> None:
+    from vogt.adapters.engine.client import EngineSession
+
+    payload = {"id": "s1", "name": "n", "alive": True, "account": "acct2"}
+    assert EngineSession.from_payload(payload).account == "acct2"
+    assert EngineSession.from_payload({**payload, "account": None}).account is None
+    assert EngineSession.from_payload({"id": "s1", "name": "n"}).account is None
+
+
 def test_an_agent_cannot_start_a_bypassed_session(
     wired: AppContext, engine: StandInEngine
 ) -> None:

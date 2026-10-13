@@ -1311,6 +1311,13 @@ class SessionSummary(Result):
             "Null is the default posture."
         ),
     )
+    account: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the named Claude Code account the session "
+            "runs under. Null is the engine's default account."
+        ),
+    )
     running: SessionRuntime | None = Field(
         default=None,
         description=(
@@ -4042,6 +4049,16 @@ class StartSessionParams(Params):
             "for its default autonomous mode, so `accept_edits` is refused)."
         ),
     )
+    account: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$",
+        description=(
+            "Run the session under a named Claude Code subscription account "
+            "(a name from the engine's ENGINE_AGENT_CLAUDE_ACCOUNTS). Omitted "
+            "uses the engine's default account. Claude Code templates only; "
+            "an unknown name is refused, never started on the default login."
+        ),
+    )
     resume: str | None = Field(
         default=None,
         pattern=r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,127}$",
@@ -5311,6 +5328,13 @@ class SessionEconomicsResult(Result):
     id: str = Field(description="The id the caller named, as given.")
     engine_session_id: str
     agent: str | None = None
+    account: str | None = Field(
+        default=None,
+        description=(
+            "The named Claude Code account the session ran under, so usage "
+            "can be totalled per subscription. Null is the default account."
+        ),
+    )
     conversation_id: str | None = None
     basis: str | None = None
     transcript: str | None = Field(

@@ -10784,6 +10784,7 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
         default_dir: Some(claude_home.clone()),
         settings_file: None,
         opencode_config: None,
+        accounts: Vec::new(),
     };
     let state_dir = cfg.state_dir.clone();
     let workspace = cfg.workspace_root.clone();
@@ -10844,6 +10845,90 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
     let woken = &printed[printed.rfind("arg=[--resume]").unwrap()..];
     assert!(woken.contains("arg=[--add-dir="), "{woken:?}");
     assert!(!woken.contains("Vogt started"), "{woken:?}");
+}
+
+#[tokio::test]
+async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
+    let (tmp, mut cfg, _stub) = hibernation_sandbox();
+    let acct2 = tmp.path().join("acct2");
+    cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
+        enabled: false,
+        default_dir: None,
+        settings_file: None,
+        opencode_config: None,
+        accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
+            "acct2={}",
+            acct2.display()
+        ))),
+    };
+    let stub = tmp.path().join("bin").join("claude");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nprintf 'cfg=[%s]\\n' \"$CLAUDE_CONFIG_DIR\"\nsleep 300 &\nprintf '> '\nwait\n",
+    )
+    .unwrap();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let want = format!("cfg=[{}]", acct2.display());
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "second",
+            "command": [stub.to_string_lossy()],
+            "env": [["CLAUDE_CONFIG_DIR", "/somewhere/the/caller/chose"]],
+            "account": "acct2",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created["account"], "acct2", "{created}");
+    let id = created["id"].as_str().unwrap().to_string();
+    // The engine's directory for the name wins over a caller-supplied one.
+    live_output_containing(&client, &base, &id, &[&want]).await;
+
+    // A wake stays on the same login, and the summary still names it.
+    client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .send()
+        .await
+        .unwrap();
+    let hibernated: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hibernated["summary"]["account"], "acct2", "{hibernated}");
+    client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .send()
+        .await
+        .unwrap();
+    live_output_containing(&client, &base, &id, &[&want]).await;
+
+    // An account the operator never listed, and a command that is not Claude
+    // Code, are refused rather than started on the default login.
+    for body in [
+        json!({ "name": "x", "command": [stub.to_string_lossy()], "account": "nope" }),
+        json!({ "name": "y", "command": ["/bin/sh", "-c", "true"], "account": "acct2" }),
+    ] {
+        let refused = client
+            .post(format!("{base}/api/sessions"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
 }
 
 #[tokio::test]

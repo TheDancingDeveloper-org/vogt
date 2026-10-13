@@ -1476,6 +1476,7 @@ impl AgentTaskRegistry {
             effort: None,
             resume: None,
             permission_mode: None,
+            account: None,
             autopilot: false,
             policy: None,
             role: Default::default(),

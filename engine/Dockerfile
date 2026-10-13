@@ -550,6 +550,7 @@ COPY engine/deploy/git-askpass.sh /usr/local/bin/vogt-git-askpass
 COPY engine/deploy/rust-analyzer-mcp.sh /usr/local/bin/vogt-rust-analyzer-mcp
 COPY engine/deploy/readonly-mcp.sh /usr/local/bin/vogt-readonly-mcp
 COPY engine/deploy/klaudia-mcp.sh /usr/local/bin/vogt-klaudia-mcp
+COPY engine/deploy/claude-profile.sh /usr/local/bin/claude-profile
 COPY engine/deploy/git-forgejo.sh /usr/local/bin/git-forgejo
 COPY engine/deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
 COPY engine/deploy/cargo-cache.sh /usr/local/bin/vogt-cargo-cache
@@ -566,6 +567,7 @@ RUN chmod +x \
     /usr/local/bin/vogt-rust-analyzer-mcp \
     /usr/local/bin/vogt-readonly-mcp \
     /usr/local/bin/vogt-klaudia-mcp \
+    /usr/local/bin/claude-profile \
     /usr/local/bin/vogt-claude-session-hook \
     /usr/local/bin/vogt-cargo-cache \
     /usr/local/bin/vogt-policy-hook \
