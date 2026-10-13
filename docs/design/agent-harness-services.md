@@ -6,7 +6,8 @@ against the engine and core on `integrate/vogt-next` at `99355800`, the
 installed helpers in `/usr/local/bin/vogt-*`, msp-klaudia `be8cd0b`, and work
 items WI-1279, WI-1281, WI-1291 and WI-1298 to WI-1316. Revised after the
 Opus-low design review of 2026-10-13 (five blockers, all addressed here;
-the review is on WI-1317).
+the review is on WI-1317) and after the re-review of the same day (one
+blocker, addressed here).
 
 The initiative that carries the work is `agent-harness-services`. The item
 refs in §9 are the Vogt items created from this doc (WI-1318 to WI-1338,
@@ -151,13 +152,18 @@ Four records and two refusals.
   [str], reviewer_session}`. The only place a review result lives. The
   review brief (WI-1299) tells the reviewer to post exactly this. A verdict
   whose `head_sha` is not the branch tip is stale, and `work.land` says so.
-  **Who may post one** (design review, blocker 1): a person, or a session
-  whose recorded `purpose` is `review` (`session.start(purpose=review)`,
-  §2.4; `review_of=<item>` from WI-1299 counts too) and that is not the
+  **Who may post one** (design review, blocker 1; re-review, blocker 1): a
+  person, or a *review session* that meets all of: its recorded `purpose` is
+  `review` (`session.start(purpose=review)`, §2.4; `review_of=<item>` from
+  WI-1299 counts too); it was **started by a person or by an oversight-role
+  session** (`CodingSession.started_by_kind`, recorded at start, §3), never
+  by a worker; its bound work item **is this item**; and it is not the
   session named in the item's latest hand-off. The core fills
-  `reviewer_session` from the acting token and ignores a supplied value, so
-  a worker cannot post a `no_blockers` verdict on its own branch and
-  `work.land` cannot be fed a forged one.
+  `reviewer_session` and `reviewer_started_by` from the acting session's
+  record and ignores supplied values. So a worker cannot post a
+  `no_blockers` verdict itself, cannot start a reviewer that posts one
+  (dispatch refuses the start, §2.4, and the verdict rule refuses the post
+  even if it got through), and a reviewer of item A cannot post on item B.
 - `work.comment kind=verification` with `VerificationFields {head_sha, lane:
   "vogt-dev" | "vogt-prod" | …, what, evidence, by}`. A functional check of
   the change in the deployed setup, posted by a person or by a session that
@@ -176,11 +182,14 @@ refused. The core:
 1. reads the project's `agent_policy.landing` (§2.4): `merge_by` must be
    `oversight`, otherwise the op refuses with "this project's merges are the
    operator's" (msp-agent, msp-klaudia, Versent);
-2. requires the latest `verdict` comment to have `verdict=no_blockers`,
-   `head_sha` equal to the branch tip the engine reports, and a
-   `reviewer_session` that is not the worker's (the latest hand-off's
-   session); a verdict at another SHA or from the worker is named in the
-   refusal;
+2. requires the latest `verdict` comment to have `verdict=no_blockers` and
+   `head_sha` equal to the branch tip the engine reports, and re-reads the
+   reviewer session from the session store: it must be a `purpose=review`
+   session started by a person or an oversight-role session, bound to this
+   item, and not the worker's (the latest hand-off's session). The op never
+   trusts the comment's own fields for this. A verdict at another SHA, from
+   the worker, from a worker-started reviewer, or from a reviewer of another
+   item is named in the refusal;
 3. asks the engine for `GitOpReq::Land {repo, branch, head_sha, onto,
    mode}` where `onto` is `landing.base_branch` and `mode` is
    `landing.merge_mode` (`fast_forward` or `rebase`; never `merge`).
@@ -386,7 +395,7 @@ today (design review: the role-None case is defined, not implied).
 | `dispatch.profiles` | the C10 table: `implement` = klaudia + grok-4.7, 120 turns, worktree; `implement-careful` = claude + opus, 150; `review` = claude + opus low, 40, read-only; `mechanical` = claude + haiku, 60; `investigate`/`design` = claude + opus low, 60 | `session.start(purpose=…)` resolves template, model, effort, budget, `worktree`, `repo_map`, `autopilot` from the profile; explicit params win and are audited as overrides |
 | `dispatch.max_workers_per_overseer` | 5 | live `worker` sessions started by one oversight session |
 | `dispatch.escalate_after_failed_reviews` | 2 | after this many `blockers` verdicts on one item, `implement` resolves to `implement-careful` |
-| `dispatch.review_by_oversight_only` | true | a `worker` session's `session.start(purpose=review)` is refused |
+| `dispatch.review_by_oversight_only` | true | a `worker` session's `session.start(purpose=review)` is refused. This is the first of three checks on reviewer provenance; the verdict rule (§2.2) and `work.land` re-check `started_by_kind`, so landing never depends on this one alone |
 
 **Enforced at `session.start` (core).** For an **agent** caller: a model
 outside the resolved profile, a review on a `never_models` model, a sixth
@@ -428,21 +437,28 @@ economics collector records `verified_by` so the "done vs verified" miss
 
 Extensions of `ci_watch.py`, in the same pure-core style:
 
-- **Hung run.** A bound branch's run `in_progress` for longer than
-  `ci.hung_after` (default 45 min, per project override) raises Inbox
-  `ci.run_hung` with the run URL and the job that is still going. No
+- **Hung run.** The check observation carries no run start time today, so
+  the collector first gains `run_started_at` (from the forge's workflow-run
+  model). Then a bound branch's run that is not `completed` and started more
+  than `ci_hung_after_minutes` ago (a `VogtConfig` setting, default 45,
+  deployment-wide; no per-project override in this phase) raises Inbox
+  `ci.run_hung` with the run URL, the workflow and the elapsed time, and one
+  notice is typed into the item's live sessions. A payload without
+  `run_started_at` falls back to `updated_at` and the row says so. No
   cancel: that is `gh run cancel` from a person or oversight, or an agent
-  task a person armed on the `forge-pr-checks` trigger.
+  task a person armed on the `forge-pr-checks` trigger (WI-1334).
 - **Every failure in one round.** The vogt engine job gets
   `timeout-minutes`, nextest with `slow-timeout`, and lint/lockfile/test as
   independent steps with `if: always()` (WI-1312). This is a workflow edit,
   not Vogt code, but it is the precondition for the next two.
 - **Flaky register.** A label `ci:flaky` on work items whose title names the
-  test (WI-1305, WI-1309, WI-1310). `ci_alerts.branch_ci` annotates a failed
-  run whose failing job's test names (from the check observation's
-  `failed_tests`, when the collector has them) match an open `ci:flaky` item
-  as `flaky_suspect` with the item ref, so the Inbox row and the typed notice
-  say "probably WI-1309" instead of "red".
+  job or test (WI-1305, WI-1309, WI-1310). The check observation carries
+  `failed_jobs` (job names, and step names when the lookup budget allowed)
+  and **no test names**, so matching is on failed job and step names against
+  the open `ci:flaky` titles; a failure that matches is annotated
+  `flaky_suspects: [refs]` on the Inbox row and in the typed notice, so they
+  say "probably WI-1309" instead of "red". Log parsing for test names is out
+  of scope here and would be its own item (WI-1335).
 - **One bounded rerun, person-armed.** A documented agent task recipe: trigger
   `forge-pr-checks status=failure`, command `gh run rerun --failed <run>`,
   guarded by the task's own run history (one rerun per head SHA). The person
@@ -454,10 +470,10 @@ Extensions of `ci_watch.py`, in the same pure-core style:
 | Record | Layer | New or changed |
 | --- | --- | --- |
 | `workspace` block on the session record and hibernation `Record`, for every repo cwd (`kind` worktree or checkout) | engine (`pty.rs`, `hibernation.rs`) | new; WI-1298 adds `worktree` on the spawn spec, WI-1324 adds the record |
-| `CodingSession.workspace_kind`, `workspace_path`, `purpose`, `started_by_session` | core (`entities.py`, one migration for the new columns) | new fields, nullable |
+| `CodingSession.workspace_kind`, `workspace_path`, `purpose`, `started_by_session`, `started_by_kind` (`person` \| `oversight` \| `worker`, a fact about the start, never updated) | core (`entities.py`, one migration for the new columns, WI-1323) | new fields, nullable |
 | `AgentPolicy.landing`, `.review`, `.verification` | core (`entities.py`, `project.update` validation) | new optional blocks |
 | `SessionPolicy.branch_pattern`, `.open_pr_allowed`, `.session_role`, `.landing_mains[]`, `.discard_baseline[]`, `.workspace_kind`, `.workspace_path`, `.protected_checkouts[]` | engine contract (`engine/contract/src/lib.rs`) | new optional fields; the workspace ones are filled by the engine, the rest by core |
-| `CommentKind` = `note \| handoff \| verdict \| verification`; `VerdictFields`, `VerificationFields` | core (`entities.py`, `models.py`, `work.py`) | new kinds and field sets; `verdict` only from a review-purpose session or a person, `verification` never from the worker |
+| `CommentKind` = `note \| handoff \| verdict \| verification`; `VerdictFields` (with `reviewer_session`, `reviewer_started_by`), `VerificationFields` | core (`entities.py`, `models.py`, `work.py`) | new kinds and field sets; `verdict` only from a person or a review session started by a person or oversight and bound to the item, `verification` never from the worker |
 | `Decision` | core (new table, migration), `services/decisions.py` | new entity |
 | `dispatch.*` preferences | core preference store | new keys with defaults in code |
 | `delivery` projection | core `work.get` | computed, not stored |
@@ -500,7 +516,9 @@ Where each rule runs, and what a refusal says.
 | Discard guard over `baseline_dirty` (any session with a baseline) | engine `policy.rs` via the hook | "refusing: `git restore` reaches a path that was dirty before this session" |
 | Protected checkouts (worktree sessions only) | engine `policy.rs` via the hook | "refusing: a worktree session does not write to a project's root checkout" |
 | Branch ownership on push; no PR where the policy says push-only (workers with a work item only) | engine `policy.rs` via the hook | names the pattern or the landing rule |
-| Verdict only from a review-purpose session or a person | core `work.comment` | "a verdict is posted by a review session or a person" |
+| Verdict only from a person, or a review session started by a person or oversight and bound to this item | core `work.comment` | "a verdict is posted by a person, or by a review session started by a person or oversight, on the item it reviews" |
+| A worker cannot start a reviewer | core `session.start` (`dispatch.review_by_oversight_only`) | names the rule |
+| Land re-reads the reviewer's provenance from the session store | core `work.land` | names the failing condition (started by a worker, other item, the worker itself) |
 | Forbidden text; merge deploys prod | engine `policy.rs` (exists) | names the rule, never the match |
 | Land only at a `no_blockers` verdict from a review session for the tip; never a merge commit; only oversight or a person | core `work.land` then engine `GitOpReq::Land` (core credential only) | names the verdict SHA vs tip, the reviewer, or the merge commit |
 | Verification from the worker's own session | core `work.comment` | "a verification is posted by someone other than the worker" |
@@ -575,10 +593,12 @@ With this design live, a driven agent session (any CLI, default posture):
 3. cannot push to `main_branches`, to another item's branch, or with
    `--force`; cannot open a PR where the project lands by branch push;
 4. cannot land its own branch (`work.land` is oversight or a person), cannot
-   post the `no_blockers` verdict that would let it be landed (verdicts come
-   from a review-purpose session or a person, never the worker), and
-   oversight cannot land without such a verdict at the exact tip, nor leave
-   a merge commit on `integrate/*`;
+   post the `no_blockers` verdict that would let it be landed, and cannot
+   start a reviewer that posts one: a verdict is accepted only from a
+   person or from a review session that a person or an oversight-role
+   session started on that item, checked at posting and again by
+   `work.land` from the session record. Oversight cannot land without such
+   a verdict at the exact tip, nor leave a merge commit on `integrate/*`;
 5. cannot post the verification of its own work, nor close an item that
    needs one;
 6. cannot run past its turn or wall-clock budget, or be nudged forever;
@@ -637,9 +657,11 @@ for workers with a work item (H10, WI-1327, Opus low); engine
 WI-1328, Opus low); linear-history CI check (WI-1315, re-scoped, Haiku);
 dispatch enforcement at `session.start` (H12, WI-1329); `delivery`
 projection and the agent-only done gate (H13, WI-1330); askpass asks the
-broker at prompt time (H14, WI-1331, Opus low); brokered-mode flip with the
-manifest audit, dev then prod (WI-1342, Opus low); `vogt-agent-auth with` for
-`gh pr create` on another org (WI-1343, Opus low).
+broker at prompt time (H14, WI-1331, Opus low); brokered-mode flip, steps
+1–2: manifest audit and the dev flip (WI-1342, Opus low); `vogt-agent-auth
+with` for `gh pr create` on another org (WI-1343, Opus low); brokered-mode
+flip, step 3: prod, a week after dev and only once WI-1331 and WI-1343 are
+verified there (WI-1344, Opus low).
 
 **Phase 3 — adapters converge.**
 Klaudia `gitguard` defers to the engine on the `VOGT_ENGINE_WORKSPACE`
@@ -655,13 +677,15 @@ WI-1335); person-armed rerun recipe (H19, WI-1336, Haiku). Flaky items
 WI-1305, WI-1309, WI-1310 are labelled `ci:flaky`.
 
 Dependencies (all recorded as `depends_on` in Vogt): WI-1323 → WI-1319 →
-WI-1320, WI-1328, WI-1329, WI-1330; WI-1318 → WI-1327, WI-1328, WI-1329,
-WI-1330; WI-1321 → WI-1322, WI-1339; WI-1323 → WI-1329; WI-1298 → WI-1324 →
-WI-1340 → WI-1325, and WI-1324 → WI-1326, WI-1332; WI-1304 → WI-1325;
-WI-1326 → WI-1332; WI-1341 → WI-1328; WI-1331 → WI-1342 → WI-1343. The
+WI-1320, WI-1328, WI-1329, WI-1330; WI-1323 → WI-1328, WI-1329; WI-1329 →
+WI-1328 (landing never ships before a worker is stopped from starting its
+own reviewer); WI-1318 → WI-1327, WI-1328, WI-1329, WI-1330; WI-1321 →
+WI-1322, WI-1339; WI-1298 → WI-1324 → WI-1340 → WI-1325, and WI-1324 →
+WI-1326, WI-1332; WI-1304 → WI-1325; WI-1326 → WI-1332; WI-1341 → WI-1328;
+WI-1331 → WI-1342, WI-1343; WI-1342, WI-1331, WI-1343 → WI-1344. The
 brokered sequence is: WI-1331 merges → WI-1342 step 1 (audit) and step 2
-(dev flip) → WI-1331 and WI-1343 verified on brokered dev → WI-1342 step 3
-(prod, a week later).
+(dev flip) → WI-1331 and WI-1343 verified on brokered dev → WI-1344 (prod, a
+week after the dev flip).
 
 ## 10. Operator decisions (answered 2026-10-13)
 
@@ -686,8 +710,8 @@ grok/Haiku items. Decisions, in order:
    expiry means. Maximum TTL 7 days.
 7. `dispatch.max_workers_per_overseer` defaults to 5.
 8. Sequencing: an Opus-low review of this design before any item starts.
-   The first review (head 9d895a28) found five blockers; this revision
-   addresses them and goes back for re-review.
+   The first review (head 9d895a28) found five blockers, the re-review
+   (head db16cf97) one; this revision addresses it and goes back once more.
 
 The questions as asked, kept for the record:
 
