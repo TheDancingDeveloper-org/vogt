@@ -21,6 +21,7 @@ from vogt.application.models import (
     CoverageResult,
     DepsParams,
     DepsResult,
+    EngineDiskStatus,
     MirroredSource,
     ObservationsParams,
     ObservationsResult,
@@ -111,6 +112,28 @@ def collector_registry(ctx: AppContext) -> CollectorRegistry:
 def _project_scoped(collector: object) -> bool:
     """Whether a collector's scope is projects (the transcript index's is not)."""
     return bool(getattr(collector, "project_scoped", True))
+
+
+def _workspace_disk(ctx: AppContext) -> EngineDiskStatus | None:
+    """The workspace volume, when a session engine answers (WI-1304).
+
+    A sweep that cannot ask the engine still collected; the row is absent
+    then, which is a different fact from a volume that is fine.
+    """
+    if ctx.engine is None:
+        return None
+    try:
+        payload = ctx.engine.operational_status()
+    except Exception as exc:
+        _log.info(
+            "workspace disk usage could not be read from the engine",
+            extra={"vogt": {"error": f"{type(exc).__name__}: {exc}"}},
+        )
+        return None
+    disk = payload.get("disk")
+    if not isinstance(disk, dict):
+        return None
+    return EngineDiskStatus.model_validate(disk)
 
 
 class _RegisteredProjects:
@@ -302,6 +325,7 @@ def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:
         projects=len(projects),
         subjects=subjects,
         dep_refs=dep_ref_count,
+        disk=_workspace_disk(ctx),
         reports=[
             SweepReportView(
                 collector=report.collector,

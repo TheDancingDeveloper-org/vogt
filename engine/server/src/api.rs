@@ -916,6 +916,30 @@ pub async fn sweep_sessions(
     Ok(Json(rows))
 }
 
+/// The workspace volume's usage, and whether it is past the threshold
+/// (WI-1304). A volume that cannot be read is reported as needing attention
+/// rather than as empty and fine.
+fn disk_status(path: &std::path::Path, threshold_percent: u8) -> DiskStatus {
+    match crate::worktree_clean::volume_usage(path) {
+        Some(usage) => DiskStatus {
+            path: path.display().to_string(),
+            total_bytes: usage.total_bytes,
+            free_bytes: usage.free_bytes,
+            used_percent: usage.used_percent,
+            threshold_percent,
+            needs_attention: usage.used_percent >= threshold_percent,
+        },
+        None => DiskStatus {
+            path: path.display().to_string(),
+            total_bytes: 0,
+            free_bytes: 0,
+            used_percent: 0,
+            threshold_percent,
+            needs_attention: true,
+        },
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ScreenQuery {
     pub scrollback_lines: Option<usize>,
@@ -1209,12 +1233,25 @@ pub struct OperationalStatus {
     /// resident memory. Absent when chats are off.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chats: Option<ChatStatus>,
+    /// The workspace volume (WI-1304). `needs_attention` once used space
+    /// passes `ENGINE_DISK_WARN_PERCENT` (85 by default).
+    pub disk: DiskStatus,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ChatStatus {
     pub running: usize,
     pub rss_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiskStatus {
+    pub path: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub used_percent: u8,
+    pub threshold_percent: u8,
+    pub needs_attention: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1310,6 +1347,7 @@ pub async fn operational_status(
             state_dir: state.config.state_dir.display().to_string(),
             workspace_root: state.config.workspace_root.display().to_string(),
         },
+        disk: disk_status(&state.config.workspace_root, state.config.disk_warn_percent),
     }))
 }
 
