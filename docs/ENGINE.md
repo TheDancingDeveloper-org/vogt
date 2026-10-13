@@ -1540,6 +1540,24 @@ checks decide what it can finish on its own (WI-926; the design is
   Destructive-git execpolicy prefix rules stay out: they are Starlark
   (`prefix_rule`), not a requirements table. Claude and opencode launches
   are not blocked by a Codex policy error.
+  Codex also does not read the guidance Claude Code reads (WI-1357). It
+  loads `AGENTS.md` in its working directory and skills from
+  `$CODEX_HOME/skills`, and stops: `CLAUDE.md`, `.claude/rules` and
+  `.claude/skills`, and a parent checkout's copies of any of them, never
+  arrive. For a Codex launch the engine gathers those itself and hands them
+  over. It walks from the session's working directory up to the git root
+  (past that the files belong to the host, not the project), reads
+  `CLAUDE.md` and `.claude/rules/*.md` at each level and `AGENTS.md` at the
+  ancestors — the working directory's own `AGENTS.md` loads natively, so it
+  is not repeated — and passes them as one `-c developer_instructions='…'`
+  argument, each file fenced as untrusted data. Skill directories under
+  `.claude/skills` are symlinked into `skills/` in a fresh per-session
+  config home under the engine's state directory, and the session gets
+  `CODEX_HOME` pointing at it. That home carries nothing else: the user's
+  `~/.codex/config.toml` holds their login, and copying it into a throwaway
+  home would fork it. A directory with none of these files gets no bundle
+  and no `CODEX_HOME`. A bundle that cannot be built is logged and skipped;
+  the session still starts, only without the guidance.
 - **opencode** (WI-932) has its own permission model, a `permission` block
   in its config. Unconfigured, it stops at "Access external directory —
   Allow once / Allow always / Reject" with nobody there to answer. The

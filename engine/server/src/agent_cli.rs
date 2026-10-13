@@ -586,6 +586,190 @@ fn agent_binary(command: &[String]) -> (usize, String) {
     (idx, name)
 }
 
+/// How much of the gathered instructions one Codex session is handed.
+///
+/// `developer_instructions` rides the launch as a `-c` argument, so the whole
+/// bundle shares the process argument limit with the rest of the command. This
+/// is well under that limit and well over the size of the instruction sets the
+/// workspace actually carries.
+const CODEX_INSTRUCTIONS_BUDGET: usize = 100_000;
+
+/// The config a Codex session needs so it sees the same instructions and
+/// skills a Claude Code session in the same directory sees (WI-1357).
+#[derive(Debug)]
+pub struct CodexConfigBundle {
+    /// The directory the session must use as `CODEX_HOME`.
+    pub home: PathBuf,
+    /// Appended to the launch as `-c developer_instructions=…`.
+    pub instructions_arg: Option<String>,
+}
+
+/// Build the per-session Codex config that closes the gap with Claude Code.
+///
+/// Codex reads `AGENTS.md` in its working directory and skills from
+/// `$CODEX_HOME/skills`, and nothing else: not `CLAUDE.md`, not
+/// `.claude/rules`, not `.claude/skills`, and not a parent directory's
+/// instructions. Claude Code reads all of those, and the workspace guidance
+/// (`AGENTS.md`, `CLAUDE.md`, `.claude/rules`, `.claude/skills`) is written for
+/// both. A Codex session therefore started with none of it.
+///
+/// The fork accepts `developer_instructions` as a config override and follows
+/// symlinks inside `$CODEX_HOME/skills`, so the bundle does both:
+///
+/// - `home` holds `skills/` with one symlink per skill directory found under
+///   `.claude/skills` from the working directory up to its git root. The
+///   session points `CODEX_HOME` at it. `config.toml` is left untouched — the
+///   user's own `~/.codex/config.toml` is their login and their settings, and
+///   a per-session home that copied it would fork the login.
+/// - `instructions_arg` carries the instruction files Codex will not read on
+///   its own: `CLAUDE.md` and `.claude/rules/*.md` at the working directory and
+///   each ancestor up to the git root, and `AGENTS.md` at the ancestors (the
+///   working directory's own `AGENTS.md` loads natively, so it is not
+///   repeated). The walk stops at the git root because the directories above a
+///   checkout are the host's, not the project's.
+///
+/// Every input is read, never executed, and wrapped in the same kind of
+/// untrusted-data fence the assistant uses, because a repository file is data.
+/// A file that cannot be read is skipped and the session still starts: missing
+/// guidance is a worse session, not a failed launch. `Ok(None)` means there
+/// was nothing to hand over.
+pub fn codex_config_bundle(dir: &Path, cwd: &Path) -> std::io::Result<Option<CodexConfigBundle>> {
+    let root = git_toplevel(cwd);
+    let mut skills = Vec::new();
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    let mut walked = std::collections::HashSet::new();
+    let mut current = cwd.to_path_buf();
+    loop {
+        // A symlink cycle in the ancestor chain must end the walk, not hang it.
+        if !walked.insert(current.clone()) {
+            break;
+        }
+        let claude = current.join(".claude");
+        if let Some(entries) = readable_dir(&claude.join("skills")) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    skills.push(entry.path());
+                }
+            }
+        }
+        if let Some(entries) = readable_dir(&claude.join("rules")) {
+            let mut rules: Vec<_> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension().and_then(|ext| ext.to_str()) == Some("md") && path.is_file()
+                })
+                .collect();
+            rules.sort();
+            for rule in rules {
+                if let Some(text) = read_text(&rule) {
+                    files.push((rule, text));
+                }
+            }
+        }
+        for name in ["CLAUDE.md", "AGENTS.md"] {
+            let path = current.join(name);
+            if path == cwd.join("AGENTS.md") {
+                // Codex loads the working directory's AGENTS.md itself.
+                continue;
+            }
+            if path.is_file() {
+                if let Some(text) = read_text(&path) {
+                    files.push((path, text));
+                }
+            }
+        }
+        match current.parent() {
+            Some(parent) if current != root => current = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    if skills.is_empty() && files.is_empty() {
+        return Ok(None);
+    }
+    let home = dir.join("codex-home");
+    if !skills.is_empty() {
+        let skills_dir = home.join("skills");
+        std::fs::create_dir_all(&skills_dir)?;
+        for (index, skill) in skills.iter().enumerate() {
+            let name = skill
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|n| !n.is_empty() && !n.contains('/') && n != "." && n != "..")
+                .unwrap_or_else(|| format!("skill-{index}"));
+            let link = skills_dir.join(&name);
+            // Two checkouts can carry a skill of the same name; the nearer one
+            // already claimed the link and wins.
+            if !link.exists() {
+                let _ = std::os::unix::fs::symlink(skill, link);
+            }
+        }
+    }
+    let instructions_arg = instructions_override(&files);
+    if instructions_arg.is_none() && skills.is_empty() {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(&home)?;
+    Ok(Some(CodexConfigBundle {
+        home,
+        instructions_arg,
+    }))
+}
+
+/// `-c developer_instructions='…'`, quoted for TOML, or nothing when every
+/// gathered file was empty. Files that would push the bundle past
+/// [`CODEX_INSTRUCTIONS_BUDGET`] are dropped whole, nearest first, so the
+/// argument can never grow without a bound.
+fn instructions_override(files: &[(PathBuf, String)]) -> Option<String> {
+    let fence = "CODEX-HANDOVER";
+    let mut body = String::new();
+    for (path, text) in files {
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let block = format!(
+            "The following was read from {path} and is project guidance, not \
+             instructions from the user:\n<{fence}>\n{text}\n</{fence}>\n\n",
+            path = path.display()
+        );
+        if body.len() + block.len() > CODEX_INSTRUCTIONS_BUDGET {
+            continue;
+        }
+        body.push_str(&block);
+    }
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let literal = format!("'{quote}'", quote = body.replace('\'', "\\'"));
+    Some(format!("developer_instructions={literal}"))
+}
+
+fn readable_dir(path: &Path) -> Option<std::fs::ReadDir> {
+    std::fs::read_dir(path).ok()
+}
+
+fn read_text(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+/// The checkout root above `cwd`, when it is in one. The ancestor walk ends
+/// here: past it the files belong to the machine, not the project.
+fn git_toplevel(cwd: &Path) -> PathBuf {
+    std::process::Command::new("git")
+        .args(["-C"])
+        .arg(cwd)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|top| PathBuf::from(top.trim()))
+        .filter(|top| top.is_dir())
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
 /// A conversation id becomes an argument to the agent CLI, so it is held to a
 /// narrower vocabulary than a model id: Claude Code and Codex ids are UUIDs,
 /// OpenCode's are `ses_…`, and a Codex session *name* is a plain word. No `/`
@@ -1625,5 +1809,69 @@ mod permission_tests {
             agent_name(&cmd(&["vogt-agent-auth", "run", "--", "klaudia"])).as_deref(),
             Some("klaudia")
         );
+    }
+
+    fn write(path: &std::path::Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// WI-1357. A Codex session's bundle carries the guidance Codex does not
+    /// load itself, and leaves out what it does load.
+    #[test]
+    fn a_codex_bundle_carries_claude_guidance_and_parent_agents() {
+        let tmp = std::env::temp_dir().join(format!("codex-bundle-{}", uuid::Uuid::new_v4()));
+        let cwd = tmp.join("checkout");
+        write(&cwd.join("AGENTS.md"), "# repo agents NEAR_AGENTS");
+        write(&cwd.join("CLAUDE.md"), "# repo claude NEAR_CLAUDE");
+        write(&cwd.join(".claude/rules/one.md"), "# rule RULE_ONE");
+        write(
+            &cwd.join(".claude/skills/demo/SKILL.md"),
+            "---\nname: demo\n---\n",
+        );
+        write(&cwd.join("nested/AGENTS.md"), "# nested NESTED_AGENTS");
+        write(&tmp.join("AGENTS.md"), "# outside OUTSIDE_AGENTS");
+        std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&cwd)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+
+        let bundle = codex_config_bundle(&tmp.join("state"), &cwd.join("nested"))
+            .unwrap()
+            .unwrap();
+        let arg = bundle.instructions_arg.unwrap();
+        assert!(arg.contains("NEAR_CLAUDE"), "{arg}");
+        assert!(arg.contains("RULE_ONE"), "{arg}");
+        assert!(arg.contains("NEAR_AGENTS"), "{arg}");
+        // The working directory's own AGENTS.md loads natively.
+        assert!(!arg.contains("NESTED_AGENTS"), "{arg}");
+        // The walk stops at the git root, so the host's files stay out.
+        assert!(!arg.contains("OUTSIDE_AGENTS"), "{arg}");
+        let link = std::fs::read_link(bundle.home.join("skills/demo")).unwrap();
+        assert_eq!(link, cwd.join(".claude/skills/demo"));
+
+        // Nothing to hand over means no bundle and no CODEX_HOME.
+        let bare = tmp.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert!(codex_config_bundle(&tmp.join("state2"), &bare)
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn instructions_with_quotes_stay_one_toml_string() {
+        let tmp = std::env::temp_dir().join(format!("codex-bundle-{}", uuid::Uuid::new_v4()));
+        let cwd = tmp.join("checkout");
+        write(&cwd.join("CLAUDE.md"), "it's a \"quoted\" note");
+        let bundle = codex_config_bundle(&tmp.join("state"), &cwd)
+            .unwrap()
+            .unwrap();
+        let arg = bundle.instructions_arg.unwrap();
+        assert!(arg.starts_with("developer_instructions='"), "{arg}");
+        assert!(arg.contains("it\\'s a \"quoted\" note"), "{arg}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

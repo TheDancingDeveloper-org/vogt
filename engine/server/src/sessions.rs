@@ -524,6 +524,45 @@ impl SessionRegistry {
             cut.0 = Some((checkout, created, worktree.branch.trim().to_string()));
         }
 
+        // WI-1357. Codex reads AGENTS.md in its working directory and skills
+        // from $CODEX_HOME, and stops there: CLAUDE.md, .claude/rules and
+        // .claude/skills — and a parent checkout's copies of all of them —
+        // never arrive. Built after the worktree is cut, because that is the
+        // directory the session actually runs in. A bundle that cannot be
+        // built is logged and skipped: the session still starts, only without
+        // the guidance, which is the failure this exists to shrink.
+        if agent_cli::agent_name(spec.command.as_deref().unwrap_or_default()).as_deref()
+            == Some("codex")
+        {
+            let cwd = std::path::PathBuf::from(
+                spec.cwd
+                    .clone()
+                    .unwrap_or_else(|| self.cfg.default_cwd.to_string_lossy().into_owned()),
+            );
+            match agent_cli::codex_config_bundle(
+                &self.cfg.state_dir.join("codex").join(id.to_string()),
+                &cwd,
+            ) {
+                Ok(Some(bundle)) => {
+                    spec.env.get_or_insert_with(Vec::new).push((
+                        "CODEX_HOME".to_string(),
+                        bundle.home.to_string_lossy().into_owned(),
+                    ));
+                    if let Some(arg) = bundle.instructions_arg {
+                        if let Some(command) = spec.command.as_mut() {
+                            command.extend(["-c".to_string(), arg]);
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    session = %id,
+                    error = %e,
+                    "codex config bundle could not be built; the session starts without it"
+                ),
+            }
+        }
+
         let prompt_file = match brief {
             Some(text) => Some(prompt_files::write_session_prompt(
                 &self.cfg.state_dir,
