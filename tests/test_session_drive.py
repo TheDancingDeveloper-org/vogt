@@ -399,6 +399,51 @@ def test_an_unknown_key_is_refused_by_the_model() -> None:
         )
 
 
+def test_text_submits_by_default(wired: AppContext, engine: Engine) -> None:
+    result = session_input(
+        wired, SessionInputParams(id=UNLINKED, text="hi", reason=WHY)
+    )
+    assert engine.inputs() == [
+        (UNLINKED, {"text": "hi", "submit": False}),
+        (UNLINKED, {"text": "", "submit": True}),
+    ]
+    assert result.submitted is True
+    assert result.delivery != "typed"
+
+
+def test_draft_types_without_pressing_enter(wired: AppContext, engine: Engine) -> None:
+    result = session_input(
+        wired,
+        SessionInputParams(id=UNLINKED, text="hi", draft=True, reason=WHY),
+    )
+    assert engine.inputs() == [(UNLINKED, {"text": "hi", "submit": False})]
+    assert result.submitted is False
+    assert result.delivery == "typed"
+    assert "no Enter" in result.delivery_evidence
+
+
+def test_explicit_submit_false_does_not_press_enter(
+    wired: AppContext, engine: Engine
+) -> None:
+    result = session_input(
+        wired,
+        SessionInputParams(id=UNLINKED, text="hi", submit=False, reason=WHY),
+    )
+    assert engine.inputs() == [(UNLINKED, {"text": "hi", "submit": False})]
+    assert result.submitted is False
+    assert result.delivery == "typed"
+
+
+def test_draft_wins_over_submit(wired: AppContext, engine: Engine) -> None:
+    result = session_input(
+        wired,
+        SessionInputParams(id=UNLINKED, text="hi", submit=True, draft=True, reason=WHY),
+    )
+    assert engine.inputs() == [(UNLINKED, {"text": "hi", "submit": False})]
+    assert result.submitted is False
+    assert result.delivery == "typed"
+
+
 def test_input_accepts_an_unlinked_engine_uuid(
     wired: AppContext, engine: Engine
 ) -> None:
@@ -406,7 +451,10 @@ def test_input_accepts_an_unlinked_engine_uuid(
         wired, SessionInputParams(id=UNLINKED, text="hi", reason=WHY)
     )
     assert result.linked is False
-    assert engine.inputs() == [(UNLINKED, {"text": "hi", "submit": False})]
+    assert engine.inputs() == [
+        (UNLINKED, {"text": "hi", "submit": False}),
+        (UNLINKED, {"text": "", "submit": True}),
+    ]
 
 
 def test_input_accepts_the_engine_uuid_of_a_linked_session(
