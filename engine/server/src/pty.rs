@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -151,12 +151,15 @@ pub struct Session {
     /// is deliberately not `budget_soft_sent`, which a soft warning sets first
     /// and which a wall-clock hard can fire before.
     budget_refusal_noted: AtomicBool,
-    /// When the budget watcher last saw this session actually running, cleared
-    /// whenever it is idle, at its prompt, at a permission dialog, or blocked.
-    /// The budget's wall clock is measured from this, not from `turn_started_at`:
-    /// a dialog resumes the same turn, so measuring from the turn would count
-    /// the time a person spent answering it.
+    /// When the budget watcher last saw this session actually running. Set when
+    /// a running stretch begins and cleared when it ends (idle, the prompt, a
+    /// permission dialog, or blocked on a person), so a pause is not counted.
+    /// It is only the current stretch: the total lives in
+    /// `budget_running_total`, which a pause does not clear (WI-1281).
     budget_running_since: Mutex<Option<time::OffsetDateTime>>,
+    /// Running time already accumulated from stretches that have ended. The
+    /// stretch in progress is added on top at each tick.
+    budget_running_total: Mutex<Duration>,
 }
 
 impl Session {
@@ -317,9 +320,18 @@ impl Session {
         *self.budget_running_since.lock()
     }
 
-    /// Remember or forget when the budget's wall clock started counting.
+    /// Remember or forget when the current running stretch began.
     pub fn set_budget_running_since(&self, since: Option<time::OffsetDateTime>) {
         *self.budget_running_since.lock() = since;
+    }
+
+    pub fn budget_running_total(&self) -> Duration {
+        *self.budget_running_total.lock()
+    }
+
+    /// Add a finished stretch to the accumulated running time.
+    pub fn add_budget_running(&self, elapsed: Duration) {
+        *self.budget_running_total.lock() += elapsed;
     }
 
     pub fn role(&self) -> vogt_engine_contract::SessionRole {
@@ -1211,6 +1223,7 @@ pub fn spawn(
         budget_hard_done: AtomicBool::new(false),
         budget_refusal_noted: AtomicBool::new(false),
         budget_running_since: Mutex::new(None),
+        budget_running_total: Mutex::new(Duration::ZERO),
     });
 
     spawn_reader_thread(
