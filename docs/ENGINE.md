@@ -684,7 +684,7 @@ than these routes.
   (`{"blocked": true, "reason", "items"}`) or clear (`{"blocked": false}`)
   the agent's "blocked on a person" report, which rides on the summary and
   screen as `blocked`, publishes a `session-blocked` event and (when set)
-  sends a push. Cleared when the session exits. Requires `sessions`.
+  sends a push. Cleared when the session exits, and also on its own once a person has addressed it (WI-1314): input or an answer arms the clear, and it drops when the next turn finishes or the screen shows `AUTOPILOT: DONE`. The engine's own autopilot nudge is not a person, so it does not arm the clear, and a fresh report resets it. Requires `sessions`.
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
   `sessions` capability). MCP: `session_rename`.
 - `POST /api/sessions/:id/kill` `{"reason"?, "by"?}` -> `OkResponse`

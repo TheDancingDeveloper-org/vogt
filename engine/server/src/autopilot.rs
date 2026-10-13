@@ -219,9 +219,9 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
 /// Type the nudge, then Enter on its own: a TUI that reads a burst ending in
 /// a carriage return as a paste would keep the newline as text.
 async fn nudge(session: &Session) -> std::io::Result<()> {
-    session.write_input(NUDGE.as_bytes())?;
+    session.write_engine_input(NUDGE.as_bytes())?;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    session.write_input(b"\r")
+    session.write_engine_input(b"\r")
 }
 
 /// Run the re-driver, unless the deployment turned nudging off.

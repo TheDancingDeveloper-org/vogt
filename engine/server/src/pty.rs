@@ -85,6 +85,10 @@ pub struct Session {
     approval: Mutex<Option<crate::approval::Pending>>,
     /// The agent's own report that it is blocked on a person.
     blocked: Mutex<Option<vogt_engine_contract::BlockedReport>>,
+    /// A person's input or answer has arrived since the report was set, so
+    /// the next completed turn (or `AUTOPILOT: DONE`) clears it (WI-1314).
+    /// Set only while a report is held; a new report resets it.
+    unblock_armed: std::sync::atomic::AtomicBool,
     /// The agent conversation this session runs, when its id is known
     /// (set by the registry right after spawn).
     conversation: Mutex<Option<vogt_engine_contract::AgentConversation>>,
@@ -582,6 +586,8 @@ impl Session {
             ));
         }
         *self.blocked.lock() = report.clone();
+        // A fresh report is unanswered until a person types or answers.
+        self.unblock_armed.store(false, Ordering::Release);
         bus.publish(ServerEvent::SessionBlocked {
             id: self.id,
             blocked: report,
@@ -732,8 +738,23 @@ impl Session {
         self.scrollback.lock().total_written()
     }
 
+    /// A person's keystrokes address a standing blocked report (WI-1314).
+    /// The engine's own autopilot nudge is not a person, so it does not.
     pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
+        self.write_input_inner(data, true)
+    }
+
+    /// [`write_input`] for the engine itself: the autopilot nudge is not a
+    /// person addressing a block, so it does not arm the clear.
+    pub fn write_engine_input(&self, data: &[u8]) -> std::io::Result<()> {
+        self.write_input_inner(data, false)
+    }
+
+    fn write_input_inner(&self, data: &[u8], from_person: bool) -> std::io::Result<()> {
         *self.last_input.lock() = Some(Instant::now());
+        if from_person && self.blocked.lock().is_some() {
+            self.unblock_armed.store(true, Ordering::Release);
+        }
         let mut w = self.writer.lock();
         w.write_all(data)?;
         w.flush()
@@ -1173,6 +1194,7 @@ pub fn spawn(
         last_output_at: Mutex::new(None),
         approval: Mutex::new(None),
         blocked: Mutex::new(None),
+        unblock_armed: std::sync::atomic::AtomicBool::new(false),
         conversation: Mutex::new(None),
         keep_awake: AtomicBool::new(false),
         autopilot: AtomicBool::new(false),
@@ -1767,7 +1789,9 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
         // An exited agent is blocked on nobody.
         if new.is_terminal() {
             *session.blocked.lock() = None;
+            session.unblock_armed.store(false, Ordering::Release);
         }
+        let ended = ends_turn(*a, new);
         *a = new;
         *session.activity_since.lock() = Instant::now();
         *session.activity_changed_at.lock() = now;
@@ -1779,7 +1803,58 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
             approval: session.approval_prompt(),
             turn_started_at: session.turn_started_at().map(format_rfc3339),
         });
+        // A blocked report a person has addressed clears when the turn that
+        // addressed it finishes, or when the screen says the work is done
+        // (WI-1314). After the activity event, so the two publishes stay
+        // ordered.
+        if ended {
+            clear_addressed_block(session, bus);
+        }
     }
+}
+
+/// A turn ends when the session comes back to rest. A permission dialog is
+/// the middle of a turn, so leaving one does not end it.
+fn ends_turn(old: ActivityState, new: ActivityState) -> bool {
+    matches!(new, ActivityState::Idle | ActivityState::WaitingForInput)
+        && matches!(
+            old,
+            ActivityState::Running | ActivityState::AwaitingApproval
+        )
+}
+
+/// Drop a blocked report a person has already addressed, once the turn that
+/// addressed it has finished or the agent has said there is nothing left.
+fn clear_addressed_block(session: &Arc<Session>, bus: &EventBus) {
+    if !session.unblock_armed.load(Ordering::Acquire) {
+        return;
+    }
+    let (rendered, _) = session.render_screen(0);
+    let done = crate::autopilot::says_done(&rendered.lines);
+    let resting = matches!(
+        session.activity(),
+        ActivityState::Idle | ActivityState::WaitingForInput
+    );
+    if !(done || resting) {
+        return;
+    }
+    let mut blocked = session.blocked.lock();
+    if blocked.is_none() {
+        return;
+    }
+    *blocked = None;
+    drop(blocked);
+    session.unblock_armed.store(false, Ordering::Release);
+    tracing::info!(
+        session = %session.id,
+        event = "session.unblocked",
+        cause = if done { "autopilot-done" } else { "turn-ended" },
+        "cleared a blocked report a person had addressed"
+    );
+    bus.publish(ServerEvent::SessionBlocked {
+        id: session.id,
+        blocked: None,
+    });
 }
 
 /// Whether moving from `old` to `new` starts a new turn.
@@ -1832,7 +1907,7 @@ mod economics_tests {
 
 #[cfg(test)]
 mod turn_tests {
-    use super::{begins_turn, ActivityState::*};
+    use super::{begins_turn, ends_turn, ActivityState::*};
 
     #[test]
     fn a_turn_starts_from_rest_and_survives_a_permission_dialog() {
@@ -1843,6 +1918,20 @@ mod turn_tests {
         assert!(!begins_turn(Running, Running));
         assert!(!begins_turn(Running, Idle));
         assert!(!begins_turn(Idle, AwaitingApproval));
+    }
+
+    #[test]
+    fn a_turn_ends_on_returning_to_rest_not_on_a_dialog() {
+        // WI-1314: the clear waits for the turn that addressed the block to
+        // finish, which is coming back to rest.
+        assert!(ends_turn(Running, Idle));
+        assert!(ends_turn(Running, WaitingForInput));
+        assert!(ends_turn(AwaitingApproval, Idle));
+        // Answering the dialog resumes the same turn.
+        assert!(!ends_turn(AwaitingApproval, Running));
+        assert!(!ends_turn(Idle, Running));
+        assert!(!ends_turn(Running, AwaitingApproval));
+        assert!(!ends_turn(Idle, WaitingForInput));
     }
 }
 
