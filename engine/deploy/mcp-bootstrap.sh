@@ -361,10 +361,12 @@ PY
 # not given a bearer here: a profile this script did not write is left as the
 # operator has it, and one it did write carries no secret.
 #
-# grok has no entry in Codex's bundled catalog, and the fallback metadata
-# offers no apply_patch tool and does not turn code mode off. Alongside the
-# provider this writes a one-model catalog (apply_patch freeform, tool_mode
-# omitted) and points model_catalog_json at it. That key is set only when
+# The router's groups have no entry in Codex's bundled catalog, and the
+# fallback metadata offers no apply_patch tool and does not turn code mode off.
+# Alongside the provider this writes a catalog of those groups (apply_patch
+# freeform, tool_mode omitted) and points model_catalog_json at it. The groups
+# are the router's own — grok, code, small, reasoning, vision, premium — and
+# nothing else (no DLab community or free models). That key is set only when
 # absent or when it already names the file this writer owns; an operator's
 # catalog is left alone. Top-level model and model_provider are set only when
 # absent or when they already name this bundle (litellm, or theclawbay as the
@@ -381,45 +383,48 @@ import json, os, sys, tempfile
 
 path = os.environ["CODEX_CONFIG"]
 # The catalog Codex deserializes as ModelsResponse (protocol openai_models.rs).
-# One model, the router's grok group. apply_patch_tool_type "freeform" is what
-# makes Codex offer the apply_patch tool; tool_mode is omitted, which is code
-# mode off. availability_nux has no serde default, so it must be present (null).
-# The catalog deserializer rejects a model with neither base_instructions nor
-# model_messages.instructions_template, so the template is a short non-empty string.
-CATALOG = {
-    "models": [
-        {
-            "slug": "grok",
-            "display_name": "grok",
-            "description": "Estate LiteLLM grok group.",
-            "supported_reasoning_levels": [],
-            "shell_type": "unified_exec",
-            "visibility": "list",
-            "supported_in_api": True,
-            "priority": 1,
-            "availability_nux": None,
-            "upgrade": None,
-            "model_messages": {
-                "instructions_template": (
-                    "You are Codex, running through the estate LiteLLM router as grok."
-                ),
-                "approvals": None,
-                "collaboration_modes": None,
-                "auto_review": None,
-                "permissions": None,
-                "multi_agent": None,
-            },
-            "default_reasoning_summary": "none",
-            "support_verbosity": False,
-            "default_verbosity": None,
-            "apply_patch_tool_type": "freeform",
-            "truncation_policy": {"mode": "bytes", "limit": 10000},
-            "context_window": 256000,
-            "effective_context_window_percent": 95,
-            "experimental_supported_tools": [],
-        }
-    ]
-}
+# One entry per LiteLLM router group, the same shape the grok entry had.
+# apply_patch_tool_type "freeform" is what makes Codex offer the apply_patch
+# tool; tool_mode is omitted, which is code mode off. availability_nux has no
+# serde default, so it must be present (null). The catalog deserializer rejects
+# a model with neither base_instructions nor model_messages.instructions_template,
+# so the template is a short non-empty string. Order is the router's, and the
+# default (grok) keeps priority 1.
+ROUTER_GROUPS = ("grok", "code", "small", "reasoning", "vision", "premium")
+
+def _catalog_model(slug: str) -> dict[str, object]:
+    return {
+        "slug": slug,
+        "display_name": slug,
+        "description": f"Estate LiteLLM {slug} group.",
+        "supported_reasoning_levels": [],
+        "shell_type": "unified_exec",
+        "visibility": "list",
+        "supported_in_api": True,
+        "priority": 1 if slug == "grok" else 0,
+        "availability_nux": None,
+        "upgrade": None,
+        "model_messages": {
+            "instructions_template": (
+                f"You are Codex, running through the estate LiteLLM router as {slug}."
+            ),
+            "approvals": None,
+            "collaboration_modes": None,
+            "auto_review": None,
+            "permissions": None,
+            "multi_agent": None,
+        },
+        "default_reasoning_summary": "none",
+        "support_verbosity": False,
+        "default_verbosity": None,
+        "apply_patch_tool_type": "freeform",
+        "truncation_policy": {"mode": "bytes", "limit": 10000},
+        "context_window": 256000,
+        "effective_context_window_percent": 95,
+        "experimental_supported_tools": [],
+    }
+
+CATALOG = {"models": [_catalog_model(slug) for slug in ROUTER_GROUPS]}
 catalog_path = os.path.join(os.path.dirname(path), "vogt-model-catalog.json")
 try:
     with open(path, encoding="utf-8") as fh:
