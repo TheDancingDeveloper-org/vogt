@@ -359,3 +359,68 @@ Initiative `event-driven-oversight-and-structured-worker-results-harness-review-
 | WI-1530 | H13 aidevenv AGENTS.md branch + remaining stale refs | p3 | xs | Haiku | — |
 
 Each item's body names its files, acceptance criteria and gates.
+
+## 11. Addendum: Codex as the target harness outside Claude Code
+
+Added 2026-10-14 at the operator's direction: the non-Claude harness Vogt targets is **Codex**, meaning our fork `TheDancingDeveloper-org/codex`. The pod runs `codex-cli 0.162.0+fork.ca04973b4` through the `codex-full-access` wrapper, which forces `--no-daemon`. Fork facts were read at ca04973b with `git show`/`git grep`; paths below are `codex-rs/…` at that commit. Pod facts come from `~/.codex/config.toml` and real rollouts.
+
+### 11.1 What Codex already gives natively
+
+- **Bounded context.**
+  - Auto-compaction triggers at `min(model_auto_compact_token_limit, 90% of window)` and is forced at 95% of the window (`protocol/src/openai_models.rs:527-538`, `core/src/session/context_window.rs:84-110`).
+  - The pod sets 200k of 272k, but by hand: nothing in vogt writes it.
+  - `/compact` exists but not mid-turn (`tui/src/slash_command.rs:248`).
+  - app-server has `thread/compact/start`.
+- **Structured turn boundaries in the rollout.**
+  - `event_msg` `task_started` / `task_complete` {turn_id, last_agent_message, duration_ms} (`protocol/src/protocol.rs:1424,1433,2173-2200`).
+  - `token_count` {last_token_usage = context occupancy, model_context_window} (`protocol.rs:2270-2372`).
+  - Compaction records (`history/src/lib.rs:287-307`).
+  - All confirmed in a live rollout.
+- **Push hooks.**
+  - `notify` runs a program with an `agent-turn-complete` JSON (`hooks/src/legacy_notify.rs:14-73`).
+  - Hooks (stable, on by default) cover Stop, PreCompact, PostCompact, PermissionRequest, SessionStart/End and more. They can be managed from `/etc/codex/requirements.toml`, which Vogt already uses for gitguard (`engine/deploy/driven-session-codex-requirements.toml`).
+- **Terminal title.** `agent-state` gives `codex: ready|working|awaiting approval`, and Vogt already reads it.
+- **Pre-assigned thread id.** `--session-id` lets Vogt choose the thread id before launch.
+- **Per-tool MCP approval and timeouts.** `[mcp_servers.X] tool_timeout_sec`, `default_tools_approval_mode`, and `tools.<t>.approval_mode = approve` (`config/src/mcp_types.rs`).
+
+### 11.2 What Codex lacks compared with the Claude Code overseer
+
+- **No scheduler.** There is no `/loop`, ScheduleWakeup or cron. `codex queue` needs the daemon, which the wrapper disables.
+- **No AskUserQuestion outside Plan mode.** `request_user_input` is Plan-mode only (`protocol/src/config_types.rs:700-702`).
+- **No memory.** There is no MEMORY.md equivalent; the engine injects workspace guidance as `developer_instructions` (`engine/server/src/codex_guidance.rs`).
+- **No in-tree ACP.** For Codex, ACP is the npm `codex-acp` adapter, which itself drives `codex app-server`.
+
+### 11.3 Decisions D1–D8 on Codex: what has to change
+
+| # | Decision | Codex native? | Required change | Item |
+|---|---|---|---|---|
+| D1 | Bound the overseer context | **Yes**: native auto-compact | Vogt must **own** the setting (`mcp-bootstrap` writes `model_auto_compact_token_limit`). It must **measure** Codex context from `token_count`; today it is estimated (`economics.rs:42` `measured: agent == "claude"`). WI-1522's typed `/compact` must skip Codex. | WI-1575 (vogt) |
+| D2 | Overseer wake-on-event | Partly: turn-end is structured | Emit ready/done from rollout `task_complete` (no screen scraping); skip nudges while a Codex `/goal` is active. Since Codex has no `/loop`, the engine must supply an hourly heartbeat. Operator questions go through vogt `decision_ask`. A PreCompact hook writes the overseer's hand-off to Vogt in place of MEMORY.md. | WI-1576, WI-1577 (vogt); WI-1572 (codex) |
+| D3 | Overseer model | n/a | Add a Codex arm to the trial: an OpenAI model via ChatGPT login, **not** the pod default `model = grok` (oversight on grok was NO-GO, 2026-10-07). This needs measured economics first. | WI-1526 comment; WI-1575 |
+| D4 | Hibernate-on-done | Partly | Codex resume must pass `-c tui.resume_cwd="session"`, or a cwd mismatch stops at an interactive prompt. Wake must wait for the old process's thread-writer lock. | WI-1578 (vogt) |
+| D5 | ACP | No in-tree ACP | For Codex the structured path is **app-server v2**, already used for quick chats (`chat_codex.rs`). Spike a Vogt-hosted app-server with the TUI joined by `--remote`: structured events **and** human live attach, which ACP cannot do. | WI-1573 (codex) |
+| D6 | aidevenv AGENTS.md | Yes: Codex auto-loads AGENTS.md | One combined 32 KiB budget, root first (`core/src/agents_md.rs:68-203`). vogt `AGENTS.md` + `engine/AGENTS.md` = 33,164 B, so Codex truncates `engine/AGENTS.md`. aidevenv's new 15.1 KB file fits. | WI-1579 (vogt) |
+| D7 | Token scope / tool access | **No**: approval blocks it | 0 of 124 vogt tools carry MCP `annotations`. Under the engine's `-a on-request`, every vogt call prompts a person, so a Codex worker can't report blocked/done unattended. Under `never` it is denied (seen in a pod rollout). The default 300 s tool timeout cuts `wait_any(600)`. Fix: annotations, per-tool `approve` for session-self tools, `tool_timeout_sec = 660`. | WI-1574 (vogt) |
+| D8 | Close shipped items | n/a | None | — |
+
+Also: pin the fork surfaces Vogt now depends on (rollout shapes, title, `--session-id`, hook payloads, MCP approval keys) in fork docs and CI, so an upstream rebase can't break them silently (WI-1571, codex).
+
+### 11.4 Codex backlog (same initiative, children of WI-1517)
+
+| Ref | Project | Title | P | Effort | Model | Depends / relates |
+|---|---|---|---|---|---|---|
+| WI-1574 | vogt | MCP annotations, per-tool approve, 660 s tool timeout for Codex | p1 | s | grok, Opus-low review | relates WI-1520 |
+| WI-1575 | vogt | Measured Codex economics; Vogt owns auto-compact settings | p1 | s | grok, Opus-low review | relates WI-1522 |
+| WI-1576 | vogt | ready/done from rollout `task_complete`; respect `/goal` | p1 | s | grok, Opus-low review | WI-1518, WI-1519; relates WI-1572 |
+| WI-1577 | vogt | Codex overseer: heartbeat wake, `decision_ask`, PreCompact hand-off | p2 | m | Opus low | WI-1521, WI-1524 |
+| WI-1578 | vogt | Codex resume without cwd prompt; lock-aware wake | p2 | xs | grok | relates WI-1523 |
+| WI-1579 | vogt | AGENTS.md over Codex's 32 KiB budget | p3 | xs | Haiku | relates WI-1530 |
+| WI-1571 | codex | Pin the Vogt harness contract in fork docs + CI | p2 | s | grok, Opus-low review | relates WI-1575, WI-1576 |
+| WI-1572 | codex | Stop hook / notify payload: turn_id + last message | p3 | s | grok | — |
+| WI-1573 | codex | Spike: Vogt-hosted app-server + TUI `--remote` | p3 | m | Opus low | relates WI-1527 |
+
+Additional operator decisions for Codex:
+
+- **D9.** Run a Codex overseer at all before WI-1574/1575/1577 land? **Recommend no.** Without them it can't call vogt write tools unattended, can't be scheduled, and its cost can't be measured.
+- **D10.** For Codex, pursue the app-server `--remote` spike (WI-1573) instead of ACP. **Recommend yes.**
+- **D11.** Which model a Codex overseer runs. **Recommend an OpenAI model via ChatGPT login, not grok.**
