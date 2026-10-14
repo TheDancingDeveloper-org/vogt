@@ -1003,6 +1003,14 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_started_at: Option<String>,
     },
+    /// A session came to rest at a prompt a driver can type into (WI-1519).
+    ///
+    /// `idle` itself is not a change an overseer reads — a session that went
+    /// quiet mid-turn is not ready — so readiness is its own event, published
+    /// once per turn when the screen render says the prompt is waiting.
+    SessionReady {
+        id: Uuid,
+    },
     /// A session was hibernated: its process tree is gone, the session is
     /// still listed (`activity: hibernated`) and can be woken.
     SessionHibernated {
