@@ -116,6 +116,9 @@ def test_a_resumed_or_engine_started_conversation_is_found_by_its_id(
         allow_cwd_guess=False,
     )
     assert by_resume is not None and by_resume.basis == "resume-id"
+    # A second transcript written into the same directory, inside the index
+    # TTL. The index only notices it once the TTL has passed.
+    transcripts._indexes.clear()
     _write_claude(root, ENGINE_ID, [_claude_line("m", "pinned")])
     by_engine = transcripts.find(
         {"claude": root},
