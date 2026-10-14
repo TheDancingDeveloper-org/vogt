@@ -5,24 +5,34 @@
 //! touching anything: the failure this prevents is discovering a problem half
 //! way through, with the live data already gone.
 //!
-//! `clone`, `export` and `import` are not here. Clone rewrites identity and
-//! forge state this build does not carry yet, and export serialises every
-//! declared entity.
+//! `clone` is `restore` for a backup of another instance: the data comes
+//! across, the target's identity and credentials stay, and the copy is made
+//! unable to act as its source. `import` is not here.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::application::context::{AppContext, Built};
+use crate::application::context::{with_stores_at, AppContext, Built};
+use crate::application::services::{context_parts, write_context};
+use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{Clock, IdFactory, Moment};
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WorkFilter};
+use crate::storage::interface::{
+    CloneStamp, DeclaredStore, ObservedStore, ProjectUpdate, ReadView, WorkFilter, WriteTxn,
+};
 use crate::VERSION;
 
 const MANIFEST_NAME: &str = "manifest.json";
 const MANIFEST_VERSION: i64 = 2;
 const ENGINE_STATE_DIR: &str = "engine-state";
 const BACKUP_EVENT: &str = "instance.backed_up";
+const CLONE_EVENT: &str = "instance.cloned";
+const CLONE_OPERATION: &str = "clone";
+/// What `clone --include-engine-state` copies: session history only. `push.json`
+/// above all stays behind — the source's phones would receive this copy's
+/// notifications otherwise.
+const CLONED_ENGINE_STATE: &[&str] = &["history.db", "assistant-log.db", "session-logs"];
 const EXPORT_FORMAT_VERSION: i64 = 2;
 
 /// What a backup says about itself. `engine_state` and `import_root` arrived
@@ -364,6 +374,261 @@ pub fn restore<C: Clock, I: IdFactory>(
     }))
 }
 
+/// Restore another instance's backup here as a copy, not as that instance.
+///
+/// A plain restore makes this instance *be* that one. A clone keeps this
+/// instance's id and credentials, revokes the source's live tokens, drops its
+/// password logins and forge accounts, disarms every project's write-back,
+/// marks the source's running sessions stopped, and stamps the copy. The
+/// source's push subscriptions and agent tasks are never copied.
+///
+/// Verification and the sanitising write happen on a staged copy. A failure
+/// before the staged stores replace the live ones leaves the live stores
+/// untouched.
+pub fn clone_instance<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: &Value,
+) -> Result<Value, VogtError> {
+    let source = expand_user(Path::new(
+        params.get("source").and_then(Value::as_str).unwrap_or(""),
+    ));
+    let manifest = verified_manifest(ctx, &source)?;
+    let current_observed = ctx.observed.schema_version();
+    if manifest.observed_schema_version > current_observed {
+        return Err(VogtError::InvalidRequest(format!(
+            "the backup was taken at observed schema {backed} and this build is at \
+             {current_observed}. Run a newer build rather than cloning backwards.",
+            backed = manifest.observed_schema_version
+        )));
+    }
+    let reason = params.get("reason").and_then(Value::as_str).unwrap_or("");
+
+    let instance_id = ctx.declared.read()?.instance_id()?;
+    if manifest.instance_id == instance_id {
+        return Err(VogtError::InvalidRequest(format!(
+            "{source} is a backup of this instance ({instance_id}); a clone copies another \
+             instance. Use `restore` to put this one back.",
+            source = source.display()
+        )));
+    }
+    if params.get("confirm").and_then(Value::as_bool) != Some(true) {
+        return Err(VogtError::InvalidRequest(format!(
+            "this replaces the stores in {data_dir} with a copy of instance {source_id} as it \
+             was at {taken}, keeping this instance's id and credentials. Pass --confirm.",
+            data_dir = ctx.config.resolved_data_dir().display(),
+            source_id = manifest.instance_id,
+            taken = crate::core::to_iso(manifest.taken_at)
+        )));
+    }
+
+    let carried = ctx.declared.credentials()?;
+    let cloned_at = now(ctx);
+    let stamp = CloneStamp {
+        source_instance_id: manifest.instance_id.clone(),
+        cloned_at,
+        backup_taken_at: manifest.taken_at,
+    };
+    let revoke_reason = format!(
+        "cloned from instance {source_id}: the source's credentials are not valid on a copy",
+        source_id = manifest.instance_id
+    );
+
+    let data_dir = ctx.config.resolved_data_dir();
+    std::fs::create_dir_all(&data_dir).map_err(|err| {
+        VogtError::InvalidRequest(format!(
+            "creating {data_dir} failed: {err}",
+            data_dir = data_dir.display()
+        ))
+    })?;
+    // Beside the live stores, so the final swap is a same-filesystem rename.
+    let stamp_label = format!(
+        "{}Z",
+        crate::core::to_iso(cloned_at)[..19].replace(['-', ':'], "")
+    );
+    let staging = data_dir.join(format!(".clone-staging-{stamp_label}"));
+    std::fs::create_dir(&staging).map_err(|err| {
+        VogtError::InvalidRequest(format!(
+            "creating {staging} failed: {err}",
+            staging = staging.display()
+        ))
+    })?;
+
+    let outcome = (|| {
+        for name in ["declared.sqlite3", "observed.sqlite3"] {
+            std::fs::copy(source.join(name), staging.join(name)).map_err(|err| {
+                VogtError::InvalidRequest(format!("copying {name} failed: {err}"))
+            })?;
+        }
+        let staged = with_stores_at(ctx, &staging);
+        let migrated = staged.declared.migrate()?;
+        staged.observed.migrate()?;
+
+        let (declared, _observed, principal, clock, ids, _config) = context_parts(&staged);
+        let mut write = write_context(declared, principal, clock, ids);
+        let sanitised = audited_write(&mut write, CLONE_OPERATION, reason, |txn, _actor| {
+            let carry = txn.carry_credentials(&carried, &revoke_reason, cloned_at)?;
+            let mut reset = Vec::new();
+            for project in txn.list_projects(10_000, 0)? {
+                if project.write_back != crate::core::WriteBack::Disabled {
+                    txn.update_project(
+                        &project.id,
+                        &ProjectUpdate {
+                            write_back: Some("none".to_string()),
+                            ..ProjectUpdate::default()
+                        },
+                        cloned_at,
+                    )?;
+                    reset.push(project.slug);
+                }
+            }
+            let running = txn.list_sessions(None, None, false, 10_000, 0)?;
+            let sessions_closed = running.len() as i64;
+            for session in &running {
+                txn.mark_session_stopped(&session.id, cloned_at)?;
+            }
+            txn.set_instance_identity(&instance_id, &stamp)?;
+            let summary = json!({
+                "source_instance_id": manifest.instance_id,
+                "backup_taken_at": crate::core::to_iso(manifest.taken_at),
+                "source": source.display().to_string(),
+                "tokens_kept": carry.tokens_kept,
+                "source_tokens_revoked": carry.source_tokens_revoked,
+                "write_back_reset": reset,
+                "sessions_closed": sessions_closed,
+            });
+            Ok(WriteOutcome::new(
+                (carry, reset, sessions_closed),
+                "instance",
+                &instance_id,
+                summary.clone(),
+                CLONE_EVENT,
+                summary,
+            ))
+        })?;
+        staged.observed.rebind_instance(&instance_id)?;
+
+        for name in ["declared.sqlite3", "observed.sqlite3"] {
+            for suffix in ["-wal", "-shm"] {
+                let stale = data_dir.join(format!("{name}{suffix}"));
+                if stale.exists() {
+                    std::fs::remove_file(&stale).map_err(|err| {
+                        VogtError::InvalidRequest(format!(
+                            "removing {stale} failed: {err}",
+                            stale = stale.display()
+                        ))
+                    })?;
+                }
+            }
+            std::fs::rename(staging.join(name), data_dir.join(name)).map_err(|err| {
+                VogtError::InvalidRequest(format!("replacing {name} failed: {err}"))
+            })?;
+            let leftover = staging.join(format!("{name}-wal"));
+            if leftover.exists() {
+                std::fs::rename(&leftover, data_dir.join(format!("{name}-wal"))).map_err(
+                    |err| {
+                        VogtError::InvalidRequest(format!(
+                            "replacing {leftover} failed: {err}",
+                            leftover = leftover.display()
+                        ))
+                    },
+                )?;
+            }
+        }
+        Ok::<_, VogtError>((sanitised, migrated.applied))
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    let (sanitised, migrations_applied) = outcome?;
+
+    let engine_state = clone_engine_state(
+        &source.join(ENGINE_STATE_DIR),
+        ctx.config.engine_state_dir.as_deref(),
+        params
+            .get("include_engine_state")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    );
+    let (carry, write_back_reset, sessions_closed) = sanitised;
+    Ok(json!({
+        "source": source.display().to_string(),
+        "instance_id": instance_id,
+        "source_instance_id": manifest.instance_id,
+        "restored_from": crate::core::to_json_timestamp(manifest.taken_at),
+        "cloned_at": crate::core::to_json_timestamp(cloned_at),
+        "migrations_applied": migrations_applied,
+        "declared_schema_version": ctx.declared.schema_version(),
+        "tokens_kept": carry.tokens_kept,
+        "source_tokens_revoked": carry.source_tokens_revoked,
+        "password_logins_kept": carry.password_logins_kept,
+        "source_password_logins_dropped": carry.source_password_logins_dropped,
+        "forge_accounts_kept": carry.forge_accounts_kept,
+        "source_forge_accounts_dropped": carry.source_forge_accounts_dropped,
+        "write_back_reset": write_back_reset,
+        "sessions_closed": sessions_closed,
+        "engine_state": engine_state,
+        "import_root_then": manifest.import_root,
+        "import_root_now": ctx.config.resolved_import_root().display().to_string(),
+    }))
+}
+
+/// Copy the allowlisted session history, or say why nothing was copied. Never
+/// fatal: by the time this runs the stores are already in place.
+fn clone_engine_state(source: &Path, target: Option<&Path>, include: bool) -> String {
+    let left_behind =
+        "push subscriptions and agent tasks are never copied by a clone; this engine keeps its own";
+    if !include {
+        return format!("not copied (pass include_engine_state to copy history); {left_behind}");
+    }
+    if !source.is_dir() {
+        return format!("not in this backup; {left_behind}");
+    }
+    let Some(target) = target else {
+        return format!(
+            "in the backup at {source}, but no engine_state_dir is configured here, so it was not \
+             copied; {left_behind}",
+            source = source.display()
+        );
+    };
+    let resolved = expand_user(target);
+    let copied = (|| -> std::io::Result<Vec<String>> {
+        std::fs::create_dir_all(&resolved)?;
+        let mut names = Vec::new();
+        let mut entries: Vec<_> = std::fs::read_dir(source)?.collect::<Result<_, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !CLONED_ENGINE_STATE
+                .iter()
+                .any(|allowed| name == *allowed || name.starts_with(&format!("{allowed}-")))
+            {
+                continue;
+            }
+            let destination = resolved.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &destination)?;
+            } else {
+                std::fs::copy(entry.path(), &destination)?;
+            }
+            names.push(name.to_string());
+        }
+        Ok(names)
+    })();
+    match copied {
+        Err(err) => format!(
+            "copying session history into {resolved} failed: {err}",
+            resolved = resolved.display()
+        ),
+        Ok(names) if names.is_empty() => {
+            format!("no session history in the backup; {left_behind}")
+        }
+        Ok(names) => format!(
+            "copied {names} into {resolved}; {left_behind}",
+            names = names.join(", "),
+            resolved = resolved.display()
+        ),
+    }
+}
+
 /// Copy one SQLite database consistently, using its own backup API. A file copy
 /// taken while a write is in flight is a torn database, and WAL mode makes that
 /// more likely rather than less.
@@ -501,6 +766,10 @@ pub fn backup_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
 
 pub fn restore_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::application::services::dispatch!(ctx, restore, &params)
+}
+
+pub fn clone_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::application::services::dispatch!(ctx, clone_instance, &params)
 }
 
 /// Write the declared entities as JSON. Deliberately declared-only:
@@ -1032,5 +1301,117 @@ mod tests {
         assert!(
             matches!(error, VogtError::NotFound(message) if message.contains("missing observed.sqlite3"))
         );
+    }
+
+    /// A backup of one instance and a second instance to clone it into. Both
+    /// fresh databases take `ins_0001` from the shared test id factory, so the
+    /// target's id is restamped — two real instances never share one.
+    fn pair() -> (Built, Built, Value) {
+        let source = opened();
+        let taken = backup(
+            ctx(&source),
+            &json!({
+                "destination": ctx(&source).config.resolved_data_dir().join("snap").display().to_string(),
+                "reason": "before clone",
+            }),
+        )
+        .unwrap();
+        let target = opened();
+        let path = ctx(&target)
+            .config
+            .resolved_data_dir()
+            .join("declared.sqlite3");
+        let conn = crate::storage::sqlite::connection::connect(&path).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = 'ins_target' WHERE key = 'instance_id'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        (source, target, taken)
+    }
+
+    #[test]
+    fn a_clone_keeps_the_targets_identity_and_records_the_stamp() {
+        let (source, target, taken) = pair();
+        let source_id = ctx(&source).declared.read().unwrap().instance_id().unwrap();
+        let target_id = ctx(&target).declared.read().unwrap().instance_id().unwrap();
+        let result = clone_instance(
+            ctx(&target),
+            &json!({"source": taken["path"], "confirm": true, "reason": "stand up a copy"}),
+        )
+        .unwrap();
+
+        assert_eq!(result["instance_id"], target_id);
+        assert_eq!(result["source_instance_id"], source_id);
+        assert_ne!(source_id, target_id);
+        let after = ctx(&target).declared.read().unwrap();
+        assert_eq!(after.instance_id().unwrap(), target_id);
+        let stamp = after.clone_stamp().unwrap().unwrap();
+        assert_eq!(stamp.source_instance_id, source_id);
+
+        let kinds: Vec<String> = after
+            .list_events(0, 50, None)
+            .unwrap()
+            .iter()
+            .map(|event| event.kind.clone())
+            .collect();
+        assert!(kinds.contains(&"instance.cloned".to_string()));
+    }
+
+    #[test]
+    fn cloning_a_backup_of_this_instance_is_refused() {
+        let built = opened();
+        let taken = backup(
+            ctx(&built),
+            &json!({
+                "destination": ctx(&built).config.resolved_data_dir().join("snap").display().to_string(),
+                "reason": "why",
+            }),
+        )
+        .unwrap();
+        let error = clone_instance(
+            ctx(&built),
+            &json!({"source": taken["path"], "confirm": true, "reason": "why"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VogtError::InvalidRequest(message) if message.contains("Use `restore`"))
+        );
+    }
+
+    #[test]
+    fn clone_refuses_without_confirmation_and_touches_nothing() {
+        let (_source, target, taken) = pair();
+        let before = ctx(&target).declared.read().unwrap().instance_id().unwrap();
+        let error = clone_instance(
+            ctx(&target),
+            &json!({"source": taken["path"], "reason": "why"}),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            VogtError::InvalidRequest(message) if message.contains("--confirm")
+        ));
+        let after = ctx(&target).declared.read().unwrap().instance_id().unwrap();
+        assert_eq!(after, before, "nothing was touched");
+    }
+
+    #[test]
+    fn a_clone_does_not_copy_engine_state_unless_asked() {
+        let (_source, target, taken) = pair();
+        let result = clone_instance(
+            ctx(&target),
+            &json!({"source": taken["path"], "confirm": true, "reason": "why"}),
+        )
+        .unwrap();
+        assert!(result["engine_state"]
+            .as_str()
+            .unwrap()
+            .contains("not copied"));
+        assert!(result["engine_state"]
+            .as_str()
+            .unwrap()
+            .contains("push subscriptions"));
     }
 }

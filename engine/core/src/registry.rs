@@ -249,6 +249,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "inbox.restore" => Some(crate::application::services::inbox::inbox_restore_op),
         "backup" => Some(crate::application::services::lifecycle::backup_op),
         "restore" => Some(crate::application::services::lifecycle::restore_op),
+        "clone" => Some(crate::application::services::lifecycle::clone_op),
         "export" => Some(crate::application::services::lifecycle::export_op),
         "import" => Some(crate::application::services::import_merge::import_op),
         "events.list" => Some(crate::application::services::history::events_list_op),
