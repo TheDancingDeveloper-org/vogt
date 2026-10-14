@@ -10,10 +10,10 @@
 // What is asserted here is the link and its silences. The terminal must keep
 // working whatever Vogt is doing, so every failure mode of this badge
 // is "no badge", never "no terminal".
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { render, waitFor } from "@solidjs/testing-library";
 
-import Terminal from "../Terminal";
+import Terminal, { forgetWorkItemLinks } from "../Terminal";
 import { fakeVogt, settle, unavailable } from "./harness";
 
 const SESSION = {
@@ -35,6 +35,9 @@ const SESSION = {
 function terminal(sessionId = "eng-1") {
   return render(() => <Terminal sessionId={sessionId} />);
 }
+
+// Terminals share one read for a few seconds; each case asks afresh.
+beforeEach(() => forgetWorkItemLinks());
 
 describe("a terminal says which work item it was opened for", () => {
   it("links back to the item, by the ref a person types", async () => {
