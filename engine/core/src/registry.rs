@@ -183,6 +183,17 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "session.wake" => Some(crate::application::services::sessions::wake_op),
         "session.keep_awake" => Some(crate::application::services::sessions::keep_awake_op),
         "session.set_role" => Some(crate::application::services::sessions::set_role_op),
+        "session.rename" => Some(crate::application::services::sessions::rename_session_op),
+        "session.remove" => Some(crate::application::services::sessions::remove_session_op),
+        "session.token" => Some(crate::application::services::sessions::session_token_op),
+        "agent_cli.list" => Some(crate::application::services::agent_clis::list_agent_clis_op),
+        "agent_cli.update" => Some(crate::application::services::agent_clis::update_agent_cli_op),
+        "agent_activity.search" => {
+            Some(crate::application::services::agent_activity::search_agent_activity_op)
+        }
+        "agent_activity.summary" => {
+            Some(crate::application::services::agent_activity::summarize_agent_activity_op)
+        }
         "session.answer" => Some(crate::application::services::sessions::answer_op),
         "session.hibernate" => Some(crate::application::services::sessions::hibernate_op),
         "suppress" => Some(crate::application::suppressions::suppress_op),

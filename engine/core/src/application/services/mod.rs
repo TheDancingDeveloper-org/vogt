@@ -10,6 +10,8 @@
 //! `dispatch!`, inside this module and nowhere else; every service is generic
 //! over the clock and the id factory.
 
+pub mod agent_activity;
+pub mod agent_clis;
 pub mod auth;
 pub mod chats;
 pub mod forge_accounts;
