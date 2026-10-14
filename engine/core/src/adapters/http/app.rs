@@ -1310,13 +1310,13 @@ fn login_missing_fields(message: &str) -> Option<Vec<serde_json::Value>> {
     if !head.ends_with("validation error") && !head.ends_with("validation errors") {
         return None;
     }
-    let (field_msg, error_type, msg) =
-        if let Some(field) = body.strip_suffix("\n  Field required") {
-            (field, "missing", "Field required")
-        } else {
-            let field = body.strip_suffix("\n  Input should be a valid string")?;
-            (field, "string_type", "Input should be a valid string")
-        };
+    let (field_msg, error_type, msg) = if let Some(field) = body.strip_suffix("\n  Field required")
+    {
+        (field, "missing", "Field required")
+    } else {
+        let field = body.strip_suffix("\n  Input should be a valid string")?;
+        (field, "string_type", "Input should be a valid string")
+    };
     let mut detail = Vec::new();
     for field in field_msg.split("\n  Field required\n") {
         let field = field.trim();
