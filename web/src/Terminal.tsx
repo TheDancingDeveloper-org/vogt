@@ -1017,9 +1017,10 @@ const TerminalView: Component<Props> = (props) => {
       enterForegroundReplay();
       if (!cached) {
         setReadyToConnect(true);
-        // A parked pane with nothing cached only attaches on load if it is one
-        // of the few most recent (WI-1413). The rest stay dark until viewed:
-        // attaching every retained tab opened one socket per live session.
+        // A parked pane with nothing cached only attaches on load if a slot is
+        // left (WI-1413). Slots go to the first parked panes to mount; the rest
+        // stay dark until viewed. Attaching every retained tab opened one
+        // socket per live session.
         if (isParked() && props.workspaceActive !== true) {
           const slot = acquireInitialAttach(props.sessionId);
           if (slot === null) {
@@ -1029,10 +1030,13 @@ const TerminalView: Component<Props> = (props) => {
             parkSocket();
             return;
           }
-          // The panes that do attach must not all open in the same tick.
+          // The panes that do attach must not all open in the same tick. Opening
+          // the pane during the wait must not lose the attach: the timer
+          // connects unless the pane has been destroyed, and connect() drops
+          // any socket it already opened, so this cannot double-connect.
           if (slot > 0) {
             setTimeout(() => {
-              if (destroyed || !isParked()) return;
+              if (destroyed) return;
               connect();
             }, slot * 250);
             return;
