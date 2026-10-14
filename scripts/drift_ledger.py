@@ -38,7 +38,14 @@ def main() -> int:
     parser.add_argument("--head", default="rust-core")
     args = parser.parse_args()
 
-    base = _git("merge-base", args.base, args.head).strip()
+    # A checkout of a PR branch has origin/main but no local rust-core ref, and
+    # this step only reports. Fall back to the commit being built.
+    head = args.head
+    if subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", head], cwd=REPO, check=False
+    ).returncode:
+        head = "HEAD"
+    base = _git("merge-base", args.base, head).strip()
     commits = _commits(base, args.base)
     previous = _previous_marks()
     table = _render(commits, previous, base, args.base)
