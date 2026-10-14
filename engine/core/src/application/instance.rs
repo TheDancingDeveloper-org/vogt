@@ -297,6 +297,32 @@ fn bind_instance(
     }
 }
 
+/// `mcp.stdio`, as the registry calls it. Ports `serve_mcp_stdio`.
+///
+/// Local-only: it reads this process's stdin until it closes and writes each
+/// JSON-RPC response to stdout before reading the next line, then returns the
+/// session report. A remote client uses `/mcp` instead, which is why the
+/// operation is not an MCP tool.
+pub fn mcp_stdio_op(
+    _ctx: &Built,
+    _params: serde_json::Value,
+) -> Result<serde_json::Value, VogtError> {
+    let registry = crate::registry::operations::build_operations();
+    let registry = crate::registry::OperationRegistry::new(registry).map_err(|err| {
+        VogtError::InvalidRequest(format!("operation registry is inconsistent: {err}"))
+    })?;
+    let report = crate::adapters::mcp::framing::serve_stdio_streams(
+        &registry,
+        &crate::adapters::mcp::framing::FullGrant,
+    )
+    .map_err(|err| VogtError::InvalidRequest(format!("mcp stdio failed: {err}")))?;
+    Ok(serde_json::json!({
+        "protocol_version": report.protocol_version,
+        "messages_handled": report.messages_handled,
+        "supported_protocol_versions": crate::adapters::mcp::framing::SUPPORTED_PROTOCOL_VERSIONS,
+    }))
+}
+
 /// `migrate`, as the registry calls it. Ports `migrate_instance`.
 pub fn migrate_op(ctx: &Built, _params: serde_json::Value) -> Result<serde_json::Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| migrate(ctx))
@@ -389,5 +415,28 @@ fn stamp_if(clock: &mut Option<crate::core::StepClock>, due: bool) -> String {
     match clock {
         Some(clock) => crate::core::to_iso(Clock::now(clock)),
         None => crate::core::to_iso(crate::core::utc_now()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn mcp_stdio_reports_a_session_read_from_its_input() {
+        // The service owns the process stdin, so the loop it calls is what a
+        // test can drive. A closed stream is zero messages and no version.
+        let registry = crate::registry::OperationRegistry::new(
+            crate::registry::operations::build_operations(),
+        )
+        .unwrap();
+        let mut output = String::new();
+        let report = crate::adapters::mcp::framing::serve_stdio(
+            "",
+            &mut output,
+            &registry,
+            &crate::adapters::mcp::framing::FullGrant,
+        );
+        assert!(output.is_empty());
+        assert_eq!(report.messages_handled, 0);
+        assert!(report.protocol_version.is_none());
     }
 }
