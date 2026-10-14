@@ -3,11 +3,12 @@ import { MAX_INITIAL_PARKED_ATTACHES } from "./terminalAttachBudget";
 /**
  * The per-document gate on the first attach of a parked pane (WI-1413).
  *
- * `initialAttachBudget` decides which panes deserve a socket; this is the
- * shared counter that enforces it, because each pane mounts on its own and
- * cannot see the others. Visible panes never ask — the reader is looking at
- * them. A parked pane asks once, on load: granted, it attaches so opening it
- * later is instant; refused, it stays dark until it is viewed.
+ * `acquireInitialAttach` is the shared counter that enforces it, because each
+ * pane mounts on its own and cannot see the others. Slots go in mount order:
+ * the first parked panes to mount are the ones warmed. Visible panes never
+ * ask — the reader is looking at them. A parked pane asks once, on load:
+ * granted, it attaches so opening it later is instant; refused, it stays dark
+ * until it is viewed.
  */
 const held: string[] = [];
 
