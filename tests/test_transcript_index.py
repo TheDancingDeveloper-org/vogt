@@ -50,7 +50,7 @@ def test_many_lookups_scan_the_root_once(
 ) -> None:
     root = _claude_root(tmp_path, sessions=70, decoys=300)
     scans = {"n": 0}
-    monkeypatch.setattr(transcripts.os, "scandir", _counting(scans, root))
+    monkeypatch.setattr(os, "scandir", _counting(scans, root))
     transcripts._indexes.clear()
     for n in range(70):
         found = transcripts._by_id("claude", root, f"conv-{n:05d}")
@@ -79,7 +79,7 @@ def test_a_missing_id_does_not_rescan_within_the_ttl(
 ) -> None:
     root = _claude_root(tmp_path, sessions=1, decoys=50)
     scans = {"n": 0}
-    monkeypatch.setattr(transcripts.os, "scandir", _counting(scans, root))
+    monkeypatch.setattr(os, "scandir", _counting(scans, root))
     transcripts._indexes.clear()
     for _ in range(40):
         assert transcripts._by_id("claude", root, "does-not-exist") is None
@@ -101,7 +101,7 @@ def test_codex_ids_share_one_scan(
         scans["n"] += 1
         return real(path)
 
-    monkeypatch.setattr(transcripts.os, "scandir", counting)
+    monkeypatch.setattr(os, "scandir", counting)
     transcripts._indexes.clear()
     for _ in range(10):
         found = transcripts._by_id("codex", root, ident)
