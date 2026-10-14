@@ -165,6 +165,10 @@ pub struct Session {
     /// prompt. While set, autopilot does not re-prompt the session, so it comes
     /// to rest at its prompt and the action lands at a turn boundary (WI-1281).
     budget_hold: AtomicBool,
+    /// A `ready` change has already been published for the current turn
+    /// (WI-1519). Set when one is, cleared when the next turn starts, so a
+    /// session that keeps idling does not announce readiness again.
+    ready_announced: AtomicBool,
 }
 
 impl Session {
@@ -1254,6 +1258,7 @@ pub fn spawn(
         budget_running_since: Mutex::new(None),
         budget_session_banked: Mutex::new(Duration::ZERO),
         budget_hold: AtomicBool::new(false),
+        ready_announced: AtomicBool::new(false),
     });
 
     spawn_reader_thread(
@@ -1625,6 +1630,13 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
             }
 
             if session.activity() != ActivityState::Running {
+                // Already at rest, but the prompt can land after the output
+                // that ended the turn: a window title set a moment later, or a
+                // box drawn once the burst settles (WI-1519). One more look
+                // when the screen changes, so that rest still becomes `ready`.
+                if session.activity() == ActivityState::Idle {
+                    announce_ready_if_at_prompt(&session, ActivityState::Idle, &bus);
+                }
                 session.activity_notify.notified().await;
                 continue;
             }
@@ -1825,14 +1837,19 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
 /// activity lock, and the event is published under it too, so subscribers
 /// see the transitions in the order they were stored.
 fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &EventBus) {
-    let mut a = session.activity.lock();
-    let new = session.terminal_state().unwrap_or(new);
-    if *a != new {
+    let settled = {
+        let mut a = session.activity.lock();
+        let new = session.terminal_state().unwrap_or(new);
+        if *a == new {
+            return;
+        }
         let now = time::OffsetDateTime::now_utc();
         // A turn starts when the session goes to work from rest; a permission
         // dialog in the middle of a turn, answered, resumes the same turn.
         if begins_turn(*a, new) {
             *session.turn_started_at.lock() = Some(now);
+            // The next rest at a prompt is a new turn's readiness (WI-1519).
+            session.ready_announced.store(false, Ordering::Release);
         }
         if new != ActivityState::AwaitingApproval {
             *session.approval.lock() = None;
@@ -1841,6 +1858,8 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
         if new.is_terminal() {
             *session.blocked.lock() = None;
         }
+        let came_to_rest = (*a == ActivityState::Running || *a == ActivityState::Idle)
+            && new == ActivityState::Idle;
         *a = new;
         *session.activity_since.lock() = Instant::now();
         *session.activity_changed_at.lock() = now;
@@ -1852,6 +1871,39 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
             approval: session.approval_prompt(),
             turn_started_at: session.turn_started_at().map(format_rfc3339),
         });
+        came_to_rest.then_some(new)
+    };
+    // A worker that finished a turn and rests at its prompt is ready, even
+    // when the activity reads `idle` rather than `waiting-for-input`: Claude
+    // Code's boxed prompt rarely matches the waiting patterns, and Klaudia and
+    // Codex are forced to `idle` by their window title (WI-1519). `idle` itself
+    // stays out of the change feed — a session that went quiet mid-turn is not
+    // ready — so readiness is its own event, and at most one of them per turn.
+    // The render happens after the activity lock is dropped: reading the grid
+    // under it would stall the PTY reader on a screen render.
+    if let Some(resting) = settled {
+        announce_ready_if_at_prompt(session, resting, bus);
+    }
+}
+
+/// Publish one `ready` change when `session` has just gone idle and its screen
+/// shows a prompt a driver can type into. At most one per turn: an earlier
+/// rest in the same turn that was not at a prompt does not count, because the
+/// prompt often lands a moment after the output that began the turn.
+fn announce_ready_if_at_prompt(session: &Session, resting: ActivityState, bus: &EventBus) {
+    if session.ready_announced.load(Ordering::Acquire) {
+        return;
+    }
+    let (rendered, _) = session.render_screen(0);
+    let ready = crate::screen::is_ready(
+        resting,
+        session.is_alive(),
+        &rendered.lines,
+        session.agent().as_deref(),
+        rendered.title.as_deref(),
+    );
+    if ready && !session.ready_announced.swap(true, Ordering::AcqRel) {
+        bus.publish(ServerEvent::SessionReady { id: session.id });
     }
 }
 
