@@ -587,8 +587,24 @@ pub struct SessionResult {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionListResult {
     pub sessions: Vec<SessionSummary>,
+    /// Digest rows (design C1). `mode` defaults to `digest`, so the ordinary
+    /// list returns these and leaves `sessions` empty; `mode=full` does the
+    /// reverse. The Rust list does not build digests yet, so this is empty
+    /// either way.
+    #[serde(default)]
+    pub digests: Vec<serde_json::Value>,
     /// Why the engine could not be asked, or null when it answered.
     pub engine: Option<String>,
+    /// How many sessions match the filters, before `limit`/`offset`.
+    #[serde(default)]
+    pub total: i64,
+    /// More sessions match than this page returns.
+    #[serde(default)]
+    pub truncated: bool,
+    /// How many sessions the engine left out of its default list (WI-1289).
+    /// 0 from an engine that does not report it, and when no engine answered.
+    #[serde(default)]
+    pub hidden_count: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -977,7 +993,14 @@ where
     }
     Ok(SessionListResult {
         sessions,
+        // `mode` defaults to `digest` on the Python side, which returns its
+        // rows under `digests` and leaves `sessions` empty. The digest rows
+        // are not built here yet, so both are empty for the same empty list.
+        digests: Vec::new(),
         engine: detail,
+        total: 0,
+        truncated: false,
+        hidden_count: 0,
     })
 }
 
