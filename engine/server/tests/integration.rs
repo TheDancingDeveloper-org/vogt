@@ -14,6 +14,7 @@ use reqwest::StatusCode;
 use serde_json::{json, Value};
 use time::OffsetDateTime;
 use tokio_tungstenite::tungstenite::Message;
+use uuid::Uuid;
 use vogt_engine_contract::{ServerEvent, SessionDetail};
 use vogt_engine_server::{app::router, app::AppState, config::SessionTemplate, Config};
 
@@ -9002,6 +9003,137 @@ async fn session_changes_are_sequenced_filtered_and_waited_on() {
     assert_eq!(bad_until.status(), StatusCode::BAD_REQUEST);
 
     for id in [prompt, other] {
+        client
+            .delete(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap();
+    }
+}
+
+/// WI-1519: a worker that finished its turn and rests `idle` at its prompt is
+/// a `ready` change, not silence. Claude Code's boxed prompt rarely matches
+/// the waiting patterns, and Klaudia is forced to `idle` by its window title,
+/// so neither used to wake `wait-any` while `/wait?until=ready` did.
+#[tokio::test]
+async fn an_idle_prompt_is_one_ready_change_and_wait_any_agrees_with_wait() {
+    let (base, state, _h) = boot_with_state(test_config()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // Claude Code's input box: a `❯` at the start of its line, inside a border,
+    // with no `?` waiting pattern anywhere, drawn after a burst of output and
+    // then left alone. The border characters the screen reader strips are `│`,
+    // `┃`, `║` and `|`; a `┌┐` box leaves the `❯` where `shows_prompt` reads it.
+    let boxed = "printf 'thinking\\n'; sleep 0.4; printf '\\033[2J\\033[H\\n  output\\n┌────┐\\n❯\\n└────┘\\n'; sleep 30";
+    let claude = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "idle-boxed-prompt",
+            "command": ["/bin/sh", "-c", boxed],
+        }),
+    )
+    .await;
+
+    // Klaudia announces rest in the window title, which forces the activity to
+    // `idle` even while the screen keeps being drawn. The title only outranks
+    // output recency for a session the engine knows runs Klaudia, so the
+    // conversation is set on the live session rather than inferred from a shell
+    // command.
+    let titled = "printf 'thinking\\n'; sleep 0.4; printf '\\033]0;klaudia: ready\\007\\033[2J\\033[H\\n│ › Ask Klaudia │\\n╾──╼\\n'; sleep 30";
+    let klaudia = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "idle-klaudia-title",
+            "command": ["/bin/sh", "-c", titled],
+        }),
+    )
+    .await;
+    state
+        .sessions
+        .get(Uuid::parse_str(&klaudia).unwrap())
+        .unwrap()
+        .set_conversation(Some(vogt_engine_contract::AgentConversation {
+            agent: "klaudia".to_string(),
+            id: "conv-1".to_string(),
+        }));
+
+    // The `ready` rows for one session, polled until one appears.
+    let ready_rows = |id: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            for _ in 0..60 {
+                let got: Value = client
+                    .get(format!("{base}/api/sessions/changes?since=0&ids={id}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                let rows: Vec<Value> = got["changes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c["kind"] == "ready")
+                    .cloned()
+                    .collect();
+                if !rows.is_empty() {
+                    return rows;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("session {id} never published a ready change");
+        }
+    };
+
+    for id in [&claude, &klaudia] {
+        let rows = ready_rows(id.clone()).await;
+        assert_eq!(rows.len(), 1, "one ready per turn for {id}: {rows:?}");
+
+        let seq = rows[0]["seq"].as_u64().unwrap();
+        let any: Value = client
+            .get(format!(
+                "{base}/api/sessions/wait-any?ids={id}&until=ready&cursor=0&timeout_s=5"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(any["outcome"], "changed", "{id}: {any}");
+        assert_eq!(any["change"]["seq"].as_u64().unwrap(), seq);
+
+        let one: Value = client
+            .get(format!(
+                "{base}/api/sessions/{id}/wait?until=ready&timeout_s=5"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(one["outcome"], "ready", "{id}: {one}");
+        assert_eq!(one["matched"], true, "{id}: {one}");
+    }
+
+    // Still at the prompt a moment later: the quiet does not become a second
+    // `ready`. (The brief's ten minutes is the same claim — one per turn,
+    // reset only when the session goes running again.)
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    for id in [&claude, &klaudia] {
+        let rows = ready_rows(id.clone()).await;
+        assert_eq!(rows.len(), 1, "no ready storm for {id}: {rows:?}");
+    }
+
+    for id in [claude, klaudia] {
         client
             .delete(format!("{base}/api/sessions/{id}"))
             .send()
