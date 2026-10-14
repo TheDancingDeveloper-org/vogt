@@ -176,6 +176,15 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "session.set_role" => Some(crate::application::services::sessions::set_role_op),
         "session.answer" => Some(crate::application::services::sessions::answer_op),
         "session.hibernate" => Some(crate::application::services::sessions::hibernate_op),
+        "chat.list" => Some(crate::application::services::chats::list_op),
+        "chat.get" => Some(crate::application::services::chats::get_op),
+        "chat.create" => Some(crate::application::services::chats::create_op),
+        "chat.send" => Some(crate::application::services::chats::send_op),
+        "chat.decide" => Some(crate::application::services::chats::decide_op),
+        "chat.set_model" => Some(crate::application::services::chats::set_model_op),
+        "chat.interrupt" => Some(crate::application::services::chats::interrupt_op),
+        "chat.archive" => Some(crate::application::services::chats::archive_op),
+        "chat.promote" => Some(crate::application::services::chats::promote_op),
         "suppress" => Some(crate::application::suppressions::suppress_op),
         "suppression.list" => Some(crate::application::suppressions::suppression_list_op),
         "suppression.revoke" => Some(crate::application::suppressions::suppression_revoke_op),
@@ -808,7 +817,7 @@ mod tests {
     #[test]
     fn not_ported_is_a_failure() {
         let registry = registry();
-        let operation = registry.get("work.get").unwrap();
+        let operation = registry.get("session.changes").unwrap();
         let error = operation.run(None, serde_json::json!({})).unwrap_err();
         assert!(
             error.message().contains("not been ported"),
