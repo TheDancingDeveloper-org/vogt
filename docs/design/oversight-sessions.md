@@ -3,7 +3,11 @@
 Status: **design, with slices 0 and 1 implemented** (WI-957, the session role
 and the rail order; WI-962, conversation capture, history identity and resume).
 Slice 1 leaves out the core mirror event (step 4) and the role chooser in the
-new-session dialog. Everything after slice 1 is a proposal. Where this note and
+new-session dialog. Everything after slice 1 is a proposal. The context-management
+work that builds on this design (session digest, `session_changes`/`wait_any`,
+budgets, hand-off comments) is tracked under initiative `ini_01M4M7ZE5221NJRCYYBZ788850`
+(WI-1240, see `context-management.md`); the harness-review follow-ups are under
+WI-1517. Where this note and
 [`ENGINE.md`](../ENGINE.md) or [`API.md`](../API.md) disagree, those describe
 what exists.
 

@@ -1,6 +1,11 @@
 # Context management for oversight and worker sessions
 
-Status: design, 2026-10-11. No code. Work items are listed at the end.
+Status: design, 2026-10-11, with most of the backlog shipped on main
+(WI-1241, WI-1242, WI-1244 without the PreCompact hook, WI-1245 without the
+auto-split, WI-1246 without the reply/commit kinds and `supervised_by`,
+WI-1247, WI-1248). Tracked under initiative `ini_01M4M7ZE5221NJRCYYBZ788850`
+(WI-1240). Remaining follow-ups go to the harness-review initiative
+(WI-1517, H3/H4). Work items are listed at the end.
 Scope: how Vogt keeps an overseer's context window small, keeps workers
 inside a budget, hands work between sessions, applies project policy
 without pasting it, and measures all of it.
