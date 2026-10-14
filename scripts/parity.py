@@ -92,7 +92,9 @@ def main(argv: list[str] | None = None) -> int:
         # A CLI run always records dump.after_init first, even when the script
         # was filtered. The prefix applies to the script, so the baseline dump
         # is not part of what --only asks to compare.
-        recorded = [step for step in recorded if step["operation"].startswith(args.only)]
+        recorded = [
+            step for step in recorded if step["operation"].startswith(args.only)
+        ]
     return _diff(golden, recorded, args.only)
 
 
@@ -123,7 +125,9 @@ def _load_steps(prefix: str) -> list[dict[str, Any]]:
     return [step for step in document["steps"] if step["operation"].startswith(prefix)]
 
 
-def _run(binary: str, steps: list[dict[str, Any]], transport: str) -> list[dict[str, Any]]:
+def _run(
+    binary: str, steps: list[dict[str, Any]], transport: str
+) -> list[dict[str, Any]]:
     if transport == "http":
         return _run_http(binary, steps)
     return _run_cli(binary, steps)
@@ -139,7 +143,9 @@ def _child_env() -> dict[str, str]:
     the runner's DNS. With none of them set, both cores read the defaults the
     contract is about, and the hooks below are the only `VOGT_*` they see.
     """
-    env = {key: value for key, value in os.environ.items() if not key.startswith("VOGT_")}
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("VOGT_")
+    }
     env.update(
         {
             "VOGT_TEST_CLOCK_START": CLOCK_START,
@@ -290,7 +296,10 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         env = _child_env()
         init = subprocess.run(
             [binary, "--json", "--data-dir", str(data), "init"],
-            env=env, capture_output=True, text=True, check=False,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if init.returncode != 0:
             raise SystemExit(f"init exited {init.returncode}: {init.stderr.strip()}")
@@ -304,8 +313,15 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # and the declared dump compares verbatim.
         server = subprocess.Popen(
             [
-                binary, "--data-dir", str(data), "serve",
-                "--host", "127.0.0.1", "--port", str(port), "--no-schedule",
+                binary,
+                "--data-dir",
+                str(data),
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--no-schedule",
             ],
             env=env,
             stdout=subprocess.PIPE,
@@ -378,7 +394,9 @@ def _wait_until(url: str, server: subprocess.Popen[str], attempts: int = 50) -> 
         except (urllib.error.URLError, ConnectionError):
             if server.poll() is not None:
                 reason = (server.stderr.read() if server.stderr else "") or "exited"
-                raise SystemExit(f"server exited before answering {url}: {reason}")
+                raise SystemExit(
+                    f"server exited before answering {url}: {reason}"
+                ) from None
             time.sleep(0.1)
     raise SystemExit(f"server never answered {url}")
 
@@ -406,7 +424,9 @@ def _mark_token_hash(dumped: dict[str, Any], secrets: list[str]) -> None:
 
 def _normalise(value: Any, root: Path, data: Path, operation: str | None = None) -> Any:
     rules = _rules()
-    return _walk(value, rules, {str(root): "<root>", str(data): "<data>"}, operation, True)
+    return _walk(
+        value, rules, {str(root): "<root>", str(data): "<data>"}, operation, True
+    )
 
 
 def _rules() -> dict[str, Any]:
@@ -509,9 +529,14 @@ def _selftest(golden_dir: Path) -> int:
     # definition is the case that would otherwise pass silently.
     dumped = json.loads((golden_dir / "cli.json").read_text())
     definition = dumped[0]["body"]["declared"]["workflow_defs"][0]["definition"]
-    dumped[0]["body"]["declared"]["workflow_defs"][0]["definition"] = definition + "-mutated"
+    dumped[0]["body"]["declared"]["workflow_defs"][0]["definition"] = (
+        definition + "-mutated"
+    )
     if _diff(golden, _normalise(dumped, root, data), "") == 0:
-        print("selftest: mutating a dumped workflow definition was not caught", file=sys.stderr)
+        print(
+            "selftest: mutating a dumped workflow definition was not caught",
+            file=sys.stderr,
+        )
         return 1
 
     fixture = {
@@ -536,12 +561,17 @@ def _selftest(golden_dir: Path) -> int:
     http = json.loads((golden_dir / "http.json").read_text())
     http_golden = _normalise(http, root, data)
     if not _mutate(http, "instance_id"):
-        print("selftest: no 'instance_id' to mutate in the HTTP golden", file=sys.stderr)
+        print(
+            "selftest: no 'instance_id' to mutate in the HTTP golden", file=sys.stderr
+        )
         return 1
     if _diff(http_golden, _normalise(http, root, data), "") == 0:
         print("selftest: mutating 'instance_id' was not caught", file=sys.stderr)
         return 1
-    print("selftest passed: id, dumped workflow definition, answer title and instance_id caught, schema title dropped")
+    print(
+        "selftest passed: id, dumped workflow definition, answer title and "
+        "instance_id caught, schema title dropped"
+    )
     return 0
 
 

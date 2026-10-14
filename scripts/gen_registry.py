@@ -56,10 +56,16 @@ use super::{CliBinding, HttpMethod, HttpRoute, Operation, Scope};
 
 def _operations() -> list[dict[str, object]]:
     """Read the operation set from source, so this runs without importing it."""
-    tree = ast.parse((REPO_ROOT / "src" / "vogt" / "registry" / "operations.py").read_text())
+    tree = ast.parse(
+        (REPO_ROOT / "src" / "vogt" / "registry" / "operations.py").read_text()
+    )
     found: list[dict[str, object]] = []
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Operation"):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Operation"
+        ):
             continue
         kw = {keyword.arg: keyword.value for keyword in node.keywords}
         found.append(
@@ -108,17 +114,23 @@ def record_golden() -> tuple[str, str]:
     fails. Re-deriving the schemas from ported Rust types, and dropping this
     table, is WI-1060's remaining work.
     """
-    from vogt.application.models import RegistryDumpParams  # noqa: E402
-    from vogt.application.services.instance import registry_dump  # noqa: E402
+    from vogt.application.models import RegistryDumpParams
+    from vogt.application.services.instance import registry_dump
 
     dump = registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
     entries = []
     for operation in dump["operations"]:
+        params = json.dumps(
+            json.dumps(operation["params_schema"], separators=(",", ":"))
+        )
+        result = json.dumps(
+            json.dumps(operation["result_schema"], separators=(",", ":"))
+        )
         entries.append(
             "    (\n"
             f"        {json.dumps(operation['name'])},\n"
-            f"        {json.dumps(json.dumps(operation['params_schema'], separators=(',', ':')))},\n"
-            f"        {json.dumps(json.dumps(operation['result_schema'], separators=(',', ':')))},\n"
+            f"        {params},\n"
+            f"        {result},\n"
             "    ),\n"
         )
     module = (
@@ -136,9 +148,7 @@ def record_golden() -> tuple[str, str]:
         "//! because after that nothing can regenerate the table.\n"
         "\n"
         "/// `(operation name, params schema, result schema)`, in registry order.\n"
-        "pub static SCHEMAS: &[(&str, &str, &str)] = &[\n"
-        + "".join(entries)
-        + "];\n"
+        "pub static SCHEMAS: &[(&str, &str, &str)] = &[\n" + "".join(entries) + "];\n"
     )
     golden = json.dumps(dump, indent=2, ensure_ascii=False) + "\n"
     return golden, module
@@ -154,9 +164,9 @@ def record_strips() -> str:
     ``Name | None`` and a constraint written out by hand all come out the same
     way, and a regex over the file would miss each of them.
     """
-    import pydantic  # noqa: E402
+    import pydantic
 
-    from vogt.registry.operations import build_operations  # noqa: E402
+    from vogt.registry.operations import build_operations
 
     rows = []
     for operation in build_operations():
@@ -173,15 +183,13 @@ def record_strips() -> str:
         "//! Parameter fields that strip whitespace, recorded from the models.\n"
         "//!\n"
         "//! Produced by `scripts/gen_registry.py`. A field is here exactly when\n"
-        "//! validating `\"  xy  \"` against its annotation returns `\"xy\"`:\n"
+        '//! validating `"  xy  "` against its annotation returns `"xy"`:\n'
         "//! `Name` and `Reason` do, a plain `str` does not. A field of the same\n"
         "//! name typed `str` is absent, and must stay absent: stripping it would\n"
         "//! change stored text, and with it the audit digest.\n"
         "\n"
         "/// `(operation, field)`, in registry order.\n"
-        "pub static STRIPS: &[(&str, &str)] = &[\n"
-        + "".join(rows)
-        + "];\n"
+        "pub static STRIPS: &[(&str, &str)] = &[\n" + "".join(rows) + "];\n"
     )
 
 
