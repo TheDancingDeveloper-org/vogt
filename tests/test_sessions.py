@@ -588,7 +588,7 @@ def test_a_worker_agent_task_gets_the_default_budget(
     )
     assert engine.last_spec["budget"] == {}
 
-    # A shell, a start with no task, and an overseer are not bounded.
+    # A shell and a start with no task are not bounded.
     start_session(wired, StartSessionParams(project="vogt", reason=WHY))
     assert "budget" not in engine.last_spec
     start_session(
@@ -596,6 +596,14 @@ def test_a_worker_agent_task_gets_the_default_budget(
         StartSessionParams(project="vogt", template="claude", reason=WHY),
     )
     assert "budget" not in engine.last_spec
+
+
+def test_an_oversight_session_gets_a_context_budget(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1522: an overseer is bounded by context only, so the engine compacts
+    it instead of hibernating a session its role pins awake. An explicit budget
+    still wins, and an empty one still declines the default."""
     start_session(
         wired,
         StartSessionParams(
@@ -606,7 +614,20 @@ def test_a_worker_agent_task_gets_the_default_budget(
             reason=WHY,
         ),
     )
-    assert "budget" not in engine.last_spec
+    assert engine.last_spec["budget"] == {"context_tokens": 200_000}
+
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt",
+            template="opencode",
+            task="watch the others",
+            role="oversight",
+            budget=SessionBudgetParams(),
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["budget"] == {}
 
 
 def test_the_digest_leaves_the_budget_line_to_the_economics_tailer() -> None:

@@ -17,6 +17,12 @@
 //!   overseer hears once that it cannot be stopped, and the watcher tries again
 //!   next tick.
 //!
+//! An oversight session's context limit is the exception (WI-1522): the watcher
+//! types `/compact` instead of hibernating, at the soft line and again at the
+//! hard line, and the session keeps running. An oversight session is pinned
+//! awake by its role, so hibernating it would not free it — the stop would be
+//! undone at once. A turn or clock limit on an oversight session is unchanged.
+//!
 //! Waiting for the prompt only works if something lets the session reach it.
 //! An autopilot worker is re-prompted the moment it gets there, so a limit that
 //! merely waited landed many turns late or never (WI-1281). While a warning or
@@ -92,6 +98,12 @@ enum Dimension {
 pub const SOFT_LINE: &str = "[vogt] budget: {what} ({n} of {limit}). \
 Commit your work in progress on your branch, write a hand-off comment \
 (work_comment kind=handoff), then stop.";
+
+/// What the watcher types for an oversight session's context limit (WI-1522),
+/// instead of the stop line. `/compact` is the agent's own command; the note
+/// in front of it says why, the way the stop line does.
+pub const COMPACT_LINE: &str = "[vogt] budget: context is {n} of {limit} tokens. \
+/compact";
 
 /// `used` against `limit`: missing or zero is no limit, at or over the limit
 /// is hard, at or over `soft_pct` of it is soft.
@@ -259,6 +271,17 @@ pub enum Action {
     /// Publish the hard change, then hibernate. `at_once` is the per-turn
     /// wall-clock case, which does not wait for the prompt.
     Hard { summary: String, at_once: bool },
+    /// An oversight session's context limit (WI-1522): publish the change and
+    /// type `/compact` instead of hibernating, so the overseer keeps running
+    /// with a smaller transcript. `level` is the level that fired.
+    Compact { level: Level, summary: String },
+}
+
+/// An oversight session's context limit compacts rather than stops (WI-1522).
+/// The role decides it and nothing else: a worker, or an oversight session that
+/// tripped a turn or clock limit, keeps the ordinary action.
+fn compacting(role: vogt_engine_contract::SessionRole, dimension: Dimension) -> bool {
+    role == vogt_engine_contract::SessionRole::Oversight && dimension == Dimension::Context
 }
 
 /// The reading this tick acts on: the budget, the economics, and both clocks.
@@ -274,7 +297,13 @@ struct Reading<'a> {
 /// prompt and not mid-turn. A soft, or a hard that is not the per-turn wall
 /// clock, that is not ready is [`Action::Leave`], so the flags stay unset and
 /// the next tick retries.
-fn decide(level: Level, dimension: Option<Dimension>, ready: bool, r: &Reading<'_>) -> Action {
+fn decide(
+    level: Level,
+    dimension: Option<Dimension>,
+    ready: bool,
+    role: vogt_engine_contract::SessionRole,
+    r: &Reading<'_>,
+) -> Action {
     let Some(dimension) = dimension else {
         return Action::Leave;
     };
@@ -292,6 +321,12 @@ fn decide(level: Level, dimension: Option<Dimension>, ready: bool, r: &Reading<'
             if !ready {
                 return Action::Leave;
             }
+            if compacting(role, dimension) {
+                return Action::Compact {
+                    level,
+                    summary: compact_line(&n, &limit),
+                };
+            }
             Action::Soft {
                 summary: summary_line(&what, &n, &limit),
             }
@@ -301,12 +336,24 @@ fn decide(level: Level, dimension: Option<Dimension>, ready: bool, r: &Reading<'
             if !at_once && !ready {
                 return Action::Leave;
             }
+            if compacting(role, dimension) {
+                return Action::Compact {
+                    level,
+                    summary: compact_line(&n, &limit),
+                };
+            }
             Action::Hard {
                 summary: summary_line(&what, &n, &limit),
                 at_once,
             }
         }
     }
+}
+
+/// The line typed for an oversight session's context limit. Unlike the stop
+/// line it does not ask the agent to halt.
+fn compact_line(n: &str, limit: &str) -> String {
+    COMPACT_LINE.replace("{n}", n).replace("{limit}", limit)
 }
 
 /// Whether the watcher holds the session this tick: an action is due (the
@@ -505,7 +552,7 @@ pub async fn run_once(
             }
         }
         let ready = at_prompt(&session, settle).await;
-        let action = decide(level, dimension, ready, &reading);
+        let action = decide(level, dimension, ready, session.role(), &reading);
         session.set_budget_hold(holds(level, &action));
         match action {
             Action::Leave => {}
@@ -528,6 +575,34 @@ pub async fn run_once(
                 tracing::info!(
                     session = %session.id,
                     level = "soft",
+                    event = "session.budget",
+                    "{summary}"
+                );
+            }
+            Action::Compact { level, summary } => {
+                // Compact does not stop the session, so the hard latch stays
+                // unset and the next crossing asks again: a transcript that
+                // grows back past the limit is compacted again.
+                if level == Level::Soft {
+                    session.set_budget_soft_sent(true);
+                }
+                bus.publish(vogt_engine_contract::ServerEvent::SessionBudget {
+                    id: session.id,
+                    level: "compact".to_string(),
+                    summary: summary.clone(),
+                });
+                if let Err(e) = type_line(&session, &summary).await {
+                    tracing::warn!(
+                        session = %session.id,
+                        error = %e,
+                        event = "session.budget",
+                        "could not type the compact request"
+                    );
+                    continue;
+                }
+                tracing::info!(
+                    session = %session.id,
+                    level = "compact",
                     event = "session.budget",
                     "{summary}"
                 );
@@ -819,6 +894,17 @@ mod tests {
         assert!(!is_running(ActivityState::WaitingForInput, false));
     }
 
+    const WORKER: vogt_engine_contract::SessionRole = vogt_engine_contract::SessionRole::Worker;
+
+    fn decide_as(
+        level: Level,
+        dimension: Option<Dimension>,
+        ready: bool,
+        r: &Reading<'_>,
+    ) -> Action {
+        decide(level, dimension, ready, WORKER, r)
+    }
+
     #[test]
     fn a_warning_waits_for_the_prompt_but_wall_clock_does_not() {
         let at = now();
@@ -826,25 +912,25 @@ mod tests {
         let econ = economics(80, 0);
         let r = reading(&b, Some(&econ), None, NONE);
         let soft = assess_with(&b, Some(&econ), None, NONE, at, 80);
-        assert_eq!(decide(soft.0, soft.1, false, &r), Action::Leave);
+        assert_eq!(decide_as(soft.0, soft.1, false, &r), Action::Leave);
         assert!(holds(soft.0, &Action::Leave));
         assert!(matches!(
-            decide(soft.0, soft.1, true, &r),
+            decide_as(soft.0, soft.1, true, &r),
             Action::Soft { .. }
         ));
         let hard_econ = economics(100, 0);
         let r = reading(&b, Some(&hard_econ), None, NONE);
         let hard = assess_with(&b, Some(&hard_econ), None, NONE, at, 80);
-        assert_eq!(decide(hard.0, hard.1, false, &r), Action::Leave);
+        assert_eq!(decide_as(hard.0, hard.1, false, &r), Action::Leave);
         assert!(matches!(
-            decide(hard.0, hard.1, true, &r),
+            decide_as(hard.0, hard.1, true, &r),
             Action::Hard { at_once: false, .. }
         ));
         // Wall clock: hard at once, even though the session is not ready.
         let started = at - time::Duration::minutes(90);
         let wb = budget(None, None, Some(60));
         let wall = assess_with(&wb, None, Some(started), NONE, at, 80);
-        let action = decide(
+        let action = decide_as(
             wall.0,
             wall.1,
             false,
@@ -866,10 +952,10 @@ mod tests {
         let r = reading(&b, None, Some(at), spent);
         let hard = assess_with(&b, None, Some(at), spent, at, 80);
         assert_eq!(hard.0, Level::Hard);
-        let mid_turn = decide(hard.0, hard.1, false, &r);
+        let mid_turn = decide_as(hard.0, hard.1, false, &r);
         assert_eq!(mid_turn, Action::Leave);
         assert!(holds(hard.0, &mid_turn));
-        match decide(hard.0, hard.1, true, &r) {
+        match decide_as(hard.0, hard.1, true, &r) {
             Action::Hard { summary, at_once } => {
                 assert!(!at_once);
                 assert!(
@@ -879,5 +965,64 @@ mod tests {
             }
             other => panic!("expected a hard stop, got {other:?}"),
         }
+    }
+
+    /// WI-1522: an oversight session's context limit compacts instead of
+    /// stopping, at both lines, and only for the context dimension.
+    #[test]
+    fn an_oversight_sessions_context_limit_compacts_instead_of_stopping() {
+        let at = now();
+        let b = budget(None, Some(200_000), None);
+        let soft_econ = economics(0, 160_000);
+        let r = reading(&b, Some(&soft_econ), None, NONE);
+        let soft = assess_with(&b, Some(&soft_econ), None, NONE, at, 80);
+        let role = vogt_engine_contract::SessionRole::Oversight;
+
+        // Mid-turn it waits, exactly as a worker's warning does.
+        assert_eq!(decide(soft.0, soft.1, false, role, &r), Action::Leave);
+
+        match decide(soft.0, soft.1, true, role, &r) {
+            Action::Compact { level, summary } => {
+                assert_eq!(level, Level::Soft);
+                assert!(summary.starts_with("[vogt] budget:"), "{summary}");
+                assert!(summary.contains("/compact"), "{summary}");
+                assert!(
+                    !summary.contains("then stop"),
+                    "a compact must not ask the overseer to stop: {summary}"
+                );
+            }
+            other => panic!("expected a compact, got {other:?}"),
+        }
+
+        // At the hard line it compacts again rather than hibernating.
+        let hard_econ = economics(0, 200_000);
+        let r = reading(&b, Some(&hard_econ), None, NONE);
+        let hard = assess_with(&b, Some(&hard_econ), None, NONE, at, 80);
+        assert!(matches!(
+            decide(hard.0, hard.1, true, role, &r),
+            Action::Compact {
+                level: Level::Hard,
+                ..
+            }
+        ));
+
+        // The same session over a turn limit still stops: compacting is the
+        // context dimension only.
+        let turns = budget(Some(100), None, None);
+        let over = economics(100, 0);
+        let r = reading(&turns, Some(&over), None, NONE);
+        let hard = assess_with(&turns, Some(&over), None, NONE, at, 80);
+        assert!(matches!(
+            decide(hard.0, hard.1, true, role, &r),
+            Action::Hard { .. }
+        ));
+
+        // And a worker at the same context limit still stops.
+        let r = reading(&b, Some(&hard_econ), None, NONE);
+        let hard = assess_with(&b, Some(&hard_econ), None, NONE, at, 80);
+        assert!(matches!(
+            decide(hard.0, hard.1, true, WORKER, &r),
+            Action::Hard { .. }
+        ));
     }
 }

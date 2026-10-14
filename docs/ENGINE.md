@@ -1788,11 +1788,13 @@ waiting for it to be (`GET /wait?until=ready`) only ever timed out.
 A session may carry a `budget` (`SessionSpec`; vogt-core sets one by default
 for an agent template given a task and the worker role: 120 turns and 90
 minutes per turn, no context limit, and no whole-session clock unless the
-project's `agent_policy.session_wall_clock_minutes` names one). An explicit
-budget object is used exactly as given; an explicit empty object sets no
-limits and declines that default. Zero is not a limit. The budget is kept on the summary
-and in the hibernation record, so a wake brings the same limits back
-(WI-1245, C7).
+project's `agent_policy.session_wall_clock_minutes` names one). An oversight
+session gets a context limit only, 200,000 tokens (WI-1522): the watcher
+compacts it rather than hibernating it, because its role pins it awake and a
+hibernation would be undone at once. An explicit budget object is used exactly
+as given; an explicit empty object sets no limits and declines that default.
+Zero is not a limit. The budget is kept on the summary and in the hibernation
+record, so a wake brings the same limits back (WI-1245, C7).
 
 The numbers come from the economics the tailer last published on the summary.
 A watcher checks every `ENGINE_BUDGET_TICK_SECS` (default 15; `0` enforces
@@ -1823,6 +1825,14 @@ nothing) and acts at two levels:
   stays running; the watcher publishes one `budget` change saying so
   (`budget exceeded; session cannot be hibernated (no resumable conversation)`)
   and retries the hibernation once a conversation is pinned.
+
+  An oversight session's context limit is the exception (WI-1522). At the soft
+  line, and again at the hard line, the watcher types `/compact` — the agent's
+  own command, with the same `[vogt] budget:` note in front of it — and
+  publishes the change at level `compact` instead of hibernating. The hard
+  latch stays unset, so a transcript that grows back past the limit is
+  compacted again. Only the context dimension is treated this way: a turn or
+  clock limit on an oversight session hibernates it as it would a worker.
 
 A missing economics reading counts as zero used, so a limit is not tripped
 before the tailer has published anything.

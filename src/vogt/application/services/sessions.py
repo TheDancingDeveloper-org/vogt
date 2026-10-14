@@ -3428,31 +3428,31 @@ def _enforced_policy(policy: AgentPolicy | None) -> dict[str, Any] | None:
 def _budget(
     params: StartSessionParams, policy: AgentPolicy | None = None
 ) -> SessionBudgetParams | None:
-    """The limits a start carries (C7, WI-1245).
+    """The limits a start carries (C7, WI-1245; WI-1522).
 
     Asked explicitly, that object is the answer — even an empty one, which is
     how a caller declines the default rather than inheriting it. Asked nothing,
     an agent template given a task in the worker role gets the default (120
     turns, 90 minutes of wall clock per turn, no context limit), plus the
     project's whole-session wall clock when its `agent_policy` sets one
-    (WI-1281; unset by default). An oversight session and a shell or no-task
-    start get none: there is nothing to bound.
+    (WI-1281; unset by default). An oversight session gets a context limit only
+    (WI-1522): the engine compacts it at that limit instead of hibernating it,
+    which would not free a session its role pins awake. A shell or no-task
+    start gets none: there is nothing to bound.
     """
     if params.budget is not None:
         return params.budget
-    if (
-        params.template
-        and params.task
-        and params.task.strip()
-        and params.role == "worker"
-    ):
-        return SessionBudgetParams(
-            turns=120,
-            wall_clock_minutes=90,
-            session_wall_clock_minutes=(
-                policy.session_wall_clock_minutes if policy else None
-            ),
-        )
+    if params.template and params.task and params.task.strip():
+        if params.role == "worker":
+            return SessionBudgetParams(
+                turns=120,
+                wall_clock_minutes=90,
+                session_wall_clock_minutes=(
+                    policy.session_wall_clock_minutes if policy else None
+                ),
+            )
+        if params.role == "oversight":
+            return SessionBudgetParams(context_tokens=200_000)
     return None
 
 
