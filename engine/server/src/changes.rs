@@ -8,9 +8,12 @@
 //! Not every bus event is a change. Activity states an overseer acts on
 //! (`waiting-for-input`, `awaiting-approval`, `exited`, `stopped`, `errored`)
 //! become `ready`, `approval`, `exited` and `errored`; `running`, `idle` and
-//! `hibernated` do not, because hibernation has its own events. `budget` is
-//! emitted from the budget watcher (WI-1245 / C7). `reply` and `commit` are
-//! reserved kinds and are not emitted here.
+//! `hibernated` do not, because hibernation has its own events and a session
+//! that went quiet is not necessarily at its prompt. A session that did come
+//! to rest at a prompt publishes `SessionReady` (WI-1519), which is the other
+//! way a `ready` change arrives. `budget` is emitted from the budget watcher
+//! (WI-1245 / C7). `reply` and `commit` are reserved kinds and are not emitted
+//! here.
 
 use std::{collections::HashSet, time::Duration};
 
@@ -69,6 +72,10 @@ pub fn change_of(sequenced: &Sequenced) -> Option<SessionChange> {
             };
             (*id, kind, format!("activity {kind}"))
         }
+        // An agent that finished its turn and rests at its prompt: `idle` is
+        // not itself a change (a quiet mid-turn is not ready), so readiness is
+        // its own event (WI-1519).
+        ServerEvent::SessionReady { id } => (*id, "ready", "ready".to_string()),
         ServerEvent::SessionBlocked { id, blocked } => match blocked {
             Some(report) => (*id, "blocked", format!("blocked: {}", report.reason)),
             None => (*id, "unblocked", "unblocked".to_string()),
