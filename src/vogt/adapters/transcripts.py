@@ -326,29 +326,48 @@ def _scan(agent: str, root: Path, now: float) -> _Index:
                         if count >= MAX_ENTRIES:
                             break
                         name = child.name
-                        is_file = name.endswith(".jsonl") and child.is_file(
-                            follow_symlinks=False
-                        )
+                        is_file = name.endswith(".jsonl") and child.is_file()
                         if is_file:
                             by_id.setdefault(name[: -len(".jsonl")], Path(child.path))
             except OSError:
                 continue
     else:
+        days = _codex_days(root)
+        for day in days:
+            stamp = max(stamp, _mtime(day))
         for path in _codex_files(root):
             match = _UUID_TAIL.search(path.stem)
             conversation = match.group(1) if match else path.stem
             # Newest dates come first, so the first hit is the one a walk finds.
             by_id.setdefault(conversation, path)
-        stamp = max(stamp, _mtime(root))
     return _Index(built_at=now, root_mtime=stamp, by_id=by_id, negative={})
 
 
 def _tree_stamp(root: Path) -> float:
-    """A stamp that changes when the root or any child directory changes."""
+    """A stamp that moves when a transcript file appears.
+
+    Claude files a conversation directly under a child of the root, so the
+    children's mtimes cover it. Codex files under `YYYY/MM/DD/`, and a new
+    rollout in today's directory moves that day's mtime, not the year's, so
+    the stamp follows the tree down to the day directories.
+    """
     stamp = _mtime(root)
-    for entry in _entries(root):
-        stamp = max(stamp, _mtime(entry))
+    for year in _entries(root):
+        stamp = max(stamp, _mtime(year))
+        for month in _entries(year):
+            stamp = max(stamp, _mtime(month))
+            for day in _entries(month):
+                stamp = max(stamp, _mtime(day))
     return stamp
+
+
+def _codex_days(root: Path) -> list[Path]:
+    """The day directories under a Codex root, newest first."""
+    days: list[Path] = []
+    for year in sorted(_entries(root), reverse=True):
+        for month in sorted(_entries(year), reverse=True):
+            days.extend(sorted(_entries(month), reverse=True))
+    return days
 
 
 # -- reading ---------------------------------------------------------------
