@@ -936,7 +936,7 @@ fn coerce(raw: &str, property: &Value) -> Result<Value, String> {
         // A list of objects is one JSON value per repeat, matching the Python
         // CLI. A list of scalars is one element per repeat.
         let items = property.get("items").cloned().unwrap_or(Value::Null);
-        if is_json_value(&items) {
+        if is_json_value(&items) || items.get("$ref").is_some() {
             return serde_json::from_str(raw).map_err(|_| format!("expected JSON, got {raw}"));
         }
         return coerce(raw, &items);
@@ -1818,7 +1818,7 @@ mod tests {
     fn a_domain_error_exits_one() {
         let registry = default_registry();
         let result = at_eighty(
-            &argv(&["work", "get", "--ref", "WI-7"]),
+            &argv(&["engine", "status"]),
             &registry,
             "test",
             &mut no_dispatch,

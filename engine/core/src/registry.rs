@@ -186,8 +186,16 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "backlog" => Some(crate::application::views::backlog_op),
         "bugs" => Some(crate::application::views::bugs_op),
         "work.list" => Some(crate::application::services::work::list_op),
+        "work.get" => Some(crate::application::services::work::get_op),
         "work.create" => Some(crate::application::services::work::create_op),
         "work.update" => Some(crate::application::services::work::update_op),
+        "work.comment" => Some(crate::application::services::work::comment_op),
+        "work.transition" => Some(crate::application::services::work::transition_op),
+        "work.relate" => Some(crate::application::services::work::relate_op),
+        "work.unrelate" => Some(crate::application::services::work::unrelate_op),
+        "work.bind_branch" => Some(crate::application::services::work::bind_branch_op),
+        "work.adopt" => Some(crate::application::services::work::adopt_op),
+        "board.list" => Some(crate::application::services::work::board_list_op),
         "project.register" => Some(crate::application::projects::register_op),
         "project.create" => Some(crate::application::projects::create_op),
         "project.scaffold" => Some(crate::application::projects::scaffold_op),
@@ -808,7 +816,7 @@ mod tests {
     #[test]
     fn not_ported_is_a_failure() {
         let registry = registry();
-        let operation = registry.get("work.get").unwrap();
+        let operation = registry.get("engine.status").unwrap();
         let error = operation.run(None, serde_json::json!({})).unwrap_err();
         assert!(
             error.message().contains("not been ported"),
