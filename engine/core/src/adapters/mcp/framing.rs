@@ -329,7 +329,7 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
             .unwrap_or(serde_json::Value::Null);
         let body = match operation.run(self.context, arguments) {
             Ok(value) => json!({
-                "content": [{"type": "text", "text": pretty(&value)}],
+                "content": [{"type": "text", "text": compact_text(&value)}],
                 "structuredContent": value,
                 "isError": false,
             }),
@@ -456,10 +456,29 @@ fn accepted(schema: &Value) -> (Vec<String>, Vec<String>) {
         .unwrap_or_default();
     (required, optional)
 }
-/// carries: two-space indentation and `ensure_ascii=True`, so a non-ASCII
-/// character leaves as `\u00e9` or a surrogate pair rather than raw UTF-8.
-fn pretty(value: &Value) -> String {
-    crate::decisions::python_json_dumps_indent(value, 2)
+/// The text a successful tool call carries. Ports `tool_success`: the whole
+/// result, compact (`separators=(",", ":")`), with null-valued keys dropped at
+/// every depth and list items kept. `structuredContent` beside it is the full
+/// result, nulls included. Klaudia reads this text and only falls back to the
+/// structured body when the text is empty, so a summary here would hide it.
+fn compact_text(value: &Value) -> String {
+    crate::decisions::python_json_dumps(&without_nulls(value), false)
+}
+
+/// Drop null-valued keys at every depth. A null list item stays, as Python's
+/// `_without_nulls` keeps it.
+fn without_nulls(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .filter(|(_, item)| !item.is_null())
+                .map(|(key, item)| (key.clone(), without_nulls(item)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_nulls).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Python's truthiness for a JSON value: `None`, `[]`, `0`, `""` and `false`
@@ -647,6 +666,31 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("error: internal error"));
+    }
+
+    #[test]
+    fn a_success_carries_the_whole_result_as_compact_text() {
+        // Design C1: the text is the full result with null keys dropped and no
+        // indentation. structuredContent keeps the nulls.
+        let payload = json!({
+            "rows": [{"id": "ses_1", "note": null, "tail": ["x".repeat(300)]}],
+            "engine": null,
+            "counts": {"total": 1},
+        });
+        let text = compact_text(&payload);
+        assert!(!text.contains('\n'));
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({
+                "rows": [{"id": "ses_1", "tail": ["x".repeat(300)]}],
+                "counts": {"total": 1},
+            })
+        );
+        // A null list item is data, not an absent key.
+        assert_eq!(
+            serde_json::from_str::<Value>(&compact_text(&json!([1, null]))).unwrap(),
+            json!([1, null])
+        );
     }
 
     #[test]
