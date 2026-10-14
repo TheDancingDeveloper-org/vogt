@@ -334,6 +334,7 @@ fn record_registration<C: Clock + 'static, I: IdFactory + 'static>(
             contract_version: None,
             compliance_status: ComplianceStatus::NotChecked,
             compliance_checked_at: None,
+            agent_policy: crate::core::AgentPolicy::default(),
             contract_adopted_at: if input.adopts_contract {
                 Some(input.now)
             } else {

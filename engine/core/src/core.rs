@@ -1420,6 +1420,10 @@ pub struct Project {
     #[serde(default = "compliance_default")]
     pub compliance_status: ComplianceStatus,
     pub compliance_checked_at: Option<Moment>,
+    /// The project's agent policy, stored whole. An empty document reads as no
+    /// policy, which is what a project that states nothing holds.
+    #[serde(default)]
+    pub agent_policy: AgentPolicy,
     pub contract_adopted_at: Option<Moment>,
     #[serde(default = "write_back_default")]
     pub write_back: WriteBack,
@@ -1446,6 +1450,7 @@ impl Project {
             contract_version: None,
             compliance_status: ComplianceStatus::NotChecked,
             compliance_checked_at: None,
+            agent_policy: AgentPolicy::default(),
             contract_adopted_at: None,
             write_back: WriteBack::Disabled,
             link_state: LinkState::Unlinked,
@@ -1455,6 +1460,37 @@ impl Project {
             updated_at: now,
         }
     }
+}
+
+/// A project's agent policy, stored as one document and read whole. An empty
+/// document is no policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPolicy {
+    #[serde(default)]
+    pub base_branch: String,
+    #[serde(default)]
+    pub commit_identity: String,
+    #[serde(default)]
+    pub deployed_setup: String,
+    #[serde(default)]
+    pub forbidden_text: Vec<String>,
+    #[serde(default)]
+    pub landing: Option<serde_json::Value>,
+    #[serde(default)]
+    pub main_branches: Vec<String>,
+    #[serde(default)]
+    pub merge_deploys_prod: bool,
+    #[serde(default)]
+    pub review: Option<serde_json::Value>,
+    #[serde(default)]
+    pub rules: Vec<String>,
+    #[serde(default)]
+    pub session_wall_clock_minutes: Option<i64>,
+    #[serde(default)]
+    pub test_recipe: String,
+    #[serde(default)]
+    pub verification: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
