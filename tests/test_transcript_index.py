@@ -111,3 +111,43 @@ def test_codex_ids_share_one_scan(
         assert transcripts._by_id("codex", root, ident) is not None
     assert scans["n"] == first
     assert first > 0
+
+
+def test_a_new_codex_file_in_todays_directory_is_found_after_the_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "codex"
+    day = root / "2026" / "10" / "14"
+    day.mkdir(parents=True)
+    first = "0f8fad5b-d9cb-469f-a165-70867728950e"
+    (day / f"rollout-2026-10-14T00-00-00-{first}.jsonl").write_text("{}\n")
+    transcripts._indexes.clear()
+    assert transcripts._by_id("codex", root, first) is not None
+    # Written into the same day directory: no new month or year appears.
+    second = "11111111-2222-4333-8444-555555555555"
+    (day / f"rollout-2026-10-14T01-00-00-{second}.jsonl").write_text("{}\n")
+    assert transcripts._by_id("codex", root, second) is None
+    monkeypatch.setattr(transcripts, "_clock", lambda: time.monotonic() + 100)
+    found = transcripts._by_id("codex", root, second)
+    assert found is not None and found.parent == day
+
+
+def test_a_non_uuid_codex_name_still_resolves(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    day = root / "2026" / "10" / "14"
+    day.mkdir(parents=True)
+    (day / "rollout-session-7.jsonl").write_text("{}\n")
+    found = transcripts._by_id("codex", root, "rollout-session-7")
+    assert found is not None and found.name == "rollout-session-7.jsonl"
+
+
+def test_a_symlinked_transcript_is_followed(tmp_path: Path) -> None:
+    root = tmp_path / "claude"
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    (real / "conv-1.jsonl").write_text("{}\n")
+    link_dir = root / "dir-keep"
+    link_dir.mkdir(parents=True)
+    (link_dir / "conv-1.jsonl").symlink_to(real / "conv-1.jsonl")
+    found = transcripts._by_id("claude", root, "conv-1")
+    assert found is not None and found.name == "conv-1.jsonl"
