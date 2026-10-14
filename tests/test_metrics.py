@@ -81,9 +81,12 @@ def test_every_series_is_labelled_as_the_core() -> None:
 def test_a_scrape_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
     port = _free_port()
     with metrics.serve_for_test(f"127.0.0.1:{port}"), caplog.at_level("DEBUG"):
+        # The one line at start-up is wanted; what must stay quiet is the
+        # scrape itself, which a Prometheus server repeats forever.
+        caplog.clear()
         _scrape(port)
         _scrape(port)
-    assert not caplog.records
+        assert not caplog.records
 
 
 def test_starting_twice_does_not_rebind() -> None:
