@@ -1699,14 +1699,14 @@ mod tests {
     #[test]
     fn no_auth_reaches_the_operation_and_an_unported_one_says_so() {
         let running = serve(true);
-        let (status, body) = request(running.addr, "GET", "/api/work/get?ref=WI-1", None);
+        let (status, body) = request(running.addr, "GET", "/api/engine/status", None);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(status, 501, "{body}");
         assert_eq!(json["error"]["code"], "not_implemented");
         assert!(json["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("work.get"));
+            .contains("engine.status"));
     }
 
     #[test]
