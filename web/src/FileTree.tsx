@@ -440,7 +440,10 @@ const FileTree: Component<Props> = (props) => {
   const openFile = (path: string) => {
     openEditorTab(path);
     navigate(`/e/${encodeURIComponent(path)}`);
-    props.onOpen?.();
+    // Do not call onOpen here. The rail passes onOpen so opening a terminal
+    // leaves the Files section for the session page; a file's own navigation
+    // is the editor route, and following it with /sessions undoes the click
+    // (WI-1412: the first click landed on sessions, the second opened the file).
   };
 
   const newFile = async () => {
