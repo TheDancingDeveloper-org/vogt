@@ -151,6 +151,26 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "e5fd2b7bd062d50c9d21a923df3176e9e5b69e9fb06b0dd6bf75b295d694b761",
             "id": "0020_install_latch"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "9f11063cfd66c2940b21819453fa18f16123b56f59ce77f2bad74d50523d5127",
+            "id": "0021_agent_policy"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "1a86e121ab2879671fd44ee5a9276e05d4af19bb4b98e71e3426634958be7078",
+            "id": "0022_comment_kind"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "8fb4506bf7517137f5e20b26525268bda7af4bcd45057731547564d5428f615e",
+            "id": "0023_decisions"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9",
+            "id": "0024_session_started_by"
           }
         ],
         "workflow_defs": [
@@ -243,12 +263,13 @@
         "work_items": 0
       },
       "data_dir": "<volatile>",
-      "declared_schema_version": 20,
+      "declared_schema_version": 24,
+      "disk": null,
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "principal": "local:parity",
       "revision": 0,
-      "vogt_version": "0.7.9"
+      "vogt_version": "0.7.14"
     },
     "exit": 0,
     "operation": "status"
@@ -256,8 +277,8 @@
   {
     "body": {
       "data_dir": "<volatile>",
-      "declared_schema_expected": 20,
-      "declared_schema_version": 20,
+      "declared_schema_expected": 24,
+      "declared_schema_version": 24,
       "migrations_applied": [],
       "observed_schema_expected": 6,
       "observed_schema_version": 6
@@ -719,6 +740,20 @@
         "<root>/proj/src"
       ],
       "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "landing": null,
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "review": null,
+          "rules": [],
+          "session_wall_clock_minutes": null,
+          "test_recipe": "",
+          "verification": null
+        },
         "compliance_checked_at": null,
         "compliance_status": "not_checked",
         "contract_adopted_at": "2026-01-02T03:04:05Z",
@@ -753,6 +788,20 @@
   {
     "body": {
       "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "landing": null,
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "review": null,
+          "rules": [],
+          "session_wall_clock_minutes": null,
+          "test_recipe": "",
+          "verification": null
+        },
         "compliance_checked_at": null,
         "compliance_status": "not_checked",
         "contract_adopted_at": "2026-01-02T03:04:05Z",
@@ -787,6 +836,20 @@
     "body": {
       "projects": [
         {
+          "agent_policy": {
+            "base_branch": "",
+            "commit_identity": "",
+            "deployed_setup": "",
+            "forbidden_text": [],
+            "landing": null,
+            "main_branches": [],
+            "merge_deploys_prod": false,
+            "review": null,
+            "rules": [],
+            "session_wall_clock_minutes": null,
+            "test_recipe": "",
+            "verification": null
+          },
           "compliance_checked_at": null,
           "compliance_status": "not_checked",
           "contract_adopted_at": "2026-01-02T03:04:05Z",
@@ -824,6 +887,20 @@
   {
     "body": {
       "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "landing": null,
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "review": null,
+          "rules": [],
+          "session_wall_clock_minutes": null,
+          "test_recipe": "",
+          "verification": null
+        },
         "compliance_checked_at": null,
         "compliance_status": "not_checked",
         "contract_adopted_at": "2026-01-02T03:04:05Z",
@@ -857,6 +934,20 @@
   {
     "body": {
       "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "landing": null,
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "review": null,
+          "rules": [],
+          "session_wall_clock_minutes": null,
+          "test_recipe": "",
+          "verification": null
+        },
         "compliance_checked_at": null,
         "compliance_status": "not_checked",
         "contract_adopted_at": "2026-01-02T03:04:05Z",
@@ -908,6 +999,20 @@
   {
     "body": {
       "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "landing": null,
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "review": null,
+          "rules": [],
+          "session_wall_clock_minutes": null,
+          "test_recipe": "",
+          "verification": null
+        },
         "compliance_checked_at": null,
         "compliance_status": "not_checked",
         "contract_adopted_at": null,
@@ -1450,8 +1555,12 @@
   },
   {
     "body": {
+      "digests": [],
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
-      "sessions": []
+      "hidden_count": 0,
+      "sessions": [],
+      "total": 0,
+      "truncated": false
     },
     "exit": 0,
     "operation": "session.list"
