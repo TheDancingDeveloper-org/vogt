@@ -50,6 +50,9 @@ const SESSION_HIBERNATE: &str = "session.hibernate";
 const SESSION_WAKE: &str = "session.wake";
 const SESSION_KEEP_AWAKE: &str = "session.keep_awake";
 const SESSION_SET_ROLE: &str = "session.set_role";
+const SESSION_RENAME: &str = "session.rename";
+const SESSION_REMOVE: &str = "session.remove";
+const SESSION_TOKEN: &str = "session.token";
 
 /// The longest `session.input` text the engine accepts in one write.
 const SESSION_INPUT_MAX_BYTES: usize = 64 * 1024;
@@ -2835,6 +2838,334 @@ where
         .next(prefix)
 }
 
+// -- sessions part II: rename, remove, token (WI-1074) -------------------------
+
+/// Rename a session, live or hibernated. The name lives on the engine; Vogt
+/// records that it happened and returns the session as it is afterwards.
+pub fn rename_session_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    let parsed = RenameSessionParams {
+        id: require_string(&params, "id")?,
+        name: require_string(&params, "name")?,
+        reason: require_string(&params, "reason")?,
+    };
+    dispatch!(built, rename_session, &parsed)
+        .and_then(|result| serde_json::to_value(result).map_err(json_error))
+}
+
+/// Remove a session: kill it if it still runs and have the engine forget it.
+/// A linked session's record is closed and its token revoked, as a stop would.
+pub fn remove_session_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    let parsed = RemoveSessionParams {
+        id: require_string(&params, "id")?,
+        reason: require_string(&params, "reason")?,
+    };
+    dispatch!(built, remove_session, &parsed)
+        .and_then(|result| serde_json::to_value(result).map_err(json_error))
+}
+
+/// Mint a fresh token for a session, revoking the one it holds. The secret is
+/// returned once and never stored.
+pub fn session_token_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    let parsed = SessionTokenParams {
+        id: require_string(&params, "id")?,
+        reason: require_string(&params, "reason")?,
+    };
+    dispatch!(built, session_token, &parsed)
+        .and_then(|result| serde_json::to_value(result).map_err(json_error))
+}
+
+#[derive(Debug, Clone)]
+pub struct RenameSessionParams {
+    pub id: String,
+    pub name: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveSessionParams {
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionTokenParams {
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionRemoved {
+    pub id: String,
+    pub engine_session_id: String,
+    pub removed: bool,
+    pub linked: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionTokenResult {
+    pub session: String,
+    pub token: String,
+    pub scopes: Vec<String>,
+}
+
+/// The name the engine shows. Trimmed, and refused when empty or past the
+/// engine's own byte limit, so a name it would reject is rejected here first.
+const SESSION_NAME_MAX_BYTES: usize = 256;
+
+pub fn rename_session<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &RenameSessionParams,
+) -> Result<SessionResult, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let reason = writes::validate_reason(&params.reason)?;
+    let name = params.name.trim();
+    if name.is_empty() {
+        return Err(VogtError::InvalidRequest(
+            "a session name cannot be empty".to_string(),
+        ));
+    }
+    if name.len() > SESSION_NAME_MAX_BYTES {
+        return Err(VogtError::InvalidRequest(format!(
+            "a session name is at most {SESSION_NAME_MAX_BYTES} bytes"
+        )));
+    }
+    let engine = engine_of(ctx)?;
+    let found = resolve_target(ctx, &params.id)?;
+    let renamed = engine.rename_session(&found.engine_session_id, name)?;
+    if !renamed {
+        return Err(VogtError::NotFound(format!(
+            "no session {}",
+            py_repr(&params.id)
+        )));
+    }
+    let mut writing = write_of(ctx);
+    let engine_id = found.engine_session_id.clone();
+    let named = name.to_string();
+    audited_action(
+        &mut writing,
+        SESSION_RENAME,
+        &reason,
+        "session",
+        &engine_id,
+        &json!({"name": named, "linked": found.session.is_some()}),
+        "session.renamed",
+        Some(&json!({"engine_session_id": engine_id})),
+    )?;
+    // The rename itself only says whether the engine had the session.
+    let current = engine
+        .get_session(&found.engine_session_id)?
+        .ok_or_else(|| VogtError::NotFound(format!("no session {}", py_repr(&params.id))))?;
+    let summary = match &found.session {
+        Some(session) => summarize(ctx, session, Some(&current))?,
+        None => unlinked_summary(&ctx.declared.read()?, &current)?,
+    };
+    Ok(SessionResult { session: summary })
+}
+
+/// Kill a session if it still runs and have the engine forget it.
+///
+/// `session.stop` closes Vogt's record and leaves the engine's; this also
+/// drops the engine's record, screen and brief. A session Vogt linked is
+/// closed and has its token revoked, exactly as a stop would, so a removed
+/// session cannot keep calling back.
+pub fn remove_session<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &RemoveSessionParams,
+) -> Result<SessionRemoved, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let reason = writes::validate_reason(&params.reason)?;
+    let found = resolve_target(ctx, &params.id)?;
+    let engine_id = found.engine_session_id.clone();
+    // The engine goes first. A session it has already forgotten is still
+    // removed as far as Vogt is concerned: the record is closed either way.
+    let removed = match ctx.engine.as_ref() {
+        None => {
+            return Err(VogtError::EngineUnavailable(
+                "no session engine is configured, so there is nothing to remove \
+                 (set VOGT_ENGINE_URL)"
+                    .to_string(),
+            ));
+        }
+        Some(engine) => match engine.remove_session(&engine_id) {
+            Ok(gone) => gone,
+            Err(VogtError::EngineUnavailable(_)) => false,
+            Err(other) => return Err(other),
+        },
+    };
+    let linked = found.session.is_some();
+    if let Some(session) = &found.session {
+        close_removed(ctx, session, &reason, removed)?;
+    } else {
+        let mut writing = write_of(ctx);
+        audited_action(
+            &mut writing,
+            SESSION_REMOVE,
+            &reason,
+            "session",
+            &engine_id,
+            &json!({"engine_session_id": engine_id, "removed": removed, "linked": false}),
+            "session.removed",
+            Some(&json!({"linked": false})),
+        )?;
+    }
+    Ok(SessionRemoved {
+        id: found
+            .session
+            .as_ref()
+            .map(|session| session.id.clone())
+            .unwrap_or_else(|| engine_id.clone()),
+        engine_session_id: engine_id,
+        removed,
+        linked,
+    })
+}
+
+/// Close a linked session the engine has forgotten, revoking its token.
+fn close_removed<C, I>(
+    ctx: &AppContext<C, I>,
+    session: &CodingSession,
+    reason: &str,
+    removed: bool,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let mut writing = write_of(ctx);
+    let stopped_at = now(&writing);
+    let actor_id = session.actor_id.clone();
+    let session_id = session.id.clone();
+    let engine_id = session.engine_session_id.clone();
+    let why = reason.to_string();
+    audited_write(&mut writing, SESSION_REMOVE, reason, move |txn, _actor| {
+        let current = txn.session_by_id(&session_id)?;
+        let Some(current) = current else {
+            return Err(VogtError::NotFound(format!(
+                "no session {}",
+                py_repr(&session_id)
+            )));
+        };
+        if current.stopped_at.is_none() {
+            txn.mark_session_stopped(&session_id, stopped_at)?;
+        }
+        for token in txn.tokens_for_actor(&actor_id, false)? {
+            if token.revoked_at.is_none() {
+                txn.revoke_token(&token.id, &why, stopped_at)?;
+            }
+        }
+        let mut stopped = current;
+        stopped.stopped_at = Some(stopped.stopped_at.unwrap_or(stopped_at));
+        Ok(WriteOutcome::new(
+            (),
+            "session",
+            &session_id,
+            audited_payload(&stopped),
+            "session.removed",
+            json!({
+                "engine_session_id": engine_id,
+                "removed": removed,
+                "linked": true,
+            }),
+        ))
+    })?;
+    Ok(())
+}
+
+/// Mint a replacement token for a session and hand it back once.
+///
+/// The session must be one Vogt linked: an engine id with no record has no
+/// actor to bind a token to. The old token is revoked in the same write that
+/// stores the new hash, so a session never holds two.
+pub fn session_token<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &SessionTokenParams,
+) -> Result<SessionTokenResult, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let reason = writes::validate_reason(&params.reason)?;
+    let found = resolve_target(ctx, &params.id)?;
+    let Some(session) = found.session else {
+        return Err(VogtError::NotFound(format!(
+            "no session {} — a token can only be minted for a session Vogt linked",
+            py_repr(&params.id)
+        )));
+    };
+    if session.stopped_at.is_some() {
+        return Err(VogtError::Conflict(format!(
+            "session {} was already stopped",
+            py_repr(&session.id)
+        )));
+    }
+    let scopes = session_scopes(ctx)?;
+    let (secret, token_hash) = minted_token()?;
+    let mut writing = write_of(ctx);
+    let session_id = session.id.clone();
+    let actor_id = session.actor_id.clone();
+    let why = reason.clone();
+    let minted_scopes = scopes.clone();
+    let token_id = fresh(&writing, "tok");
+    let minted_at = now(&writing);
+    audited_write(&mut writing, SESSION_TOKEN, &reason, move |txn, _actor| {
+        let holder = txn
+            .actor_by_id(&actor_id)?
+            .ok_or_else(|| VogtError::NotFound(format!("no session {}", py_repr(&session_id))))?;
+        let mut revoked = 0;
+        for token in txn.tokens_for_actor(&actor_id, false)? {
+            if token.revoked_at.is_none()
+                && txn.revoke_token(
+                    &token.id,
+                    &format!("superseded by session.token: {why}"),
+                    minted_at,
+                )?
+            {
+                revoked += 1;
+            }
+        }
+        txn.insert_token(
+            &Token {
+                id: token_id,
+                actor_id: holder.id.clone(),
+                actor_identity_ref: Some(holder.identity_ref.clone()),
+                name: format!("session {session_id}"),
+                scopes: minted_scopes,
+                kind: TokenKind::Api,
+                created_at: minted_at,
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: None,
+                revoked_reason: None,
+            },
+            &token_hash,
+        )?;
+        Ok(WriteOutcome::new(
+            (),
+            "session",
+            &session_id,
+            json!({"session": session_id}),
+            "session.token_minted",
+            json!({"tokens_revoked": revoked}),
+        ))
+    })?;
+    Ok(SessionTokenResult {
+        session: session.id,
+        token: secret,
+        scopes,
+    })
+}
+
+/// A serde failure while rendering a result the service just built.
+fn json_error(error: serde_json::Error) -> VogtError {
+    VogtError::InvalidRequest(format!("could not render the result: {error}"))
+}
+
 /// The work item a branch name mentions, for a session credited to one.
 pub(super) fn branch_work_item(view: &impl ReadView, text: &str) -> Option<WorkItem> {
     let references = crate::decisions::issue_references(text);
@@ -2889,7 +3220,8 @@ mod tests {
     use crate::with_ctx;
 
     use super::{
-        answers_as_person, hibernate, input, wake, HibernateParams, InputParams, WakeParams,
+        answers_as_person, hibernate, input, remove_session_op, rename_session_op,
+        session_token_op, wake, HibernateParams, InputParams, WakeParams,
     };
 
     /// An engine that records every request and answers from `script`: each GET
@@ -3293,5 +3625,141 @@ mod tests {
             .unwrap()
             .revoked_at
             .is_none());
+    }
+
+    fn renamed(id: &str, name: &str) -> Vec<u8> {
+        format!(r#"{{"id":"{id}","alive":true,"activity":"idle","role":"worker","name":"{name}"}}"#)
+            .into_bytes()
+    }
+
+    #[test]
+    fn renaming_a_session_asks_the_engine_and_returns_the_new_name() {
+        let (_dir, built, seen) = context(
+            "rename",
+            person(),
+            None,
+            |_| {},
+            vec![renamed("eng-1", "after"), b"{}".to_vec()],
+        );
+        record_session(&built, "ses_1", "eng-1");
+        let result = rename_session_op(
+            &built,
+            json!({"id": "ses_1", "name": "after", "reason": "clearer"}),
+        )
+        .unwrap();
+        let calls = seen.lock().unwrap();
+        assert!(calls.iter().any(|(method, path, body)| {
+            method == "PATCH" && path.ends_with("/eng-1") && body.contains("\"name\":\"after\"")
+        }));
+        assert_eq!(result["session"]["id"], "ses_1");
+    }
+
+    #[test]
+    fn renaming_with_an_empty_name_is_refused_before_the_engine() {
+        let (_dir, built, seen) = context("rename-empty", person(), None, |_| {}, vec![]);
+        record_session(&built, "ses_1", "eng-1");
+        let error = rename_session_op(
+            &built,
+            json!({"id": "ses_1", "name": "   ", "reason": "no"}),
+        )
+        .unwrap_err();
+        assert!(matches!(error, VogtError::InvalidRequest(_)), "{error:?}");
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn removing_a_linked_session_forgets_it_and_revokes_its_token() {
+        let (_dir, built, seen) = context("remove", person(), None, |_| {}, vec![b"{}".to_vec()]);
+        let old = record_session(&built, "ses_1", "eng-1");
+        let result = remove_session_op(&built, json!({"id": "ses_1", "reason": "done"})).unwrap();
+        assert_eq!(result["removed"], true);
+        assert_eq!(result["linked"], true);
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(method, path, _)| { method == "DELETE" && path.ends_with("/eng-1") }));
+        let tokens = tokens_of(&built, "local:ada");
+        assert!(tokens
+            .iter()
+            .find(|token| token.id == old)
+            .unwrap()
+            .revoked_at
+            .is_some());
+        with_ctx!(&built, |ctx| {
+            let session = ctx
+                .declared
+                .read()
+                .unwrap()
+                .session_by_id("ses_1")
+                .unwrap()
+                .unwrap();
+            assert!(session.stopped_at.is_some());
+        });
+    }
+
+    #[test]
+    fn removing_an_unlinked_session_still_asks_the_engine() {
+        let (_dir, built, _) = context(
+            "remove-unlinked",
+            person(),
+            None,
+            |_| {},
+            vec![b"{}".to_vec()],
+        );
+        let result = remove_session_op(&built, json!({"id": "eng-9", "reason": "gone"})).unwrap();
+        assert_eq!(result["removed"], true);
+        assert_eq!(result["linked"], false);
+        assert_eq!(result["engine_session_id"], "eng-9");
+    }
+
+    #[test]
+    fn a_fresh_token_replaces_the_one_the_session_holds() {
+        let (_dir, built, _) = context("token", person(), None, |_| {}, vec![]);
+        let old = record_session(&built, "ses_1", "eng-1");
+        let result = session_token_op(&built, json!({"id": "ses_1", "reason": "rotated"})).unwrap();
+        assert_eq!(result["session"], "ses_1");
+        let secret = result["token"].as_str().unwrap();
+        assert!(secret.starts_with("vogt_"), "{secret}");
+        let tokens = tokens_of(&built, "local:ada");
+        assert!(tokens
+            .iter()
+            .find(|token| token.id == old)
+            .unwrap()
+            .revoked_at
+            .is_some());
+        assert!(tokens
+            .iter()
+            .any(|token| token.id != old && token.revoked_at.is_none()));
+    }
+
+    #[test]
+    fn a_token_for_an_unlinked_session_is_refused() {
+        let (_dir, built, _) = context("token-unlinked", person(), None, |_| {}, vec![]);
+        let error = session_token_op(&built, json!({"id": "eng-9", "reason": "no"})).unwrap_err();
+        assert!(matches!(error, VogtError::NotFound(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_token_for_a_stopped_session_is_refused() {
+        let (_dir, built, _) = context("token-stopped", person(), None, |_| {}, vec![]);
+        record_session(&built, "ses_1", "eng-1");
+        with_ctx!(&built, |ctx| {
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "session.stop", "test", |txn, _actor| {
+                txn.set_session_stopped("ses_1", Moment::from_unix(1_700_000_001, 0))?;
+                Ok(WriteOutcome::new(
+                    (),
+                    "session",
+                    "ses_1",
+                    json!({}),
+                    "session.stopped",
+                    json!({}),
+                ))
+            })
+            .unwrap();
+        });
+        let error = session_token_op(&built, json!({"id": "ses_1", "reason": "no"})).unwrap_err();
+        assert!(matches!(error, VogtError::Conflict(_)), "{error:?}");
     }
 }
