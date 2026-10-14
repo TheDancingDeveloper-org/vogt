@@ -492,12 +492,50 @@ pub fn serve_stdio<G: ToolGrant>(
     grant: &G,
 ) -> ServeReport {
     let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Stdio);
-    for line in input.lines() {
+    feed_lines(input.lines(), &mut dispatcher, output);
+    report_of(&dispatcher)
+}
+
+/// Serve MCP on the process's own stdin and stdout until stdin closes.
+///
+/// One line in, at most one line out, flushed before the next read, so a
+/// client that stays open is answered before it sends EOF. Ports
+/// `StdioServer.serve`.
+pub fn serve_stdio_streams<G: ToolGrant>(
+    registry: &OperationRegistry,
+    grant: &G,
+) -> Result<ServeReport, std::io::Error> {
+    use std::io::{BufRead, Write};
+    let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Stdio);
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    while let Some(line) = lines.next().transpose()? {
+        let mut output = String::new();
+        feed_lines(std::iter::once(line.as_str()), &mut dispatcher, &mut output);
+        if !output.is_empty() {
+            stdout.write_all(output.as_bytes())?;
+            stdout.flush()?;
+        }
+    }
+    Ok(report_of(&dispatcher))
+}
+
+fn feed_lines<'a, G: ToolGrant>(
+    lines: impl Iterator<Item = &'a str>,
+    dispatcher: &mut Dispatcher<'_, G>,
+    output: &mut String,
+) {
+    for line in lines {
         if let Some(response) = dispatcher.handle_line(line) {
             output.push_str(&crate::decisions::python_json_dumps(&response, false));
             output.push('\n');
         }
     }
+}
+
+fn report_of<G: ToolGrant>(dispatcher: &Dispatcher<'_, G>) -> ServeReport {
     ServeReport {
         messages_handled: dispatcher.report.messages_handled,
         protocol_version: dispatcher.report.protocol_version.clone(),

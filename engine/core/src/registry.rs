@@ -126,6 +126,7 @@ pub type ServiceFn = fn(
 pub fn service_for(name: &str) -> Option<ServiceFn> {
     match name {
         "migrate" => Some(crate::application::instance::migrate_op),
+        "mcp.stdio" => Some(crate::application::instance::mcp_stdio_op),
         "status" => Some(crate::application::instance::status_op),
         "contract.evaluate" => Some(crate::application::contracts::contract_evaluate_op),
         "token.issue" => Some(crate::application::services::auth::issue_token_op),
