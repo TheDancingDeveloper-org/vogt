@@ -33,6 +33,7 @@ import json
 import os
 import re
 import threading
+import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -51,6 +52,12 @@ MAX_MESSAGE_CHARS = 20_000
 EXCERPT_CHARS = 300
 #: Directory entries considered per root, as a guard against a wrong root.
 MAX_ENTRIES = 20_000
+#: How long a conversation-id index is reused without re-checking the root.
+#: A root whose mtime moved is rebuilt on the next lookup regardless.
+INDEX_TTL_SECONDS = 5.0
+#: How long a conversation id that was not on disk stays a miss, so a list of
+#: sessions with no transcript does not rescan the root once per row.
+NEGATIVE_TTL_SECONDS = 2.0
 
 _ID = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,127}$")
 _FLAG_IDS = re.compile(r"(?:--session-id|--resume|--session)[= ]+'?([A-Za-z0-9_.-]+)")
@@ -150,18 +157,15 @@ def find(
 
 
 def _by_id(agent: str, root: Path, conversation_id: str) -> Path | None:
-    if agent in CLAUDE_FORMAT:
-        name = f"{conversation_id}.jsonl"
-        for entry in _entries(root):
-            candidate = entry / name
-            if candidate.is_file():
-                return candidate
-        return None
-    suffix = f"-{conversation_id}.jsonl"
-    for path in _codex_files(root):
-        if path.name.endswith(suffix):
-            return path
-    return None
+    """The transcript file for one conversation id, via the shared index.
+
+    The index is built from one directory listing and reused across the
+    concurrent `session.list` calls that each ask for every live session.
+    A root mtime change, or `INDEX_TTL_SECONDS` since the last build, drops
+    it; an id that was absent is remembered for `NEGATIVE_TTL_SECONDS` so a
+    miss does not rescan.
+    """
+    return _index_for(agent, root).lookup(conversation_id)
 
 
 def _by_cwd(
@@ -234,6 +238,117 @@ def _mtime(path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return 0.0
+
+
+# -- conversation-id index ---------------------------------------------------
+#
+# `session.list` resolves one transcript per live session, and several lists
+# run at once. Walking the transcript root (up to MAX_ENTRIES directory
+# entries, and for Codex the date tree under it) once per session per call is
+# the slow part. One index per (agent, root) is built from a single listing
+# and swapped in under a lock; lookups after that are dict reads.
+
+
+@dataclass
+class _Index:
+    """One scan of a transcript root, plus ids known to be absent."""
+
+    built_at: float
+    #: mtime of the root when this index was built. A new child directory
+    #: moves it; a new file inside an existing directory does not, and that
+    #: waits for the TTL.
+    root_mtime: float
+    by_id: dict[str, Path]
+    #: conversation id → monotonic time it was found missing.
+    negative: dict[str, float]
+
+    def lookup(self, conversation_id: str) -> Path | None:
+        path = self.by_id.get(conversation_id)
+        if path is not None:
+            return path
+        now = _clock()
+        with _index_guard:
+            seen = self.negative.get(conversation_id)
+            if seen is not None and now - seen < NEGATIVE_TTL_SECONDS:
+                return None
+            # Record the miss only. The id stays absent until the index is
+            # rebuilt, which happens when the root's mtime moves or the TTL
+            # expires — a new file cannot appear without one of those.
+            self.negative[conversation_id] = now
+        return None
+
+
+_indexes: dict[tuple[str, str], _Index] = {}
+_index_guard = threading.Lock()
+
+
+def _clock() -> float:
+    return time.monotonic()
+
+
+def _index_for(agent: str, root: Path) -> _Index:
+    key = ("claude" if agent in CLAUDE_FORMAT else "codex", str(root))
+    now = _clock()
+    with _index_guard:
+        current = _indexes.get(key)
+        # No stat here. Inside the TTL a list of N sessions costs N dict
+        # reads; a new file waits at most INDEX_TTL_SECONDS.
+        if current is not None and now - current.built_at < INDEX_TTL_SECONDS:
+            return current
+    # The TTL elapsed. One stat per child directory: unchanged means the
+    # files are unchanged, so the previous index stands.
+    stamp = _tree_stamp(root)
+    with _index_guard:
+        current = _indexes.get(key)
+        if current is not None and current.root_mtime == stamp:
+            current.built_at = _clock()
+            return current
+    built = _scan(agent, root, _clock())
+    with _index_guard:
+        _indexes[key] = built
+        return built
+
+
+def _scan(agent: str, root: Path, now: float) -> _Index:
+    """One pass over the root. The stamp is the newest mtime seen in it."""
+    by_id: dict[str, Path] = {}
+    stamp = _mtime(root)
+    if agent in CLAUDE_FORMAT:
+        for entry in _entries(root):
+            try:
+                entry_mtime = entry.stat().st_mtime
+            except OSError:
+                entry_mtime = 0.0
+            stamp = max(stamp, entry_mtime)
+            try:
+                with os.scandir(entry) as it:
+                    for count, child in enumerate(it):
+                        if count >= MAX_ENTRIES:
+                            break
+                        name = child.name
+                        is_file = name.endswith(".jsonl") and child.is_file(
+                            follow_symlinks=False
+                        )
+                        if is_file:
+                            by_id.setdefault(name[: -len(".jsonl")], Path(child.path))
+            except OSError:
+                continue
+    else:
+        for path in _codex_files(root):
+            match = _UUID_TAIL.search(path.stem)
+            conversation = match.group(1) if match else path.stem
+            # Newest dates come first, so the first hit is the one a walk finds.
+            by_id.setdefault(conversation, path)
+        stamp = max(stamp, _mtime(root))
+    return _Index(built_at=now, root_mtime=stamp, by_id=by_id, negative={})
+
+
+def _tree_stamp(root: Path) -> float:
+    """A stamp that changes when the root or any child directory changes."""
+    stamp = _mtime(root)
+    for entry in _entries(root):
+        stamp = max(stamp, _mtime(entry))
+    return stamp
 
 
 # -- reading ---------------------------------------------------------------
