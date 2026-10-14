@@ -1,5 +1,6 @@
 import { Component, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { listSessions } from "./vogtApi";
+
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -36,6 +37,35 @@ import {
 } from "./terminalReplay";
 import { planDormantResume } from "./terminalDormancy";
 import { acquireDormantSlot, releaseDormantSlot } from "./dormantSlots";
+
+/** How long one `session.list` answer serves every terminal that mounts. */
+const WORK_ITEM_LINKS_TTL_MS = 5000;
+let workItemLinksRead: { at: number; answer: ReturnType<typeof listSessions> } | null = null;
+
+/**
+ * The full session list, read once for every terminal mounting together.
+ * Each mount used to read it for itself, so warming ~70 terminals fired ~70
+ * full lists in under a second (WI-1413). A failed read is not kept.
+ */
+/** Drop the shared read, so the next mount asks again (tests). */
+export function forgetWorkItemLinks(): void {
+  workItemLinksRead = null;
+}
+
+export function workItemLinks(): ReturnType<typeof listSessions> {
+  const now = Date.now();
+  if (workItemLinksRead && now - workItemLinksRead.at < WORK_ITEM_LINKS_TTL_MS) {
+    return workItemLinksRead.answer;
+  }
+  const answer = listSessions({ include_stopped: true });
+  const read = { at: now, answer };
+  workItemLinksRead = read;
+  answer.catch(() => {
+    if (workItemLinksRead === read) workItemLinksRead = null;
+  });
+  return answer;
+}
+
 
 // Cap on the scrollback the serialized cache persists. A 5000-line scrollback
 // full of wide chars and colour serializes large; 2000 lines keeps the cache
@@ -655,7 +685,7 @@ const TerminalView: Component<Props> = (props) => {
     // Ask Vogt whether this PTY belongs to a work item. One read, at mount,
     // and silence on any failure: the badge is worth having and worth
     // nothing at all if it costs the terminal.
-    void listSessions({ include_stopped: true })
+    void workItemLinks()
       .then((answer) => {
         const link = (answer.sessions ?? []).find(
           (row) => row.engine_session_id === props.sessionId,

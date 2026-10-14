@@ -66,7 +66,9 @@ function armStallTimer(): void {
     setError(
       `The session list has not answered in ${Math.round(SESSION_LIST_STALL_MS / 1000)}s.`,
     );
-    void refreshSessions();
+    // Asked directly, not through the coalescer: the read it would join
+    // may be the one that never answered.
+    void loadSessions();
   }, SESSION_LIST_STALL_MS);
 }
 
@@ -82,7 +84,50 @@ function sessionListPending(): boolean {
   return !store.ready || error() !== null;
 }
 
-export async function refreshSessions(signal?: AbortSignal): Promise<void> {
+/** The unsignalled list read in flight, shared by every caller meanwhile. */
+let sessionsInFlight: Promise<void> | null = null;
+/** A trigger arrived while a read was in flight: read once more after it. */
+let sessionsRerun = false;
+
+/**
+ * Read the session list again. Unsignalled callers (stream events, panels)
+ * are coalesced: one read in flight at a time, and any number of triggers
+ * during it collapse into a single follow-up read (WI-1413). A signalled
+ * read belongs to the wake coordinator, which supersedes by aborting, so it
+ * runs as asked.
+ */
+export function refreshSessions(signal?: AbortSignal): Promise<void> {
+  if (signal) return loadSessions(signal);
+  if (sessionsInFlight) {
+    sessionsRerun = true;
+    return sessionsInFlight;
+  }
+  sessionsInFlight = (async () => {
+    try {
+      do {
+        sessionsRerun = false;
+        await loadSessions();
+      } while (sessionsRerun);
+    } finally {
+      sessionsInFlight = null;
+    }
+  })();
+  return sessionsInFlight;
+}
+
+/** How long a `lagged` waits for more of its kind before one re-read. */
+export const LAGGED_REFRESH_DEBOUNCE_MS = 1000;
+let laggedTimer: ReturnType<typeof setTimeout> | null = null;
+
+function refreshAfterLag(): void {
+  if (laggedTimer !== null) clearTimeout(laggedTimer);
+  laggedTimer = setTimeout(() => {
+    laggedTimer = null;
+    void refreshSessions();
+  }, LAGGED_REFRESH_DEBOUNCE_MS);
+}
+
+async function loadSessions(signal?: AbortSignal): Promise<void> {
   armStallTimer();
   try {
     const list = await api.listSessions(signal, railSections.showHidden);
@@ -358,14 +403,35 @@ export function startEventStream(): void {
           break;
         case "lagged":
           // This stream missed events; the list it maintains may be wrong
-          // anywhere, so read it whole again.
-          void refreshSessions();
+          // anywhere, so read it whole again — once per burst, not per lag.
+          refreshAfterLag();
           break;
         case "session-hibernated":
+          // Patched in place like `session-blocked`: a re-read per event
+          // turned a burst into a storm of full lists (WI-1413).
+          setStore(
+            produce((s) => {
+              const sess = s.sessions[ev.id];
+              if (!sess) return;
+              sess.activity = "hibernated";
+              sess.hibernation = {
+                at: new Date().toISOString(),
+                trigger: ev.trigger,
+                resumable: sess.hibernation?.resumable ?? sess.conversation != null,
+              };
+            }),
+          );
+          break;
         case "session-woken":
-          // The summary changes shape (hibernation, alive, exit code), so
-          // read it again rather than patch it field by field.
-          void refreshSessions();
+          // The next `activity` event says what it is doing now.
+          setStore(
+            produce((s) => {
+              const sess = s.sessions[ev.id];
+              if (!sess) return;
+              sess.hibernation = null;
+              if (sess.activity === "hibernated") sess.activity = "idle";
+            }),
+          );
           break;
         case "session-blocked":
           setStore(
@@ -419,6 +485,10 @@ export function stopEventStream(): void {
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+  }
+  if (laggedTimer !== null) {
+    clearTimeout(laggedTimer);
+    laggedTimer = null;
   }
   reconnectAttempts = 0;
 }
