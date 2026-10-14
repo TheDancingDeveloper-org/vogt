@@ -364,6 +364,75 @@
    }
   },
   {
+   "operation": "work.get",
+   "params": {
+    "ref": "WI-1"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "work.comment",
+   "params": {
+    "ref": "WI-1",
+    "body": "parity note",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "work.transition",
+   "params": {
+    "ref": "WI-1",
+    "to_state": "in_progress",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "work.relate",
+   "params": {
+    "ref": "WI-1",
+    "target": "WI-2",
+    "kind": "relates_to",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "work.unrelate",
+   "params": {
+    "ref": "WI-1",
+    "target": "WI-2",
+    "kind": "relates_to",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "board.list",
+   "params": {
+    "cells": [
+     {
+      "lane_key": "",
+      "state": "open"
+     }
+    ]
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
    "operation": "backlog",
    "params": {},
    "expect": {
