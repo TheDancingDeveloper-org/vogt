@@ -21,11 +21,13 @@ use crate::application::resolve;
 use crate::application::upstream;
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{
-    Clock, Effort, IdFactory, Origin, Priority, Project, TrustState, WorkItem, WorkKind,
-    TERMINAL_STATES,
+    Clock, Comment, Effort, IdFactory, Origin, Priority, Project, TrustState, WorkItem, WorkKind,
+    WorkLink, WorkOverlay, WriteBackRecord, TERMINAL_STATES,
 };
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ReadView, WorkFilter, WorkItemUpdate, WriteTxn};
+use crate::storage::interface::{
+    DeclaredStore, ObservedStore, ReadView, WorkFilter, WorkItemUpdate, WriteTxn,
+};
 
 const WORK_CREATE: &str = "work.create";
 const WORK_CREATED_EVENT: &str = "work.created";
@@ -45,6 +47,38 @@ pub fn update_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
 
 pub fn list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| list_work(ctx, params))
+}
+
+pub fn get_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| get_work(ctx, params))
+}
+
+pub fn comment_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| comment_work(ctx, params))
+}
+
+pub fn transition_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| transition_work(ctx, params))
+}
+
+pub fn relate_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| relate_work(ctx, params))
+}
+
+pub fn unrelate_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| unrelate_work(ctx, params))
+}
+
+pub fn bind_branch_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| bind_branch(ctx, params))
+}
+
+pub fn adopt_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| adopt_work(ctx, params))
+}
+
+pub fn board_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| list_board(ctx, params))
 }
 
 /// Create a work item. No project, or `local_only`, writes a native declared
@@ -785,9 +819,770 @@ fn strings(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// One work item with its comments, sessions, branches and git story.
+///
+/// A declared `WI-n` and an upstream subject key resolve the same way. Comments
+/// and sessions belong to a declared row; an upstream item has none of either
+/// until it is adopted. Branches and the git story are derived reads and come
+/// back for either.
+fn get_work<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let reference = params
+        .get("ref")
+        .or_else(|| params.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
+    let view = ctx.declared.read()?;
+    let item = upstream::resolve_work_ref(ctx, &view, reference)?;
+    let comments = if item.id.is_empty() {
+        Vec::new()
+    } else {
+        view.comments_for(&item.id, 200)?
+    };
+    let sessions = sessions_for(ctx, &view, &item)?;
+    let branches = crate::application::git_story::branch_views_for(ctx, &view, &item)?;
+    let git = crate::application::git_story::git_story_for(ctx, &item, &branches)?;
+    Ok(json!({
+        "item": item,
+        "comments": comments,
+        "sessions": sessions,
+        "branches": branches,
+        "git": git,
+        "walked": [],
+        "live_sessions": [],
+    }))
+}
+
+/// Sessions bound to a declared item. An upstream item has no declared id, so
+/// it has no sessions; the live engine half is not joined here.
+fn sessions_for<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    view: &impl crate::storage::interface::ReadView,
+    item: &WorkItem,
+) -> Result<Vec<Value>, VogtError> {
+    if item.id.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = view.list_sessions(None, Some(&item.id), true, 200, 0)?;
+    let mut out = Vec::new();
+    for session in rows {
+        let actor = view.actor_by_id(&session.actor_id)?;
+        let project = view.project_by_id(&session.project_id)?;
+        out.push(json!({
+            "id": session.id,
+            "engine_session_id": session.engine_session_id,
+            "project": project.as_ref().map(|project| &project.slug),
+            "work_item": item.reference,
+            "work_item_title": item.title,
+            "work_item_state": item.state,
+            "actor": actor.as_ref().map(|actor| &actor.identity_ref),
+            "cwd": session.cwd,
+            "template": session.template,
+            "model": session.model,
+            "effort": session.effort,
+            "reason": session.reason,
+            "started_at": session.started_at,
+            "stopped_at": session.stopped_at,
+            "running": session.stopped_at.is_none() && ctx.engine.is_some(),
+            "engine_available": ctx.engine.is_some(),
+        }));
+    }
+    Ok(out)
+}
+
+const WORK_COMMENT: &str = "work.comment";
+const WORK_COMMENTED: &str = "work.commented";
+const WORK_TRANSITION: &str = "work.transition";
+const WORK_TRANSITIONED: &str = "work.transitioned";
+const WORK_RELATE: &str = "work.relate";
+const WORK_RELATED: &str = "work.related";
+const WORK_UNRELATE: &str = "work.unrelate";
+const WORK_UNRELATED: &str = "work.unrelated";
+const WORK_BIND: &str = "work.bind_branch";
+const WORK_BRANCH_BOUND: &str = "work.branch_bound";
+const WORK_ADOPT: &str = "work.adopt";
+const WORK_ADOPTED: &str = "work.adopted";
+
+/// Append a comment to a native item. An upstream item is the forge
+/// write-through, which is not ported and stores nothing.
+fn comment_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let reference = text_of(&params, "ref")
+        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
+    let body = text_of(&params, "body")
+        .ok_or_else(|| VogtError::InvalidRequest("body is required".into()))?;
+    let reason = text_of(&params, "reason").unwrap_or_default();
+    let view = ctx.declared.read()?;
+    upstream::resolve_work_ref(ctx, &view, &reference)?;
+    if view.work_item_by_ref(&reference)?.is_none() {
+        return Err(VogtError::UpstreamWriteFailed(format!(
+            "work.comment on {} is an upstream item, and the write-through is not ported — nothing was stored locally",
+            crate::core::py_repr(&reference),
+        )));
+    }
+    drop(view);
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let ids = std::sync::Arc::clone(writing.ids());
+    let stored = audited_write(&mut writing, WORK_COMMENT, &reason, move |txn, actor| {
+        let item = resolve::work_item(txn, &reference)?;
+        let now = super::now_of(&clock);
+        let comment = Comment {
+            id: super::next_id(&ids, "cmt"),
+            work_item_id: item.id.clone(),
+            actor_id: actor.id.clone(),
+            actor_display_name: actor.display_name.clone(),
+            body: body.clone(),
+            created_at: now,
+        };
+        txn.insert_comment(&comment)?;
+        let payload = serde_json::to_value(&comment).unwrap_or(Value::Null);
+        Ok(WriteOutcome::new(
+            comment,
+            "work_item",
+            &item.id,
+            payload,
+            WORK_COMMENTED,
+            json!({"ref": item.reference}),
+        ))
+    })?;
+    record_skipped(ctx, None, None, "comment", &reason)?;
+    Ok(json!({
+        "comment": stored,
+        "write_back": {"action": "comment", "outcome": "skipped"},
+    }))
+}
+
+/// Move a native item along its workflow. `walk` takes the shortest legal path
+/// one audited hop at a time. Completion is refused while a `depends_on`
+/// target is unfinished. An upstream item is the write-through and stores
+/// nothing.
+fn transition_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let reference = text_of(&params, "ref")
+        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
+    let to_state = text_of(&params, "to_state")
+        .ok_or_else(|| VogtError::InvalidRequest("to_state is required".into()))?;
+    let walk = params.get("walk").and_then(Value::as_bool).unwrap_or(false);
+    let reason = text_of(&params, "reason").unwrap_or_default();
+    let view = ctx.declared.read()?;
+    upstream::resolve_work_ref(ctx, &view, &reference)?;
+    if view.work_item_by_ref(&reference)?.is_none() {
+        return Err(VogtError::UpstreamWriteFailed(format!(
+            "work.transition of {} is an upstream item, and the write-through is not ported — nothing was stored locally",
+            crate::core::py_repr(&reference),
+        )));
+    }
+    let item = resolve::work_item(&view, &reference)?;
+    let workflow = view.workflow_for(&item.kind.to_string())?;
+    let path = if walk {
+        workflow
+            .shortest_path(&item.state, &to_state)
+            .ok_or_else(|| {
+                VogtError::InvalidRequest(format!("no path from {} to {to_state}", item.state))
+            })?
+    } else {
+        vec![item.state.clone(), to_state.clone()]
+    };
+    if path.len() < 2 {
+        workflow.check(&item.state, &to_state)?;
+    }
+    drop(view);
+    let mut walked = Vec::new();
+    let mut current = item;
+    for window in path.windows(2) {
+        let from = window[0].clone();
+        let to = window[1].clone();
+        let walked_from = from.clone();
+        let walked_to = to.clone();
+        let mut writing = crate::application::context::write_of(ctx);
+        let clock = std::sync::Arc::clone(writing.clock());
+        let id = current.id.clone();
+        let reference = current.reference.clone();
+        current = audited_write(
+            &mut writing,
+            WORK_TRANSITION,
+            &reason,
+            move |txn, _actor| {
+                let fresh = txn
+                    .work_item_by_id(&id)?
+                    .ok_or_else(|| VogtError::NotFound(format!("no work item {reference}")))?;
+                let workflow = txn.workflow_for(&fresh.kind.to_string())?;
+                workflow.check(&fresh.state, &to)?;
+                if crate::core::TERMINAL_STATES.contains(&to.as_str()) {
+                    let blockers =
+                        txn.unfinished_blockers(&fresh.id, crate::core::TERMINAL_STATES)?;
+                    if !blockers.is_empty() {
+                        let names = blockers
+                            .iter()
+                            .map(|blocker| format!("{} ({})", blocker.r#ref, blocker.state))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return Err(crate::core::transition_rejected(
+                            "transition.blocked",
+                            &format!("{reference} is blocked by unfinished dependencies: {names}"),
+                        ));
+                    }
+                }
+                let now = super::now_of(&clock);
+                txn.update_work_item(
+                    &fresh.id,
+                    &WorkItemUpdate {
+                        state: Some(to.clone()),
+                        ..WorkItemUpdate::default()
+                    },
+                    now,
+                )?;
+                let updated = txn
+                    .work_item_by_id(&fresh.id)?
+                    .ok_or_else(|| VogtError::NotFound(format!("no work item {reference}")))?;
+                let payload = serde_json::to_value(&updated).unwrap_or(Value::Null);
+                Ok(WriteOutcome::new(
+                    updated,
+                    "work_item",
+                    &fresh.id,
+                    payload,
+                    WORK_TRANSITIONED,
+                    json!({"ref": reference, "from": from, "to": to}),
+                ))
+            },
+        )?;
+        walked.push(json!({"from": walked_from, "to": walked_to}));
+    }
+    record_skipped(
+        ctx,
+        current.project_id.as_deref(),
+        Some(&current.id),
+        "close",
+        &reason,
+    )?;
+    Ok(json!({
+        "item": current,
+        "comments": [],
+        "sessions": [],
+        "branches": [],
+        "git": null,
+        "walked": walked,
+        "live_sessions": [],
+        "write_back": {"action": "close", "outcome": "skipped"},
+    }))
+}
+
+/// Record a relation between two native items. `depends_on` and `duplicate_of`
+/// refuse a cycle. An upstream target is not a declared row and is not found.
+fn relate_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let reference = text_of(&params, "ref")
+        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
+    let related = text_of(&params, "target")
+        .or_else(|| text_of(&params, "related"))
+        .ok_or_else(|| VogtError::InvalidRequest("target is required".into()))?;
+    let kind_text = text_of(&params, "kind").unwrap_or_else(|| "relates_to".to_string());
+    let reason = text_of(&params, "reason").unwrap_or_default();
+    let kind: crate::core::RelationKind = kind_text.parse().map_err(|_| {
+        VogtError::InvalidRequest(format!(
+            "unknown relation kind {}",
+            crate::core::py_repr(&kind_text)
+        ))
+    })?;
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let stored = audited_write(&mut writing, WORK_RELATE, &reason, move |txn, _actor| {
+        let item = resolve::work_item(txn, &reference)?;
+        let other = resolve::work_item(txn, &related)?;
+        if item.id == other.id {
+            return Err(VogtError::InvalidRequest(
+                "an item cannot relate to itself".to_string(),
+            ));
+        }
+        if matches!(
+            kind,
+            crate::core::RelationKind::DependsOn | crate::core::RelationKind::DuplicateOf
+        ) && would_cycle(txn, &item.id, &other.id, kind)?
+        {
+            return Err(VogtError::InvalidRequest(format!(
+                "relating {} {kind_text} {} would create a cycle",
+                item.reference, other.reference
+            )));
+        }
+        let now = super::now_of(&clock);
+        txn.insert_relation(&item.id, &other.id, kind, now)?;
+        let updated = txn
+            .work_item_by_id(&item.id)?
+            .ok_or_else(|| VogtError::NotFound(format!("no work item {}", item.reference)))?;
+        let payload = serde_json::to_value(&updated).unwrap_or(Value::Null);
+        Ok(WriteOutcome::new(
+            payload.clone(),
+            "work_item",
+            &item.id,
+            payload,
+            WORK_RELATED,
+            json!({"ref": item.reference, "related": other.reference, "kind": kind_text}),
+        ))
+    })?;
+    Ok(json!({
+        "item": stored,
+        "comments": [],
+        "sessions": [],
+        "branches": [],
+        "git": null,
+        "walked": [],
+        "live_sessions": [],
+    }))
+}
+
+/// Drop one relation. A relation that was never recorded is a no-op that still
+/// returns the item.
+fn unrelate_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let reference = text_of(&params, "ref")
+        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
+    let related = text_of(&params, "target")
+        .or_else(|| text_of(&params, "related"))
+        .ok_or_else(|| VogtError::InvalidRequest("target is required".into()))?;
+    let kind_text = text_of(&params, "kind").unwrap_or_else(|| "relates_to".to_string());
+    let reason = text_of(&params, "reason").unwrap_or_default();
+    let kind: crate::core::RelationKind = kind_text.parse().map_err(|_| {
+        VogtError::InvalidRequest(format!(
+            "unknown relation kind {}",
+            crate::core::py_repr(&kind_text)
+        ))
+    })?;
+    let mut writing = crate::application::context::write_of(ctx);
+    let stored = audited_write(&mut writing, WORK_UNRELATE, &reason, move |txn, _actor| {
+        let item = resolve::work_item(txn, &reference)?;
+        let other = resolve::work_item(txn, &related)?;
+        txn.delete_relation(&item.id, &other.id, kind)?;
+        let updated = txn
+            .work_item_by_id(&item.id)?
+            .ok_or_else(|| VogtError::NotFound(format!("no work item {}", item.reference)))?;
+        let payload = serde_json::to_value(&updated).unwrap_or(Value::Null);
+        Ok(WriteOutcome::new(
+            payload.clone(),
+            "work_item",
+            &item.id,
+            payload,
+            WORK_UNRELATED,
+            json!({"ref": item.reference, "related": other.reference, "kind": kind_text}),
+        ))
+    })?;
+    Ok(json!({
+        "item": stored,
+        "comments": [],
+        "sessions": [],
+        "branches": [],
+        "git": null,
+        "walked": [],
+        "live_sessions": [],
+    }))
+}
+
+/// True when `target` can already reach `source` through `kind`, so adding the
+/// edge would close a cycle.
+fn would_cycle(
+    txn: &impl crate::storage::interface::ReadView,
+    source: &str,
+    target: &str,
+    kind: crate::core::RelationKind,
+) -> Result<bool, VogtError> {
+    let mut frontier = vec![target.to_string()];
+    let mut seen = std::collections::BTreeSet::from([target.to_string()]);
+    while let Some(current) = frontier.pop() {
+        if current == source {
+            return Ok(true);
+        }
+        let Some(item) = txn.work_item_by_id(&current)? else {
+            continue;
+        };
+        for relation in item.relations {
+            if relation.kind == kind && seen.insert(relation.related_id.clone()) {
+                frontier.push(relation.related_id);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Declare the branch a native item is worked on. An omitted name comes from
+/// `branch_binding_template`. Declaring the name already recorded is a no-op.
+/// An upstream item's overlay write is the write-through and stores nothing.
+fn bind_branch<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let reference = text_of(&params, "ref")
+        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
+    let given = text_of(&params, "branch");
+    let reason = text_of(&params, "reason").unwrap_or_default();
+    let view = ctx.declared.read()?;
+    upstream::resolve_work_ref(ctx, &view, &reference)?;
+    if view.work_item_by_ref(&reference)?.is_none() {
+        return Err(VogtError::UpstreamWriteFailed(format!(
+            "work.bind_branch of {} is an upstream item, and the write-through is not ported — nothing was stored locally",
+            crate::core::py_repr(&reference),
+        )));
+    }
+    let item = resolve::work_item(&view, &reference)?;
+    drop(view);
+    let branch = given.unwrap_or_else(|| {
+        crate::branches::default_branch_name(&item.reference, &ctx.config.branch_binding_template)
+    });
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let stored = audited_write(&mut writing, WORK_BIND, &reason, move |txn, _actor| {
+        let fresh = resolve::work_item(txn, &reference)?;
+        let Some(project_id) = fresh.project_id.clone() else {
+            return Err(VogtError::InvalidRequest(format!(
+                "{} has no project, so it has no branch to bind",
+                fresh.reference
+            )));
+        };
+        let mut overlay = txn.work_overlay(&fresh.reference)?.unwrap_or(WorkOverlay {
+            subject_key: fresh.reference.clone(),
+            project_id,
+            rank: None,
+            workflow_state: None,
+            priority: None,
+            effort: None,
+            assignee_actor_id: None,
+            initiative_id: None,
+            branches: Vec::new(),
+            created_at: super::now_of(&clock),
+            updated_at: super::now_of(&clock),
+        });
+        if !overlay.branches.iter().any(|name| name == &branch) {
+            overlay.branches.push(branch.clone());
+            overlay.updated_at = super::now_of(&clock);
+            txn.upsert_work_overlay(&overlay)?;
+        }
+        let payload = serde_json::to_value(&overlay).unwrap_or(Value::Null);
+        Ok(WriteOutcome::new(
+            json!({"ref": fresh.reference, "branch": branch}),
+            "work_item",
+            &fresh.id,
+            payload,
+            WORK_BRANCH_BOUND,
+            json!({"ref": fresh.reference, "branch": branch}),
+        ))
+    })?;
+    Ok(stored)
+}
+
+/// Promote one observed subject into a native work item and record the link.
+///
+/// The observation must still be the latest for its subject, belong to a
+/// project, and not already be linked. The created item takes the observation's
+/// kind, title and priority; the link is the audit of the promotion.
+fn adopt_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let subject = text_of(&params, "subject_key")
+        .ok_or_else(|| VogtError::InvalidRequest("subject_key is required".into()))?;
+    let reason = text_of(&params, "reason").unwrap_or_default();
+    if !ctx.observed.has_evidence_tables()? {
+        return Err(VogtError::NotFound(format!("no observation {subject}")));
+    }
+    let observation = ctx
+        .observed
+        .latest_by_subject(&subject)?
+        .ok_or_else(|| VogtError::NotFound(format!("no observation {subject}")))?;
+    let project_id = observation.project_id.clone().ok_or_else(|| {
+        VogtError::InvalidRequest(format!(
+            "observation {subject} has no project and cannot be adopted"
+        ))
+    })?;
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let ids = std::sync::Arc::clone(writing.ids());
+    let (item, link) = audited_write(&mut writing, WORK_ADOPT, &reason, move |txn, _actor| {
+        if txn.work_item_by_subject(&subject)?.is_some() {
+            return Err(VogtError::InvalidRequest(format!(
+                "{subject} is already adopted"
+            )));
+        }
+        let project = txn
+            .project_by_id(&project_id)?
+            .ok_or_else(|| VogtError::NotFound(format!("no project {project_id}")))?;
+        let kind_text = crate::decisions::work_kind_of(&observation);
+        let kind: WorkKind = kind_text.parse().unwrap_or(WorkKind::Chore);
+        let priority_text = crate::decisions::priority_of(&observation);
+        let priority: Priority = priority_text.parse().unwrap_or(Priority::P2);
+        let workflow = txn.workflow_for(kind_text)?;
+        let now = super::now_of(&clock);
+        let id = super::next_id(&ids, "wrk");
+        let reference = txn.next_work_ref()?;
+        let item = WorkItem {
+            id: id.clone(),
+            reference: reference.clone(),
+            kind,
+            title: crate::decisions::title_of(&observation),
+            body: String::new(),
+            state: workflow.initial_state,
+            priority,
+            effort: None,
+            project_id: Some(project.id.clone()),
+            project_slug: Some(project.slug.clone()),
+            initiative_id: None,
+            origin: crate::core::Origin::Adopted,
+            trust_state: crate::core::TrustState::Unverified,
+            assignee_actor_id: None,
+            assignee_identity_ref: None,
+            labels: Vec::new(),
+            relations: Vec::new(),
+            superseded_by: None,
+            created_at: now,
+            updated_at: now,
+        };
+        txn.insert_work_item(&item)?;
+        let link = WorkLink {
+            work_item_id: id.clone(),
+            subject_key: subject.clone(),
+            origin_kind: observation.kind.clone(),
+            source_url: observation.source_url.clone(),
+            relation: crate::core::LinkRelation::Completion,
+            created_at: now,
+        };
+        txn.insert_work_link(&link)?;
+        let payload = serde_json::to_value(&item).unwrap_or(Value::Null);
+        Ok(WriteOutcome::new(
+            (item, link),
+            "work_item",
+            &id,
+            payload,
+            WORK_ADOPTED,
+            json!({"ref": reference, "subject_key": subject}),
+        ))
+    })?;
+    Ok(json!({"item": item, "link": link}))
+}
+
+/// Record a skipped write-back. The native write already committed; a ledger
+/// row that cannot be written does not undo it, matching the Python path where
+/// the skip is a consequence rather than part of the declared transaction.
+fn record_skipped<C, I>(
+    ctx: &AppContext<C, I>,
+    project_id: Option<&str>,
+    work_item_id: Option<&str>,
+    action: &str,
+    reason: &str,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed: crate::core::WriteBackAction = action
+        .parse()
+        .unwrap_or(crate::core::WriteBackAction::Comment);
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let ids = std::sync::Arc::clone(writing.ids());
+    let project_id = project_id.map(str::to_string);
+    let work_item_id = work_item_id.map(str::to_string);
+    let reason_owned = reason.to_string();
+    let reason_for_audit = reason_owned.clone();
+    audited_write(
+        &mut writing,
+        "writeback.skip",
+        &reason_for_audit,
+        move |txn, actor| {
+            let now = super::now_of(&clock);
+            let record = WriteBackRecord {
+                id: super::next_id(&ids, "wbk"),
+                at: now,
+                project_id,
+                work_item_id,
+                actor_id: actor.id.clone(),
+                action: parsed,
+                subject_key: None,
+                policy: "none".to_string(),
+                outcome: crate::core::WriteBackOutcome::Skipped,
+                reason: reason_owned.clone(),
+                detail: None,
+                source_url: None,
+            };
+            txn.insert_writeback(&record)?;
+            Ok(WriteOutcome::new(
+                (),
+                "writeback",
+                &record.id,
+                serde_json::to_value(&record).unwrap_or(Value::Null),
+                "writeback.skipped",
+                json!({}),
+            ))
+        },
+    )?;
+    Ok(())
+}
+
+fn text_of(params: &Value, key: &str) -> Option<String> {
+    params.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// A bounded, snapshot-stable Board for native items.
+///
+/// An unlinked project answers with empty cells and `link_state: "unlinked"`.
+/// The upstream half of a linked board is gathered the same way `work.list`
+/// gathers it and merged into the counts; the snapshot token carries the
+/// declared revision so a continuation after a write is refused.
+fn list_board<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let cells = params
+        .get("cells")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if cells.is_empty() {
+        return Err(VogtError::InvalidRequest(
+            "board.list needs at least one cell".to_string(),
+        ));
+    }
+    let lane_mode = params
+        .get("lane_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let page_size = params
+        .get("page_size")
+        .and_then(Value::as_i64)
+        .unwrap_or(25);
+    let view = ctx.declared.read()?;
+    let project = params
+        .get("project")
+        .and_then(Value::as_str)
+        .map(|slug| resolve::project(&view, slug))
+        .transpose()?;
+    if let Some(project) = project.as_ref() {
+        if !upstream::is_linked(project) {
+            let pending = view.count_work_items(&WorkFilter {
+                project_id: Some(project.id.clone()),
+                exclude_terminal: true,
+                ..WorkFilter::default()
+            })?;
+            let empty: Vec<Value> = cells
+                .iter()
+                .map(|cell| {
+                    json!({
+                        "lane_key": cell.get("lane_key").and_then(Value::as_str).unwrap_or(""),
+                        "state": cell.get("state").and_then(Value::as_str).unwrap_or(""),
+                        "items": [],
+                        "total": 0,
+                        "next_cursor": null,
+                    })
+                })
+                .collect();
+            return Ok(json!({
+                "cells": empty,
+                "column_totals": {},
+                "lane_totals": {},
+                "total": 0,
+                "backlog_candidates": 0,
+                "declared_total": 0,
+                "link_state": "unlinked",
+                "excluded_unlinked": pending,
+                "snapshot": null,
+                "snapshot_at": super::now_of(&ctx.clock),
+                "revision": view.current_revision()?,
+            }));
+        }
+    }
+    let filter = WorkFilter {
+        project_id: project.as_ref().map(|project| project.id.clone()),
+        kinds: strings(params.get("kinds")),
+        states: strings(params.get("states")),
+        priorities: strings(params.get("priorities")),
+        ..WorkFilter::default()
+    };
+    let revision = view.current_revision()?;
+    let high_water = view.board_high_water(&filter)?;
+    let queries: Vec<crate::storage::interface::BoardCellQuery> = cells
+        .iter()
+        .map(|cell| crate::storage::interface::BoardCellQuery {
+            lane_key: cell
+                .get("lane_key")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            state: cell
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            after_created_at: None,
+            after_ref: None,
+        })
+        .collect();
+    let counts = view.board_counts(&filter, lane_mode, high_water.as_ref())?;
+    let pages = view.board_work_items(
+        &filter,
+        lane_mode,
+        &queries,
+        high_water.as_ref(),
+        page_size + 1,
+    )?;
+    let mut column_totals = serde_json::Map::new();
+    let mut lane_totals = serde_json::Map::new();
+    let mut total = 0_i64;
+    for ((lane, state), count) in &counts {
+        total += count;
+        let column = column_totals.entry(state.clone()).or_insert(json!(0));
+        *column = json!(column.as_i64().unwrap_or(0) + count);
+        let lane_total = lane_totals.entry(lane.clone()).or_insert(json!(0));
+        *lane_total = json!(lane_total.as_i64().unwrap_or(0) + count);
+    }
+    let rendered: Vec<Value> = queries
+        .iter()
+        .map(|query| {
+            let key = (query.lane_key.clone(), query.state.clone());
+            let fetched = pages.get(&key).cloned().unwrap_or_default();
+            let shown: Vec<&WorkItem> = fetched.iter().take(page_size.max(0) as usize).collect();
+            json!({
+                "lane_key": query.lane_key,
+                "state": query.state,
+                "items": shown,
+                "total": counts.get(&key).copied().unwrap_or(0),
+                "next_cursor": if fetched.len() > shown.len() { Value::String("more".into()) } else { Value::Null },
+            })
+        })
+        .collect();
+    Ok(json!({
+        "cells": rendered,
+        "column_totals": column_totals,
+        "lane_totals": lane_totals,
+        "total": total,
+        "backlog_candidates": total,
+        "declared_total": total,
+        "link_state": project.as_ref().map(|_| "linked"),
+        "excluded_unlinked": 0,
+        "snapshot": null,
+        "snapshot_at": super::now_of(&ctx.clock),
+        "revision": revision,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{create_work, update_work, work_page};
+    use super::{
+        bind_branch, comment_work, create_work, get_work, list_board, relate_work, transition_work,
+        unrelate_work, update_work, work_page,
+    };
     use crate::application::context::{build_context, Built};
     use crate::core::{
         ActorKind, LinkState, Moment, Principal, Project, SequentialIds, StepClock, WriteBack,
@@ -1030,5 +1825,97 @@ mod tests {
         )
         .unwrap();
         assert_eq!(after["item"]["ref"], "WI-1");
+    }
+
+    #[test]
+    fn a_comment_is_returned_by_the_get() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        create_work(
+            ctx,
+            json!({"kind": "chore", "title": "one", "reason": "test"}),
+        )
+        .unwrap();
+        let commented = comment_work(
+            ctx,
+            json!({"ref": "WI-1", "body": "noted", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(commented["comment"]["body"], "noted");
+        assert_eq!(commented["write_back"]["outcome"], "skipped");
+        let fetched = get_work(ctx, json!({"ref": "WI-1"})).unwrap();
+        assert_eq!(fetched["comments"][0]["body"], "noted");
+        assert_eq!(fetched["item"]["ref"], "WI-1");
+    }
+
+    #[test]
+    fn a_walk_records_each_hop_and_a_cycle_is_refused() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        create_work(
+            ctx,
+            json!({"kind": "chore", "title": "one", "reason": "test"}),
+        )
+        .unwrap();
+        create_work(
+            ctx,
+            json!({"kind": "chore", "title": "two", "reason": "test"}),
+        )
+        .unwrap();
+        let walked = transition_work(
+            ctx,
+            json!({"ref": "WI-1", "to_state": "review", "walk": true, "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(walked["item"]["state"], "review");
+        assert_eq!(walked["walked"].as_array().unwrap().len(), 2);
+        relate_work(
+            ctx,
+            json!({"ref": "WI-1", "related": "WI-2", "kind": "depends_on", "reason": "test"}),
+        )
+        .unwrap();
+        let cycle = relate_work(
+            ctx,
+            json!({"ref": "WI-2", "related": "WI-1", "kind": "depends_on", "reason": "test"}),
+        )
+        .unwrap_err();
+        assert!(matches!(cycle, VogtError::InvalidRequest(_)), "{cycle}");
+        unrelate_work(
+            ctx,
+            json!({"ref": "WI-1", "related": "WI-2", "kind": "depends_on", "reason": "test"}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn binding_a_branch_is_idempotent_and_the_board_counts_it() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        insert_project(&built, "beta", false, WriteBack::Disabled);
+        create_work(
+            ctx,
+            json!({"kind": "chore", "title": "one", "project": "beta", "local_only": true, "reason": "test"}),
+        )
+        .unwrap();
+        let bound = bind_branch(
+            ctx,
+            json!({"ref": "WI-1", "branch": "feat", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(bound["branch"], "feat");
+        bind_branch(
+            ctx,
+            json!({"ref": "WI-1", "branch": "feat", "reason": "test"}),
+        )
+        .unwrap();
+        let board = list_board(ctx, json!({"cells": [{"lane_key": "", "state": "open"}]})).unwrap();
+        assert_eq!(board["total"], 1);
+        assert_eq!(board["cells"][0]["items"][0]["ref"], "WI-1");
     }
 }
