@@ -1818,7 +1818,7 @@ mod tests {
     fn a_domain_error_exits_one() {
         let registry = default_registry();
         let result = at_eighty(
-            &argv(&["work", "get", "--ref", "WI-7"]),
+            &argv(&["session", "changes"]),
             &registry,
             "test",
             &mut no_dispatch,
