@@ -28,6 +28,10 @@ pub const DECLARED: &[(&str, &str)] = &[
     ("0018_actor_preferences", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0018_actor_preferences.sql")),
     ("0019_session_grants", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0019_session_grants.sql")),
     ("0020_install_latch", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0020_install_latch.sql")),
+    ("0021_agent_policy", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0021_agent_policy.sql")),
+    ("0022_comment_kind", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0022_comment_kind.sql")),
+    ("0023_decisions", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0023_decisions.sql")),
+    ("0024_session_started_by", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0024_session_started_by.sql")),
 ];
 
 pub const OBSERVED: &[(&str, &str)] = &[
