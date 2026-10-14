@@ -2314,6 +2314,7 @@ test("Files rail keeps its hierarchy compact and exposes real modified-file stat
     }],
   } }));
   await page.goto("/#/sessions");
+  await page.getByRole("button", { name: /Files/ }).click();
   const files = page.getByRole("heading", { name: "Files" });
   const search = page.getByRole("searchbox", { name: "Search files" });
   await expect(files).toBeVisible();
@@ -2325,15 +2326,16 @@ test("Files rail keeps its hierarchy compact and exposes real modified-file stat
   await expect(search).toBeVisible();
   await expect(page.getByLabel("Modified file")).toHaveText("M");
   await expect(page.getByText("TSX", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "New", exact: true })).toBeVisible();
+  await expect(page.locator(".file-tree").getByRole("button", { name: "New", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Refresh files" })).toBeVisible();
   await expect(page.getByRole("button", { name: "New folder" })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "New", exact: true }).click();
+  const newFile = page.locator(".file-tree").getByRole("button", { name: "New", exact: true });
+  await newFile.click();
   await expect(page.getByRole("button", { name: "Upload files" })).toBeVisible();
   await expect(page.getByRole("button", { name: "New file" })).toBeVisible();
   await expect(page.getByRole("button", { name: "New folder" })).toBeVisible();
-  await page.getByRole("button", { name: "New", exact: true }).click();
+  await newFile.click();
 
   await page.getByRole("button", { name: "Expand src" }).click();
   await expect(page.getByText("nested-component.tsx")).toBeVisible();
@@ -2578,36 +2580,47 @@ for (const height of [700, 900]) {
     const search = page.getByRole("searchbox", { name: "Search files" });
     const row = page.getByText("an-identifiable-long-filename.tsx");
     const settings = page.getByRole("button", { name: "Settings" });
-    const metrics = await rail.evaluate((element) => ({
-      overflowY: getComputedStyle(element).overflowY,
-      scrollHeight: element.scrollHeight,
-      clientHeight: element.clientHeight,
-      nestedOverflow: [
-        ".places-nav",
-        ".places-rail-session-area",
-        ".places-recent",
-        ".file-tree .tree-scroll",
-      ].map((selector) => getComputedStyle(element.querySelector(selector)!).overflowY),
-    }));
-    expect(metrics.overflowY).toBe("auto");
-    expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
-    expect(metrics.nestedOverflow).not.toContain("auto");
+    const metrics = await rail.evaluate((element) => {
+      const sessions = element.querySelector(".places-rail-session-area");
+      const sessionList = sessions?.querySelector(":scope > div") ?? null;
+      return {
+        overflowY: getComputedStyle(element).overflowY,
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+        sessionScrolls: sessionList
+          ? sessionList.scrollHeight > sessionList.clientHeight + 1
+          : false,
+        nestedOverflow: [".places-nav"].map(
+          (selector) => getComputedStyle(element.querySelector(selector)!).overflowY,
+        ),
+      };
+    });
+    expect(metrics.overflowY).not.toBe("auto");
+    expect(metrics.overflowY).not.toBe("scroll");
+    expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight + 1);
+    expect(metrics.sessionScrolls).toBe(true);
     expect(metrics.nestedOverflow).not.toContain("scroll");
 
     await settings.focus();
     await expect(settings).toBeFocused();
     await expect(settings).toBeInViewport();
     await expect(files).toBeInViewport();
-    await expect(search).toBeInViewport();
-    await expect(row).toBeInViewport();
     await page.getByRole("link", { name: "Board" }).focus();
     await expect(page.getByRole("link", { name: "Board" })).toBeInViewport();
-    await page.getByRole("button", { name: "New", exact: true }).focus();
-    await expect(page.getByRole("button", { name: "New", exact: true })).toBeInViewport();
-    const fileHeight = await page.locator(".file-tree").evaluate((element) =>
-      element.getBoundingClientRect().height,
-    );
-    expect(fileHeight).toBeGreaterThanOrEqual(259);
+
+    // Opening Files puts its search and a row on screen without moving nav or
+    // the footer, and without making the rail itself scroll.
+    await files.click();
+    await expect(search).toBeVisible();
+    await expect(search).toBeInViewport();
+    await expect(row).toBeInViewport();
+    await expect(page.locator(".file-tree").getByRole("button", { name: "New", exact: true })).toBeInViewport();
+    const still = await rail.evaluate((element) => ({
+      scrolls: element.scrollHeight > element.clientHeight + 1,
+      fileHeight: element.querySelector(".file-tree")!.getBoundingClientRect().height,
+    }));
+    expect(still.scrolls).toBe(false);
+    expect(still.fileHeight).toBeGreaterThanOrEqual(80);
   });
 }
 
@@ -4180,9 +4193,9 @@ test("A bounded Board cell continues from its cursor rather than re-reading", as
 });
 
 /**
- * The crowded rail: many live sessions must not push the file tree out of
- * the rail. The running list gets its own scroller and Files keeps a usable
- * minimum — asserted as geometry, because "usable" is a height.
+ * The crowded rail: many live sessions scroll inside the session area. The
+ * rail itself does not scroll, so nav and the footer stay put, and Files
+ * keeps a usable minimum — asserted as geometry, because "usable" is a height.
  */
 test("A crowded places rail keeps the file tree reachable", async ({ page }) => {
   test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
@@ -4206,37 +4219,112 @@ test("A crowded places rail keeps the file tree reachable", async ({ page }) => 
   const geometry = await rail.evaluate((node) => {
     const tree = node.querySelector(".file-tree");
     const sessions = node.querySelector(".places-rail-session-area");
+    const sessionList = sessions?.querySelector(":scope > div") ?? null;
     const treeBox = tree?.getBoundingClientRect();
     return {
       railBottom: node.getBoundingClientRect().bottom,
       viewport: window.innerHeight,
       treeTop: treeBox?.top ?? -1,
       treeHeight: treeBox?.height ?? -1,
-      sessionsScrolls: sessions
-        ? sessions.scrollHeight > sessions.clientHeight + 1
+      sessionsScrolls: sessionList
+        ? sessionList.scrollHeight > sessionList.clientHeight + 1
         : false,
       railScrolls: node.scrollHeight > node.clientHeight + 1,
     };
   });
 
-  // The rail is the one desktop scroller (by decision: no nested traps),
-  // it does not grow past the window, and Files keeps its usable minimum
-  // rather than being squeezed to a sliver under the crowd.
+  // The session area is the scroller; the rail does not grow past the window
+  // and does not scroll itself. Files keeps its usable minimum rather than
+  // being squeezed to a sliver under the crowd.
   expect(geometry.railBottom).toBeLessThanOrEqual(geometry.viewport + 1);
-  expect(geometry.railScrolls).toBe(true);
-  expect(geometry.treeHeight).toBeGreaterThanOrEqual(260);
+  expect(geometry.railScrolls).toBe(false);
+  expect(geometry.sessionsScrolls).toBe(true);
+  expect(geometry.treeHeight).toBeGreaterThanOrEqual(80);
 
-  // Reachable, not merely present: scrolling the rail brings Files onto the
-  // screen, with its search still usable there.
-  await rail.evaluate((node) => {
-    node.scrollTop = node.scrollHeight;
-  });
+  // Reachable without scrolling the rail: Files and its search are already
+  // on screen, and nav stayed put.
   const reached = await page.getByRole("heading", { name: "Files" }).evaluate((node) => {
     const box = node.getBoundingClientRect();
     return box.top >= 0 && box.bottom <= window.innerHeight;
   });
   expect(reached).toBe(true);
   await expect(page.getByRole("searchbox", { name: "Search files" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Board" })).toBeInViewport();
+  await expect(page.getByRole("button", { name: "Settings" })).toBeInViewport();
+});
+
+/**
+ * WI-1411: a long session list scrolls inside `.places-rail-session-area`.
+ * The rail, the nav and the footer do not move.
+ */
+test("A long session list scrolls inside the session area, not the rail", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+  const crowd = Array.from({ length: 40 }, (_, index) => ({
+    ...liveSession,
+    id: `scroll-${index}`,
+    name: `scroll-session-${index}`,
+  }));
+  await installFixtures(page, {}, crowd);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/#/sessions");
+
+  const rail = page.locator(".places-rail");
+  const sessionArea = page.locator(".places-rail-session-area");
+  await expect(sessionArea).toBeVisible();
+  const before = await rail.evaluate((node) => {
+    const list = node.querySelector(".places-rail-session-area > div");
+    const board = node.querySelector(".places-nav");
+    const footer = node.querySelector(".places-rail-footer");
+    const toggle = node.querySelector(".places-rail-session-area .places-section-toggle");
+    return {
+      railScrolls: node.scrollHeight > node.clientHeight + 1,
+      listScrolls: list ? list.scrollHeight > list.clientHeight + 1 : false,
+      boardTop: board?.getBoundingClientRect().top ?? -1,
+      footerTop: footer?.getBoundingClientRect().top ?? -1,
+      toggleTop: toggle?.getBoundingClientRect().top ?? -1,
+    };
+  });
+  expect(before.railScrolls).toBe(false);
+  expect(before.listScrolls).toBe(true);
+
+  await sessionArea.locator(":scope > div").evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  const after = await rail.evaluate((node) => {
+    const board = node.querySelector(".places-nav");
+    const footer = node.querySelector(".places-rail-footer");
+    const toggle = node.querySelector(".places-rail-session-area .places-section-toggle");
+    const list = node.querySelector(".places-rail-session-area > div");
+    const rows = [...(list?.querySelectorAll(".session-row") ?? [])].filter(
+      (row) => getComputedStyle(row).display !== "none",
+    );
+    const last = rows[rows.length - 1] ?? null;
+    const listBox = list?.getBoundingClientRect();
+    const lastBox = last?.getBoundingClientRect();
+    return {
+      railScrollTop: node.scrollTop,
+      boardTop: board?.getBoundingClientRect().top ?? -1,
+      footerTop: footer?.getBoundingClientRect().top ?? -1,
+      toggleTop: toggle?.getBoundingClientRect().top ?? -1,
+      lastVisible: !!(lastBox && listBox
+        && lastBox.bottom <= listBox.bottom + 2
+        && lastBox.top < listBox.bottom),
+      listTop: listBox ? Math.round(listBox.top) : -1,
+      listBottom: listBox ? Math.round(listBox.bottom) : -1,
+      scrollTop: list ? Math.round(list.scrollTop) : -1,
+      scrollHeight: list ? list.scrollHeight : -1,
+    };
+  });
+  expect(after.railScrollTop).toBe(0);
+  expect(after.boardTop).toBe(before.boardTop);
+  expect(after.footerTop).toBe(before.footerTop);
+  expect(after.toggleTop).toBe(before.toggleTop);
+  expect(after.lastVisible).toBe(true);
+
+  // Collapsing the section still works, and the list stops scrolling.
+  await sessionArea.getByRole("button", { name: /Running/ }).click();
+  await expect(sessionArea.getByRole("button", { name: /Running/ })).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".places-rail-session-area .session-row").first()).toBeHidden();
 });
 
 /**
