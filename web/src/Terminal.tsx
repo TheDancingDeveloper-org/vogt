@@ -36,6 +36,7 @@ import {
 } from "./terminalReplay";
 import { planDormantResume } from "./terminalDormancy";
 import { acquireDormantSlot, releaseDormantSlot } from "./dormantSlots";
+import { acquireInitialAttach } from "./initialAttachSlots";
 
 // Cap on the scrollback the serialized cache persists. A 5000-line scrollback
 // full of wide chars and colour serializes large; 2000 lines keeps the cache
@@ -99,6 +100,10 @@ interface Props {
   sessionId: string;
   /** Keep xterm mounted while parking the live socket for an inactive pane. */
   parked?: boolean;
+  /** This pane's workspace is the one on screen, even if another half of its
+   *  split has the keyboard. A visible pane attaches on load; only a pane in a
+   *  workspace the reader is not looking at is subject to the load cap. */
+  workspaceActive?: boolean;
   /** Exposed so the parent can inject mobile-modkey input straight into the PTY. */
   registerSend?: (fn: ((data: string | ArrayBuffer) => void) | null) => void;
   /** Exposed so the parent (modkey row, etc.) can drive copy/paste. */
@@ -982,6 +987,27 @@ const TerminalView: Component<Props> = (props) => {
       enterForegroundReplay();
       if (!cached) {
         setReadyToConnect(true);
+        // A parked pane with nothing cached only attaches on load if it is one
+        // of the few most recent (WI-1413). The rest stay dark until viewed:
+        // attaching every retained tab opened one socket per live session.
+        if (isParked() && props.workspaceActive !== true) {
+          const slot = acquireInitialAttach(props.sessionId);
+          if (slot === null) {
+            // Past the budget: no socket until this pane is viewed. Mark the
+            // attach done and park so the resume path attaches on activation.
+            initialAttachDone = true;
+            parkSocket();
+            return;
+          }
+          // The panes that do attach must not all open in the same tick.
+          if (slot > 0) {
+            setTimeout(() => {
+              if (destroyed || !isParked()) return;
+              connect();
+            }, slot * 250);
+            return;
+          }
+        }
         // Render the initial snapshot even when parked-on-mount, then park
         // (WI-170 render-then-park): connect()'s initial-attach guard lets this
         // first attach through regardless of parked, and parkSocket() defers the

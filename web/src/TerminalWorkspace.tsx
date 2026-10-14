@@ -416,6 +416,7 @@ const PaneView: Component<Omit<LayoutNodeProps, "node"> & { node: PaneNode }> = 
               !props.parked,
               props.activePaneId === paneId(),
             )}
+            workspaceActive={!props.parked}
             interceptInput={(data) => props.interceptPaneInput(paneId(), data)}
             sessionId={sessionId}
             registerSend={(fn) => props.registerPaneSend(paneId(), fn)}
