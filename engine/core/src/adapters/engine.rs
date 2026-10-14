@@ -1836,8 +1836,10 @@ pub mod http1 {
     fn load_pem_file(
         path: &std::path::Path,
     ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
-        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-        rustls_pemfile::certs(&mut std::io::BufReader::new(file))
+        use rustls::pki_types::pem::PemObject;
+
+        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+        rustls::pki_types::CertificateDer::pem_slice_iter(&bytes)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())
     }

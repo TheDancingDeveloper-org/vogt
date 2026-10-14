@@ -800,14 +800,13 @@ fn load_tls(
         Some(path) => std::fs::read(path)?,
         None => cert_bytes.clone(),
     };
-    let mut reader = std::io::BufReader::new(cert_bytes.as_slice());
-    let certs = rustls_pemfile::certs(&mut reader)
+    use rustls::pki_types::pem::PemObject;
+
+    let certs = rustls::pki_types::CertificateDer::pem_slice_iter(&cert_bytes)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(std::io::Error::other)?;
-    let mut reader = std::io::BufReader::new(key_bytes.as_slice());
-    let key = rustls_pemfile::private_key(&mut reader)
-        .map_err(std::io::Error::other)?
-        .ok_or_else(|| std::io::Error::other("the PEM holds no private key"))?;
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_bytes)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(axum_server::tls_rustls::RustlsConfig::from_config(
         std::sync::Arc::new(rustls_server_config(certs, key)?),
     ))

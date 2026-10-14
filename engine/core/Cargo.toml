@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
-axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 clap = { version = "4.5", features = ["derive"] }
 regex = "1"
 fancy-regex = "0.14"
@@ -43,11 +43,11 @@ ureq = { version = "2", features = ["tls"], default-features = false }
 # from the platform certificates instead of only the bundled Mozilla roots.
 # ureq's own native-certs feature is not used. rustls-native-certs returns
 # only the SSL_CERT_FILE bundle when that variable is set, so the store is
-# assembled by hand: the env bundle, parsed with rustls-pemfile, plus the
-# platform bundle openssl-probe finds.
+# assembled by hand: the env bundle, parsed with rustls-pki-types' PemObject,
+# plus the platform bundle openssl-probe finds. rustls-pemfile did this before
+# and is unmaintained (RUSTSEC-2025-0134).
 rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-native-certs = "0.7"
-rustls-pemfile = "2"
+rustls-native-certs = "0.8"
 openssl-probe = "0.1.6"
 
 [target.'cfg(unix)'.dependencies]
