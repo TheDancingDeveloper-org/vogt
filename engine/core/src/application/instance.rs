@@ -370,7 +370,29 @@ fn status<C: Clock, I: IdFactory>(
             "cloned_at": stamp.cloned_at.to_json(),
             "backup_taken_at": stamp.backup_taken_at.to_json(),
         })),
+        // The workspace volume, when a session engine answers. Absent is a
+        // different fact from a volume that is fine (WI-1304).
+        "disk": workspace_disk(ctx),
     }))
+}
+
+/// The engine's report of the workspace volume, or nothing when it cannot be
+/// asked. A failure to answer is logged and read as absent, never as an error
+/// in status.
+fn workspace_disk<C: Clock, I: IdFactory>(
+    ctx: &crate::application::context::AppContext<C, I>,
+) -> Option<serde_json::Value> {
+    let engine = ctx.engine.as_ref()?;
+    match engine.operational_status() {
+        Ok(payload) => payload.get("disk").filter(|disk| disk.is_object()).cloned(),
+        Err(error) => {
+            tracing::info!(
+                error = %error,
+                "workspace disk usage could not be read from the engine"
+            );
+            None
+        }
+    }
 }
 
 /// The next instant. A step clock walks one second per read, the way Python's
