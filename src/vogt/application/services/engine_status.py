@@ -14,15 +14,21 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import ValidationError
+
 from vogt.adapters.engine import EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
     EngineAgentTaskStatus,
+    EngineDiskStatus,
     EngineHistoryStatus,
     EngineLag,
     EngineStatusParams,
     EngineStatusResult,
 )
+from vogt.observability import logger
+
+_log = logger("engine_status")
 
 _NO_ENGINE = "no session engine is configured (VOGT_ENGINE_URL is unset)"
 
@@ -64,6 +70,7 @@ def engine_status(ctx: AppContext, params: EngineStatusParams) -> EngineStatusRe
             for name, lag in _object(payload.get("event_lag")).items()
             if isinstance(lag, dict)
         },
+        disk=_disk(payload.get("disk")),
     )
 
 
@@ -81,3 +88,33 @@ def _count(value: object) -> int | None:
 
 def _flag(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
+
+
+def _disk(value: object) -> EngineDiskStatus | None:
+    """The workspace volume, when the engine reports one (WI-1304)."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        return EngineDiskStatus.model_validate(value)
+    except ValidationError:
+        return None
+
+
+def workspace_disk(ctx: AppContext) -> EngineDiskStatus | None:
+    """The workspace volume, when a session engine answers (WI-1304).
+
+    Sweep and status read it. A caller that cannot ask the engine still
+    answers; the row is absent then, which is a different fact from a volume
+    that is fine.
+    """
+    if ctx.engine is None:
+        return None
+    try:
+        payload = ctx.engine.operational_status()
+    except Exception as exc:
+        _log.info(
+            "workspace disk usage could not be read from the engine",
+            extra={"vogt": {"error": f"{type(exc).__name__}: {exc}"}},
+        )
+        return None
+    return _disk(payload.get("disk"))

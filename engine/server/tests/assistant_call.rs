@@ -149,6 +149,7 @@ async fn stub_server(stubs: Shared) -> String {
         .route("/v1/chat/completions", post(chat))
         .route("/v1/audio/transcriptions", post(transcriptions))
         .route("/v1/audio/speech", post(speech))
+        .route("/mcp", post(core_mcp))
         .with_state(stubs);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
@@ -156,6 +157,40 @@ async fn stub_server(stubs: Shared) -> String {
         let _ = axum::serve(listener, app).await;
     });
     format!("http://{addr}/v1")
+}
+
+/// A stand-in vogt-core MCP endpoint. Every card is a Vogt write now, so a
+/// call can only be asked to approve something when a core offers the
+/// `session_input` tool and carries it out.
+async fn core_mcp(Json(message): Json<Value>) -> Json<Value> {
+    let id = message.get("id").cloned().unwrap_or(json!(1));
+    let result = match message["method"].as_str() {
+        Some("tools/list") => json!({"tools": [{
+            "name": "session_input",
+            "description": "Type a line into a terminal session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "text": {"type": "string"},
+                    "submit": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["id", "text", "reason"],
+                "additionalProperties": false,
+            },
+        }]}),
+        Some("tools/call") => json!({
+            "content": [{"type": "text", "text": "{\"ok\": true}"}],
+            "isError": false,
+        }),
+        _ => {
+            return Json(
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "unknown method"}}),
+            )
+        }
+    };
+    Json(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
 fn test_config(stub: &str) -> Config {
@@ -179,6 +214,7 @@ fn test_config(stub: &str) -> Config {
         allowed_origins: vec![],
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
+        codex_session_id: false,
         agent_auth_secrets: vec![],
         agent_grant_projects: vec![],
         session_templates: vec![],
@@ -186,6 +222,7 @@ fn test_config(stub: &str) -> Config {
         assistant_base_url: stub.to_string(),
         assistant_model: "test-model".into(),
         assistant_max_tool_calls: 8,
+        assistant_starts_per_hour: 3,
         assistant_allow_claude_proxy: false,
         assistant_reasoning_effort: None,
         assistant_profiles: vec![],
@@ -210,6 +247,7 @@ fn test_config(stub: &str) -> Config {
         vogt_core_token: None,
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
+        session_list_retain_after: None,
         assistant_call: vogt_engine_server::call::CallPolicy {
             // Captions re-transcribe on a timer; off here so each turn makes
             // exactly the transcription calls the test expects.
@@ -217,10 +255,15 @@ fn test_config(stub: &str) -> Config {
             ..vogt_engine_server::call::CallPolicy::default()
         },
         autopilot: vogt_engine_server::autopilot::Policy::default(),
+        budget: vogt_engine_server::budget::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
+        worktree_clean_on_hibernate: false,
+        disk_warn_percent: 85,
         metrics_bind: None,
         chat: Default::default(),
+        economics_tick: std::time::Duration::ZERO,
+        economics_home: None,
     }
 }
 
@@ -352,6 +395,17 @@ async fn setup(stubs: Stubs) -> (String, Shared) {
     let stubs = Arc::new(Mutex::new(stubs));
     let stub = stub_server(Arc::clone(&stubs)).await;
     let addr = boot(test_config(&stub)).await;
+    (addr, stubs)
+}
+
+/// As `setup`, with the stub also standing in for vogt-core.
+async fn setup_with_core(stubs: Stubs) -> (String, Shared) {
+    let stubs = Arc::new(Mutex::new(stubs));
+    let stub = stub_server(Arc::clone(&stubs)).await;
+    let mut cfg = test_config(&stub);
+    cfg.vogt_core_url = Some(stub.trim_end_matches("/v1").to_string());
+    cfg.vogt_core_token = Some("stack-secret-for-the-stub-core".to_string());
+    let addr = boot(cfg).await;
     (addr, stubs)
 }
 
@@ -535,11 +589,13 @@ async fn speaking_over_the_reply_stops_it_and_keeps_only_what_was_heard() {
 
 #[tokio::test]
 async fn a_spoken_yes_never_approves_and_the_button_does() {
-    let (addr, stubs) = setup(Stubs::default()).await;
+    let (addr, stubs) = setup_with_core(Stubs::default()).await;
     // A terminal for the assistant to propose typing into.
     let session: Value = client()
         .post(format!("http://{addr}/api/sessions"))
-        .json(&json!({"name": "shell", "command": ["/bin/cat"]}))
+        // Bounded, so a failed assertion ends the test rather than leaving a
+        // PTY the runtime waits on forever: the kill at the end never runs.
+        .json(&json!({"name": "shell", "command": ["timeout", "60", "cat"]}))
         .send()
         .await
         .unwrap()
@@ -555,8 +611,14 @@ async fn a_spoken_yes_never_approves_and_the_button_does() {
                 "id": "call_1",
                 "type": "function",
                 "function": {
-                    "name": "send_input",
-                    "arguments": json!({"session_id": session_id, "text": "ls"}).to_string(),
+                    "name": "vogt_session_input",
+                    "arguments": json!({
+                        "id": session_id,
+                        "text": "ls",
+                        "submit": true,
+                        "reason": "the user asked for a listing of their shell",
+                    })
+                    .to_string(),
                 },
             }]}),
             final_reply("Done, I typed it."),
@@ -569,7 +631,8 @@ async fn a_spoken_yes_never_approves_and_the_button_does() {
     speak(&mut ws, &utterance()).await;
     let card = read_until(&mut ws, &mut seen, is("approval.pending")).await;
     let action_id = card["card"]["id"].as_str().unwrap().to_string();
-    assert_eq!(card["card"]["kind"], "send_input");
+    assert_eq!(card["card"]["kind"], "vogt_write");
+    assert_eq!(card["card"]["operation"], "session.input");
     let done = read_until(&mut ws, &mut seen, is("response.done")).await;
     assert_eq!(done["status"], "pending_approval");
     let calls_before = stubs.lock().unwrap().chat_calls;

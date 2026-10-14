@@ -11,6 +11,12 @@ is that map. Read it before reaching for a token — a request to the wrong
 surface, or with the wrong bearer, is a `401`/`404` that looks like a bug and
 is not.
 
+`work.comment` takes `kind` (`note`, the default, or `handoff`) and, for a
+hand-off, a `handoff` object (branch, head sha, base, done, remaining, touch
+points, gates run, blockers, session). `work.get` takes `comment_order`
+(`newest`, the default, or `oldest`) so `comment_limit` keeps one end of the
+thread. The field list itself is the generated OpenAPI, not this page.
+
 ## The two processes
 
 | Process | What it is | Port | Serves |
@@ -117,7 +123,8 @@ Reading a terminal and typing into one are deliberately different grants.
 | `session.list` (`session_list`) | `read` | every session, linked or not, with live activity |
 | `session.log_tail` (`session_log_tail`) | `read` | the tail of a session's output log |
 | `session.screen` (`session_screen`) | `read` | what the terminal shows now: lines, cursor, title, activity, readiness |
-| `session.input` (`session_input`) | `work.write` | type text, press named keys (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`, `ctrl-d`, `backspace`), then Enter with `submit` |
+| `session.digest` (`session_digest`) | `read` | one session's digest from the engine row: activity, blocked report, a last-reply excerpt, and economics the engine already computed (null when the row has none; does not read a transcript) |
+| `session.input` (`session_input`) | `work.write` | type text, press named keys (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`, `ctrl-d`, `backspace`), then Enter (the default; `draft` or `submit: false` types without sending) |
 | `session.start` / `session.stop` | `work.write` | open or close a terminal |
 | `session.rename` (`session_rename`) | `work.write` | rename a session, as the GUI does; `session.list` returns the name as `name` |
 | `session.remove` (`session_remove`) | `work.write` | kill a session if it runs and have the engine forget it, as the GUI's Remove does |
@@ -181,7 +188,21 @@ credentials never leave) and redacted the same way, with `agent: "opencode"`.
 `session.wait` blocks (up to `timeout_s`, at most 600) until a session is
 ready — or needs a person, or exits — or, with `until`, until it exits or
 changes at all, and returns why with the screen: one call instead of a
-polling loop. `session.report_blocked` / `session.report_unblocked`
+polling loop. `session.changes` reads the deltas the engine has published
+since a cursor (`since`, 0 for the retained ring): each carries `seq`, `at`,
+the session (`ses_…` when Vogt linked it, otherwise the engine UUID), a `kind`
+(`ready`, `approval`, `exited`, `errored`, `blocked`, `unblocked`,
+`hibernated`, `woken`) and a short `summary`. `next_cursor` is the seq to
+pass next; `truncated` means the bounded ring dropped events, so the page
+starts at the oldest still kept. `ids` restricts the page (either id form);
+empty reads every session — there is no supervised-by-me filter yet, so the
+caller names the sessions. `session.wait_any` blocks (up to `timeout_s`, at
+most 600) until one of those sessions publishes a kind in `until` (default
+`ready`, `blocked`, `approval`, `exited`, `errored`) and returns that delta
+with `outcome: "changed"`, or `outcome: "timeout"` and no change. Pass
+`cursor` (the previous `next_cursor`) so a page already read is not waited on
+again. Together they are the overseer's loop: wait, read, act.
+`session.report_blocked` / `session.report_unblocked`
 (`work.write`, audited) let an agent say it is blocked on a person; the report
 shows as `blocked` on `session.list` and `session.screen`, raises an Inbox
 `session.blocked` entry and a push. `session.start` takes `autopilot` (see
@@ -207,8 +228,10 @@ whole process tree, as the engine last sampled them, with `over_threshold`
 past the deployment's `ENGINE_SESSION_RSS_WARN`. `session.list` with
 `order: "rss"` lists the heaviest first.
 
-`session.input` reports what became of the input. `submitted` is true when
-Enter was pressed, by `submit` or as one of the `keys`. `delivery` is:
+`session.input` reports what became of the input. Enter is pressed by default;
+`draft: true`, or an explicit `submit: false`, types without sending.
+`submitted` is true when Enter was pressed, by that default or as one of the
+`keys`. `delivery` is:
 
 - `typed`: no Enter;
 - `delivered`: a turn started after it;
@@ -239,6 +262,20 @@ sessions no longer look like crashes (WI-913).
   started itself (the GUI, a protected template): `session.token` (below)
   gives such a session its own agent credential.
 
+`session.start` takes `purpose` (WI-1323): `implement`,
+`implement-careful`, `review`, `mechanical`, `investigate` or `design`. The
+deployment's dispatch profile for it fills `template`, `model`, `effort`,
+`budget`, `worktree`, `repo_map` and `autopilot` where the start leaves them
+unset. Explicit fields win and are listed under `overrides` on the
+`session.started` event, which also carries the resolved `budget`,
+`worktree` and `repo_map`. A profile never sets `role` or `permission_mode`,
+and it is resolved after the `role_refused` and `bypass_refused` checks.
+Session rows (`session.list` full mode) carry `purpose`,
+`started_by_session` and `started_by_kind` (`person`, `oversight`, `worker`,
+or null when the engine could not report the starter's role). The core
+derives both `started_by_*` fields from the caller's principal and engine
+role, never from the start's parameters.
+
 `session.token` (`work.write`, audited, `POST /api/sessions/token`) is the
 session engine's call, refused to every other caller (`403 engine_only`).
 For an agent session the engine starts without a credential of its own
@@ -253,6 +290,13 @@ plain shell keeps the pod's token, because the person at it is a person.
 
 The posture shows on session rows as `permission_mode`. See
 [`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture).
+
+`session.start` also takes `account`, the name of a Claude Code subscription
+account from the engine's `ENGINE_AGENT_CLAUDE_ACCOUNTS`. Omitted runs the
+engine's default login. The name is sent to the engine as is: it maps the name
+to a config directory itself, and refuses an unknown name or a command that is
+not Claude Code (`400`). It shows on session rows and on `session.economics` as
+`account`. See [`ENGINE.md`, "Claude accounts"](ENGINE.md#claude-accounts).
 
 `session.answer` (`work.write`, audited) answers the dialog a session
 shows. The session must be `awaiting-approval`, which covers permission
@@ -290,14 +334,23 @@ session.
 `session.hibernate` (`work.write`, audited) stops a session's processes to
 free their memory and revokes its token. The session stays listed with
 `activity: "hibernated"`, a `hibernation` (`at`, `trigger`, `reason`,
-`resumable`) and its last screen. `session.wake` starts it again under the
-same id by resuming its agent conversation (`conversation_id`). It mints a
-new token for the same actor and revokes the old one. `session.input` on a
-hibernated session wakes it, waits until it is ready (`wake_timeout_s`,
-default 120) and then types; the result says `woke`. `session.screen` and
+`resumable`, and `superseded_by` when set) and its last screen. Passing
+`superseded_by` (a `ses_…` id or the engine UUID of the session taking over)
+records the handoff on the hibernation; hibernating an already-hibernated
+session with it records the successor without restarting anything. `session.wake`
+starts it again under the same id by resuming its agent conversation
+(`conversation_id`). It mints a new token for the same actor and revokes the
+old one. It is refused (`409`) while `superseded_by` is set, and while another
+live session holds the same work item in the same directory — two agents must
+not edit one tree. `force` wakes past both guards, and only a person or an oversight session may set it. `session.input` on a
+hibernated session wakes it the same way, never with `force`, waits until it
+is ready (`wake_timeout_s`, default 120) and then types; the result says
+`woke`. A refused wake leaves no token behind. `session.screen` and
 `session.wait` never wake: a wait answers at once with `outcome:
 "hibernated"` and the kept screen. `session.keep_awake` pins a session
-against the engine's idle policy. `session.set_role` (`work.write`, audited)
+against the engine's idle policy. A session hibernated by hand, or one whose
+work was handed on, is not brought back when the engine restarts; one the
+idle or shutdown policy hibernated still is. `session.set_role` (`work.write`, audited)
 nominates a session as `oversight` — the one supervising the others — or
 makes it a `worker` again; `session.start` takes the same `role`. **It is a
 person's nomination**: an agent principal gets `403 role_refused`, because
@@ -357,6 +410,22 @@ never a value. The Inbox entry names the target as the person knows it
 for itself; those come from the engine and the core, not from the request. The engine half and the session's `vogt-agent-auth
 fetch VAR` are [`ENGINE.md` §9](ENGINE.md),
 and the design is [`design/oversight-grants.md`](design/oversight-grants.md).
+
+`decision.ask` (`work.write`, audited) records a question for a person:
+`question` (≤ 2000), two to four `options` (`label` ≤ 60, `description` ≤ 400,
+exactly one `recommended`), `context` (≤ 4000), optional `work_item`, and
+`ttl_seconds` (default 86 400, at most 604 800). The asker's session is taken
+from its token, never a parameter. A pending decision shows in the Inbox as
+`decision.pending`, with an action of kind `decision` (`decision_id`) and the
+options and recommendation in its evidence. `decision.answer` (`id`, `label`,
+optional `note`) is **refused for every agent principal** with
+`403 person_required`, and a `label` that is not one of the options is
+refused. `decision.withdraw` withdraws a pending decision; a person or the
+asking session may. `decision.list` (`read`) filters by `state` (`pending`,
+`answered`, `withdrawn`, `expired`), `work_item` and `asker` (identity_ref).
+`expired` is a pending decision past `expires_at`, computed on read; it cannot
+be answered and implies no answer. Nothing is applied when a decision is
+answered. The design is `design/agent-harness-services.md` §2.3.
 
 Only a session whose conversation id the
 engine knows can hibernate: Claude Code started by Vogt, or any `resume`. A
@@ -442,12 +511,26 @@ docker exec <core-container> \
   caller's own row. `inbox.filter` is validated:
   `{"sources": [...] | null, "actor": "any|external|org|bot",
   "triage_states": ["active", ...]}`.
+  The `dispatch.*` keys are the deployment's dispatch table, not
+  per-caller settings: only a person sets them (an agent gets `403
+  person_required`), and `session.start` reads the newest person's write.
+  `dispatch.profiles` is `{"<purpose>": {field: value}}` and overrides only
+  the fields it names (`template`, `model`, `effort`, `budget_turns`,
+  `budget_wall_clock_minutes`, `worktree`, `repo_map`, `autopilot`,
+  `read_only`). `dispatch.max_workers_per_overseer` (default 5),
+  `dispatch.escalate_after_failed_reviews` (2) and
+  `dispatch.review_by_oversight_only` (true) are each `{"value": …}`. Each
+  key is validated against its own shape, and any other `dispatch.*` key is
+  refused.
 - **`place.metrics`** — `inbox_active` is the badge: the count under the
   caller's saved `inbox.filter` (the same answer `inbox.list` gives under it;
   free-text search is client-side and never counted). `inbox_active_unfiltered`
   is every active entry and `inbox_filter` the filter applied (`null` = none).
-  The count reads only stored fields, and one Inbox projection serves every
-  badge read until the declared revision or the event feed moves (at most 5 s).
+  The count reads only stored fields. The stored half of the Inbox, and the
+  other counts, are computed once and shared by every badge read until the
+  declared revision, the event feed or the observed projection moves.
+  Concurrent reads share one computation. Live engine sessions and pending
+  grants are read fresh on every call.
 
 ## Agent activity: what agents did, searchable
 
@@ -596,6 +679,12 @@ fits in context.
   the last page). `work.list --query` matches title, body and ref,
   case-insensitively; naming a finished state in `states` includes finished
   items without `include_finished`.
+- **Many refs at once.** `work.get_many` takes up to 200 `refs` (repeated
+  `refs=` on HTTP) and returns the same compact rows as `work.list`'s summary
+  mode, in the order asked, finished items included; refs that name nothing
+  come back in `missing` rather than failing the read. Each ref resolves as
+  `work.get` resolves it. The PWA's session rail reads its work-item chips
+  this way, one request per render.
 - **Can I create here?** Each `project.list` entry carries `writable` and
   `writable_reason`: whether a default `work.create` (no `local_only`) would
   land there now — forge-linked, write-back policy permits `create`, a forge
@@ -609,6 +698,18 @@ fits in context.
   take comments, transitions (including to `done`) and field edits; only a
   default `work.create` and label edits refuse `project_not_linked`, and that
   refusal says so.
+
+- **A project's agent policy.** `project.update` takes `agent_policy` and
+  replaces the whole policy. Besides `forbidden_text`, `merge_deploys_prod`,
+  `main_branches`, `commit_identity`, `test_recipe` and `rules`, it may carry
+  `landing` (`base_branch`, `branch_pattern` with `{n}` for the work item
+  number, `worker_lands_by` of `push_branch` or `open_pr`, `merge_by` of
+  `oversight` or `operator`, `merge_mode` of `fast_forward` or `rebase`,
+  `linear_history`, `deploy_by`), `review` (`template`, `model`, `effort`,
+  `never_models`, `budget_turns`) and `verification` (`required_for_done`,
+  `lanes`). `branch_pattern` must compile as a regex once `{n}` is a number,
+  and `merge_mode` of `merge` is refused; both refusals name the field.
+  `project.get` returns the blocks as stored. Nothing enforces them yet.
 
 ## Deploy diagnostics
 

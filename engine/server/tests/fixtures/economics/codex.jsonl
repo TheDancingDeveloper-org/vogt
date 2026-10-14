@@ -1,0 +1,8 @@
+{"type":"turn_context","payload":{"content":[{"type":"text","text":"ctx"}]}}
+{"type":"assistant","timestamp":"2026-10-11T03:00:00Z","message":{"content":"thinking"}}
+{"type":"tool_result","payload":{"content":[{"type":"tool_result","tool":"shell","content":"zzzzzzzzzzz"}]}}
+{"type":"assistant","timestamp":"2026-10-11T03:00:45Z","message":{"content":"more"}}
+{"type":"tool_result","payload":{"content":[{"type":"tool_result","tool":"grep","content":"matchline"}]}}
+{"type":"user","content":[{"type":"tool_result","name":"cat","input":{"path":"/b.py"},"content":"alpha"}]}
+{"type":"user","content":[{"type":"tool_result","name":"cat","input":{"path":"/b.py"},"content":"alpha"}]}
+{"type":"assistant","timestamp":"2026-10-11T03:00:45Z","message":{"id":"c1","content":"done"}}

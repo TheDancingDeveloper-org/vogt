@@ -35,7 +35,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vogt_engine_contract::{AgentConversation, Hibernation, SessionRole};
+use vogt_engine_contract::{AgentConversation, Hibernation, SessionPolicy, SessionRole};
 
 /// How much of a session's output is kept to show while it is hibernated.
 /// Enough to render the screen and a few hundred lines above it.
@@ -75,6 +75,20 @@ pub struct Record {
     /// quietly change it (WI-926).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The Claude Code account it was started under; a wake keeps it, and its
+    /// `CLAUDE_CONFIG_DIR` rides in `env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The launch posture actually applied at the first start (WI-1250): the
+    /// driven-session settings file, and every extra directory the agent was
+    /// given. A wake replays these instead of reading the deployment's current
+    /// config or dropping them because the wake has no new brief. Absent on a
+    /// record written before this field existed; a wake of one falls back to
+    /// the deployment's current settings and adds no directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_dirs: Vec<PathBuf>,
     /// What a wake resumes. `None` only for a shell hibernated on request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<AgentConversation>,
@@ -88,20 +102,57 @@ pub struct Record {
     /// On autopilot (WI-949); a wake keeps it on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autopilot: bool,
+    /// The project policy it enforces (WI-1243); a wake keeps it. Absent on a
+    /// record written before the field existed, which wakes without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SessionPolicy>,
+    /// The budget the session was started with (WI-1245); a wake keeps it,
+    /// and the two flags with it, so a warning already given is not given
+    /// again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<vogt_engine_contract::SessionBudget>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub budget_soft_sent: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub budget_hard_done: bool,
+    /// Seconds of running the whole-session wall clock had counted (WI-1281);
+    /// a wake resumes from here rather than from nothing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub budget_session_secs: u64,
     /// What the session is for (WI-957); a wake keeps it.
     #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
     pub role: SessionRole,
     /// The work item it serves (WI-998); a wake and a redeploy keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// The session this one's work was handed to (WI-1251): an engine session
+    /// id. Kept on the record itself, so a forced wake does not forget it and
+    /// the next hibernation still says who replaced it. A wake is refused
+    /// while it is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
     /// Set while hibernated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hibernation: Option<Hibernation>,
+    /// The latest economics snapshot, as JSON (WI-1245). Kept so removing a
+    /// hibernated session can record its cost once; nothing reads it back
+    /// onto a summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economics: Option<String>,
     /// The terminal size at hibernation, to render the kept screen with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
+    /// The blocked report the session carried when it was hibernated (C4).
+    /// A wake puts it back on the session, and a restart lists it again.
+    /// Absent on a record written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<vogt_engine_contract::BlockedReport>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Record {
@@ -118,15 +169,26 @@ impl Record {
             model: None,
             effort: None,
             permission_mode: None,
+            account: None,
+            settings_file: None,
+            add_dirs: Vec::new(),
             conversation: None,
             brief_file: None,
             keep_awake: false,
             autopilot: false,
+            policy: None,
+            budget: None,
+            budget_soft_sent: false,
+            budget_hard_done: false,
+            budget_session_secs: 0,
             role: SessionRole::Worker,
             work_item: None,
+            superseded_by: None,
             hibernation: None,
+            economics: None,
             rows: None,
             cols: None,
+            blocked: None,
         }
     }
 }
@@ -356,6 +418,62 @@ pub async fn stop_tree(pid: u32, grace: Duration, exited: impl Fn() -> bool) {
         for &p in &tree {
             signal(p as i32, libc::SIGKILL);
         }
+    }
+}
+
+/// `SIGKILL` to `pid`'s process group, `pid`, and every pid in `tree` (taken
+/// with [`descendants`] before the leader was signalled). For a stop that must
+/// leave nothing running in the session's directory (WI-1304).
+pub fn kill_tree(pid: u32, tree: &[u32]) {
+    #[cfg(unix)]
+    {
+        signal(-(pid as i32), libc::SIGKILL);
+        signal(pid as i32, libc::SIGKILL);
+        for &p in tree {
+            signal(p as i32, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, tree);
+    }
+}
+
+/// Whether `pid` is a process that can still run: present and not a zombie.
+/// A zombie has stopped writing anywhere; only its exit status is left.
+/// Off Linux this cannot be told apart, so any process that exists counts.
+pub fn running(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return exists(pid);
+        };
+        let Some(close) = stat.rfind(')') else {
+            return true;
+        };
+        !matches!(
+            stat[close + 1..].split_whitespace().next(),
+            Some("Z") | Some("X") | Some("x")
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        exists(pid)
+    }
+}
+
+/// Whether `pid` exists at all. `EPERM` means it exists but is not ours,
+/// which still counts.
+fn exists(pid: u32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
     }
 }
 

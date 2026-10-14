@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from vogt.core.entities import ActorPreference, CodingSession
+from vogt.core.entities import ActorPreference, AgentPolicy, CodingSession
 from vogt.errors import MigrationError, MigrationLocked
+from vogt.storage.interface import ProjectUpdate
 from vogt.storage.sqlite.connection import connect, split_statements
 from vogt.storage.sqlite.declared import MIGRATIONS_DIR as DECLARED_MIGRATIONS
 from vogt.storage.sqlite.declared import SqliteDeclaredStore
@@ -231,8 +232,11 @@ def test_shipped_migrations_bring_both_stores_up(tmp_path: Path) -> None:
     assert declared_report.applied == tuple(sorted(declared_report.applied))
     assert observed_report.applied[0] == "0001_foundation"
 
-    assert declared.schema_version() == len(declared_report.applied)
-    assert observed.schema_version() == len(observed_report.applied)
+    # The version is the highest number applied, not a count: numbers may
+    # have a gap while a sibling branch's migration is still in review
+    # (0024 shipped ahead of WI-1321's 0023).
+    assert declared.schema_version() == int(declared_report.applied[-1][:4])
+    assert observed.schema_version() == int(observed_report.applied[-1][:4])
     assert not declared.is_initialized()
     assert not observed.is_initialized()
 
@@ -312,6 +316,76 @@ def test_a_pre_session_instance_migrates_forward_with_its_data(
     with store.read() as view:
         assert view.project_by_slug("already-here") is not None
         assert [s.id for s in view.list_sessions(limit=10, offset=0)] == ["ses_first"]
+
+
+def test_a_session_from_before_started_by_reads_back_with_none(
+    tmp_path: Path,
+) -> None:
+    """A session written before 0024 has no purpose and no starter, and
+    reads back as none rather than as a value invented by the upgrade."""
+    shipped = load_migrations(DECLARED_MIGRATIONS)
+    old_migrations = tmp_path / "before-provenance"
+    old_migrations.mkdir()
+    for migration in shipped:
+        if migration.number < 24:
+            (old_migrations / f"{migration.id}.sql").write_text(
+                migration.sql, encoding="utf-8"
+            )
+
+    path = tmp_path / "declared.sqlite3"
+    conn = connect(path, create=True)
+    Migrator(store="declared", directory=old_migrations, holder="old/1").migrate(
+        conn, now=NOW
+    )
+    conn.execute(
+        "INSERT INTO projects (id, slug, name, root_path, lifecycle_state, "
+        "compliance_status, exclusions, trust_state, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "prj_old",
+            "already-here",
+            "Already Here",
+            "/srv/already-here",
+            "active",
+            "not_checked",
+            "[]",
+            "unverified",
+            NOW.isoformat(),
+            NOW.isoformat(),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO actors (id, identity_ref, kind, display_name, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("act_old", "local:old", "human", "Old", NOW.isoformat()),
+    )
+    conn.execute(
+        "INSERT INTO coding_sessions (id, engine_session_id, project_id, "
+        "actor_id, cwd, reason, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            "ses_old",
+            "eng-old",
+            "prj_old",
+            "act_old",
+            "/srv/already-here",
+            "started before provenance existed",
+            NOW.isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteDeclaredStore(path, clock=StepClock())
+    store.bootstrap(TEST_PRINCIPAL)
+    report = store.migrate()
+    assert "0024_session_started_by" in report.applied
+
+    with store.read() as view:
+        [session] = view.list_sessions(limit=10, offset=0)
+    assert session.id == "ses_old"
+    assert session.purpose is None
+    assert session.started_by_session is None
+    assert session.started_by_kind is None
 
 
 def test_an_m0_instance_migrates_forward_with_its_data(tmp_path: Path) -> None:
@@ -397,3 +471,75 @@ def test_an_instance_before_preferences_gains_them_with_its_actors(
         stored = view.actor_preference(actor_id=actor_id, key="inbox.filter")
         assert stored is not None and stored.value == {"actor": "external"}
         assert view.actor_preferences(actor_id) == [stored]
+
+
+#: The migration that added `projects.agent_policy`.
+AGENT_POLICY_MIGRATION = 21
+
+
+def test_a_project_from_before_agent_policy_reads_back_as_none(tmp_path: Path) -> None:
+    """An instance created before 0021 gains the column without losing the row.
+
+    The default is the empty document, which reads back as a policy that states
+    nothing — the same as a project registered with no policy today.
+    """
+    shipped = load_migrations(DECLARED_MIGRATIONS)
+    old_migrations = tmp_path / "before-agent-policy"
+    old_migrations.mkdir()
+    for migration in shipped:
+        if migration.number < AGENT_POLICY_MIGRATION:
+            (old_migrations / f"{migration.id}.sql").write_text(
+                migration.sql, encoding="utf-8"
+            )
+    path = tmp_path / "declared.sqlite3"
+    conn = connect(path, create=True)
+    Migrator(store="declared", directory=old_migrations, holder="old/1").migrate(
+        conn, now=NOW
+    )
+    conn.execute(
+        "INSERT INTO projects (id, slug, name, root_path, lifecycle_state, "
+        "compliance_status, exclusions, trust_state, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "prj_old",
+            "already-here",
+            "Already Here",
+            "/srv/already-here",
+            "active",
+            "not_checked",
+            "[]",
+            "unverified",
+            NOW.isoformat(),
+            NOW.isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteDeclaredStore(path, clock=StepClock())
+    store.bootstrap(TEST_PRINCIPAL)
+    assert store.schema_version() == AGENT_POLICY_MIGRATION - 1
+    report = store.migrate()
+    assert "0021_agent_policy" in report.applied
+    with store.read() as view:
+        project = view.project_by_slug("already-here")
+        assert project is not None
+        assert project.agent_policy == AgentPolicy()
+
+    with store.write() as txn:
+        current = txn.project_by_slug("already-here")
+        assert current is not None
+        txn.update_project(
+            current.id,
+            ProjectUpdate(
+                agent_policy=AgentPolicy(
+                    forbidden_text=["(?i)wip"], merge_deploys_prod=True
+                )
+            ),
+            at=NOW,
+        )
+    with store.read() as view:
+        stored = view.project_by_slug("already-here")
+        assert stored is not None
+        assert stored.agent_policy.forbidden_text == ["(?i)wip"]
+        assert stored.agent_policy.merge_deploys_prod is True

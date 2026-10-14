@@ -231,6 +231,28 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/vogt-engine /usr/local/bin/vogt-engine \
     && strip /usr/local/bin/vogt-engine
 
+# ─── Test-only: the Codex gitguard e2e binary (WI-1356) ─────────────────────
+# Not part of the shipped image; nothing below copies from it. `build.yml`
+# builds this target, then runs the binary inside the stack image, where
+# /etc/codex/requirements.toml is the shipped file and the real Codex fork
+# and klaudia are installed — the only place the e2e can execute.
+FROM server-build AS codex-gitguard-e2e-build
+COPY engine/deploy/driven-session-codex-requirements.toml ./deploy/driven-session-codex-requirements.toml
+COPY engine/server/tests/codex_gitguard_e2e.rs ./server/tests/codex_gitguard_e2e.rs
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/engine/target \
+    cargo test --release -p vogt-engine-server --test codex_gitguard_e2e --no-run --message-format=json \
+      | sed -n 's/.*"executable":"\([^"]*codex_gitguard_e2e[^"]*\)".*/\1/p' \
+      | xargs -I{} cp {} /codex_gitguard_e2e \
+    && test -x /codex_gitguard_e2e
+
+# Only the test binary leaves the build: build.yml exports this target with
+# `type=local`, and exporting server-build itself (toolchain, sources) stalled
+# the publish runner for over half an hour.
+FROM scratch AS codex-gitguard-e2e
+COPY --from=codex-gitguard-e2e-build /codex_gitguard_e2e /codex_gitguard_e2e
+
 FROM ${UV_IMAGE} AS uv
 
 # ─── Stage 3: the Python core, taken from the published image ───────────────
@@ -335,6 +357,7 @@ RUN set -eu; \
 
 ARG INSTALL_AI_CLIENTS
 ARG CODEX_VERSION
+ARG CODEX_SHA
 ARG CLAUDE_CODE_VERSION
 ARG OPENCODE_VERSION
 ARG KLAUDIA_VERSION
@@ -342,9 +365,11 @@ ARG KLAUDIA_VERSION
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install in the base. The dev pod is
 # the trusted isolation boundary, so install the real Codex entry point under
-# libexec and expose the codex-full-access wrapper as `codex`. This overrides
-# persisted per-user workspace-write/network restrictions for every repo under
-# ~/Working.
+# libexec and expose the codex-full-access wrapper as `codex`. The wrapper no
+# longer forces --dangerously-bypass-approvals-and-sandbox (WI-1143): posture
+# flags come from the engine, and the nested sandbox stays the one those flags
+# name (`danger-full-access` for default and accept-edits; bypass is the only
+# posture that skips it, and only when a person asked).
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
 # The driven-session permission policy (WI-926): auto-mode rules every
 # engine-launched Claude session gets with --settings. A deployment replaces it
@@ -353,6 +378,13 @@ COPY engine/deploy/driven-session-settings.json /usr/local/share/vogt/driven-ses
 # Its opencode half (WI-932), given as OPENCODE_CONFIG_CONTENT; replaced with
 # ENGINE_AGENT_OPENCODE_CONFIG.
 COPY engine/deploy/driven-session-opencode.json /usr/local/share/vogt/driven-session-opencode.json
+# Codex requirements (WI-1143, WI-1146). Stock Codex reads
+# /etc/codex/requirements.toml with no flag; the image copy is what
+# ENGINE_AGENT_CODEX_POLICY resolves to when unset. The file wires the
+# gitguard managed hook fail-closed for the Codex fork (WI-1356) — see the
+# file. Do not add a flag Codex does not have.
+COPY engine/deploy/driven-session-codex-requirements.toml /usr/local/share/vogt/driven-session-codex-requirements.toml
+COPY engine/deploy/driven-session-codex-requirements.toml /etc/codex/requirements.toml
 # The pin below is the *baked baseline*. A deployment may name a different
 # version per tool at runtime (`VOGT_CLAUDE_CODE_VERSION` and friends in the
 # container's environment; `agent-clis.tools`, written below, is the
@@ -383,20 +415,19 @@ ENV PATH=/opt/vogt/agent-clis/bin:$PATH
 # of the pin self-verifying instead of hopeful.
 RUN set -eu; \
     . /usr/local/share/vogt/agent-versions.env; \
-    codex_version="${CODEX_VERSION:-${VOGT_CODEX_VERSION}}"; \
+    codex_sha="${CODEX_SHA:-${VOGT_CODEX_SHA}}"; \
     claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
     opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
     go_version="$(go version | sed -n 's/^go version go\([^ ]*\) .*/\1/p')"; \
     klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
     printf 'codex=%s\nclaude-code=%s\nopencode=%s\ngo=%s\nklaudia=%s\n' \
-        "$codex_version" "$claude_code_version" "$opencode_version" "$go_version" "$klaudia_version" \
+        "$codex_sha" "$claude_code_version" "$opencode_version" "$go_version" "$klaudia_version" \
         > /usr/local/share/vogt/agent-versions.resolved; \
-    printf 'codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
-        "$VOGT_KLAUDIA_SOURCE" \
+    printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
+        "$VOGT_CODEX_SOURCE" "$VOGT_KLAUDIA_SOURCE" \
         > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        pkgs="$pkgs @openai/codex@${codex_version}"; \
         pkgs="$pkgs @anthropic-ai/claude-code@${claude_code_version}"; \
         pkgs="$pkgs opencode-ai@${opencode_version}"; \
         # The pod base's unpinned copy (its `curl | bash` installer) is
@@ -412,10 +443,40 @@ RUN set -eu; \
         || { echo "claude is not $claude_code_version — a stub install" >&2; exit 1; } \
         && /usr/local/bin/opencode --version | grep -qF "$opencode_version" \
         || { echo "opencode is not $opencode_version — the platform binary did not install" >&2; exit 1; } \
-        && install -d /usr/local/libexec \
-        && codex_target="$(readlink -f /usr/local/bin/codex)" \
-        && ln -s "$codex_target" /usr/local/libexec/codex-real \
-        && ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex ; \
+        && install -d /usr/local/libexec; \
+    fi
+# Codex (WI-1142) is the fork's release asset, not the npm package. The tag is
+# `fork-<sha>` and the asset is `codex-<target>.tar.gz`; the recorded sha256 is
+# of the `codex` member inside it (the same one a runtime pin checks against
+# SHA256SUMS), so a CODEX_SHA that is not the pin has nothing to be checked
+# against and is refused. Stock npm Codex stays selectable: pin
+# VOGT_CODEX_VERSION at runtime and the `codex-npm` row installs it.
+RUN set -eu; \
+    if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
+        . /usr/local/share/vogt/agent-versions.env; \
+        codex_sha="${CODEX_SHA:-${VOGT_CODEX_SHA}}"; \
+        if [ "$codex_sha" != "$VOGT_CODEX_SHA" ]; then \
+            echo "CODEX_SHA=$codex_sha has no recorded checksum; edit engine/agent-versions.env instead" >&2; \
+            exit 1; \
+        fi; \
+        case "$(dpkg --print-architecture)" in \
+            amd64) target=x86_64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_AMD64" ;; \
+            arm64) target=aarch64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_ARM64" ;; \
+            *) echo "no pinned Codex for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+        esac; \
+        asset="codex-${target}.tar.gz"; \
+        curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${codex_sha}/${asset}" -o "/tmp/${asset}"; \
+        curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${codex_sha}/SHA256SUMS" -o /tmp/SHA256SUMS; \
+        tar -xzf "/tmp/${asset}" -C /tmp; \
+        (cd /tmp && grep -F "  ${target}/" SHA256SUMS | sha256sum -c -); \
+        echo "$codex_sum  /tmp/${target}/codex" | sha256sum -c -; \
+        install -d /usr/local/libexec; \
+        install -m 0755 "/tmp/${target}/codex" /usr/local/libexec/codex-real; \
+        install -m 0755 "/tmp/${target}/bwrap" /usr/local/libexec/bwrap; \
+        install -m 0755 "/tmp/${target}/codex-code-mode-host" /usr/local/libexec/codex-code-mode-host; \
+        rm -rf "/tmp/${asset}" /tmp/SHA256SUMS "/tmp/${target}"; \
+        ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex; \
+        /usr/local/libexec/codex-real --version; \
     fi
 
 # Klaudia (WI-950), built from the pinned commit with the pinned Go: no
@@ -556,8 +617,11 @@ COPY engine/deploy/git-askpass.sh /usr/local/bin/vogt-git-askpass
 COPY engine/deploy/rust-analyzer-mcp.sh /usr/local/bin/vogt-rust-analyzer-mcp
 COPY engine/deploy/readonly-mcp.sh /usr/local/bin/vogt-readonly-mcp
 COPY engine/deploy/klaudia-mcp.sh /usr/local/bin/vogt-klaudia-mcp
+COPY engine/deploy/claude-profile.sh /usr/local/bin/claude-profile
 COPY engine/deploy/git-forgejo.sh /usr/local/bin/git-forgejo
 COPY engine/deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
+COPY engine/deploy/cargo-cache.sh /usr/local/bin/vogt-cargo-cache
+COPY engine/deploy/policy-hook.sh /usr/local/bin/vogt-policy-hook
 RUN chmod +x \
     /usr/local/bin/vogt-lifecycle \
     /usr/local/bin/vogt-entrypoint \
@@ -570,7 +634,10 @@ RUN chmod +x \
     /usr/local/bin/vogt-rust-analyzer-mcp \
     /usr/local/bin/vogt-readonly-mcp \
     /usr/local/bin/vogt-klaudia-mcp \
+    /usr/local/bin/claude-profile \
     /usr/local/bin/vogt-claude-session-hook \
+    /usr/local/bin/vogt-cargo-cache \
+    /usr/local/bin/vogt-policy-hook \
     /usr/local/bin/git-forgejo
 
 # One port. vogt-core listens on loopback inside this namespace and is not

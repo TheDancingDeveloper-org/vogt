@@ -378,6 +378,79 @@ paths:
                         text: { type: string }
                         at: { type: string, format: date-time, nullable: true }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/changes:
+    get:
+      tags: [sessions]
+      summary: Session changes published after a cursor.
+      description: >-
+        Every session event on the bus carries a monotonic `seq`; the engine
+        keeps the last 4096. Returns the overseer-relevant ones after `since`
+        — kinds ready, approval, exited, errored, blocked, unblocked,
+        hibernated, woken — each with a summary of at most 120 characters,
+        and `next_cursor` to pass next time. `truncated` is true when the
+        cursor fell off the ring or is from a previous engine run (a cursor
+        past the head); read a sweep then.
+      operationId: sessionChanges
+      x-capability: sessions
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: ids
+          in: query
+          required: false
+          description: Engine session ids, comma separated. Absent means every session.
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: The page of changes and the cursor to read from next.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /api/sessions/wait-any:
+    get:
+      tags: [sessions]
+      summary: Wait, server-side, until any named session changes in a way `until` names.
+      description: >-
+        Subscribes before checking the ring, so nothing published between
+        calls is missed: answers at once with the first matching change after
+        `cursor`, else blocks for the next one, else `outcome: timeout` with
+        the current head as `next_cursor`. A cursor past the head (an engine
+        restart) reads from the start of the ring.
+      operationId: sessionWaitAny
+      x-capability: sessions
+      parameters:
+        - name: ids
+          in: query
+          required: false
+          description: Engine session ids, comma separated. Absent means every session.
+          schema: { type: string }
+        - name: until
+          in: query
+          required: false
+          description: Kinds, comma separated. Default ready, blocked, approval, exited, errored.
+          schema: { type: string }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: timeout_s
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 600, default: 120 }
+      responses:
+        "200":
+          description: Why the wait ended, the change if any, and the next cursor.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
   /api/sessions/{id}/wait:
     parameters:
       - $ref: "#/components/parameters/SessionId"
@@ -931,7 +1004,9 @@ components:
           description: Pinned awake; absent when false.
         autopilot:
           type: boolean
-          description: On autopilot (WI-949) — exempt from the idle policy and re-prompted at its prompt until it prints `AUTOPILOT: DONE`; absent when false.
+          description: >-
+            On autopilot (WI-949) — exempt from the idle policy and re-prompted
+            at its prompt until it prints `AUTOPILOT: DONE`; absent when false.
         autopilot_nudges:
           type: integer
           description: How many times the engine has told it to carry on; absent when none.
@@ -941,6 +1016,7 @@ components:
           type: string
           description: The work item the session serves (WI-998); absent when bound to none.
         resources: { $ref: "#/components/schemas/SessionResources" }
+        budget: { $ref: "#/components/schemas/SessionBudget" }
         template:
           type: string
           description: The session template it was started from, by the name given; absent for an explicit command.
@@ -948,6 +1024,20 @@ components:
           type: string
           enum: [accept-edits, bypass]
           description: The permission posture when not the default (docs/ENGINE.md, "Permission posture").
+        account:
+          type: string
+          description: The named Claude Code account the session runs under, when one was named (docs/ENGINE.md, "Claude accounts").
+    SessionBudget:
+      type: object
+      description: >-
+        Limits on one session (WI-1245). A field absent or zero is not a limit.
+        The engine warns once at `ENGINE_BUDGET_SOFT_PCT` of a turn or context
+        limit and hibernates at the limit; `wall_clock_minutes` is hard only,
+        and only while one turn is running.
+      properties:
+        turns: { type: integer, minimum: 1 }
+        context_tokens: { type: integer, minimum: 1 }
+        wall_clock_minutes: { type: integer, minimum: 1 }
     SessionResources:
       type: object
       required: [rss_bytes, cpu_pct, processes, sampled_at]
@@ -1182,6 +1272,14 @@ components:
             For `claude` and `codex` the session starts in the directory the
             conversation's transcript records, when that is inside the
             workspace, instead of `cwd`.
+        account:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,31}$"
+          description: >-
+            Run under a named Claude Code account from
+            `ENGINE_AGENT_CLAUDE_ACCOUNTS`; the engine sets that account's
+            `CLAUDE_CONFIG_DIR`. Refused (`400`) for an unknown name or a
+            command that is not Claude Code. Kept in the hibernation record.
         role:
           $ref: "#/components/schemas/SessionRole"
         work_item:
@@ -1202,6 +1300,11 @@ components:
         cols: { type: integer }
         rows: { type: integer }
         scrollback_bytes: { type: integer }
+        budget:
+          $ref: "#/components/schemas/SessionBudget"
+          description: >-
+            Limits enforced on this session. An empty object sets none. Kept in
+            the hibernation record and restored on wake.
     SessionInput:
       type: object
       required: [text]

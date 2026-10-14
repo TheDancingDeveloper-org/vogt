@@ -1279,7 +1279,10 @@ impl AgentTaskRegistry {
             }
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let live = prompt_files::session_id_from_prompt_file(name.as_ref())
+            // A brief and its companion guide both belong to the session. Either
+            // stays while the session is known — live or hibernated — and both
+            // go once the registry has forgotten it.
+            let live = prompt_files::session_id_from_artifact(name.as_ref())
                 .is_some_and(|id| self.sessions.knows(id));
             if !live {
                 remove_session_prompt_with_tally(&entry_path, tally)?;
@@ -1473,14 +1476,19 @@ impl AgentTaskRegistry {
             effort: None,
             resume: None,
             permission_mode: None,
+            account: None,
             autopilot: false,
+            policy: None,
             role: Default::default(),
             // The rail shows the item a run works on, like any session's
             // (WI-998).
             work_item: task.vogt_work_item.clone(),
+            worktree: None,
             cols: Some(100),
             rows: Some(30),
             scrollback_bytes: None,
+            companion: None,
+            budget: None,
         })?;
 
         // Capture the run's starting git position in its own workspace, so the
@@ -5158,6 +5166,7 @@ mod tests {
             allowed_origins: vec![],
             auto_agent_auth: false,
             agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
+            codex_session_id: false,
             agent_auth_secrets: vec![],
             agent_grant_projects: vec![],
             session_templates: vec![],
@@ -5165,6 +5174,7 @@ mod tests {
             assistant_base_url: "http://unused.invalid".into(),
             assistant_model: "test-model".into(),
             assistant_max_tool_calls: 8,
+            assistant_starts_per_hour: 3,
             assistant_allow_claude_proxy: false,
             assistant_reasoning_effort: None,
             assistant_profiles: vec![],
@@ -5189,12 +5199,18 @@ mod tests {
             vogt_core_token: None,
             agent_clis: crate::agent_clis::AgentCliPaths::default(),
             hibernation: crate::hibernate_policy::Policy::default(),
+            session_list_retain_after: None,
             assistant_call: crate::call::CallPolicy::default(),
             autopilot: crate::autopilot::Policy::default(),
+            budget: crate::budget::Policy::default(),
             agent_onboarding: crate::claude_config::Onboarding::default(),
             session_rss_warn_bytes: None,
+            worktree_clean_on_hibernate: false,
+            disk_warn_percent: 85,
             metrics_bind: None,
             chat: Default::default(),
+            economics_tick: std::time::Duration::ZERO,
+            economics_home: None,
         }
     }
 

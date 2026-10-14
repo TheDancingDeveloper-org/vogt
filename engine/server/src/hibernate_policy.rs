@@ -7,6 +7,11 @@
 //! pod is below it. Both keep every exemption, and each exemption is a reason
 //! a person can read — the same sentence the watcher logs.
 //!
+//! `ENGINE_HIBERNATE_LIVE_CAP` is not a watcher trigger. It is the number of
+//! live sessions at which the assistant refuses to start another one (WI-1269).
+//! Set on its own it leaves the watcher off: idle and memory are still what
+//! hibernate a session.
+//!
 //! What is never hibernated by policy:
 //!
 //! - a session that cannot be at all (no conversation to resume, an
@@ -53,9 +58,15 @@ pub struct Policy {
     /// the pod (its cgroup limit minus usage, or else the host's
     /// `MemAvailable`) is below this many bytes.
     pub memavailable_below: Option<u64>,
+    /// How many live sessions the assistant will start up to. Not a watcher
+    /// trigger: `is_off` ignores it, and the watcher never reads it. Unset
+    /// means the assistant does not count live sessions before a start.
+    pub live_cap: Option<usize>,
 }
 
 impl Policy {
+    /// Whether the watcher has nothing to do. A live cap alone does not turn
+    /// it on: the cap is enforced at the assistant's start gate, not here.
     pub fn is_off(&self) -> bool {
         self.idle_after.is_none() && self.memavailable_below.is_none()
     }
@@ -121,14 +132,15 @@ pub fn exemption(registry: &SessionRegistry, session: &Session) -> Option<String
     if session.output_quiet_for() < session.idle_after() {
         return Some("output is still arriving".into());
     }
-    // Klaudia says in its title when a turn is running, and when it waits
-    // on a permission ask, question or plan approval, none of which are
-    // dialogs the engine recognises (WI-1090).
-    if session.agent().as_deref() == Some("klaudia") {
-        use crate::screen::{klaudia_title, KlaudiaTitle};
-        match klaudia_title(session.title().as_deref()) {
-            Some(KlaudiaTitle::Working) => return Some("a turn is running".into()),
-            Some(KlaudiaTitle::AwaitingApproval) => {
+    // Klaudia (WI-1090) and the WI-1127 Codex fork (WI-1145) say in the window
+    // title when a turn is running, and when they wait on a permission ask,
+    // question or plan approval — none of which are dialogs the engine
+    // recognises from the screen.
+    if matches!(session.agent().as_deref(), Some("klaudia" | "codex")) {
+        use crate::screen::{agent_title, AgentTitle};
+        match agent_title(session.title().as_deref()) {
+            Some((_, AgentTitle::Working)) => return Some("a turn is running".into()),
+            Some((_, AgentTitle::AwaitingApproval)) => {
                 return Some("a permission dialog is open".into())
             }
             _ => {}
@@ -289,7 +301,7 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
     };
     for (id, trigger, why) in choose(policy, &candidates, available) {
         match registry
-            .hibernate(id, Some(why.clone()), trigger, false)
+            .hibernate(id, Some(why.clone()), trigger, false, None)
             .await
         {
             Ok(_) => tracing::info!(session = %id, ?trigger, reason = %why, "hibernated by policy"),
@@ -321,15 +333,27 @@ pub fn spawn_boot_wake(state: Arc<AppState>) {
                     .wake(id, WakeRequest::default())
                     .await
                     .map(|_| ())
-                    .map_err(|e| e.to_string()),
-                Some(core) => wake_through_core(core, id).await,
+                    .map_err(|e| (e.to_string().starts_with("conflict:"), e.to_string())),
+                Some(core) => wake_through_core(core, id)
+                    .await
+                    .map_err(|e| (e.contains("409"), e)),
             };
             match woken {
                 Ok(()) => {
                     tracing::info!(session = %id, "woke a session pinned awake at boot");
                     prompt_resumed_overseer(&state, id);
                 }
-                Err(e) => {
+                // The handoff guard refused. Said as a refusal, not a failure,
+                // and not retried: the direct wake has no retry, and the core
+                // path stops inside wake_through_core.
+                Err((true, e)) => {
+                    tracing::info!(
+                        session = %id,
+                        error = %e,
+                        "boot wake refused; the session stays hibernated"
+                    );
+                }
+                Err((false, e)) => {
                     tracing::warn!(session = %id, error = %e, "could not wake a session pinned awake; it stays hibernated")
                 }
             }
@@ -420,6 +444,12 @@ async fn wake_through_core(core: &crate::vogt_core::VogtCore, id: Uuid) -> Resul
             .await
         {
             Ok(()) => return Ok(()),
+            // A 409 is the handoff guard refusing, and it will refuse the same
+            // way on every retry. Stop at once and say it was refused.
+            Err(e) if e.contains("409") => {
+                tracing::info!(session = %id, error = %e, "boot wake refused; not retrying");
+                return Err(e);
+            }
             Err(e) => last = e,
         }
         tokio::time::sleep(delay).await;
@@ -458,6 +488,7 @@ mod tests {
         let idle = Policy {
             idle_after: Some(mins(120)),
             memavailable_below: None,
+            live_cap: None,
         };
         let chosen: Vec<_> = choose(&idle, &candidates, None)
             .into_iter()
@@ -468,6 +499,7 @@ mod tests {
         let both = Policy {
             idle_after: Some(mins(120)),
             memavailable_below: Some(2 << 30),
+            live_cap: None,
         };
         let chosen: Vec<_> = choose(&both, &candidates, Some(1 << 30))
             .into_iter()
@@ -495,6 +527,7 @@ mod tests {
         let idle_only = Policy {
             idle_after: Some(mins(120)),
             memavailable_below: None,
+            live_cap: None,
         };
         let chosen: Vec<_> = choose(&idle_only, &candidates, None)
             .into_iter()
@@ -508,11 +541,28 @@ mod tests {
         let pressure = Policy {
             idle_after: None,
             memavailable_below: Some(2 << 30),
+            live_cap: None,
         };
         let chosen: Vec<_> = choose(&pressure, &candidates, Some(1 << 30))
             .into_iter()
             .map(|(id, t, _)| (id, t))
             .collect();
         assert_eq!(chosen, vec![(looping, HibernateTrigger::Memory)]);
+    }
+
+    #[test]
+    fn a_live_cap_alone_does_not_turn_the_watcher_on() {
+        let capped = Policy {
+            live_cap: Some(3),
+            ..Policy::default()
+        };
+        assert!(capped.is_off());
+        assert!(Policy::default().is_off());
+        assert!(!Policy {
+            idle_after: Some(Duration::from_secs(60)),
+            live_cap: Some(3),
+            ..Policy::default()
+        }
+        .is_off());
     }
 }

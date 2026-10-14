@@ -278,6 +278,13 @@ pub struct Config {
     pub auto_agent_auth: bool,
     /// Helper executable used when `auto_agent_auth` is enabled.
     pub agent_auth_helper: std::path::PathBuf,
+    /// The installed Codex accepts `--session-id` (the WI-1126 fork, pinned
+    /// by WI-1142). The image bakes that fork, so a fresh Codex launch is
+    /// pinned to the engine session id by default (WI-1354): without the pin
+    /// the engine does not know the conversation and hibernation is refused.
+    /// Set `VOGT_CODEX_SESSION_ID=false` when the binary is stock npm Codex,
+    /// which refuses an unknown flag and would not start.
+    pub codex_session_id: bool,
     /// `ENGINE_AGENT_AUTH_SECRETS`, parsed: what a deployment declared for
     /// sessions, and therefore the policy the on-demand secret broker
     /// enforces. Empty when nothing is declared, which turns the
@@ -300,6 +307,9 @@ pub struct Config {
     pub assistant_model: String,
     /// Upper bound on tool-call rounds per user message.
     pub assistant_max_tool_calls: u32,
+    /// How many sessions the assistant may start per conversation per rolling
+    /// hour. Counted when a start is delivered, not when it is proposed.
+    pub assistant_starts_per_hour: u32,
     /// Optional `reasoning_effort` forwarded to the backend (e.g. "minimal").
     pub assistant_reasoning_effort: Option<String>,
     /// Send `claude-*` model ids to the OpenAI-compatible backend anyway.
@@ -438,6 +448,10 @@ pub struct Config {
     /// `ENGINE_HIBERNATE_IDLE_AFTER` or `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW`
     /// is set (`hibernate_policy`).
     pub hibernation: crate::hibernate_policy::Policy,
+    /// How long a quiet, finished session stays on the default list
+    /// (WI-1289). `None` (`ENGINE_SESSION_LIST_RETAIN_AFTER=off`) never hides
+    /// one. The default is six hours.
+    pub session_list_retain_after: Option<std::time::Duration>,
     /// The live call's switch and turn-taking timings (WI-960). A call is
     /// offered only when this is enabled *and* the assistant, STT and TTS
     /// are all configured.
@@ -446,6 +460,11 @@ pub struct Config {
     /// prompt before it is told to carry on, and the most nudges it gets
     /// (`ENGINE_AUTOPILOT_NUDGE_AFTER`, `ENGINE_AUTOPILOT_MAX_NUDGES`).
     pub autopilot: crate::autopilot::Policy,
+    /// Enforcing session budgets (WI-1245 / C7): the percent of a turn or
+    /// context limit that warns, and how often live sessions are checked
+    /// (`ENGINE_BUDGET_SOFT_PCT`, `ENGINE_BUDGET_TICK_SECS`; a tick of 0
+    /// enforces nothing).
+    pub budget: crate::budget::Policy,
     /// Answering Claude Code's per-directory trust questions before a
     /// session starts (`claude_config`). On unless
     /// `ENGINE_AGENT_QUIET_ONBOARDING=0`; off in a hand-built config.
@@ -455,6 +474,14 @@ pub struct Config {
     /// summary (`resources`). Unset flags nothing; usage is reported either
     /// way.
     pub session_rss_warn_bytes: Option<u64>,
+    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` (off by default): when a session
+    /// is hibernated or stopped and its directory is a linked git worktree,
+    /// remove regenerable build output there (`worktree_clean`). Never a
+    /// repo's main checkout.
+    pub worktree_clean_on_hibernate: bool,
+    /// `ENGINE_DISK_WARN_PERCENT` (85): the workspace volume's used percent
+    /// above which sweep and status carry a needs-attention disk row.
+    pub disk_warn_percent: u8,
     /// `ENGINE_METRICS_ADDR` (`0.0.0.0:9464`): where `GET /metrics` is
     /// served, on a listener of its own (`crate::metrics`). Unset, nothing
     /// listens.
@@ -463,6 +490,13 @@ pub struct Config {
     /// picker offers, and how long an idle chat process and an unanswered
     /// approval live (`ENGINE_CHAT_*`). Off in a hand-built config.
     pub chat: crate::chats::ChatPolicy,
+    /// `ENGINE_ECONOMICS_TICK_SECS` (15): how often the economics tailer reads
+    /// each live session's transcript (`economics`). Zero disables it. A
+    /// hand-built config starts disabled.
+    pub economics_tick: std::time::Duration,
+    /// The home the economics tailer reads transcripts under. `None` uses the
+    /// process home; tests set it so they never touch the real one.
+    pub economics_home: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -487,12 +521,14 @@ struct FileConfig {
     allowed_origins: Option<Vec<String>>,
     auto_agent_auth: Option<bool>,
     agent_auth_helper: Option<String>,
+    codex_session_id: Option<bool>,
     session_templates: Option<Vec<SessionTemplate>>,
     assistant_api_key: Option<String>,
     assistant_base_url: Option<String>,
     assistant_model: Option<String>,
     assistant_allow_claude_proxy: Option<bool>,
     assistant_max_tool_calls: Option<u32>,
+    assistant_starts_per_hour: Option<u32>,
     assistant_reasoning_effort: Option<String>,
     assistant_profiles: Option<Vec<AssistantProfile>>,
     assistant_default_profile: Option<String>,
@@ -645,6 +681,18 @@ pub fn load(
         .canonicalize()
         .or_else(|_| std::env::current_dir().and_then(|d| d.canonicalize()))
         .unwrap_or(workspace_root_candidate);
+
+    let codex_session_id = match std::env::var("VOGT_CODEX_SESSION_ID") {
+        Ok(value) => Some(parse_bool_env("VOGT_CODEX_SESSION_ID", &value)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            return Err(ApiError::Config(format!(
+                "reading VOGT_CODEX_SESSION_ID: {error}"
+            )));
+        }
+    }
+    .or(from_file.codex_session_id)
+    .unwrap_or(true);
 
     let auto_agent_auth = match engine_env("ENGINE_AUTO_AGENT_AUTH") {
         Ok(v) => Some(parse_bool_env("ENGINE_AUTO_AGENT_AUTH", &v)?),
@@ -803,6 +851,7 @@ pub fn load(
         ),
         auto_agent_auth,
         agent_auth_helper,
+        codex_session_id,
         agent_auth_secrets,
         agent_grant_projects: engine_env("ENGINE_AGENT_GRANT_PROJECTS")
             .map(|text| {
@@ -846,6 +895,19 @@ pub fn load(
         assistant_max_tool_calls: parse_u32_env("ENGINE_ASSISTANT_MAX_TOOL_CALLS")?
             .or(from_file.assistant_max_tool_calls)
             .unwrap_or(8),
+        assistant_starts_per_hour: {
+            let value = parse_u32_env("ENGINE_ASSISTANT_STARTS_PER_HOUR")?
+                .or(from_file.assistant_starts_per_hour)
+                .unwrap_or(3);
+            if value == 0 {
+                return Err(ApiError::Config(
+                    "assistant_starts_per_hour / ENGINE_ASSISTANT_STARTS_PER_HOUR \
+                     must be a positive integer"
+                        .into(),
+                ));
+            }
+            value
+        },
         assistant_reasoning_effort: from_file
             .assistant_reasoning_effort
             .or_else(|| engine_env("ENGINE_ASSISTANT_REASONING_EFFORT").ok())
@@ -923,8 +985,10 @@ pub fn load(
         vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
         agent_clis: crate::agent_clis::AgentCliPaths::from_env(),
         hibernation: hibernation_policy_from_env()?,
+        session_list_retain_after: session_list_retain_from_env()?,
         assistant_call: call_policy_from_env()?,
         autopilot: autopilot_policy_from_env()?,
+        budget: budget_policy_from_env()?,
         chat: chat_policy_from_env()?,
         agent_onboarding: crate::claude_config::Onboarding::from_env(),
         session_rss_warn_bytes: match engine_env("ENGINE_SESSION_RSS_WARN") {
@@ -937,6 +1001,14 @@ pub fn load(
             }
             _ => None,
         },
+        worktree_clean_on_hibernate: parse_worktree_clean(
+            engine_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE")
+                .ok()
+                .as_deref(),
+        )?,
+        disk_warn_percent: parse_disk_warn_percent(
+            engine_env("ENGINE_DISK_WARN_PERCENT").ok().as_deref(),
+        )?,
         metrics_bind: match engine_env("ENGINE_METRICS_ADDR") {
             Ok(v) if !v.trim().is_empty() => Some(v.trim().parse().map_err(|_| {
                 ApiError::Config(format!(
@@ -945,6 +1017,12 @@ pub fn load(
             })?),
             _ => None,
         },
+        economics_tick: match parse_u64_env("ENGINE_ECONOMICS_TICK_SECS")? {
+            Some(0) => std::time::Duration::ZERO,
+            Some(secs) => std::time::Duration::from_secs(secs),
+            None => std::time::Duration::from_secs(15),
+        },
+        economics_home: None,
         vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")
             .ok()
             .map(|value| value.trim().to_string())
@@ -1125,6 +1203,32 @@ fn engine_env(name: &str) -> std::result::Result<String, std::env::VarError> {
     std::env::var(name)
 }
 
+/// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`: off unless set to a true value.
+/// Unset or blank is off; this removes files, so it is never on by accident.
+fn parse_worktree_clean(raw: Option<&str>) -> Result<bool> {
+    match raw {
+        Some(v) if !v.trim().is_empty() => parse_bool_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE", v),
+        _ => Ok(false),
+    }
+}
+
+/// `ENGINE_DISK_WARN_PERCENT`: a whole percent from 1 to 100, 85 when unset.
+fn parse_disk_warn_percent(raw: Option<&str>) -> Result<u8> {
+    match raw {
+        Some(v) if !v.trim().is_empty() => v
+            .trim()
+            .parse::<u8>()
+            .ok()
+            .filter(|p| (1..=100).contains(p))
+            .ok_or_else(|| {
+                ApiError::Config(format!(
+                    "ENGINE_DISK_WARN_PERCENT={v:?} is not a whole percent from 1 to 100"
+                ))
+            }),
+        _ => Ok(85),
+    }
+}
+
 fn parse_bool_env(name: &str, raw: &str) -> Result<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -1265,6 +1369,11 @@ fn call_policy_from_env() -> Result<crate::call::CallPolicy> {
 /// `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` (`2GiB`, `512M`, bytes). Unset or
 /// empty is off; a value that does not parse is a startup error, not a policy
 /// quietly left off.
+///
+/// `ENGINE_HIBERNATE_LIVE_CAP` is a positive integer, and unset means the
+/// assistant does not count live sessions before starting one. It is parsed
+/// here because it belongs with the hibernation knobs, but it does not turn
+/// the watcher on: the watcher only acts on idle and memory.
 fn hibernation_policy_from_env() -> Result<crate::hibernate_policy::Policy> {
     use crate::hibernate_policy::{parse_duration, parse_size, Policy};
     let read = |name: &str| match engine_env(name) {
@@ -1288,10 +1397,51 @@ fn hibernation_policy_from_env() -> Result<crate::hibernate_policy::Policy> {
             ))
         })?),
     };
+    let live_cap = match read("ENGINE_HIBERNATE_LIVE_CAP")? {
+        None => None,
+        Some(v) => Some(
+            v.trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| {
+                    ApiError::Config(format!(
+                        "ENGINE_HIBERNATE_LIVE_CAP={v:?} is not a positive integer"
+                    ))
+                })?,
+        ),
+    };
     Ok(Policy {
         idle_after,
         memavailable_below,
+        live_cap,
     })
+}
+
+/// `ENGINE_SESSION_LIST_RETAIN_AFTER` (WI-1289). Unset is six hours. `off`
+/// (or `0`) never hides a session from the default list. Anything else is a
+/// duration (`6h`, `30m`, seconds) and a value that does not parse is a
+/// startup error.
+fn session_list_retain_from_env() -> Result<Option<std::time::Duration>> {
+    use crate::hibernate_policy::parse_duration;
+    match engine_env("ENGINE_SESSION_LIST_RETAIN_AFTER") {
+        Ok(v) => {
+            let v = v.trim();
+            if v.eq_ignore_ascii_case("off") || v == "0" {
+                Ok(None)
+            } else {
+                parse_duration(v).map(Some).ok_or_else(|| {
+                    ApiError::Config(format!(
+                        "ENGINE_SESSION_LIST_RETAIN_AFTER={v:?} is not a duration like 6h, 30m or 21600, or off"
+                    ))
+                })
+            }
+        }
+        Err(std::env::VarError::NotPresent) => Ok(Some(std::time::Duration::from_secs(6 * 3600))),
+        Err(e) => Err(ApiError::Config(format!(
+            "reading ENGINE_SESSION_LIST_RETAIN_AFTER: {e}"
+        ))),
+    }
 }
 
 /// `ENGINE_AUTOPILOT_NUDGE_AFTER` (`60s`, `2m`; default one minute) and
@@ -1318,6 +1468,22 @@ fn autopilot_policy_from_env() -> Result<crate::autopilot::Policy> {
         policy.max_nudges = u32::try_from(max).map_err(|_| {
             ApiError::Config(format!("ENGINE_AUTOPILOT_MAX_NUDGES={max} is too large"))
         })?;
+    }
+    Ok(policy)
+}
+
+/// `ENGINE_BUDGET_SOFT_PCT` (default 80) and `ENGINE_BUDGET_TICK_SECS`
+/// (default 15; `0` enforces nothing). A value that does not parse is a
+/// startup error.
+fn budget_policy_from_env() -> Result<crate::budget::Policy> {
+    let mut policy = crate::budget::Policy::default();
+    if let Some(pct) = parse_u64_env("ENGINE_BUDGET_SOFT_PCT")? {
+        policy.soft_pct = u32::try_from(pct)
+            .map_err(|_| ApiError::Config(format!("ENGINE_BUDGET_SOFT_PCT={pct} is too large")))?;
+    }
+    if let Some(secs) = parse_u64_env("ENGINE_BUDGET_TICK_SECS")? {
+        policy.tick = std::time::Duration::from_secs(secs);
+        policy.enabled = secs > 0;
     }
     Ok(policy)
 }
@@ -1363,6 +1529,12 @@ fn chat_policy_from_env() -> Result<crate::chats::ChatPolicy> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
+    if let Ok(v) = engine_env("ENGINE_CHAT_DRIVER") {
+        let v = v.trim();
+        if !v.is_empty() {
+            policy.driver = v.to_string();
+        }
+    }
     if let Some(n) = parse_usize_env("ENGINE_CHAT_MAX_PROCESSES")? {
         policy.max_processes = n;
     }
@@ -1788,6 +1960,34 @@ mod tests {
 mod prefix_tests {
     use super::*;
 
+    /// Worktree cleanup deletes files, so only an explicit true turns it on.
+    #[test]
+    fn worktree_clean_is_off_unless_asked_for() {
+        assert!(!parse_worktree_clean(None).unwrap());
+        assert!(!parse_worktree_clean(Some("")).unwrap());
+        assert!(!parse_worktree_clean(Some("  ")).unwrap());
+        assert!(!parse_worktree_clean(Some("0")).unwrap());
+        assert!(!parse_worktree_clean(Some("false")).unwrap());
+        assert!(parse_worktree_clean(Some("1")).unwrap());
+        assert!(parse_worktree_clean(Some("true")).unwrap());
+        assert!(parse_worktree_clean(Some("maybe")).is_err());
+    }
+
+    #[test]
+    fn disk_warn_percent_is_a_percent_from_1_to_100() {
+        assert_eq!(parse_disk_warn_percent(None).unwrap(), 85);
+        assert_eq!(parse_disk_warn_percent(Some(" ")).unwrap(), 85);
+        assert_eq!(parse_disk_warn_percent(Some("1")).unwrap(), 1);
+        assert_eq!(parse_disk_warn_percent(Some(" 90 ")).unwrap(), 90);
+        assert_eq!(parse_disk_warn_percent(Some("100")).unwrap(), 100);
+        for bad in ["0", "101", "255", "256", "-5", "85%", "eighty"] {
+            assert!(
+                parse_disk_warn_percent(Some(bad)).is_err(),
+                "{bad} accepted"
+            );
+        }
+    }
+
     /// The document comes from a file when one is named, the inline
     /// environment value is accepted but withdrawn from the environment, and
     /// an empty file fails the boot rather than silently disabling push.
@@ -1848,6 +2048,7 @@ mod prefix_tests {
         let clear = || unsafe {
             std::env::remove_var("ENGINE_TOKEN");
             std::env::remove_var("ENGINE_BIND");
+            std::env::remove_var("VOGT_CODEX_SESSION_ID");
         };
         clear();
 
@@ -1871,6 +2072,17 @@ mod prefix_tests {
         )
         .unwrap();
         assert_eq!(cfg.token.as_deref(), Some("cli-flag-token-0123456789"));
+
+        // WI-1354: the image bakes the fork, so a fresh Codex launch is pinned
+        // unless the deployment opts out. The old default (false) left a fresh
+        // session with no conversation id and hibernation refused it.
+        assert!(
+            cfg.codex_session_id,
+            "the pin is on when nothing says otherwise"
+        );
+        unsafe { std::env::set_var("VOGT_CODEX_SESSION_ID", "false") };
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert!(!cfg.codex_session_id, "stock npm Codex opts out explicitly");
 
         clear();
     }

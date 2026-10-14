@@ -1,0 +1,54 @@
+# Driven-session Codex requirements (WI-1143, WI-1146, WI-1356).
+#
+# Codex reads this path (`/etc/codex/requirements.toml`) with no flag. The
+# engine does not pass one: it checks that the named policy file exists, is
+# non-empty and wires the gitguard hook below, then lets Codex load this path
+# itself (`sessions.rs`, `codex_policy_refusal`).
+#
+# Shape: the Codex fork (fork-ca04973b) parses `[hooks]` here as
+# `ManagedHooksRequirementsToml` — the event tables flattened under `hooks`,
+# each a list of matcher groups with a `hooks` list of handlers
+# (codex-rs/config/src/hook_config.rs and the `[[hooks.PreToolUse]]` fixtures
+# in config_requirements.rs). Hooks from a requirements layer are managed:
+# trusted without a hash and always enabled.
+#
+# `failClosed = true` (fork WI-1129) makes a hook that crashes, times out or
+# cannot be started block the tool call instead of letting it run.
+# `klaudia hook gitguard` (WI-1136) captures the dirty working tree on
+# SessionStart and refuses, on PreToolUse, a shell command or patch that would
+# discard it (stash, checkout --, restore, clean, reset --hard, ...).
+#
+# PreToolUse tool names the fork sends: `Bash` for shell, exec_command and
+# write_stdin; `apply_patch` (aliases Write/Edit) for patches; `write_stdin`
+# for the approval path of stdin writes. The matcher is a regex over them.
+#
+# Managed hooks run only while the `hooks` feature is on, and a session can
+# turn it off (`-c features.hooks=false`, `--disable hooks`, `[features]` in
+# $CODEX_HOME or a project `.codex/config.toml`, a nested `codex exec`). The
+# `[features]` table here is FeatureRequirementsToml: a pinned value wins over
+# every config layer and CLI override (core/src/config/managed_features.rs),
+# so gitguard stays on.
+#
+# A Codex that cannot parse this file refuses to start; it does not run
+# without the hook. `engine/server/tests/codex_gitguard_e2e.rs` launches the
+# real fork binary against this file and proves the refusals.
+
+[features]
+hooks = true
+
+[[hooks.SessionStart]]
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "klaudia hook gitguard"
+timeout = 30
+failClosed = true
+
+[[hooks.PreToolUse]]
+matcher = "^(Bash|shell|exec_command|write_stdin|apply_patch)$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "klaudia hook gitguard"
+timeout = 30
+failClosed = true

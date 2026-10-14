@@ -11,16 +11,19 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 
 from vogt.core.entities import (
     Actor,
     ActorPreference,
+    AgentPolicy,
     AuditRecord,
     AuthDecision,
     CodingSession,
     Comment,
     ContractExemption,
+    Decision,
     DepRef,
     DriftProposal,
     Event,
@@ -198,6 +201,8 @@ class ProjectUpdate:
     write_back: str | None = None
     link_state: str | None = None
     exclusions: tuple[str, ...] | None = None
+    #: Replaces the project's agent policy wholesale. `None` leaves it alone.
+    agent_policy: AgentPolicy | None = None
     contract_adopted_at: datetime | None = None
     #: Adoption is reversible, and `None` already means "leave alone", so
     #: declining the contract needs a flag of its own rather than a value.
@@ -310,7 +315,17 @@ class ReadView(Protocol):
         self, work_item_id: str, *, terminal_states: tuple[str, ...]
     ) -> list[Blocker]: ...
 
-    def comments_for(self, work_item_id: str, *, limit: int) -> list[Comment]: ...
+    def comments_for(
+        self, work_item_id: str, *, limit: int, order: str = "oldest"
+    ) -> list[Comment]:
+        """Comments on one item, oldest first unless `order` is `newest`.
+
+        `newest` returns the newest `limit` rows, newest first. `oldest`
+        (the default, what every existing caller asks for) returns the
+        oldest `limit` rows, oldest first. A limit larger than the table
+        returns every row either way.
+        """
+        ...
 
     # -- taxonomy ----------------------------------------------------------
 
@@ -489,6 +504,14 @@ class ReadView(Protocol):
         """Every setting the actor has written, ordered by key."""
         ...
 
+    def latest_human_preference(self, key: str) -> ActorPreference | None:
+        """The most recent write of `key` by a human actor (`{}` = cleared).
+
+        How a deployment-level setting is read (the `dispatch.*` table,
+        WI-1323): a person's write, never an agent's, and the newest wins.
+        """
+        ...
+
     def inbox_triage_by_keys(self, entry_keys: list[str]) -> dict[str, InboxTriage]:
         """Every triage decision among `entry_keys`, keyed by entry key.
 
@@ -505,6 +528,19 @@ class ReadView(Protocol):
     def session_by_id(self, session_id: str) -> CodingSession | None: ...
 
     def session_grant(self, grant_id: str) -> SessionGrant | None: ...
+
+    def decision(self, decision_id: str) -> Decision | None: ...
+
+    def list_decisions(
+        self,
+        *,
+        state: str | None = None,
+        work_item_id: str | None = None,
+        asker_actor_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Decision]:
+        """Decisions, newest first, optionally of one state, item or asker."""
+        ...
 
     def list_session_grants(
         self,
@@ -732,6 +768,12 @@ class WriteTxn(ReadView, Protocol):
 
     def insert_session_grant(self, grant: SessionGrant) -> None: ...
 
+    def insert_decision(self, decision: Decision) -> None: ...
+
+    def update_decision(self, decision: Decision) -> None:
+        """Replace a decision's state and answer fields."""
+        ...
+
     def update_session_grant(self, grant: SessionGrant) -> None:
         """Replace a grant's decision and revocation fields."""
         ...
@@ -812,6 +854,11 @@ class WriteTxn(ReadView, Protocol):
 class DeclaredStore(Protocol):
     """The authoritative store. Only the application layer writes here."""
 
+    @property
+    def path(self) -> Path:
+        """Where the store lives: what identifies it across contexts."""
+        ...
+
     def migrate(self) -> MigrationReport: ...
 
     def is_initialized(self) -> bool: ...
@@ -888,6 +935,11 @@ class ObservedStore(Protocol):
     a registered project is a cross-store question the application layer
     answers and hands down (`SCHEMA.md` §1).
     """
+
+    @property
+    def path(self) -> Path:
+        """Where the store lives: what identifies it across contexts."""
+        ...
 
     def migrate(self) -> MigrationReport: ...
 
@@ -1026,6 +1078,12 @@ class ObservedStore(Protocol):
 
     def rebuild_latest(self) -> int: ...
 
+    def latest_generation(self) -> int:
+        """A number that moves whenever `rebuild_latest` changes the
+        projection every `latest`-based read is answered from; 0 before the
+        first rebuild."""
+        ...
+
     def replace_dep_refs(self, rows: list[DepRefRow]) -> int: ...
 
     def prune(
@@ -1061,7 +1119,8 @@ class ObservedStore(Protocol):
         self, query: ActivityQuery, *, limit: int, offset: int
     ) -> list[ActivitySessionRow]:
         """Per agent conversation, what its matching calls add up to, most
-        recently active first."""
+        recently active first. `transcript_path` is the newest indexed file
+        for that conversation, or none; context is not stored here."""
         ...
 
 

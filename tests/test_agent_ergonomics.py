@@ -8,6 +8,7 @@ undocumented, untested alias is one that drifts.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -100,6 +101,70 @@ def test_work_list_query_aliases_filter_title_body_and_ref(
 
     by_ref = list_work(instance, ListWorkParams(query=wanted.lower()))
     assert [row.ref for row in by_ref.items] == [wanted]
+
+
+def test_a_query_matches_a_ref_by_bare_number_or_either_case(
+    instance: AppContext,
+) -> None:
+    """WI-1249: the board and backlog search box send the reader's text as-is,
+    including a bare number or a lower-cased ref. Matching is substring
+    containment on the lower-cased ref, so all three find the same item."""
+    wanted = _item(instance, "The thing being searched for")
+    _item(instance, "Unrelated")
+    number = wanted.removeprefix("WI-")
+    for query in (number, wanted, wanted.lower()):
+        answer = list_work(instance, ListWorkParams(query=query))
+        assert [row.ref for row in answer.items] == [wanted]
+
+
+def test_an_exact_ref_query_leads_the_page_ahead_of_substring_hits(
+    instance: AppContext,
+) -> None:
+    """WI-1249: `1241` is also inside `WI-12410` and inside a body that cites
+    `WI-1241`. Those stay matched, but the item whose ref is `WI-1241` is
+    first even when both decoys were created earlier and the page is one row.
+    """
+    earlier = instance.clock() - timedelta(days=1)
+    cited_at = earlier + timedelta(seconds=1)
+    wanted = _item(instance, "The item the number names")
+    number = wanted.removeprefix("WI-")
+    decoy_ref = f"WI-{number}0"
+    with instance.declared.write() as txn:
+        txn.insert_work_item(
+            WorkItem(
+                id=instance.id_factory("wrk"),
+                ref=decoy_ref,
+                kind="feature",
+                title="A longer ref that contains the number",
+                body="",
+                state="open",
+                priority="p2",
+                created_at=earlier,
+                updated_at=earlier,
+            )
+        )
+        cited = txn.next_work_ref()
+        txn.insert_work_item(
+            WorkItem(
+                id=instance.id_factory("wrk"),
+                ref=cited,
+                kind="feature",
+                title="An older note",
+                body=f"see {wanted} for the real one",
+                state="open",
+                priority="p2",
+                created_at=cited_at,
+                updated_at=cited_at,
+            )
+        )
+
+    for query in (number, wanted, wanted.lower()):
+        answer = list_work(instance, ListWorkParams(query=query, limit=1))
+        assert answer.items[0].ref == wanted
+        assert answer.total == 3
+
+    whole = list_work(instance, ListWorkParams(query=number))
+    assert [row.ref for row in whole.items] == [wanted, decoy_ref, cited]
 
 
 def test_the_query_is_literal_text_not_a_pattern(instance: AppContext) -> None:

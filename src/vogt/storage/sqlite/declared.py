@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sqlite3
 from collections.abc import Iterator
@@ -26,9 +27,13 @@ from vogt.core.entities import (
     CodingSession,
     Comment,
     ContractExemption,
+    Decision,
+    DecisionAnswer,
+    DecisionOption,
     DriftProposal,
     Event,
     ForgeAccount,
+    HandoffFields,
     InboxTriage,
     Initiative,
     Label,
@@ -62,7 +67,11 @@ from vogt.storage.interface import (
     WorkFilter,
     WorkItemUpdate,
 )
-from vogt.storage.sqlite.connection import DEFAULT_SYNCHRONOUS, connect
+from vogt.storage.sqlite.connection import (
+    DEFAULT_SYNCHRONOUS,
+    borrow_read,
+    connect,
+)
 from vogt.storage.sqlite.migrator import (
     DEFAULT_STALE_AFTER,
     Migrator,
@@ -122,6 +131,9 @@ _FORGE_ACCOUNT_CARRY_COLUMNS: tuple[str, ...] = (
 )
 
 WORK_REF_PREFIX = "WI-"
+# A search that names one work item: "1241", "WI-1241" or "wi-1241". The
+# substring filter still applies; this only decides who sorts first.
+_EXACT_REF_QUERY = re.compile(r"^(?:wi-)?(\d+)$", re.IGNORECASE)
 
 WORK_KINDS: tuple[WorkKind, ...] = ("feature", "bug", "chore", "question")
 
@@ -501,16 +513,26 @@ class SqliteDeclaredStore:
 
     @contextmanager
     def read(self) -> Iterator[SqliteReadView]:
-        conn = self._open_initialized()
-        try:
-            # A ReadView promises one consistent snapshot. SQLite otherwise
-            # starts and ends a read transaction around each SELECT, which
-            # would let a count and its following page observe two revisions.
-            conn.execute("BEGIN")
-            yield SqliteReadView(conn)
-        finally:
-            _rollback_quietly(conn)
-            conn.close()
+        if not self._path.exists():
+            raise NotInitialized(self._not_initialized_message())
+        # A pooled connection (WI-1224): a read is the hot path, and a fresh
+        # connection per read paid the open, the pragmas and a cold page
+        # cache every time. Writes keep their own connection per transaction.
+        with borrow_read(self._path, synchronous=self._synchronous) as conn:
+            try:
+                if _meta_get(conn, META_INSTANCE_ID) is None:
+                    raise NotInitialized(self._not_initialized_message())
+            except sqlite3.OperationalError as exc:
+                raise NotInitialized(self._not_initialized_message()) from exc
+            try:
+                # A ReadView promises one consistent snapshot. SQLite otherwise
+                # starts and ends a read transaction around each SELECT, which
+                # would let a count and its following page observe two
+                # revisions.
+                conn.execute("BEGIN")
+                yield SqliteReadView(conn)
+            finally:
+                _rollback_quietly(conn)
 
     @contextmanager
     def write(self) -> Iterator[SqliteWriteTxn]:
@@ -659,10 +681,10 @@ class SqliteReadView:
 
     def list_work_items(self, work_filter: WorkFilter) -> list[WorkItem]:
         where, params = _work_where(work_filter)
+        order, order_params = _work_order(work_filter)
         rows = self._conn.execute(
-            f"SELECT {_WORK_COLUMNS} {_WORK_JOINS} {where} "
-            "ORDER BY w.created_at, w.ref LIMIT ? OFFSET ?",
-            (*params, work_filter.limit, work_filter.offset),
+            f"SELECT {_WORK_COLUMNS} {_WORK_JOINS} {where} {order} LIMIT ? OFFSET ?",
+            (*params, *order_params, work_filter.limit, work_filter.offset),
         ).fetchall()
         return self._hydrate(rows)
 
@@ -777,11 +799,18 @@ class SqliteReadView:
         ).fetchall()
         return [Blocker(ref=str(r["ref"]), state=str(r["state"])) for r in rows]
 
-    def comments_for(self, work_item_id: str, *, limit: int) -> list[Comment]:
+    def comments_for(
+        self, work_item_id: str, *, limit: int, order: str = "oldest"
+    ) -> list[Comment]:
+        # `newest` wants the newest N, newest first. Selecting DESC and
+        # reversing would hand back the newest N oldest-first, which is the
+        # opposite of what a reader paging from the top asked for.
+        direction = "DESC" if order == "newest" else "ASC"
         rows = self._conn.execute(
             "SELECT c.*, a.display_name AS actor_display_name FROM comments c "
             "JOIN actors a ON a.id = c.actor_id "
-            "WHERE c.work_item_id = ? ORDER BY c.created_at, c.id LIMIT ?",
+            f"WHERE c.work_item_id = ? ORDER BY c.created_at {direction}, "
+            f"c.id {direction} LIMIT ?",
             (work_item_id, limit),
         ).fetchall()
         return [_row_to_comment(row) for row in rows]
@@ -1062,6 +1091,16 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_actor_preference(row) for row in rows]
 
+    def latest_human_preference(self, key: str) -> ActorPreference | None:
+        row = self._conn.execute(
+            "SELECT p.actor_id, p.key, p.value, p.version, p.updated_at "
+            "FROM actor_preferences p JOIN actors a ON a.id = p.actor_id "
+            "WHERE p.key = ? AND a.kind = 'human' "
+            "ORDER BY p.updated_at DESC, p.actor_id LIMIT 1",
+            (key,),
+        ).fetchone()
+        return None if row is None else _row_to_actor_preference(row)
+
     # -- inbox triage -------------------------------------------------------
 
     def inbox_triage_by_key(self, entry_key: str) -> InboxTriage | None:
@@ -1200,6 +1239,37 @@ class SqliteReadView:
             "SELECT * FROM session_grants WHERE id = ?", (grant_id,)
         ).fetchone()
         return None if row is None else _row_to_session_grant(row)
+
+    def decision(self, decision_id: str) -> Decision | None:
+        row = self._conn.execute(
+            "SELECT * FROM decisions WHERE id = ?", (decision_id,)
+        ).fetchone()
+        return None if row is None else _row_to_decision(row)
+
+    def list_decisions(
+        self,
+        *,
+        state: str | None = None,
+        work_item_id: str | None = None,
+        asker_actor_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Decision]:
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("state", state),
+            ("work_item_id", work_item_id),
+            ("asker_actor_id", asker_actor_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM decisions {where}ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [_row_to_decision(row) for row in rows]
 
     def list_session_grants(
         self,
@@ -1413,9 +1483,9 @@ class SqliteWriteTxn(SqliteReadView):
             "INSERT INTO projects (id, slug, name, root_path, repo_url, "
             "lifecycle_state, current_version, contract_version, "
             "compliance_status, compliance_checked_at, contract_adopted_at, "
-            "write_back, link_state, exclusions, trust_state, created_at, "
-            "updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "write_back, link_state, exclusions, agent_policy, trust_state, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project.id,
                 project.slug,
@@ -1435,6 +1505,7 @@ class SqliteWriteTxn(SqliteReadView):
                 project.write_back,
                 project.link_state,
                 json.dumps(project.exclusions),
+                project.agent_policy.model_dump_json(),
                 project.trust_state,
                 to_iso(project.created_at),
                 to_iso(project.updated_at),
@@ -1468,6 +1539,9 @@ class SqliteWriteTxn(SqliteReadView):
         if update.exclusions is not None:
             assignments.append("exclusions = ?")
             params.append(json.dumps(list(update.exclusions)))
+        if update.agent_policy is not None:
+            assignments.append("agent_policy = ?")
+            params.append(update.agent_policy.model_dump_json())
         if not assignments:
             return
         assignments.append("updated_at = ?")
@@ -1628,14 +1702,19 @@ class SqliteWriteTxn(SqliteReadView):
 
     def insert_comment(self, comment: Comment) -> None:
         self._conn.execute(
-            "INSERT INTO comments (id, work_item_id, actor_id, body, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO comments "
+            "(id, work_item_id, actor_id, body, created_at, kind, data) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 comment.id,
                 comment.work_item_id,
                 comment.actor_id,
                 comment.body,
                 to_iso(comment.created_at),
+                comment.kind,
+                None
+                if comment.handoff is None
+                else json.dumps(comment.handoff.model_dump(mode="json")),
             ),
         )
 
@@ -2000,6 +2079,43 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def insert_decision(self, decision: Decision) -> None:
+        self._conn.execute(
+            "INSERT INTO decisions (id, asker_actor_id, asker_session, "
+            "work_item_id, question, options_json, context, state, answer_json, "
+            "answered_by_actor_id, created_at, answered_at, expires_at, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                decision.id,
+                decision.asker_actor_id,
+                decision.asker_session,
+                decision.work_item_id,
+                decision.question,
+                json.dumps([o.model_dump(mode="json") for o in decision.options]),
+                decision.context,
+                decision.state,
+                _decision_answer_json(decision),
+                decision.answered_by_actor_id,
+                to_iso(decision.created_at),
+                _iso_or_none(decision.answered_at),
+                to_iso(decision.expires_at),
+                decision.reason,
+            ),
+        )
+
+    def update_decision(self, decision: Decision) -> None:
+        self._conn.execute(
+            "UPDATE decisions SET state = ?, answer_json = ?, "
+            "answered_by_actor_id = ?, answered_at = ? WHERE id = ?",
+            (
+                decision.state,
+                _decision_answer_json(decision),
+                decision.answered_by_actor_id,
+                _iso_or_none(decision.answered_at),
+                decision.id,
+            ),
+        )
+
     def update_session_grant(self, grant: SessionGrant) -> None:
         self._conn.execute(
             "UPDATE session_grants SET state = ?, decided_by = ?, decided_at = ?, "
@@ -2021,7 +2137,8 @@ class SqliteWriteTxn(SqliteReadView):
         self._conn.execute(
             "INSERT INTO coding_sessions (id, engine_session_id, project_id, "
             "work_item_id, actor_id, cwd, template, model, effort, reason, "
-            "started_at, stopped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "purpose, started_by_session, started_by_kind, started_at, stopped_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session.id,
                 session.engine_session_id,
@@ -2033,6 +2150,9 @@ class SqliteWriteTxn(SqliteReadView):
                 session.model,
                 session.effort,
                 session.reason,
+                session.purpose,
+                session.started_by_session,
+                session.started_by_kind,
                 to_iso(session.started_at),
                 None if session.stopped_at is None else to_iso(session.stopped_at),
             ),
@@ -2295,6 +2415,7 @@ def _row_to_project(row: sqlite3.Row) -> Project:
                 None if checked_at is None else from_iso(str(checked_at))
             ),
             "exclusions": json.loads(str(row["exclusions"])),
+            "agent_policy": json.loads(str(row["agent_policy"])),
             "contract_adopted_at": (
                 None if adopted_at is None else from_iso(str(adopted_at))
             ),
@@ -2392,6 +2513,8 @@ def _row_to_initiative(row: sqlite3.Row) -> Initiative:
 
 
 def _row_to_comment(row: sqlite3.Row) -> Comment:
+    raw = row["data"]
+    handoff = None if raw is None else HandoffFields.model_validate_json(str(raw))
     return Comment(
         id=str(row["id"]),
         work_item_id=str(row["work_item_id"]),
@@ -2399,6 +2522,8 @@ def _row_to_comment(row: sqlite3.Row) -> Comment:
         actor_display_name=str(row["actor_display_name"]),
         body=str(row["body"]),
         created_at=from_iso(str(row["created_at"])),
+        kind=row["kind"],
+        handoff=handoff,
     )
 
 
@@ -2470,6 +2595,26 @@ def _work_where(work_filter: WorkFilter) -> tuple[str, list[object]]:
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, params
+
+
+def _work_order(work_filter: WorkFilter) -> tuple[str, tuple[object, ...]]:
+    """Stable created-at order, with an exact ref first when the query is one.
+
+    `1241` is also a substring of `WI-12410` and of a body that cites
+    `WI-1241`. Those stay in the result (the filter is unchanged), but the
+    item whose ref *is* `WI-1241` leads, so a 100-row page still shows it.
+    The ref is bound, never interpolated.
+    """
+    text = work_filter.text
+    if text:
+        match = _EXACT_REF_QUERY.fullmatch(text.strip())
+        if match is not None:
+            exact = f"{WORK_REF_PREFIX}{match.group(1)}".lower()
+            return (
+                "ORDER BY (lower(w.ref) = ?) DESC, w.created_at, w.ref",
+                (exact,),
+            )
+    return "ORDER BY w.created_at, w.ref", ()
 
 
 def _append_where(where: str, clause: str) -> str:
@@ -2722,6 +2867,36 @@ def _opt_time(row: sqlite3.Row, column: str) -> datetime | None:
     return None if value is None else from_iso(str(value))
 
 
+def _decision_answer_json(decision: Decision) -> str | None:
+    if decision.answer is None:
+        return None
+    return json.dumps(decision.answer.model_dump(mode="json"))
+
+
+def _row_to_decision(row: sqlite3.Row) -> Decision:
+    answer = row["answer_json"]
+    return Decision(
+        id=str(row["id"]),
+        asker_actor_id=str(row["asker_actor_id"]),
+        asker_session=_opt(row, "asker_session"),
+        work_item_id=_opt(row, "work_item_id"),
+        question=str(row["question"]),
+        options=[
+            DecisionOption.model_validate(o) for o in json.loads(row["options_json"])
+        ],
+        context=str(row["context"]),
+        state=row["state"],
+        answer=None
+        if answer is None
+        else DecisionAnswer.model_validate(json.loads(str(answer))),
+        answered_by_actor_id=_opt(row, "answered_by_actor_id"),
+        created_at=from_iso(str(row["created_at"])),
+        answered_at=_opt_time(row, "answered_at"),
+        expires_at=from_iso(str(row["expires_at"])),
+        reason=str(row["reason"]),
+    )
+
+
 def _row_to_session_grant(row: sqlite3.Row) -> SessionGrant:
     return SessionGrant(
         id=str(row["id"]),
@@ -2761,6 +2936,9 @@ def _row_to_session(row: sqlite3.Row) -> CodingSession:
         model=None if row["model"] is None else str(row["model"]),
         effort=None if row["effort"] is None else str(row["effort"]),
         reason=str(row["reason"]),
+        purpose=_opt(row, "purpose"),
+        started_by_session=_opt(row, "started_by_session"),
+        started_by_kind=_opt(row, "started_by_kind"),  # type: ignore[arg-type]
         started_at=from_iso(str(row["started_at"])),
         stopped_at=None if stopped is None else from_iso(str(stopped)),
     )

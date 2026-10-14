@@ -36,7 +36,7 @@ const LAUNCH_BUCKETS: &[f64] = &[
     0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0,
 ];
 
-type Labels = Vec<(&'static str, String)>;
+pub type Labels = Vec<(&'static str, String)>;
 
 struct Histogram {
     buckets: &'static [f64],
@@ -128,6 +128,97 @@ impl HistogramVec {
     }
 }
 
+/// A histogram whose observations are raw magnitudes (token counts, turn
+/// counts) rather than durations: the same exposition shape, but the sum is
+/// the sum of the values, not microseconds divided back into seconds.
+struct ValueHistogram {
+    buckets: &'static [f64],
+    counts: Vec<AtomicU64>,
+    sum: AtomicU64,
+    count: AtomicU64,
+}
+
+impl ValueHistogram {
+    fn new(buckets: &'static [f64]) -> Self {
+        Self {
+            buckets,
+            counts: buckets.iter().map(|_| AtomicU64::new(0)).collect(),
+            sum: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+        }
+    }
+
+    fn observe(&self, value: f64) {
+        for (bound, count) in self.buckets.iter().zip(&self.counts) {
+            if value <= *bound {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.sum.fetch_add(value as u64, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A family of raw-value histograms, one series per label set.
+pub struct ValueHistogramVec {
+    name: &'static str,
+    help: &'static str,
+    buckets: &'static [f64],
+    series: Mutex<BTreeMap<Labels, Arc<ValueHistogram>>>,
+}
+
+impl ValueHistogramVec {
+    fn new(name: &'static str, help: &'static str, buckets: &'static [f64]) -> Self {
+        Self {
+            name,
+            help,
+            buckets,
+            series: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    pub fn observe(&self, labels: &[(&'static str, &str)], value: f64) {
+        let key: Labels = labels.iter().map(|(k, v)| (*k, (*v).to_string())).collect();
+        let histogram = Arc::clone(
+            self.series
+                .lock()
+                .entry(key)
+                .or_insert_with(|| Arc::new(ValueHistogram::new(self.buckets))),
+        );
+        histogram.observe(value);
+    }
+
+    fn render(&self, out: &mut String) {
+        let _ = writeln!(out, "# HELP {} {}", self.name, self.help);
+        let _ = writeln!(out, "# TYPE {} histogram", self.name);
+        for (labels, h) in self.series.lock().iter() {
+            for (bound, count) in h.buckets.iter().zip(&h.counts) {
+                let mut with_le = labels.clone();
+                with_le.push(("le", format_bound(*bound)));
+                let _ = writeln!(
+                    out,
+                    "{}_bucket{} {}",
+                    self.name,
+                    format_labels(&with_le),
+                    count.load(Ordering::Relaxed)
+                );
+            }
+            let mut inf = labels.clone();
+            inf.push(("le", "+Inf".to_string()));
+            let count = h.count.load(Ordering::Relaxed);
+            let _ = writeln!(out, "{}_bucket{} {count}", self.name, format_labels(&inf));
+            let _ = writeln!(
+                out,
+                "{}_sum{} {}",
+                self.name,
+                format_labels(labels),
+                h.sum.load(Ordering::Relaxed)
+            );
+            let _ = writeln!(out, "{}_count{} {count}", self.name, format_labels(labels));
+        }
+    }
+}
+
 /// A counter family: one series per label set.
 pub struct CounterVec {
     name: &'static str,
@@ -152,6 +243,40 @@ impl CounterVec {
     fn render(&self, out: &mut String) {
         let _ = writeln!(out, "# HELP {} {}", self.name, self.help);
         let _ = writeln!(out, "# TYPE {} counter", self.name);
+        for (labels, value) in self.series.lock().iter() {
+            let _ = writeln!(out, "{}{} {value}", self.name, format_labels(labels));
+        }
+    }
+}
+
+/// A gauge family whose whole series set is replaced at once (WI-1373). The
+/// per-session resource gauges are written this way by the sampler every
+/// round, so a session that stops or hibernates drops out of the next scrape
+/// instead of leaving a stale series behind: the series count is bounded by
+/// the sessions alive now, not by every session the engine has ever run.
+pub struct GaugeVec {
+    name: &'static str,
+    help: &'static str,
+    series: Mutex<BTreeMap<Labels, f64>>,
+}
+
+impl GaugeVec {
+    fn new(name: &'static str, help: &'static str) -> Self {
+        Self {
+            name,
+            help,
+            series: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Replace every series with `values`.
+    pub fn replace(&self, values: impl IntoIterator<Item = (Labels, f64)>) {
+        *self.series.lock() = values.into_iter().collect();
+    }
+
+    fn render(&self, out: &mut String) {
+        let _ = writeln!(out, "# HELP {} {}", self.name, self.help);
+        let _ = writeln!(out, "# TYPE {} gauge", self.name);
         for (labels, value) in self.series.lock().iter() {
             let _ = writeln!(out, "{}{} {value}", self.name, format_labels(labels));
         }
@@ -199,7 +324,26 @@ pub struct Metrics {
     pub session_starts: CounterVec,
     /// Secret projects read at launch, by how (`bulk`: one request; `cli`:
     /// one vendor-CLI run per secret, the slow fallback) and outcome.
-    pub launch_secret_reads: CounterVec,
+    pub launch_vault_read_count: CounterVec,
+    /// Turns a session had when it ended, by template and model. Observed once,
+    /// at exit or hibernation, from the session's economics snapshot.
+    pub session_turns: ValueHistogramVec,
+    /// Peak context window a session reached, in tokens.
+    pub session_peak_context: ValueHistogramVec,
+    /// Compactions a session performed.
+    pub session_compactions: ValueHistogramVec,
+    /// Resident memory of each live session's process tree, from the
+    /// resource sampler, by session, template, agent, model and project.
+    pub session_rss: GaugeVec,
+    /// CPU of each live session's tree over the last sampling interval.
+    pub session_cpu: GaugeVec,
+    /// Processes in each live session's tree.
+    pub session_processes: GaugeVec,
+    /// Resident memory summed over every live session's tree (unlabelled).
+    pub sessions_rss_total: GaugeVec,
+    /// Resident memory of every process the engine can see: in a container,
+    /// the whole pod, sessions or not (unlabelled).
+    pub pod_rss: GaugeVec,
 }
 
 impl Metrics {
@@ -224,9 +368,52 @@ impl Metrics {
                 "vogt_session_starts_total",
                 "Sessions the engine started, by origin and outcome.",
             ),
-            launch_secret_reads: CounterVec::new(
+            launch_vault_read_count: CounterVec::new(
                 "vogt_session_launch_secret_reads_total",
                 "Secret projects read at session launch, by mode (bulk or cli) and outcome.",
+            ),
+            session_turns: ValueHistogramVec::new(
+                "vogt_session_turns",
+                "Turns a session had when it ended, by template and model.",
+                &[10.0, 25.0, 50.0, 100.0, 150.0, 250.0, 500.0, 1000.0],
+            ),
+            session_peak_context: ValueHistogramVec::new(
+                "vogt_session_peak_context_tokens",
+                "Peak context window a session reached, in tokens, by template and model.",
+                &[
+                    10_000.0,
+                    25_000.0,
+                    50_000.0,
+                    100_000.0,
+                    200_000.0,
+                    400_000.0,
+                    1_000_000.0,
+                ],
+            ),
+            session_compactions: ValueHistogramVec::new(
+                "vogt_session_compactions",
+                "Compactions a session performed, by template and model.",
+                &[0.0, 1.0, 2.0, 3.0, 5.0, 10.0, 25.0, 50.0],
+            ),
+            session_rss: GaugeVec::new(
+                "vogt_session_rss_bytes",
+                "Resident memory of a live session's process tree, in bytes.",
+            ),
+            session_cpu: GaugeVec::new(
+                "vogt_session_cpu_percent",
+                "CPU of a live session's process tree over the last sample, in percent of one core.",
+            ),
+            session_processes: GaugeVec::new(
+                "vogt_session_processes",
+                "Processes in a live session's process tree.",
+            ),
+            sessions_rss_total: GaugeVec::new(
+                "vogt_sessions_rss_bytes",
+                "Resident memory summed over every live session's process tree, in bytes.",
+            ),
+            pod_rss: GaugeVec::new(
+                "vogt_pod_rss_bytes",
+                "Resident memory summed over every process the engine can see (the pod), in bytes.",
             ),
         }
     }
@@ -238,7 +425,15 @@ impl Metrics {
         self.launch.render(&mut out);
         self.launch_stage.render(&mut out);
         self.session_starts.render(&mut out);
-        self.launch_secret_reads.render(&mut out);
+        self.launch_vault_read_count.render(&mut out);
+        self.session_turns.render(&mut out);
+        self.session_peak_context.render(&mut out);
+        self.session_compactions.render(&mut out);
+        self.session_rss.render(&mut out);
+        self.session_cpu.render(&mut out);
+        self.session_processes.render(&mut out);
+        self.sessions_rss_total.render(&mut out);
+        self.pod_rss.render(&mut out);
         out
     }
 }
@@ -329,5 +524,24 @@ mod tests {
         c.render(&mut out);
         assert!(out.contains("t_total{outcome=\"ok\"} 2"), "{out}");
         assert!(out.contains("t_total{outcome=\"a\\\"b\"} 1"), "{out}");
+    }
+
+    #[test]
+    fn a_gauge_replace_drops_series_that_are_not_given_again() {
+        let g = GaugeVec::new("t_bytes", "help");
+        g.replace([
+            (vec![("session", "a".to_string())], 10.0),
+            (vec![("session", "b".to_string())], 20.0),
+        ]);
+        let mut out = String::new();
+        g.render(&mut out);
+        assert!(out.contains("# TYPE t_bytes gauge"), "{out}");
+        assert!(out.contains("t_bytes{session=\"a\"} 10"), "{out}");
+        assert!(out.contains("t_bytes{session=\"b\"} 20"), "{out}");
+        g.replace([(vec![("session", "b".to_string())], 30.0)]);
+        let mut out = String::new();
+        g.render(&mut out);
+        assert!(!out.contains("session=\"a\""), "{out}");
+        assert!(out.contains("t_bytes{session=\"b\"} 30"), "{out}");
     }
 }

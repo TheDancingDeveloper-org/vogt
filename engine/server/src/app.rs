@@ -189,6 +189,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         Arc::clone(&sessions),
         Arc::clone(&agent_tasks),
         Arc::clone(&push),
+        bus.clone(),
         assistant_log.clone(),
     );
     if assistant.is_some() {
@@ -289,7 +290,20 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     spawn_history_retention_sweeper(Arc::clone(&state));
     crate::hibernate_policy::spawn_watcher(Arc::clone(&state));
     crate::autopilot::spawn_watcher(Arc::clone(&state));
+    crate::budget::spawn_watcher(Arc::clone(&state));
     crate::resources::spawn_sampler(Arc::clone(&state));
+    if !state.config.economics_tick.is_zero() {
+        let home = state.config.economics_home.clone().unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default()
+        });
+        crate::economics::spawn_economics_tailer(
+            Arc::clone(&state),
+            home,
+            state.config.economics_tick,
+        );
+    }
     crate::hibernate_policy::spawn_boot_wake(Arc::clone(&state));
 
     // Public: /healthz, /api/config, /api/push/public-key. None reveal secrets.
@@ -304,6 +318,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),
         )
+        // Literal paths before `/{id}`, or axum captures "changes" and
+        // "wait-any" as session ids.
+        .route("/api/sessions/changes", get(api::session_changes))
+        .route("/api/sessions/wait-any", get(api::session_wait_any))
         .route(
             "/api/sessions/{id}",
             get(api::get_session)
@@ -511,6 +529,9 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             api::OWN_CONVERSATION_ROUTE,
             post(api::report_own_conversation),
         )
+        // A session's own project-policy check (WI-1243): the same caller and
+        // the same per-session token. The hook asks before a shell command.
+        .route(api::POLICY_CHECK_ROUTE, post(api::policy_check))
         // A session's own approved grants (WI-973): the same caller and the
         // same per-session token.
         .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants))

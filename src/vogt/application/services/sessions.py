@@ -26,6 +26,7 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,6 +37,7 @@ from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
 from vogt.adapters.engine.client import (
     EngineApproval,
     EngineBlocked,
+    EngineChange,
     EngineHibernation,
     EngineResources,
     EngineScreen,
@@ -44,10 +46,13 @@ from vogt.adapters.engine.client import (
 from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    DIGEST_LIVE_STATES,
     SESSION_INPUT_MAX_BYTES,
     AnswerSessionParams,
     BindSessionWorkParams,
     BindSessionWorkResult,
+    CommitForSessionParams,
+    CommitForSessionResult,
     EngineSessionTokenParams,
     EngineSessionTokenResult,
     HibernateSessionParams,
@@ -70,6 +75,15 @@ from vogt.application.models import (
     SessionApprovalOption,
     SessionBlocked,
     SessionBlockedResult,
+    SessionBudgetParams,
+    SessionChange,
+    SessionChangesParams,
+    SessionChangesResult,
+    SessionDigest,
+    SessionDigestParams,
+    SessionDigestResult,
+    SessionEconomicsParams,
+    SessionEconomicsResult,
     SessionHibernation,
     SessionInputParams,
     SessionInputResult,
@@ -87,6 +101,8 @@ from vogt.application.models import (
     SessionSummary,
     SessionSweepResult,
     SessionSweepRow,
+    SessionWaitAnyParams,
+    SessionWaitAnyResult,
     SessionWaitParams,
     SessionWaitResult,
     SetSessionRoleParams,
@@ -100,15 +116,26 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.application.services._brief import (
     AUTOPILOT,
+    ComposedBrief,
     brief_for_project,
     brief_for_work_item,
+    review_brief_for_work_item,
 )
+from vogt.application.services.preferences import dispatch_settings
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
 from vogt.core import delivery, oversight, runtime
 from vogt.core.auth import Scope, hash_token, issue, parse_scopes
 from vogt.core.branches import default_branch_name
-from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
+from vogt.core.entities import (
+    Actor,
+    AgentPolicy,
+    CodingSession,
+    Token,
+    WorkItem,
+    WorkOverlay,
+)
+from vogt.core.session_economics import SessionEconomics, meter
 from vogt.errors import (
     BypassRefused,
     Conflict,
@@ -135,6 +162,8 @@ SESSION_WAKE = "session.wake"
 SESSION_WOKEN_EVENT = "session.woken"
 SESSION_KEEP_AWAKE = "session.keep_awake"
 SESSION_KEEP_AWAKE_EVENT = "session.keep_awake"
+SESSION_COMMIT_FOR = "session.commit_for"
+SESSION_COMMITTED_EVENT = "session.committed"
 SESSION_SET_ROLE = "session.set_role"
 SESSION_ROLE_EVENT = "session.role_set"
 SESSION_RENAME = "session.rename"
@@ -171,6 +200,15 @@ def _session_scopes(ctx: AppContext) -> tuple[Scope, ...]:
     return parse_scopes(ctx.config.agent_session_scopes)
 
 
+def _as_digest(result: SessionResult) -> SessionResult:
+    """C1: start, hibernate and wake carry the digest row as well as the summary.
+
+    The summary stays. Parity, the CLI and the PWA read `session`; the digest
+    is what an MCP caller keeps. `exclude_none` does not drop it.
+    """
+    return result.model_copy(update={"digest": _digest_of(result.session)})
+
+
 def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     """Open a terminal for a work item or a project."""
     # Validate everything we can before crossing the process boundary. The
@@ -190,7 +228,29 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             "denied action as blocked"
         )
         raise BypassRefused(msg)
+    if (
+        params.role != "worker"
+        and ctx.principal.kind == "agent"
+        and not _is_engine_credential(ctx)
+    ):
+        # The oversight role is a person's nomination (WI-957), and it is what
+        # lets a session commit for others (C14) and ask for grants on their
+        # behalf (WI-973). An agent that could start an overseer would hand
+        # itself that standing by proxy: start one, drive its terminal
+        # (WI-1255). The engine's own credential is not an agent here — it
+        # relays the break-glass operator.
+        msg = (
+            f"only a person starts an oversight session ({ctx.principal.identity_ref} "
+            "is an agent); start a worker, or ask a person to start the "
+            "overseer from the GUI"
+        )
+        raise RoleRefused(msg)
     engine = _engine(ctx)
+    # Resolved only after both guards above, and a profile carries neither a
+    # role nor a permission posture, so naming a purpose can never raise a
+    # start past what the caller could ask for directly (WI-1323).
+    params, overrides, read_only = _resolve_purpose(ctx, params)
+    started_by_session, started_by_kind = _started_by(ctx, engine)
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
     actor_ref = f"agent:session:{session_id}"
@@ -202,6 +262,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # A refusal raises before any audit write, so it is logged here; the
     # engine audits its own side (`event=session.start`) either way.
     autopilot = _autopilot(params)
+    budget = _budget(params, subject.policy)
     spawn_started = time.monotonic()
     try:
         started = _start_on_engine(
@@ -212,14 +273,32 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             env=_session_env(
                 ctx, session_id, credential.secret, work_item=subject.work_item_ref
             ),
-            brief=_brief_with_task(subject.brief, params.task, autopilot=autopilot),
+            brief=_brief_with_task(
+                subject.brief,
+                params,
+                cwd=subject.cwd,
+                autopilot=autopilot,
+                read_only=read_only,
+            ),
+            companion=subject.brief.companion,
             model=params.model,
             effort=params.effort,
             resume=params.resume,
             permission_mode=params.permission_mode,
+            account=params.account,
             autopilot=autopilot,
             role=params.role,
             work_item=subject.work_item_ref,
+            policy=subject.policy,
+            budget=budget,
+            worktree=(
+                {
+                    "branch": _worktree_branch(subject, session_id),
+                    "base_ref": _worktree_base(subject.policy),
+                }
+                if params.worktree
+                else None
+            ),
         )
     except VogtError as error:
         _LOG.warning(
@@ -243,9 +322,14 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
 
     # A resumed conversation is started by the engine in the directory its
     # transcript records, which may be below or beside the project root
-    # (WI-871). Record where it actually runs; every other session runs at
-    # the registry's root, which is what the engine reports back anyway.
-    cwd = started.cwd if params.resume and started.cwd else subject.cwd
+    # (WI-871). A session given its own worktree runs in that worktree, which
+    # the engine reports back as its cwd (WI-1298). Every other session runs
+    # at the registry's root, which is what the engine reports back anyway.
+    cwd = (
+        started.cwd
+        if started.cwd and (params.resume or params.worktree)
+        else subject.cwd
+    )
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
         del actor
@@ -281,6 +365,9 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             model=params.model,
             effort=params.effort,
             reason=reason,
+            purpose=params.purpose,
+            started_by_session=started_by_session,
+            started_by_kind=started_by_kind,
             started_at=now,
             stopped_at=None,
         )
@@ -330,16 +417,33 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 # Recorded so that "which session was the overseer?" has an
                 # answer after the engine has forgotten it (WI-957).
                 "role": params.role,
+                # Whether this session was started to review rather than to
+                # do the work, so the audit trail says which brief it got.
+                "review_of": params.review_of,
                 # Named on the audit row: who started an unguarded session,
                 # and why, is what an operator looks for afterwards.
                 "permission_mode": params.permission_mode,
+                # Which Claude Code account it was asked to run under.
+                "account": params.account,
+                # The dispatch purpose and what it resolved (WI-1323): the
+                # start fields the caller set over the profile are listed in
+                # `overrides`, so a reader sees which defaults were not used.
+                "purpose": params.purpose,
+                "overrides": list(overrides),
+                "budget": None if budget is None else _budget_wire(budget),
+                "worktree": params.worktree,
+                "repo_map": params.repo_map,
+                "started_by_session": started_by_session,
+                "started_by_kind": started_by_kind,
                 # How long the engine took to start it (WI-927); the launch
                 # inside it is timed by the engine's own launch report.
                 "engine_spawn_ms": engine_spawn_ms,
             },
         )
 
-    return audited_write(ctx, operation=SESSION_START, reason=reason, body=body)
+    return _as_digest(
+        audited_write(ctx, operation=SESSION_START, reason=reason, body=body)
+    )
 
 
 def stop_session(ctx: AppContext, params: StopSessionParams) -> SessionResult:
@@ -405,6 +509,109 @@ def stop_session(ctx: AppContext, params: StopSessionParams) -> SessionResult:
     return audited_write(ctx, operation=SESSION_STOP, reason=params.reason, body=body)
 
 
+_EXCLUDED_STATES = frozenset({"hibernated", "stopped", "exited"})
+_DIGEST_CLIP = 120
+
+
+def _clip(text: str | None, limit: int = _DIGEST_CLIP) -> str | None:
+    if text is None:
+        return None
+    return text if len(text) <= limit else text[:limit]
+
+
+def _digest_of(
+    summary: SessionSummary,
+    *,
+    attention: str | None = None,
+    ready: bool | None = None,
+    fields: list[str] | None = None,
+    budget: str | None = None,
+) -> SessionDigest:
+    """One line of state from a full summary (design C1).
+
+    `command` stays off the digest; `template` is the replacement, and
+    `brief_file` is null until the engine reports a path. `budget` is the
+    engine's economics line when the caller has one. `supervisor` stays null
+    until WI-956 exists.
+    """
+    extra: dict[str, Any] = {}
+    for name in fields or []:
+        if name in {"command"} or not hasattr(summary, name):
+            continue
+        value = getattr(summary, name)
+        if hasattr(value, "model_dump"):
+            value = value.model_dump(mode="json")
+        extra[name] = value
+    blocked = None if summary.blocked is None else summary.blocked.blocker
+    return SessionDigest(
+        id=summary.id,
+        name=summary.name,
+        work_item=summary.work_item,
+        activity=summary.activity,
+        attention=attention,
+        ready=ready,
+        blocked_reason=_clip(blocked),
+        turn_started_at=summary.turn_started_at,
+        last_reply_excerpt=_clip(summary.last_reply_excerpt),
+        template=summary.template,
+        budget=budget,
+        extra=extra or None,
+    )
+
+
+def _state_of(summary: SessionSummary, attention: str | None) -> str | None:
+    if summary.activity == "stopped" or attention == "exited":
+        return "exited" if attention == "exited" else (summary.activity or attention)
+    return summary.activity or attention
+
+
+def _kept(
+    summary: SessionSummary, attention: str | None, states: list[str] | None
+) -> bool:
+    """Default listings drop hibernated, stopped and exited.
+
+    An empty list means the caller asked for every state.
+    """
+    if states is not None and len(states) == 0:
+        return True
+    allowed = DIGEST_LIVE_STATES if states is None else frozenset(states)
+    state = _state_of(summary, attention)
+    if state is None:
+        return "unknown" in allowed
+    if state in allowed or (attention is not None and attention in allowed):
+        return True
+    return state not in _EXCLUDED_STATES and state in allowed
+
+
+def _attention_of(
+    summary: SessionSummary, *, now: datetime, stall_after: timedelta
+) -> oversight.Verdict:
+    """The same attention class a sweep row would carry, without a screen."""
+    return oversight.classify(
+        activity=summary.activity,
+        alive=summary.alive,
+        ready=summary.activity == "waiting-for-input",
+        approval_question=None
+        if summary.approval is None
+        else summary.approval.question,
+        blocker=None if summary.blocked is None else summary.blocked.blocker,
+        approval_kind=None if summary.approval is None else summary.approval.kind,
+        last_output_at=summary.last_output_at,
+        now=now,
+        stall_after=stall_after,
+    )
+
+
+def _attention_kept(attention: str, wanted: list[str] | None) -> bool:
+    if not wanted:
+        return True
+    names = set(wanted)
+    if "needs_you" in names:
+        names.discard("needs_you")
+        names.update(oversight.NEEDS_YOU)
+    return attention in names
+
+
 def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListResult:
     """Vogt's session links, enriched with what the engine says right now,
     plus any live session the engine holds that Vogt never linked.
@@ -416,28 +623,93 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
     A session started outside Vogt — or one whose link Vogt lost — is still
     running, and an agent asking "what sessions are here" must be able to see
     it: reporting only Vogt's own links is why one session could not see
-    another. Such unlinked sessions are appended (with `linked=False` and null
-    declared fields) after the declared page. They carry no project or work
-    item, so a `project`/`work_item` filter excludes them; and because they
-    have no stable page position, they are appended only on the first page.
+    another. Such unlinked sessions are joined (with `linked=False` and null
+    declared fields) before any page is cut. They carry no project or work
+    item, so a `project`/`work_item` filter excludes them.
+
+    The page is cut last. A state filter applied after `limit` rows of
+    hibernated links have already filled the page hides every live session
+    past it and returns a near-empty list with no sign that more existed
+    (WI-1266). The joined set is filtered (digest mode; full mode returns
+    every state, as before), then ordered, then sliced, and
+    `total`/`truncated` say whether the page is the whole answer.
     """
     live: dict[str, EngineSession] = {}
     detail: str | None = None
+    # The engine's count of rows it hid before this list (WI-1289). Zero when
+    # the caller asked for them, when no engine answered, or when the engine
+    # is older than the object response and says nothing about what it hid.
+    hidden_count = 0
     if ctx.engine is None:
         detail = "no session engine is configured (VOGT_ENGINE_URL is unset)"
     else:
         try:
-            live = {row.id: row for row in ctx.engine.list_sessions()}
+            rows, hidden_count = ctx.engine.list_sessions(
+                include_hidden=params.include_hidden
+            )
+            live = {row.id: row for row in rows}
         except EngineUnavailable as exc:
             detail = str(exc)
-    summaries = _rows(ctx, params, live, detail)
+    joined, declared_overflow = _rows(ctx, params, live, detail)
+    now = ctx.clock()
+    stall_after = timedelta(minutes=params.stall_after_minutes)
+    kept = [
+        summary
+        for summary in joined
+        if params.mode == "full"
+        or _kept(
+            summary,
+            _attention_of(summary, now=now, stall_after=stall_after).attention,
+            params.states,
+        )
+    ]
     if params.order == "rss":
         # Stable: sessions with no sample keep their order, after the
         # measured ones.
-        summaries.sort(
+        kept.sort(
             key=lambda s: (1, 0) if s.resources is None else (0, -s.resources.rss_bytes)
         )
-    return SessionListResult(sessions=summaries, engine=detail)
+    total = len(kept)
+    page = kept[params.offset : params.offset + params.limit]
+    # The declared half is fetched with a ceiling one past the operation's own
+    # maximum page (`_DECLARED_FETCH`). When that ceiling is hit, more declared
+    # links match than were joined, so the counted `total` is a floor and the
+    # list is partial even when this page holds everything that was fetched
+    # (WI-1266 review).
+    truncated = params.offset + len(page) < total or declared_overflow
+    if declared_overflow:
+        total += 1
+    if params.mode == "full":
+        return SessionListResult(
+            sessions=page,
+            engine=detail,
+            total=total,
+            truncated=truncated,
+            hidden_count=hidden_count,
+        )
+    digests = []
+    for summary in page:
+        attention = _attention_of(summary, now=now, stall_after=stall_after).attention
+        digests.append(
+            _digest_of(
+                summary,
+                attention=attention,
+                ready=summary.activity == "waiting-for-input",
+                fields=params.fields,
+                budget=_budget_of(
+                    None
+                    if (row := live.get(summary.engine_session_id)) is None
+                    else row.economics
+                ),
+            )
+        )
+    return SessionListResult(
+        digests=digests,
+        engine=detail,
+        total=total,
+        truncated=truncated,
+        hidden_count=hidden_count,
+    )
 
 
 def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweepResult:
@@ -466,9 +738,10 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
         if entries is None:
             # An engine that predates the sweep route: the same table, from
             # the list, without screens.
+            live_rows, _hidden = ctx.engine.list_sessions()
             entries = [
                 EngineSweepEntry(session=row)
-                for row in ctx.engine.list_sessions()
+                for row in live_rows
                 if row.alive or row.hibernated
             ]
     except EngineUnavailable as exc:
@@ -477,9 +750,14 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
         )
     live = {entry.session.id: entry.session for entry in entries}
     tails = {entry.session.id: entry for entry in entries}
-    summaries = _rows(
+    summaries, _declared_overflow = _rows(
         ctx,
-        ListSessionsParams(project=params.project, limit=500),
+        # Unstopped links only. The declared half is capped, and a history of
+        # stopped links would fill that cap with rows the sweep then discards
+        # (it keeps only sessions the engine still runs), pushing a live link
+        # older than the newest 500 starts out of the table entirely (WI-1266
+        # review).
+        ListSessionsParams(project=params.project, limit=500, offset=0),
         live,
         None,
     )
@@ -508,14 +786,16 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                 attention=verdict.attention,
                 attention_reason=verdict.reason,
                 session=summary,
-                screen_tail=list(entry.screen_tail),
+                screen_tail=list(entry.screen_tail) if params.screen_lines else [],
                 ready=entry.ready,
             )
         )
     rows.sort(
         key=lambda row: (
             oversight.ORDER.get(row.attention, 99),  # type: ignore[call-overload]
-            -(row.session.last_output_at or now).timestamp(),
+            -(
+                (row.session.last_output_at if row.session is not None else None) or now
+            ).timestamp(),
         )
     )
     counts: dict[str, int] = {"total": len(rows), "needs_you": 0}
@@ -523,6 +803,36 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
         counts[row.attention] = counts.get(row.attention, 0) + 1
         if row.attention in oversight.NEEDS_YOU:
             counts["needs_you"] += 1
+    if params.mode == "digest":
+        kept: list[SessionSweepRow] = []
+        for row in rows:
+            if row.session is None:
+                continue
+            if not _kept(row.session, row.attention, params.states):
+                continue
+            if not _attention_kept(row.attention, params.attention):
+                continue
+            kept.append(
+                SessionSweepRow(
+                    attention=row.attention,
+                    attention_reason=row.attention_reason,
+                    digest=_digest_of(
+                        row.session,
+                        attention=row.attention,
+                        ready=row.ready,
+                        fields=params.fields,
+                        budget=_budget_of(
+                            None
+                            if (live_row := live.get(row.session.engine_session_id))
+                            is None
+                            else live_row.economics
+                        ),
+                    ),
+                    screen_tail=row.screen_tail,
+                    ready=row.ready,
+                )
+            )
+        rows = kept[: params.limit]
     return SessionSweepResult(rows=rows, counts=counts, swept_at=now, engine=None)
 
 
@@ -531,11 +841,16 @@ def _rows(
     params: ListSessionsParams,
     live: dict[str, EngineSession],
     detail: str | None,
-) -> list[SessionSummary]:
+) -> tuple[list[SessionSummary], bool]:
     """The rows `session.list` and `session.sweep` share: Vogt's links joined
     with what the engine reported (`live`, empty when `detail` says why it
     could not be asked), unlinked engine sessions appended, and reply
-    excerpts read from the agents' transcripts."""
+    excerpts read from the agents' transcripts.
+
+    The second element is true when more declared links match than were
+    fetched: the declared half is capped, so past the cap the joined set is
+    not the whole answer and the caller must say so.
+    """
     with ctx.declared.read() as view:
         project_id = (
             None
@@ -551,9 +866,16 @@ def _rows(
             project_id=project_id,
             work_item_id=work_item_id,
             include_stopped=params.include_stopped,
-            limit=params.limit,
-            offset=params.offset,
+            # The page is cut after the state filter, so the declared half
+            # has to be the whole filtered set. One past the operation's own
+            # ceiling (`ListSessionsParams.limit` max 500) so a match beyond
+            # it is visible as overflow instead of a silently complete list.
+            limit=_DECLARED_FETCH,
+            offset=0,
         )
+        declared_overflow = len(sessions) == _DECLARED_FETCH
+        if declared_overflow:
+            sessions = sessions[: _DECLARED_FETCH - 1]
         summaries = [
             _summarize(
                 view,
@@ -564,15 +886,17 @@ def _rows(
             for session in sessions
         ]
 
-        # Append live engine sessions Vogt never linked. A project/work-item
+        # Append engine sessions Vogt never linked. A project/work-item
         # filter is a filter on the declared half, which these do not have, so
-        # they surface only when neither filter is set; and they are appended
-        # only on the first page, having no stable position to paginate by.
+        # they surface only when neither filter is set. The caller pages the
+        # joined set afterwards, so they are not sliced here: slicing to the
+        # page size before the state filter drops a live unlinked session
+        # behind a page of hibernated links (WI-1266).
         # An unlinked session whose process has exited is the engine's
         # leftover, not a running terminal: it is listed only when stopped
         # sessions were asked for, as a linked one Vogt stopped would be.
         unfiltered = project_id is None and work_item_id is None
-        if unfiltered and params.offset == 0:
+        if unfiltered:
             for engine_session in live.values():
                 # A hibernated session is asleep, not stopped: listed always.
                 if (
@@ -583,7 +907,6 @@ def _rows(
                     continue
                 if view.session_by_engine_id(engine_session.id) is None:
                     summaries.append(_summarize_engine_only(engine_session, view))
-            summaries = summaries[: params.limit]
 
         templates = {
             summary.engine_session_id: summary.template for summary in summaries
@@ -612,7 +935,7 @@ def _rows(
             if excerpt is not None:
                 update["last_reply_excerpt"] = excerpt
         summaries[index] = summary.model_copy(update=update)
-    return summaries
+    return summaries, declared_overflow
 
 
 def _opencode_replies(
@@ -768,6 +1091,284 @@ def last_reply(
     )
 
 
+def _budget_of(payload: dict[str, Any] | None) -> str | None:
+    """The digest line from an engine economics reading, or None when the
+    engine has not measured the session."""
+    if not payload:
+        return None
+    tools = payload.get("tool_result_bytes")
+    reading = SessionEconomics(
+        turns=_int_of(payload.get("turns")),
+        context_tokens=_int_of(payload.get("context_tokens")),
+        peak_context_tokens=_int_of(payload.get("peak_context_tokens")),
+        compactions=_int_of(payload.get("compactions")),
+        tool_result_bytes={
+            str(name): _int_of(value)
+            for name, value in tools.items()
+            if isinstance(name, str)
+        }
+        if isinstance(tools, dict)
+        else {},
+        reads_repeated=_int_of(payload.get("reads_repeated")),
+        output_tokens=_int_of(payload.get("output_tokens")),
+        usage_measured=payload.get("usage_measured") is True,
+    )
+    return reading.budget_line(None, None)
+
+
+def _int_of(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def economics(
+    ctx: AppContext, params: SessionEconomicsParams
+) -> SessionEconomicsResult:
+    """What the session's agent transcript cost, read whole.
+
+    The same finding as `last_reply`, but the file is metered rather than
+    tailed: context, compactions and tool bytes live anywhere in it, not in
+    the last few megabytes. Cost stays null (no price table) and the worktree
+    is not measured here, so commits and files_changed stay null rather than
+    claiming a clean tree.
+    """
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    engine_session: EngineSession | None = None
+    if ctx.engine is not None:
+        try:
+            engine_session = ctx.engine.get_session(engine_id)
+        except EngineUnavailable:
+            engine_session = None
+    declared = target.session
+    if engine_session is None and declared is None:
+        msg = f"no session {params.id!r}"
+        raise NotFound(msg)
+    result = SessionEconomicsResult(
+        id=params.id,
+        engine_session_id=engine_id,
+        account=None if engine_session is None else engine_session.account,
+    )
+    reported = None if engine_session is None else engine_session.economics
+    if reported:
+        # The engine's tailer already metered the transcript. Re-reading the
+        # file here would repeat its work and could disagree with the number
+        # the session list shows.
+        return result.model_copy(
+            update={
+                "agent": engine_session.conversation_agent if engine_session else None,
+                "conversation_id": engine_session.conversation_id
+                if engine_session
+                else None,
+                "basis": "engine",
+                "turns": _int_of(reported.get("turns")),
+                "context_tokens": _int_of(reported.get("context_tokens")),
+                "peak_context_tokens": _int_of(reported.get("peak_context_tokens")),
+                "compactions": _int_of(reported.get("compactions")),
+                "tool_result_bytes": {
+                    str(name): _int_of(value)
+                    for name, value in reported["tool_result_bytes"].items()
+                }
+                if isinstance(reported.get("tool_result_bytes"), dict)
+                else {},
+                "reads_repeated": _int_of(reported.get("reads_repeated")),
+                "wall_clock_count": (
+                    _int_of(reported["wall_clock"].get("count"))
+                    if isinstance(reported.get("wall_clock"), dict)
+                    else 0
+                ),
+                "wall_clock_max_ms": _int_of(
+                    (reported.get("wall_clock") or {}).get("max_ms")
+                )
+                if isinstance(reported.get("wall_clock"), dict)
+                else 0,
+                "wall_clock_mean_ms": _int_of(
+                    (reported.get("wall_clock") or {}).get("mean_ms")
+                )
+                if isinstance(reported.get("wall_clock"), dict)
+                else 0,
+                "output_tokens": _int_of(reported.get("output_tokens")),
+                "usage_measured": reported.get("usage_measured") is True,
+                "budget_line": _budget_of(reported) or "",
+                "detail": None,
+            }
+        )
+    if engine_session is not None and engine_session.conversation_agent == "opencode":
+        return result.model_copy(
+            update={
+                "agent": "opencode",
+                "basis": "engine-id",
+                "detail": "opencode transcripts are not metered",
+            }
+        )
+    roots = ctx.config.session_transcript_roots
+    if not roots:
+        return result.model_copy(
+            update={"detail": "session_transcript_roots is empty: reading is off"}
+        )
+    started = (
+        declared.started_at
+        if declared is not None
+        else _parse_engine_timestamp(
+            None if engine_session is None else engine_session.created_at
+        )
+    )
+    found = transcripts.find(
+        roots,
+        engine_session_id=engine_id,
+        command=None if engine_session is None else engine_session.command,
+        template=None if declared is None else declared.template,
+        cwd=(engine_session.cwd if engine_session is not None else None)
+        or (declared.cwd if declared is not None else None),
+        started_at=started,
+        allow_cwd_guess=True,
+    )
+    if found is None:
+        return result.model_copy(
+            update={
+                "detail": (
+                    "no agent transcript found for this session (a plain shell, "
+                    "an agent started by hand in another directory, or "
+                    "transcripts this process cannot read)"
+                )
+            }
+        )
+    try:
+        text = found.path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return result.model_copy(
+            update={
+                "agent": found.agent,
+                "conversation_id": found.conversation_id,
+                "basis": found.basis,
+                "transcript": str(found.path),
+                "detail": "the transcript could not be read",
+            }
+        )
+    reading = meter(text.splitlines(), agent=found.agent)
+    return result.model_copy(
+        update={
+            "agent": found.agent,
+            "conversation_id": found.conversation_id,
+            "basis": found.basis,
+            "transcript": str(found.path),
+            "turns": reading.turns,
+            "context_tokens": reading.context_tokens,
+            "peak_context_tokens": reading.peak_context_tokens,
+            "compactions": reading.compactions,
+            "tool_result_bytes": dict(reading.tool_result_bytes),
+            "reads_repeated": reading.reads_repeated,
+            "wall_clock_count": reading.wall_clock.count,
+            "wall_clock_max_ms": reading.wall_clock.max_ms,
+            "wall_clock_mean_ms": reading.wall_clock.mean_ms,
+            "output_tokens": reading.output_tokens,
+            "usage_measured": reading.usage_measured,
+            "budget_line": reading.budget_line(None, None),
+            "detail": None,
+        }
+    )
+
+
+_EXCERPT_LIMIT = 120
+
+
+def _int_or_none(value: object) -> int | None:
+    """An economics counter the engine sent, or None when it did not.
+
+    A bool is an int in Python and is not a count. A float is not a count
+    either. Anything else is absent rather than zero: zero would say the
+    session was measured and did nothing.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def digest(ctx: AppContext, params: SessionDigestParams) -> SessionDigestResult:
+    """One session's digest, from a single engine row plus a transcript tail.
+
+    Numbers come from the row's `economics` when the engine already computed
+    them, and stay null when it did not. This read does not meter a transcript.
+    The excerpt is the same tail read the list digest uses, clipped to 120
+    characters, and null when the transcript cannot be read.
+    """
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    engine_session: EngineSession | None = None
+    if ctx.engine is not None:
+        try:
+            engine_session = ctx.engine.get_session(engine_id)
+        except EngineUnavailable:
+            engine_session = None
+    if engine_session is None and target.session is None:
+        msg = f"no session {params.id!r}"
+        raise NotFound(msg)
+    if engine_session is None:
+        return SessionDigestResult(id=params.id)
+    numbers = engine_session.economics
+    turns = context = peak = compactions = output = None
+    usage_measured: bool | None = None
+    context_pct: int | None = None
+    budget: str | None = None
+    if numbers is not None:
+        turns = _int_or_none(numbers.get("turns"))
+        context = _int_or_none(numbers.get("context_tokens"))
+        peak = _int_or_none(numbers.get("peak_context_tokens"))
+        compactions = _int_or_none(numbers.get("compactions"))
+        output = _int_or_none(numbers.get("output_tokens"))
+        measured = numbers.get("usage_measured")
+        usage_measured = measured if isinstance(measured, bool) else None
+        reading = SessionEconomics(
+            turns=turns or 0,
+            context_tokens=context or 0,
+            peak_context_tokens=peak or 0,
+            compactions=compactions or 0,
+            output_tokens=output or 0,
+            usage_measured=bool(usage_measured),
+        )
+        budget = reading.budget_line(None, params.context_window)
+        if params.context_window and context is not None:
+            context_pct = min(100, round(100 * context / params.context_window))
+    excerpt = _digest_excerpt(
+        ctx,
+        engine_session,
+        None if target.session is None else target.session.template,
+    )
+    return SessionDigestResult(
+        id=params.id,
+        name=engine_session.name or None,
+        work_item=engine_session.work_item,
+        activity=engine_session.activity,
+        blocked=_blocked(engine_session.blocked),
+        last_reply_excerpt=excerpt,
+        turns=turns,
+        context_tokens=context,
+        peak_context_tokens=peak,
+        compactions=compactions,
+        output_tokens=output,
+        usage_measured=usage_measured,
+        context_pct=context_pct,
+        budget_line=budget,
+        updated_at=_parse_engine_timestamp(engine_session.activity_changed_at),
+    )
+
+
+def _digest_excerpt(
+    ctx: AppContext, engine_session: EngineSession, template: str | None
+) -> str | None:
+    """The list digest's tail read, clipped, and null on any failure.
+
+    A transcript that cannot be found or read is an absent excerpt, never an
+    error that fails the digest.
+    """
+    found = _transcript(ctx, engine_session, template)
+    if found is None:
+        return None
+    excerpt = transcripts.last_reply_excerpt(found)
+    if excerpt is None or len(excerpt) <= _EXCERPT_LIMIT:
+        return excerpt
+    return excerpt[:_EXCERPT_LIMIT]
+
+
 # -- session history ------------------------------------------------
 #
 # Thin read pass-throughs to the engine's history surface. All three degrade
@@ -797,7 +1398,7 @@ def history_list(ctx: AppContext, params: HistoryListParams) -> HistoryListResul
                 ended_at=row.ended_at,
                 exit_code=row.exit_code,
                 cwd=row.cwd,
-                command=row.command,
+                command=None if params.mode == "summary" else row.command,
                 scrollback_bytes=row.scrollback_bytes,
                 template=row.template,
                 role=row.role,
@@ -884,7 +1485,19 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     reason = writes.validate_reason(params.reason)
     text = params.text or ""
     keys = list(params.keys or [])
-    if not text and not keys and not params.submit:
+    # `submit` defaults to pressing Enter after text. `draft` is the opt-out
+    # for typing without sending, and an explicit `submit=false` means the
+    # same thing. A call that names only keys keeps its old behaviour: the
+    # keys are pressed and nothing else, unless `submit` is given explicitly.
+    # An "enter" among the keys is already the submit, so the default adds no
+    # second, blind Enter after it.
+    explicit_submit = "submit" in params.model_fields_set
+    submit = (
+        params.submit
+        and not params.draft
+        and (explicit_submit or (bool(text) and "enter" not in keys))
+    )
+    if not text and not keys and not submit:
         msg = "nothing to send: give text, keys, or submit"
         raise InvalidRequest(msg)
     size = len(text.encode("utf-8"))
@@ -903,11 +1516,11 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     if text:
         writes_in_order.append((text, False))
     writes_in_order.extend((SESSION_KEYS[key], False) for key in keys)
-    if params.submit:
+    if submit:
         writes_in_order.append(("", True))
     # Enter by either route is a submit: `keys: ["enter"]` used to report
     # `submitted: false` (WI-918).
-    submitted = params.submit or "enter" in keys
+    submitted = submit or "enter" in keys
     confirming = submitted and params.confirm
     before: str | None = None
     if confirming:
@@ -930,6 +1543,9 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         current = engine.get_session(engine_id)
         if current is None or not current.hibernated:
             raise
+        # Never forced. A session whose work was handed on, or whose work item
+        # is already live in the same directory, stays asleep and the engine's
+        # refusal (409) is the answer.
         _wake(ctx, engine, target, f"woken to deliver input: {reason}")
         woke = True
         waited = engine.wait_session(
@@ -967,7 +1583,8 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             "linked": linked,
             "bytes": size,
             "keys": list(keys),
-            "submit": params.submit,
+            "submit": submit,
+            "draft": params.draft,
             "submitted": submitted,
             "delivery": verdict.delivery,
             "woke": woke,
@@ -975,6 +1592,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         },
         event_kind=SESSION_INPUT_EVENT,
     )
+    digest = _input_digest(ctx, target)
     return SessionInputResult(
         id=params.id,
         engine_session_id=engine_id,
@@ -985,6 +1603,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         delivery=verdict.delivery,
         delivery_evidence=verdict.evidence,
         woke=woke,
+        digest=digest,
     )
 
 
@@ -1115,13 +1734,16 @@ def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResul
         screen = engine.session_screen(engine_id)
         if screen is None or screen.activity != "hibernated":
             raise
+        shown = _screen_result(params.id, engine_id, screen)
         return SessionWaitResult(
             id=params.id,
             engine_session_id=engine_id,
             outcome="hibernated",
             matched=False,
             waited_ms=0,
-            screen=_screen_result(params.id, engine_id, screen),
+            screen=shown if params.screen else None,
+            digest=None if params.screen else _wait_digest(ctx, params.id, engine_id),
+            screen_tail=[] if params.screen else _tail_of(shown),
         )
     if waited is None:
         if engine.get_session(engine_id) is not None:
@@ -1133,13 +1755,114 @@ def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResul
             raise EngineUnavailable(msg)
         msg = f"the engine has no live session {params.id!r}"
         raise NotFound(msg)
+    shown = _screen_result(params.id, engine_id, waited.screen)
     return SessionWaitResult(
         id=params.id,
         engine_session_id=engine_id,
         outcome=waited.outcome,
         matched=waited.matched,
         waited_ms=waited.waited_ms,
-        screen=_screen_result(params.id, engine_id, waited.screen),
+        screen=shown if params.screen else None,
+        digest=None if params.screen else _wait_digest(ctx, params.id, engine_id),
+        screen_tail=[] if params.screen else _tail_of(shown),
+    )
+
+
+def _session_labels(ctx: AppContext, engine_ids: list[str]) -> dict[str, str]:
+    """Vogt's `ses_…` id for each linked engine session, else the uuid itself.
+
+    One read for the page: opening the store per change is a query per row.
+    """
+    labels: dict[str, str] = {}
+    with ctx.declared.read() as view:
+        for engine_id in dict.fromkeys(engine_ids):
+            linked = view.session_by_engine_id(engine_id)
+            labels[engine_id] = linked.id if linked is not None else engine_id
+    return labels
+
+
+def _change(change: EngineChange, labels: dict[str, str]) -> SessionChange:
+    return SessionChange(
+        seq=change.seq,
+        at=_parse_engine_timestamp(change.at),
+        session=labels.get(change.session, change.session),
+        kind=change.kind,
+        summary=change.summary,
+    )
+
+
+def _engine_ids(ctx: AppContext, ids: list[str]) -> list[str] | None:
+    """Resolve named sessions to engine ids; `None` means every session."""
+    named = [one.strip() for one in ids if one.strip()]
+    if not named:
+        return None
+    return [_target(ctx, one).engine_session_id for one in named]
+
+
+def session_changes(
+    ctx: AppContext, params: SessionChangesParams
+) -> SessionChangesResult:
+    """Read session deltas published after `since`.
+
+    One call replaces re-sweeping every session. The engine keeps a bounded
+    ring of what it published; this reads a page of it.
+    """
+    engine = _engine(ctx)
+    ids = _engine_ids(ctx, params.ids)
+    try:
+        page = engine.session_changes(since=params.since, ids=ids, limit=params.limit)
+    except Conflict:
+        page = None
+    if page is None:
+        msg = (
+            "the session engine does not support changes yet (it has no "
+            "GET /api/sessions/changes route); upgrade the engine, or poll "
+            "session.sweep"
+        )
+        raise EngineUnavailable(msg)
+    labels = _session_labels(ctx, [one.session for one in page.changes])
+    return SessionChangesResult(
+        changes=[_change(one, labels) for one in page.changes],
+        next_cursor=page.next_cursor,
+        truncated=page.truncated,
+    )
+
+
+def session_wait_any(
+    ctx: AppContext, params: SessionWaitAnyParams
+) -> SessionWaitAnyResult:
+    """Block until one named session publishes a kind in `until`.
+
+    The overseer's loop: wait, then read `session.changes` from the cursor
+    this returns. The engine does the waiting; this is a read, held open for
+    at most `timeout_s`.
+    """
+    engine = _engine(ctx)
+    ids = _engine_ids(ctx, params.ids)
+    kinds = [one.strip() for one in params.until if one.strip()] or None
+    try:
+        waited = engine.wait_any(
+            ids=ids,
+            until=kinds,
+            cursor=params.cursor,
+            timeout_s=params.timeout_s,
+        )
+    except Conflict:
+        waited = None
+    if waited is None:
+        msg = (
+            "the session engine does not support wait-any yet (it has no "
+            "GET /api/sessions/wait-any route); upgrade the engine, or poll "
+            "session.sweep"
+        )
+        raise EngineUnavailable(msg)
+    labels = (
+        {} if waited.change is None else _session_labels(ctx, [waited.change.session])
+    )
+    return SessionWaitAnyResult(
+        outcome=waited.outcome,
+        change=None if waited.change is None else _change(waited.change, labels),
+        next_cursor=waited.next_cursor,
     )
 
 
@@ -1159,11 +1882,17 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
+    successor: str | None = None
+    if params.superseded_by:
+        successor = _target(ctx, params.superseded_by).engine_session_id
     if target.session is not None and target.session.stopped_at is not None:
         msg = f"session {params.id!r} was stopped; there is nothing to hibernate"
         raise Conflict(msg)
     hibernated = engine.hibernate_session(
-        engine_id, reason=reason, allow_shell=params.allow_shell
+        engine_id,
+        reason=reason,
+        allow_shell=params.allow_shell,
+        superseded_by=successor,
     )
     if hibernated is None:
         msg = (
@@ -1178,6 +1907,7 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
         "resumable": None
         if hibernated.hibernation is None
         else hibernated.hibernation.resumable,
+        "superseded_by": successor,
     }
     if target.session is None:
         audited_action(
@@ -1189,7 +1919,7 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
             outcome=outcome,
             event_kind=SESSION_HIBERNATED_EVENT,
         )
-        return SessionResult(session=_summarize_engine_only(hibernated))
+        return _as_digest(SessionResult(session=_summarize_engine_only(hibernated)))
     session = target.session
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
@@ -1215,23 +1945,73 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
             summary={**outcome, "tokens_revoked": len(revoked)},
         )
 
-    return audited_write(ctx, operation=SESSION_HIBERNATE, reason=reason, body=body)
+    return _as_digest(
+        audited_write(ctx, operation=SESSION_HIBERNATE, reason=reason, body=body)
+    )
 
 
 def wake_session(ctx: AppContext, params: WakeSessionParams) -> SessionResult:
     """Start a hibernated session again: the same id, the same conversation.
 
     A live session is returned as it is — waking is idempotent, so a caller
-    that is not sure need not check first.
+    that is not sure need not check first. A session superseded by a successor,
+    or whose work item another live session holds in the same directory, is
+    refused unless `params.force`.
     """
     reason = writes.validate_reason(params.reason)
     engine = _engine(ctx)
+    if params.force and not _may_force_wake(ctx, engine):
+        raise RoleRefused("only a person or an oversight session may force a wake")
     target = _target(ctx, params.id)
-    return _wake(ctx, engine, target, reason)
+    return _wake(ctx, engine, target, reason, force=params.force)
+
+
+def _named_session(ctx: AppContext, engine_session_id: str) -> str:
+    """The ses_… id of the session linked to `engine_session_id`, or the uuid
+    itself when none is. One declared read."""
+    with ctx.declared.read() as view:
+        row = view.session_by_engine_id(engine_session_id)
+    return row.id if row is not None else engine_session_id
+
+
+_SUCCESSOR = re.compile(
+    r"(?P<head>session [0-9a-fA-F-]{36} was superseded by )(?P<uuid>[0-9a-fA-F-]{36})"
+)
+
+
+def _in_session_terms(ctx: AppContext, message: str) -> str:
+    """Say a refused wake in ses_… terms when the successor is a linked session.
+    An unlinked successor stays a uuid, and so does any other refusal."""
+    found = _SUCCESSOR.search(message)
+    if found is None:
+        return message
+    named = _named_session(ctx, found.group("uuid"))
+    if named == found.group("uuid"):
+        return message
+    return message.replace(found.group("uuid"), named, 1)
 
 
 def _wake(
-    ctx: AppContext, engine: EngineClient, target: _Target, reason: str
+    ctx: AppContext,
+    engine: EngineClient,
+    target: _Target,
+    reason: str,
+    *,
+    force: bool = False,
+) -> SessionResult:
+    try:
+        return _wake_inner(ctx, engine, target, reason, force=force)
+    except Conflict as refused:
+        raise Conflict(_in_session_terms(ctx, str(refused))) from None
+
+
+def _wake_inner(
+    ctx: AppContext,
+    engine: EngineClient,
+    target: _Target,
+    reason: str,
+    *,
+    force: bool = False,
 ) -> SessionResult:
     """Wake `target` if it is hibernated; its summary either way.
 
@@ -1256,14 +2036,14 @@ def _wake(
             )
             raise Conflict(msg)
         if session is None:
-            return SessionResult(session=_summarize_engine_only(current))
+            return _as_digest(SessionResult(session=_summarize_engine_only(current)))
         with ctx.declared.read() as view:
-            return SessionResult(
-                session=_summarize(view, session, engine_session=current)
+            return _as_digest(
+                SessionResult(session=_summarize(view, session, engine_session=current))
             )
 
     if session is None:
-        woken = engine.wake_session(engine_id)
+        woken = engine.wake_session(engine_id, force=force)
         if woken is None:
             msg = f"the engine has no session {engine_id!r}"
             raise NotFound(msg)
@@ -1273,10 +2053,14 @@ def _wake(
             reason=reason,
             entity_kind="session",
             entity_id=engine_id,
-            outcome={"engine_session_id": engine_id, "linked": False},
+            outcome={
+                "engine_session_id": engine_id,
+                "linked": False,
+                "forced": force,
+            },
             event_kind=SESSION_WOKEN_EVENT,
         )
-        return SessionResult(session=_summarize_engine_only(woken))
+        return _as_digest(SessionResult(session=_summarize_engine_only(woken)))
 
     if session.stopped_at is not None:
         msg = f"session {session.id!r} was stopped; start a new one instead"
@@ -1284,7 +2068,7 @@ def _wake(
     scopes = _session_scopes(ctx)
     credential = issue(scopes)
     woken = engine.wake_session(
-        engine_id, env=_session_env(ctx, session.id, credential.secret)
+        engine_id, env=_session_env(ctx, session.id, credential.secret), force=force
     )
     if woken is None:
         msg = f"the engine has no session {engine_id!r}"
@@ -1327,10 +2111,13 @@ def _wake(
                 "engine_session_id": engine_id,
                 "conversation_id": current.conversation_id,
                 "tokens_revoked": len(revoked),
+                "forced": force,
             },
         )
 
-    return audited_write(ctx, operation=SESSION_WAKE, reason=reason, body=body)
+    return _as_digest(
+        audited_write(ctx, operation=SESSION_WAKE, reason=reason, body=body)
+    )
 
 
 def keep_session_awake(
@@ -1364,6 +2151,64 @@ def keep_session_awake(
         return SessionResult(
             session=_summarize(view, target.session, engine_session=updated)
         )
+
+
+def commit_for_session(
+    ctx: AppContext, params: CommitForSessionParams
+) -> CommitForSessionResult:
+    """Commit a worker session's staged work (C14).
+
+    The engine owns the checklist: the worker must be idle, hibernated or
+    blocked, and the staged diff must carry no conflict marker, secret or
+    intent-to-add. The commit uses the repo's own identity. The result is a
+    digest and the SHA; the diff itself only when the caller asked for it.
+    """
+    reason = writes.validate_reason(params.reason)
+    message = params.message.strip()
+    if not message:
+        msg = "message must not be empty: say what the commit does"
+        raise InvalidRequest(msg)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    _require_commit_authority(ctx, engine, target.engine_session_id)
+    forbidden_text = _forbidden_text_for(ctx, target)
+    committed = engine.git_commit(
+        session_id=target.engine_session_id,
+        message=message,
+        paths=params.paths,
+        full_diff=params.full_diff,
+        forbidden_text=forbidden_text,
+        worktree=params.worktree,
+    )
+    sha = str(committed.get("commit") or "")
+    if not sha:
+        msg = f"the engine committed nothing for session {params.id!r}"
+        raise InvalidRequest(msg)
+    audited_action(
+        ctx,
+        operation=SESSION_COMMIT_FOR,
+        reason=reason,
+        entity_kind="session",
+        entity_id=(
+            target.session.id
+            if target.session is not None
+            else target.engine_session_id
+        ),
+        outcome={
+            "engine_session_id": target.engine_session_id,
+            "commit": sha,
+            "digest": str(committed.get("digest") or ""),
+            "paths": len(params.paths),
+        },
+        event_kind=SESSION_COMMITTED_EVENT,
+    )
+    return CommitForSessionResult(
+        commit=sha,
+        digest=str(committed.get("digest") or ""),
+        diff_stat=str(committed.get("diff_stat") or ""),
+        diff=committed.get("diff"),
+        review=[str(flag) for flag in committed.get("review") or []],
+    )
 
 
 def rename_session(ctx: AppContext, params: RenameSessionParams) -> SessionResult:
@@ -1496,7 +2341,7 @@ def set_session_role(ctx: AppContext, params: SetSessionRoleParams) -> SessionRe
         msg = (
             "only a person nominates an oversight session, or makes one a worker "
             f"again ({ctx.principal.identity_ref} is an agent); ask a person to "
-            "set the role from the GUI, or start the session with role=oversight"
+            "set the role from the GUI"
         )
         raise RoleRefused(msg)
     engine = _engine(ctx)
@@ -1784,6 +2629,18 @@ SESSION_TOKEN = "session.token"
 ENGINE_SESSION_ACTOR_PREFIX = "agent:engine:"
 
 
+def _may_force_wake(ctx: AppContext, engine: EngineClient) -> bool:
+    """`force` overrides the handoff guard, so only a person, or a session the
+    engine has marked `oversight`, may use it. Any other agent is refused."""
+    if _answers_as_person(ctx):
+        return True
+    caller_id = _caller_engine_session_id(ctx)
+    if caller_id is None:
+        return False
+    caller = engine.get_session(caller_id)
+    return caller is not None and caller.role == "oversight"
+
+
 def _answers_as_person(ctx: AppContext) -> bool:
     """Whether this caller answers a permission prompt as a person (WI-983).
 
@@ -1795,6 +2652,71 @@ def _answers_as_person(ctx: AppContext) -> bool:
     process that can read it.
     """
     return ctx.principal.kind == "human" and not _is_engine_credential(ctx)
+
+
+def _forbidden_text_for(ctx: AppContext, target: _Target) -> list[str]:
+    """The target session's project policy patterns (C13), read here, never
+    taken from the caller. A session Vogt never linked has no project, so
+    nothing is forbidden for it beyond what the engine checks anyway."""
+    if target.session is None:
+        return []
+    with ctx.declared.read() as view:
+        project = view.project_by_id(target.session.project_id)
+    return [] if project is None else list(project.agent_policy.forbidden_text)
+
+
+def _caller_engine_session_id(ctx: AppContext) -> str | None:
+    """The engine session id this caller is, when the caller is a session.
+
+    A session Vogt started is `agent:session:<ses_…>`, resolved through its
+    row. One the engine started is `agent:engine:<uuid>`, and that uuid is
+    the engine's id. Anyone else is not a session.
+    """
+    ref = ctx.principal.identity_ref
+    if ref.startswith("agent:session:"):
+        own = _own_session(ctx)
+        with ctx.declared.read() as view:
+            session = view.session_by_id(own)
+        if session is None:
+            return None
+        return session.engine_session_id
+    if ref.startswith(ENGINE_SESSION_ACTOR_PREFIX):
+        return ref.removeprefix(ENGINE_SESSION_ACTOR_PREFIX)
+    return None
+
+
+def _require_commit_authority(
+    ctx: AppContext, engine: EngineClient, target_engine_id: str
+) -> None:
+    """Who may commit for a session (C14).
+
+    A person always may. A session may commit only for another session, and
+    only when its own engine role is `oversight`: a worker committing its own
+    tree, or another worker's, is the thing this refuses.
+    """
+    if _answers_as_person(ctx):
+        return
+    caller_id = _caller_engine_session_id(ctx)
+    if caller_id is None:
+        msg = (
+            "only a person, or an oversight session, commits for a session "
+            f"({ctx.principal.identity_ref} is neither)"
+        )
+        raise RoleRefused(msg)
+    if caller_id == target_engine_id:
+        msg = (
+            "a session does not commit its own work; an oversight session, or "
+            f"a person, commits for it ({caller_id})"
+        )
+        raise RoleRefused(msg)
+    caller = engine.get_session(caller_id)
+    if caller is None or caller.role != "oversight":
+        role = "unknown" if caller is None else caller.role
+        msg = (
+            "only an oversight session commits for another session "
+            f"({caller_id} is {role})"
+        )
+        raise RoleRefused(msg)
 
 
 def _is_engine_credential(ctx: AppContext) -> bool:
@@ -1914,6 +2836,12 @@ SESSION_REPORT_UNBLOCKED = "session.report_unblocked"
 SESSION_BLOCKED_EVENT = "session.blocked"
 SESSION_UNBLOCKED_EVENT = "session.unblocked"
 
+# One past the largest page `session.list` will return. Fetching exactly the
+# ceiling hides a match beyond it: the response would report the capped count
+# as complete. The extra row is dropped before the join; it only marks the
+# overflow so the caller can keep `truncated` true.
+_DECLARED_FETCH = 501
+
 
 def report_blocked(
     ctx: AppContext, params: ReportBlockedParams
@@ -1984,6 +2912,41 @@ def _set_blocked(
         engine_session_id=engine_id,
         blocked=_blocked(updated.blocked),
     )
+
+
+def _input_digest(ctx: AppContext, target: _Target) -> SessionDigest | None:
+    """The digest of the session just typed into, when it can be read."""
+    try:
+        live = _engine(ctx).get_session(target.engine_session_id)
+    except (EngineUnavailable, NotFound):
+        return None
+    if target.session is None:
+        if live is None:
+            return None
+        return _digest_of(_summarize_engine_only(live))
+    with ctx.declared.read() as view:
+        return _digest_of(_summarize(view, target.session, engine_session=live))
+
+
+def _wait_digest(
+    ctx: AppContext, params_id: str, engine_id: str
+) -> SessionDigest | None:
+    try:
+        live = _engine(ctx).get_session(engine_id)
+    except (EngineUnavailable, NotFound):
+        return None
+    if live is None:
+        return None
+    target = _target(ctx, params_id)
+    if target.session is None:
+        return _digest_of(_summarize_engine_only(live))
+    with ctx.declared.read() as view:
+        return _digest_of(_summarize(view, target.session, engine_session=live))
+
+
+def _tail_of(screen: SessionScreenResult, lines: int = 8) -> list[str]:
+    kept = [line for line in screen.lines if line.strip()]
+    return kept[-lines:]
 
 
 def _own_session(ctx: AppContext) -> str:
@@ -2082,7 +3045,8 @@ class _Subject:
         project_slug: str,
         cwd: str,
         work_item: WorkItem | None,
-        brief: str,
+        brief: ComposedBrief,
+        policy: AgentPolicy,
         is_scratch: bool = False,
     ) -> None:
         self.project_id = project_id
@@ -2090,6 +3054,7 @@ class _Subject:
         self.cwd = cwd
         self.work_item = work_item
         self.brief = brief
+        self.policy = policy
         #: Resolved from `session_scratch_project` rather than named by the
         #: caller. Carried so the name and the audit row can say so.
         self.is_scratch = is_scratch
@@ -2112,7 +3077,78 @@ class _Subject:
         return self.work_item_ref or self.project_slug
 
 
+def _worktree_branch(subject: _Subject, session_id: str) -> str:
+    """The branch a session's own worktree is cut onto (WI-1298).
+
+    `<work item>-<session>` when the session serves an item, otherwise
+    `<project>-<session>`. The session id's tail keeps two sessions on the
+    same item apart, and a ref or slug that is not itself a legal branch
+    name is flattened so git is handed one path component.
+    """
+    head = subject.work_item_ref or subject.project_slug
+    flat = re.sub(r"[^A-Za-z0-9._-]+", "-", head).strip("-") or "session"
+    tail = session_id.removeprefix("ses_")
+    return f"{flat}-{tail}"
+
+
+def _worktree_base(policy: AgentPolicy) -> str:
+    """What the worktree's branch is cut from: the project's integration
+    branch when it states one, otherwise `main`."""
+    stated = policy.base_branch.strip()
+    return stated or "main"
+
+
+def _review_subject(ctx: AppContext, params: StartSessionParams) -> StartSessionParams:
+    """Fold `review_of` into the subject, or refuse a review of nothing.
+
+    A review is of one work item. Naming it is enough — the same sugar as
+    `from_handoff` — and naming a second, different item is a contradiction,
+    refused before a terminal exists. Whether the item has a hand-off is the
+    brief's to say: a review of an item that names no diff still starts, and
+    reports that there is nothing to diff.
+    """
+    if params.review_of is None:
+        return params
+    if params.work_item is not None and params.work_item != params.review_of:
+        msg = (
+            f"review_of names {params.review_of}, but work_item names "
+            f"{params.work_item}"
+        )
+        raise InvalidRequest(msg)
+    if params.from_handoff is not None and params.from_handoff != params.review_of:
+        msg = (
+            f"review_of names {params.review_of}, but from_handoff names "
+            f"{params.from_handoff}"
+        )
+        raise InvalidRequest(msg)
+    with ctx.declared.read() as view:
+        item = _resolve.work_item(view, params.review_of)
+    return params.model_copy(update={"work_item": item.ref, "review_of": item.ref})
+
+
 def _subject(ctx: AppContext, params: StartSessionParams, session_id: str) -> _Subject:
+    params = _review_subject(ctx, params)
+    if params.from_handoff is not None:
+        # Sugar for "fresh session on the item the hand-off belongs to".
+        # The brief carries the hand-off because the brief always does,
+        # once the item is the subject.
+        if params.work_item is not None and params.work_item != params.from_handoff:
+            msg = (
+                "from_handoff names "
+                f"{params.from_handoff}, but work_item names {params.work_item}"
+            )
+            raise InvalidRequest(msg)
+        with ctx.declared.read() as view:
+            item = _resolve.work_item(view, params.from_handoff)
+            handoffs = [
+                one
+                for one in view.comments_for(item.id, limit=200, order="newest")
+                if one.kind == "handoff"
+            ]
+        if not handoffs:
+            msg = f"{item.ref} has no hand-off comment to start a session from"
+            raise InvalidRequest(msg)
+        params = params.model_copy(update={"work_item": item.ref})
     if params.work_item is not None and params.project is not None:
         msg = "give at most one of --work-item or --project"
         raise InvalidRequest(msg)
@@ -2176,7 +3212,14 @@ def _resolve_subject(
             project_slug=project.slug,
             cwd=project.root_path,
             work_item=item,
-            brief=brief_for_work_item(view, item, session_id, _ranking(ctx, item.ref)),
+            brief=(
+                review_brief_for_work_item(view, item, session_id, project=project)
+                if params.review_of is not None
+                else brief_for_work_item(
+                    view, item, session_id, _ranking(ctx, item.ref), project=project
+                )
+            ),
+            policy=project.agent_policy,
         )
 
     project = _resolve.project(view, params.project or "")
@@ -2185,7 +3228,8 @@ def _resolve_subject(
         project_slug=project.slug,
         cwd=project.root_path,
         work_item=None,
-        brief=brief_for_project(view, project.slug, session_id),
+        brief=brief_for_project(view, project.slug, session_id, project=project),
+        policy=project.agent_policy,
     )
 
 
@@ -2231,8 +3275,15 @@ def _engine(ctx: AppContext) -> EngineClient:
     return ctx.engine
 
 
-def _brief_with_task(brief: str, task: str | None, *, autopilot: bool = False) -> str:
-    """Fold an explicit task into the session's brief.
+def _brief_with_task(
+    brief: ComposedBrief,
+    params: StartSessionParams,
+    *,
+    cwd: str,
+    autopilot: bool = False,
+    read_only: bool = False,
+) -> str:
+    """Fold an explicit task, and its touch points, into the session's brief.
 
     The brief is context — the project, or the work item and why it ranks —
     and by itself it asks the agent to do nothing (a project brief says so
@@ -2242,14 +3293,287 @@ def _brief_with_task(brief: str, task: str | None, *, autopilot: bool = False) -
     Appended rather than replacing so the agent keeps the context under
     the task.
     """
-    task = (task or "").strip()
+    text = brief.text
     if autopilot:
         # Said in the brief, not enforced: the engine cannot make an agent
         # keep going, but an agent that was told to will (WI-878).
-        brief = f"{brief.rstrip()}\n\n{AUTOPILOT}"
-    if not task:
-        return brief
-    return f"{brief.rstrip()}\n\n## Task\n\n{task}\n"
+        text = f"{text.rstrip()}\n\n{AUTOPILOT}"
+    if read_only:
+        text = f"{text.rstrip()}\n\n{READ_ONLY}"
+    task = (params.task or "").strip()
+    touch = _touch_points(params, cwd=cwd)
+    if task:
+        # A reviewer already has its task — check the diff — and a caller's
+        # task would read as new work to go and do. It is recorded under the
+        # review instead, as what the review was asked to look at.
+        heading = "## Also asked" if params.review_of is not None else "## Task"
+        text = f"{text.rstrip()}\n\n{heading}\n\n{task}\n"
+    if touch:
+        text = f"{text.rstrip()}\n\n{touch}"
+    return text
+
+
+def _touch_points(params: StartSessionParams, *, cwd: str) -> str:
+    """The structured half of a task: files, symbols, done, gates, map.
+
+    Empty when the caller named none of them, so a plain `task` brief is
+    unchanged. The map is a two-level outline of the directories the files
+    sit in, drawn from the working tree and capped — a map, not a listing.
+    """
+    rows: list[str] = []
+    if params.files:
+        rows.append("**Files**")
+        rows.extend(f"- `{one}`" for one in params.files)
+    if params.symbols:
+        rows.append("**Symbols** " + ", ".join(f"`{one}`" for one in params.symbols))
+    if params.done:
+        rows.append("**Done when**")
+        rows.extend(f"- {one}" for one in params.done)
+    if params.gates:
+        rows.append("**Gates**")
+        rows.extend(f"- {one}" for one in params.gates)
+    outline = _repo_map(params, cwd=cwd)
+    if outline:
+        rows += ["**Repo map**", "```", outline, "```"]
+    if not rows:
+        return ""
+    return "## Touch points\n\n" + "\n".join(rows) + "\n"
+
+
+_REPO_MAP_CAP = 2000
+
+
+def _repo_map(params: StartSessionParams, *, cwd: str) -> str:
+    """A two-level outline of the touch-point directories, or nothing.
+
+    Drawn only when the caller asked (`repo_map`) or named files. Each file's
+    directory is listed one level down, and only when it sits inside `cwd`:
+    a path that escapes the working tree is a hint that was wrong, not a
+    directory to go and read. A missing tree is an empty map, never a failed
+    start. Capped, because a map that outgrows the brief has stopped being one.
+    """
+    wanted = params.repo_map
+    if wanted is False or (wanted is None and not params.files):
+        return ""
+    root = Path(cwd).resolve()
+    if not root.is_dir():
+        return ""
+    dirs = {_touch_dir(root, spec) for spec in params.files}
+    dirs.discard(None)
+    lines: list[str] = []
+    for directory in sorted(dirs, key=lambda one: str(one)):
+        assert directory is not None
+        rel = directory.relative_to(root)
+        lines.append(f"{rel}/" if str(rel) != "." else "./")
+        try:
+            children = sorted(directory.iterdir(), key=lambda one: one.name)
+        except OSError:
+            continue
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            mark = "/" if child.is_dir() else ""
+            lines.append(f"  {child.name}{mark}")
+            if sum(len(line) + 1 for line in lines) > _REPO_MAP_CAP:
+                lines.append("  …")
+                return "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _touch_dir(root: Path, spec: str) -> Path | None:
+    """The directory a touch-point file sits in, if it is inside `root`."""
+    raw = spec.split(":", 1)[0].strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    if resolved.is_file():
+        resolved = resolved.parent
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    return resolved if resolved.is_dir() else None
+
+
+def _enforced_policy(policy: AgentPolicy | None) -> dict[str, Any] | None:
+    """The slice of a project's agent policy the engine can refuse on.
+
+    Guidance (`commit_identity`, `test_recipe`, `rules`) stays in the brief
+    and never reaches the session. With nothing to refuse — no forbidden
+    text and merges that do not deploy — the spec omits `policy` entirely,
+    so a start is byte-identical to one from before enforcement existed.
+    """
+    if policy is None:
+        return None
+    forbidden = [str(pattern) for pattern in policy.forbidden_text]
+    merges = policy.merge_deploys_prod
+    if not forbidden and not merges:
+        return None
+    branches = [str(branch) for branch in policy.main_branches]
+    enforced: dict[str, Any] = {
+        "forbidden_text": forbidden,
+        "merge_deploys_prod": merges,
+    }
+    if branches:
+        enforced["main_branches"] = branches
+    return enforced
+
+
+def _budget(
+    params: StartSessionParams, policy: AgentPolicy | None = None
+) -> SessionBudgetParams | None:
+    """The limits a start carries (C7, WI-1245).
+
+    Asked explicitly, that object is the answer — even an empty one, which is
+    how a caller declines the default rather than inheriting it. Asked nothing,
+    an agent template given a task in the worker role gets the default (120
+    turns, 90 minutes of wall clock per turn, no context limit), plus the
+    project's whole-session wall clock when its `agent_policy` sets one
+    (WI-1281; unset by default). An oversight session and a shell or no-task
+    start get none: there is nothing to bound.
+    """
+    if params.budget is not None:
+        return params.budget
+    if (
+        params.template
+        and params.task
+        and params.task.strip()
+        and params.role == "worker"
+    ):
+        return SessionBudgetParams(
+            turns=120,
+            wall_clock_minutes=90,
+            session_wall_clock_minutes=(
+                policy.session_wall_clock_minutes if policy else None
+            ),
+        )
+    return None
+
+
+def _budget_wire(budget: SessionBudgetParams | None) -> dict[str, int] | None:
+    """The engine's `budget` object, or None when the start sets no budget.
+
+    An empty object is sent as `{}`: it means "no limits", which the engine
+    reads differently from a field that was never sent.
+    """
+    if budget is None:
+        return None
+    return {
+        key: value
+        for key, value in (
+            ("turns", budget.turns),
+            ("context_tokens", budget.context_tokens),
+            ("wall_clock_minutes", budget.wall_clock_minutes),
+            ("session_wall_clock_minutes", budget.session_wall_clock_minutes),
+        )
+        if value is not None
+    }
+
+
+def _budget_params(raw: dict[str, Any] | None) -> SessionBudgetParams | None:
+    """The engine's budget object as the summary carries it.
+
+    Only positive limits survive: zero is not a limit, and a row that yields
+    nothing is no budget rather than an empty object.
+    """
+    if not isinstance(raw, dict):
+        return None
+    limits = {
+        key: value
+        for key in (
+            "turns",
+            "context_tokens",
+            "wall_clock_minutes",
+            "session_wall_clock_minutes",
+        )
+        if isinstance(value := raw.get(key), int) and value > 0
+    }
+    return SessionBudgetParams(**limits) if limits else None
+
+
+#: The start fields a dispatch profile fills, in the order `overrides` lists
+#: them. No `role` and no `permission_mode`: those are never defaults.
+_PROFILE_FIELDS = (
+    "template",
+    "model",
+    "effort",
+    "budget",
+    "worktree",
+    "repo_map",
+    "autopilot",
+)
+
+#: The review profile's hint (WI-1323). Advisory, like autopilot's text.
+READ_ONLY = (
+    "## Read only\n\n"
+    "This session was started to review. Read, run the checks and report; do "
+    "not edit, commit or push."
+)
+
+
+def _resolve_purpose(
+    ctx: AppContext, params: StartSessionParams
+) -> tuple[StartSessionParams, tuple[str, ...], bool]:
+    """Fill a start's unset fields from its purpose's dispatch profile.
+
+    Returns the filled params, the profile fields the caller set explicitly
+    (the overrides), and whether the profile asks for a read-only session.
+    The profile is the deployment's (`dispatch.profiles`, written by a
+    person, over the code defaults), never the caller's own preference. A
+    start with no purpose is returned unchanged.
+    """
+    if params.purpose is None:
+        return params, (), False
+    with ctx.declared.read() as view:
+        profile = dispatch_settings(view).profiles[params.purpose]
+    given = params.model_fields_set
+    supplied: dict[str, object] = {
+        "template": profile.template,
+        "model": profile.model,
+        "effort": profile.effort,
+        "budget": SessionBudgetParams(
+            turns=profile.budget_turns,
+            wall_clock_minutes=profile.budget_wall_clock_minutes,
+        )
+        if profile.budget_turns or profile.budget_wall_clock_minutes
+        else None,
+        "worktree": profile.worktree,
+        "repo_map": profile.repo_map,
+        "autopilot": profile.autopilot,
+    }
+    filled = {field: value for field, value in supplied.items() if field not in given}
+    overrides = tuple(field for field in _PROFILE_FIELDS if field in given)
+    return params.model_copy(update=filled), overrides, profile.read_only
+
+
+def _started_by(
+    ctx: AppContext, engine: EngineClient
+) -> tuple[str | None, Literal["person", "oversight", "worker"] | None]:
+    """Who is starting this session, from the caller's verified identity.
+
+    A person (the check `session.grant_decide` makes) is `person` with no
+    session. A session is named by its token's actor, and its kind is its
+    engine role right now; None when the engine cannot say. Nothing here is
+    read from the start's parameters.
+    """
+    if ctx.principal.kind != "agent":
+        return None, "person"
+    caller = _caller_engine_session_id(ctx)
+    if caller is None:
+        return None, None
+    try:
+        live = engine.get_session(caller)
+    except EngineUnavailable:
+        live = None
+    if live is None or live.role not in ("oversight", "worker"):
+        return caller, None
+    return caller, "oversight" if live.role == "oversight" else "worker"
 
 
 def _autopilot(params: StartSessionParams) -> bool:
@@ -2269,14 +3593,20 @@ def _start_on_engine(
     cwd: str,
     env: dict[str, str],
     brief: str,
+    companion: str = "",
     model: str | None = None,
     effort: str | None = None,
     resume: str | None = None,
     permission_mode: str | None = None,
+    account: str | None = None,
     autopilot: bool = False,
     role: str = "worker",
     work_item: str | None = None,
+    policy: AgentPolicy | None = None,
+    budget: SessionBudgetParams | None = None,
+    worktree: dict[str, str] | None = None,
 ) -> EngineSession:
+    enforced = _enforced_policy(policy)
     return engine.create_session(
         prompt=brief,
         name=name,
@@ -2298,9 +3628,14 @@ def _start_on_engine(
         effort=effort,
         resume=resume,
         permission_mode=permission_mode,
+        account=account,
         autopilot=autopilot,
         role=role,
         work_item=work_item,
+        companion=companion or None,
+        policy=enforced,
+        budget=_budget_wire(budget),
+        worktree=worktree,
     )
 
 
@@ -2352,6 +3687,9 @@ def _audited_payload(session: CodingSession) -> dict[str, object]:
         "template": session.template,
         "model": session.model,
         "effort": session.effort,
+        "purpose": session.purpose,
+        "started_by_session": session.started_by_session,
+        "started_by_kind": session.started_by_kind,
         "started_at": session.started_at.isoformat(),
         "stopped_at": None
         if session.stopped_at is None
@@ -2393,6 +3731,9 @@ def _summarize(
         model=session.model,
         effort=session.effort,
         reason=session.reason,
+        purpose=session.purpose,
+        started_by_session=session.started_by_session,
+        started_by_kind=session.started_by_kind,
         started_at=session.started_at,
         stopped_at=session.stopped_at,
         activity=None if engine_session is None else engine_session.activity,
@@ -2446,8 +3787,10 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "conversation_id": engine_session.conversation_id,
         "resources": _resources(engine_session.resources),
         "permission_mode": engine_session.permission_mode,
+        "account": engine_session.account,
         "stopped_by": engine_session.stopped_by,
         "stop_reason": engine_session.stop_reason,
+        "budget": _budget_params(engine_session.budget),
     }
 
 
@@ -2471,6 +3814,7 @@ def _hibernation(hibernation: EngineHibernation | None) -> SessionHibernation | 
         trigger=hibernation.trigger,
         reason=hibernation.reason,
         resumable=hibernation.resumable,
+        superseded_by=hibernation.superseded_by,
     )
 
 
@@ -2541,6 +3885,8 @@ def _parse_engine_timestamp(value: str | None) -> datetime | None:
 __all__ = [
     "answer_session",
     "bind_session_work",
+    "digest",
+    "economics",
     "hibernate_session",
     "history_list",
     "keep_session_awake",
@@ -2552,9 +3898,11 @@ __all__ = [
     "report_blocked",
     "report_unblocked",
     "search_output",
+    "session_changes",
     "session_input",
     "session_screen",
     "session_wait",
+    "session_wait_any",
     "start_session",
     "stop_session",
     "sweep_sessions",

@@ -18,16 +18,13 @@ import {
 
 function session(over: Partial<SessionSummary> & { id: string }): SessionSummary {
   return {
-    id: over.id,
+    ...over,
     name: over.name ?? over.id,
     activity: over.activity ?? "idle",
     exit_code: over.exit_code ?? null,
     scrollback_bytes: 0,
     cwd: over.cwd ?? "/workspace",
     created_at: over.created_at ?? "2026-08-18T08:00:00Z",
-    activity_changed_at: over.activity_changed_at,
-    blocked: over.blocked,
-    role: over.role,
   };
 }
 
@@ -113,28 +110,19 @@ describe("attention order", () => {
     expect(input.map((s) => s.id)).toEqual(["idle-old", "idle-new", "waiting"]);
   });
 
-  it("partitions bookmarks without rebuilding bookmark state per comparison", () => {
+  it("keeps the server's order, lifting bookmarks between oversight and the rest (WI-1289)", () => {
     const rows = [
-      session({ id: "idle-old", activity: "idle", activity_changed_at: "2026-08-18T08:00:00Z" }),
-      session({ id: "waiting", activity: "waiting-for-input" }),
-      session({ id: "idle-new", activity: "idle", activity_changed_at: "2026-08-18T09:00:00Z" }),
-    ];
-    expect(sortSessionsForRail(rows, new Set(["idle-old"])).map((row) => row.id))
-      .toEqual(["idle-old", "waiting", "idle-new"]);
-  });
-
-  it("lists oversight sessions first, ahead of bookmarks and attention (WI-957)", () => {
-    const rows = [
-      session({ id: "waiting", activity: "waiting-for-input" }),
-      session({ id: "bookmarked", activity: "idle" }),
       session({ id: "overseer", activity: "idle", role: "oversight" }),
-      session({ id: "worker", activity: "running", role: "worker" }),
       session({ id: "overseer-busy", activity: "waiting-for-input", role: "oversight" }),
+      session({ id: "recent", activity: "idle" }),
+      session({ id: "bookmarked", activity: "idle" }),
+      session({ id: "older", activity: "running", role: "worker" }),
     ];
+    // Attention would have put waiting first; the rail must not.
     expect(sortSessionsForRail(rows, new Set(["bookmarked"])).map((row) => row.id))
-      .toEqual(["overseer-busy", "overseer", "bookmarked", "waiting", "worker"]);
-    expect(isOversight(rows[2]!)).toBe(true);
-    expect(isOversight(rows[0]!)).toBe(false);
+      .toEqual(["overseer", "overseer-busy", "bookmarked", "recent", "older"]);
+    expect(isOversight(rows[0]!)).toBe(true);
+    expect(isOversight(rows[2]!)).toBe(false);
   });
 });
 
@@ -176,6 +164,25 @@ describe("resource words", () => {
     expect(sessionStateWord(heavy, 0)).toContain("⚠ 50 GiB");
     expect(sessionResourceWord({ ...heavy, activity: "hibernated" })).toBeNull();
     expect(sessionResourceWord(session({ id: "n" }))).toBeNull();
+  });
+});
+
+describe("a non-default permission posture (WI-1250)", () => {
+  it("names bypass and leaves the default unmarked", async () => {
+    const { permissionPostureLabel, sessionRuntimeHint } = await import("../sessionRowModel");
+    expect(permissionPostureLabel(null)).toBeNull();
+    expect(permissionPostureLabel("")).toBeNull();
+    expect(permissionPostureLabel("default")).toBeNull();
+    expect(permissionPostureLabel("bypass")).toBe("no permission checks");
+    expect(permissionPostureLabel("accept-edits")).toBe("accept-edits");
+    const klaudia = session({
+      id: "k",
+      command: "/usr/bin/klaudia --model test-model --dangerously-skip-permissions",
+      template: "klaudia",
+    });
+    expect(sessionRuntimeHint({ ...klaudia, permission_mode: "bypass" })).toBe(
+      "template klaudia · klaudia · model test-model · permissions bypass",
+    );
   });
 });
 

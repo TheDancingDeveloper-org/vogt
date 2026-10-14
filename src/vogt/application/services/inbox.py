@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,7 +24,9 @@ from vogt.adapters.forge.kinds import (
     KIND_DEPLOY_LANE,
 )
 from vogt.application.context import AppContext
+from vogt.application.memo import StoreMemo
 from vogt.application.models import (
+    DecisionView,
     InboxAction,
     InboxArchiveParams,
     InboxCoverage,
@@ -44,6 +45,7 @@ from vogt.application.services.ci_watch import (
     bound_branches,
     index_by_branch,
 )
+from vogt.application.services.decisions import pending_decisions
 from vogt.application.services.grants import pending_grants
 from vogt.application.services.views import trust_for
 from vogt.application.writes import WriteOutcome, audited_write
@@ -271,12 +273,27 @@ class InboxBadge:
     active_total: int
 
 
-#: How long one projection may answer badge reads. Short: the key already
-#: moves on every declared write and every published sweep, so the TTL only
-#: bounds what the key cannot see — live engine session state and a snooze
-#: running out.
-BADGE_TTL_SECONDS = 5.0
-_badge_cache: dict[tuple[int, int, int, int], tuple[float, list[InboxEntry]]] = {}
+@dataclass(frozen=True)
+class _StoredInbox:
+    """The half of the Inbox that is a pure function of the two stores.
+
+    Everything but the live engine half: notifications, CI, agent runs,
+    bound branches, deploy lanes and drift, with their triage applied. The
+    projects are kept beside them because the live half names its entries'
+    projects too.
+    """
+
+    projects: dict[str, Project]
+    entries: list[InboxEntry]
+
+
+#: The stored half, shared between every badge read while the stores have not
+#: moved (WI-1224). Every open tab and device nudges its badge on the same
+#: event; before, each one rebuilt the whole projection, and the cache that
+#: was meant to share it was keyed on the store *objects*, which are built
+#: per request, so it never hit across requests. The live half is not in it:
+#: it is read from the engine on every badge read, and is cheap.
+_stored_memo: StoreMemo[_StoredInbox] = StoreMemo()
 
 
 def inbox_badge(ctx: AppContext, saved: InboxSavedFilter | None) -> InboxBadge:
@@ -284,27 +301,16 @@ def inbox_badge(ctx: AppContext, saved: InboxSavedFilter | None) -> InboxBadge:
 
     Same answer as `inbox.list` under the same filter (`counts`/length), but
     cheaper: it skips the coverage and engine-status reads `inbox.list`
-    reports, and it shares one projection between every badge read that
-    arrives while nothing has changed — every open tab and device nudges its
-    badge on the same event, and before this each one rebuilt the whole
-    Inbox. It filters only on fields already on the entry (the actor was
-    resolved at collect time), so no forge call can happen here.
+    reports, and it shares one projection of the stored half between every
+    badge read that arrives while nothing has changed (`StoreMemo`). It
+    filters only on fields already on the entry (the actor was resolved at
+    collect time), so no forge call can happen here. A snooze that runs out
+    is judged at count time, so a shared projection cannot keep it hidden.
     """
+    stored = _stored_memo.get(ctx, lambda: _stored_triaged(ctx))
     with ctx.declared.read() as view:
-        key = (
-            id(ctx.declared),
-            id(ctx.observed),
-            view.current_revision(),
-            view.latest_event_seq(),
-        )
-        now = time.monotonic()
-        cached = _badge_cache.get(key)
-        if cached is not None and cached[0] > now:
-            entries = cached[1]
-        else:
-            entries = _collect(ctx, view)
-            _badge_cache.clear()
-            _badge_cache[key] = (now + BADGE_TTL_SECONDS, entries)
+        live = _triaged(ctx, view, _collect_live(ctx, view, stored.projects))
+    entries = [*stored.entries, *live]
     moment = ctx.clock()
     active_total = sum(
         1 for entry in entries if _triage_matches(entry, ["active"], moment)
@@ -323,10 +329,33 @@ def inbox_badge(ctx: AppContext, saved: InboxSavedFilter | None) -> InboxBadge:
 
 def clear_badge_cache() -> None:
     """Drop the shared badge projection (tests, and a restore)."""
-    _badge_cache.clear()
+    _stored_memo.clear()
+
+
+def _stored_triaged(ctx: AppContext) -> _StoredInbox:
+    with ctx.declared.read() as view:
+        stored = _collect_stored(ctx, view)
+        return _StoredInbox(
+            projects=stored.projects,
+            entries=_triaged(ctx, view, stored.entries),
+        )
+
+
+def _triaged(
+    ctx: AppContext, view: ReadView, entries: list[InboxEntry]
+) -> list[InboxEntry]:
+    triage = view.inbox_triage_by_keys([entry.entry_key for entry in entries])
+    return [_apply_triage(ctx, triage, entry) for entry in entries]
 
 
 def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
+    stored = _collect_stored(ctx, view)
+    live = _collect_live(ctx, view, stored.projects)
+    return _triaged(ctx, view, [*stored.entries, *live])
+
+
+def _collect_stored(ctx: AppContext, view: ReadView) -> _StoredInbox:
+    """The stored half, untriaged: a pure function of the two stores."""
     projects = {p.id: p for p in view.list_projects(limit=MAX_SCAN, offset=0)}
     entries: list[InboxEntry] = []
     bots = normalise_bot_logins(ctx.config.inbox_bot_logins)
@@ -498,11 +527,19 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
 
     for proposal in view.list_drift(status="open", limit=MAX_SCAN):
         entries.append(_drift_entry(ctx, proposal, projects, view))
+    return _StoredInbox(projects=projects, entries=entries)
 
+
+def _collect_live(
+    ctx: AppContext, view: ReadView, projects: dict[str, Project]
+) -> list[InboxEntry]:
+    """The live half, untriaged: grants waiting for a person and the engine's
+    sessions that need one. Read on every call — the engine is its truth."""
+    entries: list[InboxEntry] = []
     live: list[EngineSession] = []
     if ctx.engine is not None:
         try:
-            live = ctx.engine.list_sessions()
+            live, _hidden = ctx.engine.list_sessions()
         except EngineUnavailable:
             live = []
 
@@ -514,6 +551,10 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
     live_by_id = {session.id: session for session in live}
     for grant in pending_grants(view, ctx):
         entries.append(_grant_entry(ctx, grant, view, projects, live_by_id))
+    # Decisions waiting for a person (WI-1321): one entry per question,
+    # answered by choosing one of its options on the entry itself.
+    for decision in pending_decisions(view, ctx):
+        entries.append(_decision_entry(decision, view))
 
     if ctx.engine is not None:
         try:
@@ -554,8 +595,7 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
                 )
         except EngineUnavailable:
             pass
-    triage = view.inbox_triage_by_keys([entry.entry_key for entry in entries])
-    return [_apply_triage(ctx, triage, entry) for entry in entries]
+    return entries
 
 
 def _freshness(
@@ -950,6 +990,68 @@ def _grant_entry(
         actor_kind="human"
         if requester is not None and requester.kind == "human"
         else "bot",
+        actor_relation="org_member",
+    )
+
+
+def _decision_entry(decision: DecisionView, view: ReadView) -> InboxEntry:
+    """A question an agent asked and a person has yet to answer (WI-1321).
+
+    The question, options and context are the asking agent's text —
+    untrusted, shown verbatim, never acted on. Nothing is applied when the
+    person answers; the asker reads the answer.
+    """
+    recommended = next(
+        (o.label for o in decision.options if o.recommended), decision.options[0].label
+    )
+    options = " | ".join(
+        o.label + (" (recommended)" if o.recommended else "") for o in decision.options
+    )
+    summary = (f"{decision.asker} asks: {decision.question} Options: {options}.")[:1000]
+    item = (
+        None
+        if decision.work_item is None
+        else view.work_item_by_ref(decision.work_item)
+    )
+    project = (
+        None
+        if item is None or item.project_id is None
+        else view.project_by_id(item.project_id)
+    )
+    asker = view.actor_by_identity(decision.asker)
+    return InboxEntry(
+        entry_key=f"agent:decision:{decision.id}",
+        source=AGENT_KIND,
+        kind="decision.pending",
+        occurred_at=decision.created_at,
+        observed_at=None,
+        title=f"Decision: {decision.question[:120]}",
+        summary=summary,
+        project_slug=None if project is None else project.slug,
+        work_item_ref=decision.work_item,
+        session_id=decision.asker_session,
+        source_subject_key=decision.id,
+        trust_state="unverified",
+        freshness="live",
+        provisional=True,
+        action=InboxAction(
+            kind="decision",
+            decision_id=decision.id,
+            session_id=decision.asker_session,
+        ),
+        evidence_snapshot={
+            "decision_id": decision.id,
+            "asker": decision.asker,
+            "asker_session": decision.asker_session,
+            "work_item": decision.work_item,
+            "question": decision.question,
+            "options": [o.model_dump(mode="json") for o in decision.options],
+            "recommended": recommended,
+            "context": decision.context,
+            "expires_at": decision.expires_at.isoformat(),
+        },
+        actor_login=decision.asker,
+        actor_kind="human" if asker is not None and asker.kind == "human" else "bot",
         actor_relation="org_member",
     )
 

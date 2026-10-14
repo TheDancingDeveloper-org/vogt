@@ -5,7 +5,7 @@
 # network with no host bind-mount — the CI runner's filesystem is not the docker
 # daemon's, the same constraint deploy/e2e.engine.Dockerfile is built for. The
 # image tag is version-matched to web/package.json's `@playwright/test`
-# (^1.62.1) so the browsers preinstalled in the base match the test runner and
+# (^1.64.0) so the browsers preinstalled in the base match the test runner and
 # nothing is downloaded at run time.
 #
 # The workflow builds this as `vogt-e2e-playwright:local` and runs it as the
@@ -13,7 +13,7 @@
 # the running engine by service DNS (http://engine:8910). It runs ONLY the
 # `live` project, which uses the real API (no `installFixtures`) — see
 # web/playwright.config.ts and web/tests/browser/gui.spec.ts.
-ARG PW_VERSION=v1.62.1-noble
+ARG PW_VERSION=v1.64.0-noble
 FROM mcr.microsoft.com/playwright:${PW_VERSION}
 
 WORKDIR /web

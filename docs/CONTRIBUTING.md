@@ -45,12 +45,33 @@ project space. Security reports go to the channel in
 
 ## 2. Workflow
 
-- `main` is the only long-lived branch. Branch from `main`, open the pull
-  request against `main`. Releases are `v*` tags on `main`.
+- `main` is the only long-lived product branch, and every release is a `v*`
+  tag on `main`. `main` is rebase-only with linear history, so no merge commit
+  reaches it.
+- Development lands on the integration branch `integrate/vogt-next`, not on
+  `main`:
+  - A worker branches from `origin/integrate/vogt-next` in its own worktree,
+    on `wi-<n>-<slug>`, and lands by pushing that branch. It opens no pull
+    request.
+  - Oversight reviews the pushed branch and merges it into
+    `integrate/vogt-next` by rebase or fast-forward only.
+  - The operator approves the integration pull request from
+    `integrate/vogt-next` to `main`, and approves every deploy.
+- The integration branch is rebased onto `origin/main`. Never merge `main`
+  into `integrate/*`. From now on, oversight merges into `integrate/*` by
+  rebase or fast-forward only, so no merge commit lands there. The integration
+  pull request is meant to land on `main` by rebase, and a merge commit in its
+  range is the usual reason a green pull request cannot land. `integrate/vogt-next`
+  still holds merge commits from earlier oversight merges; WI-1315 linearises
+  it and adds the check.
+- A change that does not go through an integration branch, such as a fork pull
+  request, branches from `origin/main` and opens its pull request against
+  `main`, under the same linear-history rule.
 - Keep pull requests small and single-purpose. A nearby cleanup belongs in the
   same change only when the change is not correct without it.
-- Keep the branch rebased onto `origin/main`. History is linear, so a stale
-  base is the usual reason a green PR cannot land.
+- Keep the branch rebased onto its base: `origin/integrate/vogt-next` for a
+  worker branch, `origin/main` for a fork pull request. History is linear, so a
+  stale base is the usual reason a green change cannot land.
 - Fill in the [pull request template](../.github/PULL_REQUEST_TEMPLATE.md):
   what changed, why, which gates you ran, which documents you updated.
 - Documentation changes in the same pull request as the code it describes:

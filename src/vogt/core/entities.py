@@ -7,10 +7,11 @@ REST, CLI and MCP surfaces return. One definition, three transports.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 
 from vogt.core.principal import ActorKind
 
@@ -23,6 +24,10 @@ ComplianceStatus = Literal[
     "compliant", "non_compliant", "not_checked", "not_applicable"
 ]
 TrustState = Literal["verified", "stale", "unverified", "disputed"]
+
+#: Lookaround and backreferences compile in Python but not in the Rust regex
+#: crate the engine matches with, so a pattern carrying one is refused.
+_UNSUPPORTED_REGEX = re.compile(r"\(\?<=|\(\?<!|\(\?=|\(\?!|\(\?P=|\(\?\(|\\[1-9]")
 
 #: Whether a project's work model is the forge's (decision 1). Set by
 #: an explicit act — `project.import`'s clone+consolidate, `forge.link`, and
@@ -77,6 +82,148 @@ class Actor(Entity):
     created_at: datetime
 
 
+#: `{n}` in a landing branch pattern stands for the work item's number.
+_BRANCH_NUMBER = "{n}"
+
+
+class LandingPolicy(Entity):
+    """How a worker's branch is cut and landed on this project.
+
+    Recorded so a brief can state the rule and, later, so the engine can
+    enforce it. Nothing here is enforced yet: a later item reads it.
+    """
+
+    #: The branch workers cut from and land onto.
+    base_branch: str
+    #: `{n}` is the work item number. Validated by compiling it with `{n}`
+    #: replaced by `\d+`, so a pattern that could never match is refused.
+    branch_pattern: str = r"^wi-{n}-[a-z0-9-]+$"
+    worker_lands_by: Literal["push_branch", "open_pr"]
+    merge_by: Literal["oversight", "operator"]
+    #: A merge commit is refused outright: landing is a fast-forward or a rebase.
+    merge_mode: Literal["fast_forward", "rebase"]
+    linear_history: bool = True
+    deploy_by: str = "operator"
+
+    @field_validator("branch_pattern")
+    @classmethod
+    def _pattern_compiles(cls, pattern: str) -> str:
+        compiled_from = pattern.replace(_BRANCH_NUMBER, r"\d+")
+        try:
+            re.compile(compiled_from)
+        except re.error as exc:
+            raise ValueError(
+                f"branch_pattern {pattern!r} does not compile once {{n}} is "
+                f"replaced with a number: {exc}"
+            ) from exc
+        return pattern
+
+
+class ReviewPolicy(Entity):
+    """How a review of this project's work is run. Guidance until enforced."""
+
+    template: str = "claude"
+    model: str = "opus"
+    effort: str = "low"
+    #: A review that names one of these models is refused once enforcement lands.
+    never_models: list[str] = []
+    budget_turns: int = 40
+
+
+class VerificationPolicy(Entity):
+    """Whether closing an item needs a verification record, and where."""
+
+    required_for_done: bool = False
+    #: The deploy lanes a verification must have been exercised on.
+    lanes: list[str] = []
+
+
+class AgentPolicy(Entity):
+    """A project's agent policy, stored as data and shown in every session brief.
+
+    `forbidden_text` and `merge_deploys_prod` are the two facts the session
+    hooks refuse on. `landing`, `review` and `verification` are recorded so
+    the brief can state them; nothing enforces them yet. Everything else is
+    guidance the brief carries and nothing enforces: compliance stays a fact
+    to read, never a precondition.
+    """
+
+    #: Regexes matched against commit messages, authors, trailers, PR text and
+    #: branch names. They must compile as a Python regex and stay inside the
+    #: dialect the engine's regex crate also implements, so a rule that could
+    #: never match — or would match differently where it is enforced — is
+    #: refused at the write rather than silently doing nothing later.
+    forbidden_text: list[str] = []
+    #: This project's merges deploy production, so a hook refuses `gh pr merge`
+    #: from an agent. A person is not refused.
+    merge_deploys_prod: bool = False
+    #: The branches a merge onto counts as deploying. Empty means `main`.
+    main_branches: list[str] = []
+    #: The branch a session's own worktree is cut from (WI-1298): the
+    #: project's integration branch. Empty means `main`. Guidance for the
+    #: worktree, not a fact a hook refuses on.
+    base_branch: str = ""
+    #: How a commit should be attributed, in the project's own words.
+    commit_identity: str = ""
+    #: The short named block that says how this project is tested.
+    test_recipe: str = ""
+    #: How the project actually runs where it is deployed — separate
+    #: services, split topologies — in the project's own words. A reviewer is
+    #: shown it, because a test that passes in-process says nothing about a
+    #: deployment that runs the same code as a separate service.
+    deployed_setup: str = ""
+    #: Free-text rules. Guidance only; a hook never reads these.
+    rules: list[str] = []
+    #: Minutes of running a worker session may accumulate across all its turns
+    #: before the engine hibernates it at a turn boundary (WI-1281). Added to
+    #: the default budget a start gets; None, the default, is no such limit.
+    session_wall_clock_minutes: int | None = None
+    #: Absent means the project states no landing rule, and the brief says none.
+    landing: LandingPolicy | None = None
+    review: ReviewPolicy | None = None
+    verification: VerificationPolicy | None = None
+
+    @field_validator("session_wall_clock_minutes")
+    @classmethod
+    def _positive_minutes(cls, minutes: int | None) -> int | None:
+        if minutes is not None and minutes <= 0:
+            raise ValueError("session_wall_clock_minutes must be positive")
+        return minutes
+
+    @field_validator("forbidden_text")
+    @classmethod
+    def _patterns_compile(cls, patterns: list[str]) -> list[str]:
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(
+                    f"forbidden_text pattern {pattern!r} does not compile: {exc}"
+                ) from exc
+        return patterns
+
+    def check_engine_dialect(self) -> None:
+        """Refuse a pattern the engine's regex crate cannot match.
+
+        The engine matches with the Rust regex crate, which has no lookaround,
+        no backreferences and no conditional or named-group definitions. A
+        pattern Python accepts but the engine would skip is a rule that never
+        fires, so a write refuses it.
+
+        This is a write-time check and not a field validator on purpose: a
+        project stored before the rule existed must still load, and the engine
+        skips a pattern it cannot compile rather than refusing every command.
+        """
+        for pattern in self.forbidden_text:
+            unsupported = _UNSUPPORTED_REGEX.search(pattern)
+            if unsupported is not None:
+                raise ValueError(
+                    f"forbidden_text pattern {pattern!r} uses {unsupported.group(0)!r},"
+                    " which the engine's regex dialect does not support"
+                    " (no lookaround, no backreferences)"
+                )
+
+
 class Project(Entity):
     """One explicitly registered repository or folder."""
 
@@ -90,6 +237,9 @@ class Project(Entity):
     contract_version: str | None = None
     compliance_status: ComplianceStatus = "not_checked"
     compliance_checked_at: datetime | None = None
+    #: What an agent working here is told, and — for the two enforced facts —
+    #: what its session hooks refuse. Empty means the project states none.
+    agent_policy: AgentPolicy = AgentPolicy()
     #: When this project opted into the contract. Null is the
     #: ordinary case and carries no fault: the contract is something a
     #: project adopts, not something it is measured against by default.
@@ -138,8 +288,37 @@ class Relation(Entity):
     related_state: str
 
 
+CommentKind = Literal["note", "handoff"]
+
+
+class HandoffFields(BaseModel):
+    """The structured half of a hand-off comment (design C11).
+
+    Every field is optional: a hand-off records what the writer knows, and a
+    field left out means "not stated", not "empty on purpose". Free text stays
+    on the comment body.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    branch: str | None = None
+    head_sha: str | None = None
+    base: str | None = None
+    done: list[str] = []
+    remaining: list[str] = []
+    touch_points: list[str] = []
+    gates_run: list[str] = []
+    blockers: list[str] = []
+    session: str | None = None
+
+
 class Comment(Entity):
-    """A remark on a work item, attributed to an actor."""
+    """A remark on a work item, attributed to an actor.
+
+    `kind` is `note` for an ordinary remark and `handoff` for the structured
+    hand-off a fresh session starts from (design C11). `handoff` is present
+    only on a hand-off comment.
+    """
 
     id: str
     work_item_id: str
@@ -147,6 +326,8 @@ class Comment(Entity):
     actor_display_name: str
     body: str
     created_at: datetime
+    kind: CommentKind = "note"
+    handoff: HandoffFields | None = None
 
 
 class WorkItem(Entity):
@@ -301,6 +482,17 @@ class CodingSession(Entity):
     reason: str
     started_at: datetime
     stopped_at: datetime | None = None
+    #: Start provenance (WI-1323, design §2.4 and §3), facts about the start
+    #: that are never updated. `purpose` is the dispatch purpose the start
+    #: named. `started_by_session` is the engine id of the session that
+    #: started this one, and `started_by_kind` is `person` for a person's
+    #: start, otherwise the starting session's engine role at that moment
+    #: (`oversight` or `worker`). Both are read from the caller's verified
+    #: identity, never from its parameters. All three are None on a session
+    #: from before migration 0024.
+    purpose: str | None = None
+    started_by_session: str | None = None
+    started_by_kind: Literal["person", "oversight", "worker"] | None = None
 
 
 class Token(Entity):
@@ -542,6 +734,58 @@ class SessionGrant(Entity):
             and self.expires_at is not None
             and self.expires_at <= now
         ):
+            return "expired"
+        return self.state
+
+
+DecisionState = Literal["pending", "answered", "withdrawn"]
+
+
+class DecisionOption(Entity):
+    """One answer a decision offers; exactly one per decision is recommended."""
+
+    label: str
+    description: str = ""
+    recommended: bool = False
+
+
+class DecisionAnswer(Entity):
+    """The option a person chose, and what they added."""
+
+    label: str
+    note: str = ""
+
+
+class Decision(Entity):
+    """A question an agent put to a person, with options (WI-1321).
+
+    Shaped like `SessionGrant` so the Inbox and the person-only rule are
+    reused (`docs/design/agent-harness-services.md` §2.3). Nothing is applied
+    when it is answered: the asker reads the answer and acts through the op
+    that checks the action. `expired` is not a state: it is a pending
+    decision past `expires_at`, computed on read, and it implies no answer.
+    """
+
+    id: str
+    asker_actor_id: str
+    asker_session: str | None = None
+    work_item_id: str | None = None
+    question: str
+    options: list[DecisionOption]
+    context: str = ""
+    state: DecisionState = "pending"
+    answer: DecisionAnswer | None = None
+    answered_by_actor_id: str | None = None
+    created_at: datetime
+    answered_at: datetime | None = None
+    expires_at: datetime
+    reason: str
+
+    def effective_state(
+        self, now: datetime
+    ) -> Literal["pending", "answered", "withdrawn", "expired"]:
+        """`expired` for a pending decision past its expiry, else the state."""
+        if self.state == "pending" and self.expires_at <= now:
             return "expired"
         return self.state
 

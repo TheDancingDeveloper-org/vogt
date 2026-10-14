@@ -30,6 +30,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import _resolve
 from vogt.application.services.ci_watch import announce_concluded
+from vogt.application.services.engine_status import workspace_disk
 from vogt.application.services.views import freshness_of
 from vogt.collectors import CollectorContext, CollectorRegistry, Sweeper
 from vogt.collectors.agent_activity import AgentActivityCollector
@@ -302,6 +303,7 @@ def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:
         projects=len(projects),
         subjects=subjects,
         dep_refs=dep_ref_count,
+        disk=workspace_disk(ctx),
         reports=[
             SweepReportView(
                 collector=report.collector,

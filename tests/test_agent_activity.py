@@ -587,6 +587,8 @@ def test_store_filters_narrow(claude_root: Path, tmp_path: Path) -> None:
     assert summary[0].wait_ms == 3000
     assert summary[0].tools == {"Bash": 2}
     assert summary[0].services == {"github": 1, "http": 1}
+    assert summary[0].transcript_path is not None
+    assert summary[0].transcript_path.endswith("conv-1.jsonl")
 
 
 # -- the operations --------------------------------------------------------
@@ -686,6 +688,27 @@ def test_a_sweep_indexes_and_the_ops_link_project_and_vogt_session(
     assert only.error_rate == 1.0
     assert only.services == {"git": 1}
     assert only.vogt_session_id == started.session.id
+    # Metering a transcript is opt-in. The default summary does not read it,
+    # so the economics fields stay null rather than claiming a reading.
+    assert only.turns is None
+    assert only.context_tokens is None
+    assert only.compactions is None
+    metered = summarize_agent_activity(
+        ctx, AgentActivitySummaryParams(session=started.session.id, economics=True)
+    ).sessions[0]
+    # Claude with no usage block counts the turn and leaves context at 0.
+    assert metered.turns == 1
+    assert metered.context_tokens == 0
+    assert metered.peak_context_tokens == 0
+    assert metered.compactions == 0
+    transcript = claude_root / "-estate" / "eng-1.jsonl"
+    transcript.unlink()
+    unread = summarize_agent_activity(
+        ctx, AgentActivitySummaryParams(session=started.session.id, economics=True)
+    ).sessions[0]
+    assert unread.turns is None
+    assert unread.context_tokens is None
+    assert unread.compactions is None
 
     unlinked = search_agent_activity(
         ctx, AgentActivitySearchParams(session="conv-1", errors_only=True)

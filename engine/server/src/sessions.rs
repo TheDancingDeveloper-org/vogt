@@ -17,6 +17,7 @@ use crate::{
     config::Config,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
+    git,
     hibernation::{self, Record},
     history::{ArchiveRecord, SessionHistory, SessionIdentity},
     prompt_files,
@@ -109,6 +110,10 @@ pub struct SessionRegistry {
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
+
+/// How long a worktree cleanup waits for a stopped session's process tree to
+/// be gone before it gives up and leaves the directory alone (WI-1304).
+const CLEAN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Which sessions a hibernation may take, and how a session was created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,7 +309,43 @@ impl SessionRegistry {
         // the template and caller gave them, before the engine adds its own
         // launch arguments and variables (a wake adds those again).
         let base_command = spec.command.clone();
-        let base_env = spec.env.clone().unwrap_or_default();
+        let mut base_env = spec.env.clone().unwrap_or_default();
+
+        // A named Claude Code account becomes that account's config directory,
+        // which the engine looked up itself: the caller never supplies a path.
+        // It goes into the recorded environment (a directory, not a secret),
+        // so a wake runs on the same login, and it comes after the caller's
+        // own pairs so it has the last word. A woken session replays the
+        // directory already in its record.
+        let account = spec
+            .account
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_string);
+        if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), &creating) {
+            if base_command
+                .as_deref()
+                .and_then(agent_cli::agent_name)
+                .as_deref()
+                != Some("claude")
+            {
+                return Err(ApiError::BadRequest(
+                    "account is applied to Claude Code only; the command is not `claude`".into(),
+                ));
+            }
+            let dir = self
+                .cfg
+                .agent_onboarding
+                .account_dir(name)
+                .map_err(ApiError::BadRequest)?;
+            base_env.retain(|(k, _)| k != "CLAUDE_CONFIG_DIR");
+            base_env.push((
+                "CLAUDE_CONFIG_DIR".into(),
+                dir.to_string_lossy().into_owned(),
+            ));
+            spec.env = Some(base_env.clone());
+        }
 
         // A resumed conversation starts where it ran, not where the caller
         // would have opened a fresh session: `claude --resume <id>` only finds
@@ -313,6 +354,18 @@ impl SessionRegistry {
         // worktree) (WI-871). The transcript's own record of that directory
         // wins when it is inside the workspace; otherwise the caller's cwd is
         // kept and the CLI reports the conversation as not found.
+        // A session that asked for its own worktree (WI-1298) is cut from
+        // `cwd`, the checkout, only after every refusal below has had its say,
+        // so a refused start leaves no worktree or branch behind. A resumed
+        // conversation would move `cwd` to its transcript's directory, which
+        // is not the checkout the caller named, so the two are refused
+        // together rather than cut from somewhere unasked.
+        let worktree = spec.worktree.take();
+        if worktree.is_some() && spec.resume.as_deref().is_some_and(|r| !r.trim().is_empty()) {
+            return Err(ApiError::BadRequest(
+                "a worktree cannot be cut for a resumed conversation; start it fresh, or resume in the worktree as cwd".into(),
+            ));
+        }
         if let Some(dir) = self.resume_cwd(&spec) {
             spec.cwd = Some(dir);
         }
@@ -350,6 +403,17 @@ impl SessionRegistry {
             .filter(|text| !text.is_empty());
         let brief_path = brief.map(|_| prompt_files::session_prompt_path(&self.cfg.state_dir, id));
 
+        // The guide is written before launch: the brief names its path, so it
+        // has to exist first (WI-1243).
+        if let Some(text) = spec
+            .companion
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            prompt_files::write_session_guide(&self.cfg.state_dir, id, text)?;
+        }
+
         // Before the prompt file is written and before anything is spawned:
         // a request naming a model (or a conversation to resume) this command
         // cannot be told about is refused, not started plain. Doing it here
@@ -357,6 +421,20 @@ impl SessionRegistry {
         // to undo. An agent CLI started with a brief is also given its first
         // prompt here — a pointer to the file, so it begins the brief's task
         // instead of opening idle.
+        let recorded = match &creating {
+            Creating::Wake(record) => Some(record),
+            Creating::Fresh(_) => None,
+        };
+        // Codex loads `/etc/codex/requirements.toml` itself; the engine does
+        // not pass a flag for it. When a policy was *named* and cannot be
+        // read, refuse the launch (400) instead of starting with no hook and
+        // instead of falling through to bypass (WI-1143). Claude and opencode
+        // do not consult this field. A deployment with the file unset, or
+        // `ENGINE_AGENT_CODEX_POLICY=off`, is `Ok` and launches.
+        codex_policy_refusal(
+            base_command.as_deref(),
+            &self.cfg.agent_onboarding.codex_policy,
+        )?;
         let launch = agent_cli::launch(
             spec.command.as_deref(),
             &agent_cli::LaunchRequest {
@@ -365,8 +443,22 @@ impl SessionRegistry {
                 resume: spec.resume.as_deref(),
                 brief_file: brief_path.as_deref(),
                 session_id: Some(id),
+                codex_session_id: self.cfg.codex_session_id,
                 permission_mode: spec.permission_mode.as_deref(),
-                settings_file: self.cfg.agent_onboarding.settings_file.as_deref(),
+                // A wake replays the posture recorded at the first start. The
+                // deployment's settings may have changed since, and reading
+                // them again would silently move a bypass (or a default)
+                // session onto a different policy (WI-1250). A record from
+                // before the field existed has none, and falls back; so does
+                // one whose file has since been removed, because a missing
+                // `--settings` file stops the agent and no settings at all
+                // would be a silent downgrade.
+                settings_file: wake_settings_file(
+                    id,
+                    recorded.and_then(|record| record.settings_file.as_deref()),
+                    self.cfg.agent_onboarding.settings_file.as_deref(),
+                ),
+                add_dirs: recorded.map(|r| r.add_dirs.as_slice()).unwrap_or(&[]),
                 opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
             },
         )?;
@@ -405,6 +497,50 @@ impl SessionRegistry {
             }
         }
 
+        // Every refusal has passed: cut the worktree now. Its destination is
+        // checked against the workspace root first — a checkout at the root
+        // has its sibling outside it. From here on the guard removes the
+        // worktree and its branch again unless the child is spawned.
+        let mut cut = CutWorktree::default();
+        if let Some(worktree) = worktree {
+            let checkout = spec.cwd.clone().ok_or_else(|| {
+                ApiError::BadRequest("a worktree needs the checkout it is cut from as cwd".into())
+            })?;
+            let checkout = std::path::PathBuf::from(checkout);
+            let destination = git::worktree_destination(&checkout, &worktree.branch)?;
+            let parent = destination.parent().unwrap_or(&destination);
+            workspace_path::resolve_existing_allow_absolute(
+                &self.cfg.workspace_root,
+                &parent.to_string_lossy(),
+            )
+            .map_err(|_| {
+                ApiError::BadRequest(format!(
+                    "worktree {} would be outside the workspace",
+                    destination.display()
+                ))
+            })?;
+            let created = git::create_worktree(&checkout, &worktree.branch, &worktree.base_ref)?;
+            spec.cwd = Some(created.to_string_lossy().into_owned());
+            cut.0 = Some((checkout, created, worktree.branch.trim().to_string()));
+        }
+
+        // WI-1357. Codex reads no CLAUDE.md, .claude/rules or .claude/skills,
+        // and no AGENTS.md above its git root, so the workspace guidance a
+        // Claude session gets is handed over as one `-c` override. Built after
+        // the worktree is cut, because that is where the session runs.
+        if let Some(command) = spec.command.as_deref() {
+            let cwd = spec
+                .cwd
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| self.cfg.default_cwd.clone());
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            if let Some(rewritten) = agent_cli::with_codex_guidance(command, &cwd, home.as_deref())
+            {
+                spec.command = Some(rewritten);
+            }
+        }
+
         let prompt_file = match brief {
             Some(text) => Some(prompt_files::write_session_prompt(
                 &self.cfg.state_dir,
@@ -424,7 +560,12 @@ impl SessionRegistry {
         };
         let conversation = match &creating {
             Creating::Fresh(Origin::AgentTask) => None,
-            _ => agent_cli::conversation(base_command.as_deref(), spec.resume.as_deref(), id),
+            _ => agent_cli::conversation(
+                base_command.as_deref(),
+                spec.resume.as_deref(),
+                id,
+                self.cfg.codex_session_id,
+            ),
         };
         // opencode mints its own conversation id, so a fresh opencode session
         // is found in opencode's store once it has started (WI-930).
@@ -523,6 +664,8 @@ impl SessionRegistry {
                 return Err(e);
             }
         };
+        // The child runs in the worktree now; it stays.
+        cut.keep();
         let session = spawned.session;
         session.set_conversation(conversation.clone());
         // The posture as the wire names it, `None` for the default one.
@@ -533,7 +676,10 @@ impl SessionRegistry {
             .map(|m| m.replace('_', "-"))
             .filter(|m| !m.is_empty() && m != "default");
         session.set_permission_mode(posture.clone());
+        session.set_account(account.clone());
         session.set_autopilot(spec.autopilot);
+        session.set_policy(spec.policy.clone());
+        session.set_budget(spec.budget.clone());
         session.set_role(spec.role);
         session.set_work_item(spec.work_item.clone());
         // An oversight session is the one that brings the others back, so it
@@ -570,7 +716,16 @@ impl SessionRegistry {
                 record.model = spec.model.clone();
                 record.effort = spec.effort.clone();
                 record.permission_mode = posture.clone();
+                record.account = account.clone();
+                record.settings_file = self.cfg.agent_onboarding.settings_file.clone();
+                record.add_dirs = prompt_file
+                    .as_ref()
+                    .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                    .into_iter()
+                    .collect();
                 record.autopilot = spec.autopilot;
+                record.policy = spec.policy.clone();
+                record.budget = spec.budget.clone();
                 record.role = spec.role;
                 record.work_item = spec.work_item.clone();
                 record.keep_awake = session.keep_awake();
@@ -583,6 +738,21 @@ impl SessionRegistry {
                 record.hibernation = None;
                 record.name = session.name();
                 session.set_keep_awake(record.keep_awake);
+                session.set_budget(record.budget.clone());
+                session.set_budget_soft_sent(record.budget_soft_sent);
+                session.set_budget_hard_done(record.budget_hard_done);
+                session.set_budget_session_banked(std::time::Duration::from_secs(
+                    record.budget_session_secs,
+                ));
+                // A forced wake does not undo the handoff. The next hibernation
+                // rebuilds the record from the live session, so the mark has to
+                // live there too.
+                session.set_superseded_by(record.superseded_by.clone());
+                // Taken, not cloned: the live record must not keep a report the
+                // woken session can later clear, and restoring must not publish
+                // — a publish is a push the operator already received. The next
+                // hibernation captures whatever the session still holds.
+                session.restore_blocked(record.blocked.take());
                 hibernation::remove_screen(&self.cfg.state_dir, id);
                 Some(record)
             }
@@ -628,6 +798,7 @@ impl SessionRegistry {
                         conversation: live.conversation(),
                         work_item: live.work_item(),
                     }),
+                    economics: None,
                 };
                 drop(live);
                 if let Err(e) = history.archive_session(record).await {
@@ -655,7 +826,12 @@ impl SessionRegistry {
         }
         let agent = agent_cli::agent_name(spec.command.as_deref()?)?;
         let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
-        let dir = crate::transcripts::conversation_cwd(&agent, id, &home)?;
+        let dir = crate::transcripts::conversation_cwd(
+            &agent,
+            id,
+            &home,
+            &self.cfg.agent_onboarding.claude_dirs(),
+        )?;
         let dir = dir.to_str()?;
         match workspace_path::resolve_existing_allow_absolute(&self.cfg.workspace_root, dir) {
             Ok(canon) => Some(canon.to_string_lossy().into_owned()),
@@ -712,13 +888,24 @@ impl SessionRegistry {
     /// Hibernated sessions pinned awake: what the engine wakes at boot. Only
     /// those with a conversation to resume: waking a shell the engine kept
     /// only so it stays listed (an oversight shell, WI-962) would open an
-    /// empty shell in its place.
+    /// empty shell in its place. A session whose work was handed to a
+    /// successor, and one a person hibernated by hand, stay hibernated
+    /// (WI-1251): keep_awake must not bring either back on every restart.
+    /// One the budget watcher hibernated stays hibernated too (WI-1245): its
+    /// hard flag persists, so a boot wake would bring it back unenforced.
     pub fn hibernated_keep_awake(&self) -> Vec<Uuid> {
         self.records
             .iter()
             .filter(|r| {
                 r.keep_awake
-                    && r.hibernation.is_some()
+                    && r.hibernation.as_ref().is_some_and(|h| {
+                        !matches!(
+                            h.trigger,
+                            vogt_engine_contract::HibernateTrigger::Manual
+                                | vogt_engine_contract::HibernateTrigger::Budget
+                        )
+                    })
+                    && r.superseded_by.is_none()
                     && r.conversation.is_some()
                     && !self.sessions.contains_key(r.key())
             })
@@ -729,6 +916,41 @@ impl SessionRegistry {
     /// Whether the engine knows this session at all, live or hibernated.
     pub fn knows(&self, id: Uuid) -> bool {
         self.sessions.contains_key(&id) || self.records.contains_key(&id)
+    }
+
+    /// A session's summary whether it is live, exited but still listed, or
+    /// hibernated; `None` when the engine does not know it.
+    pub fn summary_of(&self, id: Uuid) -> Option<SessionSummary> {
+        match self.sessions.get(&id) {
+            Some(session) => Some(session.summary()),
+            None => self.hibernated_summary(id),
+        }
+    }
+
+    /// The engine sessions Vogt started as `vogt_id` (`ses_…`): the ones whose
+    /// recorded environment carries `VOGT_SESSION_ID=<vogt_id>`, the variable
+    /// vogt-core gives each session it starts. More than one means somebody
+    /// started a second session claiming the same id, and a caller that needs
+    /// to know which session a token belongs to must treat that as unknown.
+    pub fn engine_ids_for_vogt_session(&self, vogt_id: &str) -> Vec<Uuid> {
+        self.records
+            .iter()
+            .filter(|r| {
+                r.env
+                    .iter()
+                    .any(|(k, v)| k == "VOGT_SESSION_ID" && v == vogt_id)
+            })
+            .map(|r| *r.key())
+            .collect()
+    }
+
+    /// Keep the latest economics snapshot on the session's record, so the
+    /// removal of a hibernated session can count it. A session with no record
+    /// yet has nothing to keep it on.
+    pub fn set_record_economics(&self, id: Uuid, economics: String) {
+        if let Some(mut record) = self.records.get_mut(&id) {
+            record.economics = Some(economics);
+        }
     }
 
     pub fn is_hibernated(&self, id: Uuid) -> bool {
@@ -858,6 +1080,37 @@ impl SessionRegistry {
             if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
                 return;
             }
+            // A session that just stops, rather than hibernating, still leaves
+            // the next one a hand-off (C12). Hibernation writes its own, and
+            // this hook returns above so the two never both write.
+            if let Some(conversation) = session.conversation() {
+                // `git` inside the hand-off must not run on a tokio worker.
+                // This hook is invoked from the session's exit waiter, which
+                // is a tokio task when one is current (the credential revoke
+                // just below already depends on `try_current`).
+                let state_dir = state_dir.clone();
+                let id = session.id;
+                let agent = conversation.agent.clone();
+                let conversation_id = conversation.id.clone();
+                let cwd = session.cwd.clone();
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                let write = move || {
+                    crate::handoff::write_for(
+                        &state_dir,
+                        id,
+                        &agent,
+                        &conversation_id,
+                        &cwd,
+                        home.as_deref(),
+                    );
+                };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(runtime) => {
+                        runtime.spawn_blocking(write);
+                    }
+                    Err(_) => write(),
+                }
+            }
             records.remove(&session.id);
             hibernation::remove(&state_dir, session.id);
             // The session's own credential ends with it (WI-926).
@@ -910,9 +1163,9 @@ impl SessionRegistry {
         if record.conversation.is_none() && !allow_shell {
             return Some(
                 "the engine does not know an agent conversation to resume for this session \
-                 (a shell, or an agent CLI whose conversation id it did not pin — a fresh \
-                 Codex or OpenCode session); pass allow_shell to hibernate it anyway, and \
-                 it will wake as a fresh process in the same directory"
+                 (a shell, or an agent CLI whose conversation id it did not pin — stock \
+                 Codex, or a fresh OpenCode session); pass allow_shell to hibernate it \
+                 anyway, and it will wake as a fresh process in the same directory"
                     .into(),
             );
         }
@@ -921,17 +1174,25 @@ impl SessionRegistry {
 
     /// Stop a live session's process tree and keep it listed as hibernated,
     /// to be woken later by resuming its agent conversation under the same
-    /// id. Hibernating a hibernated session returns it unchanged.
+    /// id. `superseded_by` names the session its work was handed to (WI-1251);
+    /// it must be a session the engine knows, other than this one. Hibernating
+    /// a session that is already hibernated returns it unchanged, except that
+    /// a `superseded_by` is recorded on it.
     pub async fn hibernate(
         &self,
         id: Uuid,
         reason: Option<String>,
         trigger: HibernateTrigger,
         allow_shell: bool,
+        superseded_by: Option<String>,
     ) -> Result<SessionSummary> {
+        let superseded_by = self.checked_successor(id, superseded_by)?;
         let lock = self.transition_lock(id);
         let _held = lock.lock().await;
         let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) else {
+            if superseded_by.is_some() {
+                self.mark_superseded(id, superseded_by)?;
+            }
             return self.hibernated_summary(id).ok_or(ApiError::NotFound);
         };
         if let Some(refusal) = self.hibernate_refusal(&session, allow_shell) {
@@ -948,8 +1209,23 @@ impl SessionRegistry {
         let (screen, rows, cols) = session.screen_source(hibernation::SCREEN_BYTES);
         record.name = session.name();
         record.keep_awake = session.keep_awake();
+        // The report survives the stop: a wake and a restart both read it
+        // back off this record (C4).
+        record.blocked = session.blocked();
         record.rows = Some(rows);
         record.cols = Some(cols);
+        // A handoff survives a forced wake and a later hibernation that does
+        // not name one: the live session carries the mark the record had.
+        record.superseded_by = superseded_by.or_else(|| session.superseded_by());
+        // The budget and its flags live on the session; a record rebuilt here
+        // would otherwise drop them, and a wake would forget both the limit
+        // and that it had already been reached.
+        record.budget = session.budget();
+        record.budget_soft_sent = session.budget_soft_sent();
+        record.budget_hard_done = session.budget_hard_done();
+        record.budget_session_secs = session
+            .budget_session_running(time::OffsetDateTime::now_utc())
+            .as_secs();
         record.hibernation = Some(Hibernation {
             at: now_rfc3339(),
             trigger,
@@ -957,13 +1233,36 @@ impl SessionRegistry {
                 .map(|r| r.trim().chars().take(500).collect::<String>())
                 .filter(|r| !r.is_empty()),
             resumable: record.conversation.is_some(),
+            superseded_by: record.superseded_by.clone(),
         });
         hibernation::write_screen(&self.cfg.state_dir, id, &screen)
             .and_then(|()| hibernation::write(&self.cfg.state_dir, &record))
             .map_err(|e| ApiError::Internal(format!("write the hibernation record: {e}")))?;
+        // Best-effort, and only for a Klaudia conversation: a missing summary
+        // or a directory that is not a checkout still leaves what it can, and
+        // a failure here must not stop the hibernation (C12). `git` runs off
+        // the runtime: at shutdown every session hibernates in turn.
+        let state_dir = self.cfg.state_dir.clone();
+        let handoff_record = record.clone();
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let joined = tokio::task::spawn_blocking(move || {
+            crate::handoff::write(&state_dir, &handoff_record, home.as_deref());
+        })
+        .await;
+        if let Err(e) = joined {
+            tracing::warn!(session = %id, error = %e, "the handoff write task failed");
+        }
+        // Not observed here. A hibernation is not the end: a wake resumes the
+        // session, and counting it now would count it again at every later
+        // hibernation. The exit waiter skips a hibernating session, and the
+        // removal of the hibernated record is what counts it.
         session.mark_hibernating();
         self.records.insert(id, record);
 
+        let tree = session
+            .pid()
+            .map(hibernation::descendants)
+            .unwrap_or_default();
         match session.pid() {
             Some(pid) => {
                 let watched = Arc::clone(&session);
@@ -984,10 +1283,112 @@ impl SessionRegistry {
         }
         self.sessions.remove(&id);
         self.secret_broker.revoke(id);
+        self.clean_worktree(id, &session.cwd, session.pid(), tree);
         self.bus
             .publish(ServerEvent::SessionHibernated { id, trigger });
         tracing::info!(session = %id, ?trigger, "session hibernated");
         self.hibernated_summary(id).ok_or(ApiError::NotFound)
+    }
+
+    /// `superseded_by` as the engine stores it: a known session other than
+    /// `id`, or `None` when the caller named none. Anything else is a 400.
+    fn checked_successor(&self, id: Uuid, superseded_by: Option<String>) -> Result<Option<String>> {
+        let Some(raw) = superseded_by else {
+            return Ok(None);
+        };
+        let successor = Uuid::parse_str(raw.trim()).map_err(|_| {
+            ApiError::BadRequest(
+                "superseded_by must be the engine session id of a session the engine knows".into(),
+            )
+        })?;
+        if successor == id || !self.knows(successor) {
+            return Err(ApiError::BadRequest(format!(
+                "superseded_by must name a known session other than {id}"
+            )));
+        }
+        Ok(Some(successor.to_string()))
+    }
+
+    /// Record `superseded_by` on a session that is already hibernated, without
+    /// touching a process: the handoff can be declared after the stop.
+    fn mark_superseded(&self, id: Uuid, superseded_by: Option<String>) -> Result<()> {
+        let Some(mut record) = self.records.get_mut(&id) else {
+            return Err(ApiError::NotFound);
+        };
+        if record.hibernation.is_none() {
+            return Err(ApiError::NotFound);
+        }
+        record.superseded_by = superseded_by.clone();
+        if let Some(hibernation) = record.hibernation.as_mut() {
+            hibernation.superseded_by = superseded_by;
+        }
+        hibernation::write(&self.cfg.state_dir, &record)
+            .map_err(|e| ApiError::Internal(format!("write the hibernation record: {e}")))?;
+        Ok(())
+    }
+
+    /// Why waking `id` would put two agents on one piece of work (WI-1251), or
+    /// `None` when it would not.
+    fn refuse_contested_wake(&self, id: Uuid, record: &Record) -> Result<()> {
+        if let Some(successor) = record.superseded_by.as_deref() {
+            if self.successor_still_known(successor) {
+                return Err(ApiError::Conflict(format!(
+                    "session {id} was superseded by {successor}; send to the successor instead"
+                )));
+            }
+            tracing::info!(
+                session = %id,
+                successor,
+                event = "session.wake.successor_gone",
+                "the successor is gone; the handoff no longer blocks the wake"
+            );
+        }
+        if let Some(contender) = self.same_work_contender(id, record) {
+            let work_item = record.work_item.as_deref().unwrap_or_default();
+            return Err(ApiError::Conflict(format!(
+                "{contender} is working on {work_item} in the same directory"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether `successor` still exists: live, or still hibernated. A session
+    /// that was removed leaves no record, and a handoff to it must not block
+    /// the wake forever.
+    fn successor_still_known(&self, successor: &str) -> bool {
+        let Ok(id) = Uuid::parse_str(successor) else {
+            return false;
+        };
+        self.sessions.contains_key(&id) || self.records.contains_key(&id)
+    }
+
+    /// A live session in the same directory, bound to the same non-empty work
+    /// item as `record`.
+    fn same_work_contender(&self, id: Uuid, record: &Record) -> Option<Uuid> {
+        let work_item = record.work_item.as_deref().filter(|w| !w.is_empty())?;
+        let cwd = self.canonical_dir(record.cwd.as_deref());
+        self.live_sessions().into_iter().find_map(|session| {
+            (session.id != id
+                && session.is_alive()
+                && session.work_item().as_deref() == Some(work_item)
+                && self.canonical_dir(Some(session.cwd.as_str())) == cwd)
+                .then_some(session.id)
+        })
+    }
+
+    /// `path` with symlinks resolved, or the engine's default directory when
+    /// none was recorded. A path that cannot be resolved is compared as given,
+    /// so a missing directory still matches its twin.
+    fn canonical_dir(&self, path: Option<&str>) -> String {
+        let path = path
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| self.cfg.default_cwd.clone());
+        std::fs::canonicalize(&path)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Start a hibernated session again, under the same id, by resuming its
@@ -1016,6 +1417,12 @@ impl SessionRegistry {
             .map(|r| r.clone())
             .filter(|r| r.hibernation.is_some())
             .ok_or(ApiError::NotFound)?;
+        if !req.force {
+            self.refuse_contested_wake(id, &record)?;
+        } else if record.superseded_by.is_some() || self.same_work_contender(id, &record).is_some()
+        {
+            tracing::info!(session = %id, event = "session.wake.forced", "waking a session past a handoff guard");
+        }
         let mut env = record.env.clone();
         env.extend(req.env.unwrap_or_default());
         let (command, template) = self.wake_launch(&record);
@@ -1043,13 +1450,20 @@ impl SessionRegistry {
             model: record.model.clone(),
             effort: record.effort.clone(),
             permission_mode: record.permission_mode.clone(),
+            account: record.account.clone(),
             autopilot: record.autopilot,
+            policy: record.policy.clone(),
             role: record.role,
             work_item: record.work_item.clone(),
+            // A wake returns to the worktree the first start already cut; it
+            // does not cut another (WI-1298).
+            worktree: None,
             resume: record.conversation.as_ref().map(|c| c.id.clone()),
             cols: req.cols.or(record.cols),
             rows: req.rows.or(record.rows),
             scrollback_bytes: None,
+            companion: None,
+            budget: record.budget.clone(),
         };
         let session = self.create_inner(spec, Creating::Wake(Box::new(record)), None)?;
         self.bus.publish(ServerEvent::SessionWoken { id });
@@ -1158,9 +1572,26 @@ impl SessionRegistry {
         }
         if let (Some(history), Some(conversation)) = (self.history.clone(), next.clone()) {
             tokio::spawn(async move {
-                if let Err(e) = history.set_identity(id, None, Some(&conversation)).await {
-                    tracing::warn!(session = %id, error = %e, "could not record the session's conversation in history");
+                // The provisional row is written by a task of its own and can
+                // still be queued behind the pool when an agent reports its
+                // conversation straight after the session starts. An update
+                // then finds no row and used to return success anyway, so
+                // History never learned the conversation (WI-1309). Wait for
+                // the row, briefly — a conversation History lost is a session
+                // a SIGKILL cannot resume.
+                for _ in 0..50 {
+                    match history.set_identity(id, None, Some(&conversation)).await {
+                        Ok(true) => return,
+                        Ok(false) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                        }
+                        Err(e) => {
+                            tracing::warn!(session = %id, error = %e, "could not record the session's conversation in history");
+                            return;
+                        }
+                    }
                 }
+                tracing::warn!(session = %id, "no history row to record the session's conversation in");
             });
         }
         tracing::info!(
@@ -1241,9 +1672,22 @@ impl SessionRegistry {
         if let Some(history) = self.history.clone() {
             if live.is_some() || updated.is_some() {
                 tokio::spawn(async move {
-                    if let Err(e) = history.set_identity(id, Some(role.as_str()), None).await {
-                        tracing::warn!(session = %id, error = %e, "could not record the session's role in history");
+                    // Same race as a reported conversation: the provisional row
+                    // may not exist yet, and a role History lost is a restart
+                    // that no longer knows the session is oversight.
+                    for _ in 0..50 {
+                        match history.set_identity(id, Some(role.as_str()), None).await {
+                            Ok(true) => return,
+                            Ok(false) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                            }
+                            Err(e) => {
+                                tracing::warn!(session = %id, error = %e, "could not record the session's role in history");
+                                return;
+                            }
+                        }
                     }
+                    tracing::warn!(session = %id, "no history row to record the session's role in");
                 });
             }
         }
@@ -1376,6 +1820,7 @@ impl SessionRegistry {
                         Some("the engine was shutting down".into()),
                         HibernateTrigger::Shutdown,
                         allow_shell,
+                        None,
                     )
                     .await,
                 )
@@ -1398,7 +1843,10 @@ impl SessionRegistry {
             .collect()
     }
 
-    pub fn list(&self) -> Vec<SessionSummary> {
+    /// Every session the registry knows, newest activity first, with how many
+    /// the default list leaves out (WI-1289). `include_hidden` returns the
+    /// aged-out rows too; `hidden_count` counts them either way.
+    pub fn list(&self, include_hidden: bool) -> vogt_engine_contract::SessionList {
         let mut out: Vec<_> = self
             .sessions
             .iter()
@@ -1415,8 +1863,22 @@ impl SessionRegistry {
                 .into_iter()
                 .filter_map(|id| self.hibernated_summary(id)),
         );
-        out.sort_by_key(|s| s.created_at.clone());
-        out
+        let now = time::OffsetDateTime::now_utc();
+        for summary in &mut out {
+            summary.last_event_at = Some(latest_event_at(summary));
+        }
+        let hidden_count = out
+            .iter()
+            .filter(|s| session_is_hidden(s, self.cfg.session_list_retain_after, now))
+            .count() as u64;
+        if !include_hidden {
+            out.retain(|s| !session_is_hidden(s, self.cfg.session_list_retain_after, now));
+        }
+        out.sort_by(session_list_order);
+        vogt_engine_contract::SessionList {
+            sessions: out,
+            hidden_count,
+        }
     }
 
     /// A configured session template matched by name (case-insensitive) or,
@@ -1468,19 +1930,132 @@ impl SessionRegistry {
         if s.is_alive() {
             s.request_stop(request);
         }
+        let tree = self.tree_for_clean(&s);
         s.kill()?;
+        self.finish_for_clean(id, &s, tree);
         Ok(())
+    }
+
+    /// The session's process tree, read before it is signalled, when a
+    /// cleanup may follow; empty otherwise, so a stop with cleanup off is
+    /// exactly what it was.
+    fn tree_for_clean(&self, s: &Session) -> Vec<u32> {
+        match s.pid() {
+            Some(pid) if self.cfg.worktree_clean_on_hibernate => hibernation::descendants(pid),
+            _ => Vec::new(),
+        }
+    }
+
+    /// After a stop's `SIGKILL` to the leader: with cleanup on, take the rest
+    /// of the tree too (a cargo or node grandchild in its own group would
+    /// otherwise keep writing into the directory), then clean.
+    fn finish_for_clean(&self, id: Uuid, s: &Session, tree: Vec<u32>) {
+        if !self.cfg.worktree_clean_on_hibernate {
+            return;
+        }
+        if let Some(pid) = s.pid() {
+            hibernation::kill_tree(pid, &tree);
+        }
+        self.clean_worktree(id, &s.cwd, s.pid(), tree);
+    }
+
+    /// Drop regenerable build output in a session's linked worktree, when the
+    /// deployment asked for it (WI-1304). Off unless
+    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` is set. Best-effort and off the
+    /// runtime: a cleanup that fails must not fail the hibernation or stop.
+    ///
+    /// Fails closed. Nothing is removed when the session's leader pid is
+    /// unknown, while any process of its tree (`pid` and `tree`) is still
+    /// running after a short wait, or while another session — running, or
+    /// hibernated, which a wake brings back — has its directory inside the
+    /// same worktree. An exited session left in the registry builds nothing.
+    fn clean_worktree(&self, id: Uuid, cwd: &str, pid: Option<u32>, tree: Vec<u32>) {
+        if !self.cfg.worktree_clean_on_hibernate {
+            return;
+        }
+        let Some(root) = crate::worktree_clean::linked_worktree(std::path::Path::new(cwd)) else {
+            return;
+        };
+        // Off Linux the process tree cannot be read, so whether a grandchild
+        // still writes into the worktree cannot be known.
+        let Some(pid) = pid.filter(|_| cfg!(target_os = "linux")) else {
+            tracing::info!(session = %id, "worktree cleanup skipped: the session's process tree cannot be read");
+            return;
+        };
+        let others: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|e| *e.key() != id && e.value().is_alive())
+            .map(|e| e.value().cwd.clone())
+            .chain(
+                self.records
+                    .iter()
+                    .filter(|e| *e.key() != id)
+                    .filter_map(|e| e.value().cwd.clone()),
+            )
+            .collect();
+        if crate::worktree_clean::shared_with(&root, others.iter().map(String::as_str)) {
+            tracing::info!(
+                session = %id,
+                worktree = %root.display(),
+                "worktree cleanup skipped: another session works in the same worktree"
+            );
+            return;
+        }
+        let mut pids = tree;
+        pids.push(pid);
+        let job = move || {
+            if !crate::worktree_clean::tree_gone(&pids, CLEAN_WAIT) {
+                tracing::warn!(
+                    session = %id,
+                    worktree = %root.display(),
+                    "worktree cleanup skipped: a process of the session is still running"
+                );
+                return;
+            }
+            let removed = crate::worktree_clean::clean(&root);
+            if !removed.is_empty() {
+                let bytes: u64 = removed.iter().map(|c| c.bytes).sum();
+                tracing::info!(
+                    session = %id,
+                    worktree = %root.display(),
+                    dirs = removed.len(),
+                    bytes,
+                    "cleaned build output from the session's worktree"
+                );
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn_blocking(job);
+            }
+            Err(_) => job(),
+        }
     }
 
     pub fn remove(&self, id: Uuid) -> Result<()> {
         let live = self.sessions.remove(&id).map(|(_, v)| v);
-        let recorded = self.records.remove(&id).is_some();
+        let recorded = self.records.remove(&id);
+        // A live session was already counted by its exit. A hibernated one
+        // has no process left to exit, so removing its record is its end.
+        if live.is_none() {
+            if let Some((_, record)) = recorded.as_ref().filter(|(_, r)| r.hibernation.is_some()) {
+                crate::pty::observe_economics(
+                    record.template.clone(),
+                    record.model.clone(),
+                    record.economics.as_deref(),
+                );
+            }
+        }
+        let recorded = recorded.is_some();
         hibernation::remove(&self.cfg.state_dir, id);
         if live.is_none() && !recorded {
             return Err(ApiError::NotFound);
         }
         if let Some(s) = live {
+            let tree = self.tree_for_clean(&s);
             let _ = s.kill();
+            self.finish_for_clean(id, &s, tree);
         }
         // Forgetting the session forgets its leave to ask the broker.
         self.secret_broker.revoke(id);
@@ -1502,6 +2077,95 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
+/// The latest clock a summary carries, as RFC 3339 (WI-1289). A clock that
+/// does not parse is ignored. With none at all the session sorts as never,
+/// which is its `created_at` only as a last resort so the order stays total.
+fn latest_event_at(summary: &SessionSummary) -> String {
+    let mut clocks = vec![
+        summary.activity_changed_at.as_str(),
+        summary.created_at.as_str(),
+    ];
+    if let Some(at) = summary.last_output_at.as_deref() {
+        clocks.push(at);
+    }
+    if let Some(at) = summary.last_person_input_at.as_deref() {
+        clocks.push(at);
+    }
+    if let Some(blocked) = summary.blocked.as_ref() {
+        clocks.push(blocked.since.as_str());
+    }
+    if let Some(approval) = summary.approval.as_ref() {
+        clocks.push(approval.detected_at.as_str());
+    }
+    if let Some(stop) = summary.stop.as_ref() {
+        clocks.push(stop.at.as_str());
+    }
+    if let Some(hibernation) = summary.hibernation.as_ref() {
+        clocks.push(hibernation.at.as_str());
+    }
+    clocks
+        .into_iter()
+        .filter(|at| !at.is_empty())
+        .max_by_key(|at| parse_rfc3339(at).unwrap_or(time::OffsetDateTime::UNIX_EPOCH))
+        .unwrap_or(summary.created_at.as_str())
+        .to_string()
+}
+
+fn parse_rfc3339(raw: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339).ok()
+}
+
+/// Whether the default list leaves this session out (WI-1289). A session
+/// stays listed when any of these hold: it is oversight or pinned awake; a
+/// turn is running, a dialog is open, or it is blocked; it is waiting for a
+/// person; it is still alive and idle (a live agent between turns); a person
+/// typed within the window; or its latest event is inside the window.
+/// `retain` of `None` (`ENGINE_SESSION_LIST_RETAIN_AFTER=off`) hides nothing.
+fn session_is_hidden(
+    summary: &SessionSummary,
+    retain: Option<std::time::Duration>,
+    now: time::OffsetDateTime,
+) -> bool {
+    let Some(retain) = retain else {
+        return false;
+    };
+    if summary.role == SessionRole::Oversight || summary.keep_awake {
+        return false;
+    }
+    if matches!(
+        summary.activity,
+        ActivityState::Running | ActivityState::AwaitingApproval | ActivityState::WaitingForInput
+    ) || summary.blocked.is_some()
+        || summary.approval.is_some()
+    {
+        return false;
+    }
+    // A live idle session is an agent between turns. Only a session that has
+    // finished — exited, stopped, hibernated, or idle with no process — ages
+    // out, and only once both clocks are past the window.
+    if summary.alive && summary.activity == ActivityState::Idle {
+        return false;
+    }
+    let window_start = now - retain;
+    let recent = |at: &str| parse_rfc3339(at).is_some_and(|t| t >= window_start);
+    if summary.last_person_input_at.as_deref().is_some_and(recent) {
+        return false;
+    }
+    !summary.last_event_at.as_deref().is_some_and(recent)
+}
+
+/// Oversight first, then the latest event, then the newer session, then id.
+/// `last_event_at` is filled before this runs, so a missing one sorts last.
+fn session_list_order(a: &SessionSummary, b: &SessionSummary) -> std::cmp::Ordering {
+    let rank = |s: &SessionSummary| u8::from(s.role != SessionRole::Oversight);
+    rank(a).cmp(&rank(b)).then_with(|| {
+        b.last_event_at
+            .cmp(&a.last_event_at)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| a.id.cmp(&b.id))
+    })
+}
+
 /// A hibernated record as the wire lists it.
 fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSummary> {
     let hibernation = record.hibernation.clone()?;
@@ -1518,8 +2182,10 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         activity_changed_at: hibernation.at.clone(),
         turn_started_at: None,
         last_output_at: None,
+        last_event_at: None,
+        last_person_input_at: None,
         approval: None,
-        blocked: None,
+        blocked: record.blocked.clone(),
         conversation: record.conversation.clone(),
         hibernation: Some(hibernation),
         keep_awake: record.keep_awake,
@@ -1530,7 +2196,10 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         resources: None,
         template: record.template.clone(),
         permission_mode: record.permission_mode.clone(),
+        account: record.account.clone(),
         stop: None,
+        economics: None,
+        budget: record.budget.clone(),
     })
 }
 
@@ -1562,6 +2231,7 @@ fn recover_records(
                 trigger: HibernateTrigger::Recovered,
                 reason: Some("the engine stopped without hibernating it".into()),
                 resumable,
+                superseded_by: record.superseded_by.clone(),
             });
             if hibernation::read_screen(state_dir, id).is_empty() {
                 if let Some(tail) = history.and_then(|h| log_tail(&h.log_path(id))) {
@@ -1605,9 +2275,114 @@ fn normalize_session_name(name: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+/// A session worktree cut during a start that has not spawned yet (WI-1298).
+/// Dropped while it still holds one, it removes the worktree and its branch,
+/// so a start that fails after the cut — a prompt file that cannot be written,
+/// a PTY that cannot be spawned — leaves nothing behind.
+#[derive(Default)]
+struct CutWorktree(Option<(std::path::PathBuf, std::path::PathBuf, String)>);
+
+impl CutWorktree {
+    fn keep(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CutWorktree {
+    fn drop(&mut self) {
+        if let Some((checkout, path, branch)) = self.0.take() {
+            git::remove_worktree(&checkout, &path, &branch);
+        }
+    }
+}
+
+/// A Codex launch whose named policy cannot be read (WI-1143). Claude and
+/// opencode never consult the field, and `Ok` (unset, or
+/// `ENGINE_AGENT_CODEX_POLICY=off`) launches. Split out so the refusal is
+/// testable without spawning a PTY. The policy type is `std::result::Result`
+/// on purpose: this crate's `Result` alias is `Result<T, ApiError>`.
+fn codex_policy_refusal(
+    command: Option<&[String]>,
+    policy: &std::result::Result<Option<std::path::PathBuf>, String>,
+) -> Result<()> {
+    if command.and_then(agent_cli::agent_name).as_deref() != Some("codex") {
+        return Ok(());
+    }
+    match policy {
+        Err(why) => Err(ApiError::BadRequest(why.clone())),
+        Ok(_) => Ok(()),
+    }
+}
+
+/// The settings file a launch hands the agent (WI-1250). A wake replays the
+/// one recorded at the first start, so a later change to the deployment's
+/// config does not quietly move the session onto another policy. A record
+/// with none, or whose file has since been removed, falls back to the
+/// deployment's: a missing `--settings` file stops the agent, and no settings
+/// at all would be a silent downgrade.
+fn wake_settings_file<'a>(
+    id: Uuid,
+    recorded: Option<&'a std::path::Path>,
+    deployment: Option<&'a std::path::Path>,
+) -> Option<&'a std::path::Path> {
+    match recorded {
+        Some(path) if path.is_file() => Some(path),
+        Some(path) => {
+            tracing::warn!(
+                session = %id,
+                path = %path.display(),
+                "recorded settings file is gone; waking with the deployment's"
+            );
+            deployment
+        }
+        None => deployment,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalize_session_name;
+
+    #[test]
+    fn a_named_missing_codex_policy_refuses_a_codex_launch_and_only_codex() {
+        let missing: std::result::Result<Option<std::path::PathBuf>, String> =
+            Err("Codex driven-session policy /no/such/requirements.toml cannot be read".into());
+        let codex = |cmd: &[&str]| cmd.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let err = super::codex_policy_refusal(Some(&codex(&["codex"])), &missing).unwrap_err();
+        assert!(
+            matches!(&err, crate::error::ApiError::BadRequest(msg) if msg.contains("cannot be read")),
+            "{err}"
+        );
+        // The wrapper the protected template actually runs still names Codex.
+        let wrapped = super::codex_policy_refusal(
+            Some(&codex(&["vogt-agent-auth", "run", "--", "codex"])),
+            &missing,
+        )
+        .unwrap_err();
+        assert!(matches!(wrapped, crate::error::ApiError::BadRequest(_)));
+        // Claude and opencode do not consult the field, so the same error
+        // does not refuse them. Unset (`Ok`) does not refuse Codex either.
+        assert!(super::codex_policy_refusal(Some(&codex(&["claude"])), &missing).is_ok());
+        assert!(super::codex_policy_refusal(Some(&codex(&["opencode"])), &missing).is_ok());
+        assert!(super::codex_policy_refusal(Some(&codex(&["codex"])), &Ok(None),).is_ok());
+    }
+
+    #[test]
+    fn a_wake_replays_the_recorded_settings_unless_the_file_is_gone() {
+        let dir = std::env::temp_dir().join(format!("vogt-wake-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let recorded = dir.join("recorded.json");
+        let deployment = dir.join("deployment.json");
+        std::fs::write(&recorded, "{}").unwrap();
+        std::fs::write(&deployment, "{}").unwrap();
+        let id = uuid::Uuid::nil();
+        let wake = |r| super::wake_settings_file(id, r, Some(deployment.as_path()));
+        assert_eq!(wake(Some(recorded.as_path())), Some(recorded.as_path()));
+        assert_eq!(wake(None), Some(deployment.as_path()));
+        std::fs::remove_file(&recorded).unwrap();
+        assert_eq!(wake(Some(recorded.as_path())), Some(deployment.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_engine_url_is_its_bind_address_with_wildcards_on_loopback() {
@@ -1728,5 +2503,192 @@ mod tests {
                 .name,
             "Alpha Agent"
         );
+    }
+
+    use vogt_engine_contract::SessionSummary;
+
+    fn aged(id: u128, activity: vogt_engine_contract::ActivityState) -> SessionSummary {
+        use vogt_engine_contract::SessionSummary;
+        SessionSummary {
+            id: uuid::Uuid::from_u128(id),
+            name: format!("s{id}"),
+            activity,
+            exit_code: None,
+            alive: false,
+            scrollback_bytes: 0,
+            cwd: String::new(),
+            command: None,
+            created_at: "2020-01-01T00:00:00Z".into(),
+            activity_changed_at: "2020-01-01T00:00:00Z".into(),
+            turn_started_at: None,
+            last_output_at: None,
+            last_event_at: Some("2020-01-01T00:00:00Z".into()),
+            last_person_input_at: None,
+            approval: None,
+            blocked: None,
+            conversation: None,
+            hibernation: None,
+            keep_awake: false,
+            autopilot: false,
+            autopilot_nudges: 0,
+            role: vogt_engine_contract::SessionRole::Worker,
+            work_item: None,
+            resources: None,
+            template: None,
+            permission_mode: None,
+            account: None,
+            stop: None,
+            economics: None,
+            budget: None,
+        }
+    }
+
+    fn now() -> time::OffsetDateTime {
+        time::OffsetDateTime::parse(
+            "2026-10-12T12:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap()
+    }
+
+    fn retain() -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(6 * 60 * 60))
+    }
+
+    fn hidden(summary: &SessionSummary) -> bool {
+        super::session_is_hidden(summary, retain(), now())
+    }
+
+    #[test]
+    fn a_finished_session_past_the_window_hides() {
+        for activity in [
+            vogt_engine_contract::ActivityState::Exited,
+            vogt_engine_contract::ActivityState::Stopped,
+            vogt_engine_contract::ActivityState::Hibernated,
+            vogt_engine_contract::ActivityState::Errored,
+        ] {
+            assert!(hidden(&aged(1, activity)), "{activity:?} should hide");
+        }
+        let mut idle = aged(1, vogt_engine_contract::ActivityState::Idle);
+        assert!(hidden(&idle), "idle with no process hides");
+        idle.alive = true;
+        assert!(!hidden(&idle), "a live idle agent stays listed");
+    }
+
+    #[test]
+    fn exemptions_stay_listed() {
+        let mut oversight = aged(1, vogt_engine_contract::ActivityState::Exited);
+        oversight.role = vogt_engine_contract::SessionRole::Oversight;
+        assert!(!hidden(&oversight));
+
+        let mut pinned = aged(1, vogt_engine_contract::ActivityState::Hibernated);
+        pinned.keep_awake = true;
+        assert!(!hidden(&pinned));
+
+        for activity in [
+            vogt_engine_contract::ActivityState::Running,
+            vogt_engine_contract::ActivityState::AwaitingApproval,
+            vogt_engine_contract::ActivityState::WaitingForInput,
+        ] {
+            assert!(!hidden(&aged(1, activity)), "{activity:?} stays listed");
+        }
+
+        let mut blocked = aged(1, vogt_engine_contract::ActivityState::Idle);
+        blocked.blocked = Some(vogt_engine_contract::BlockedReport {
+            reason: "needs a person".into(),
+            items: vec![],
+            since: "2020-01-01T00:00:00Z".into(),
+        });
+        assert!(!hidden(&blocked));
+
+        let mut approval = aged(1, vogt_engine_contract::ActivityState::Idle);
+        approval.approval = Some(vogt_engine_contract::ApprovalPrompt {
+            question: "go?".into(),
+            command_excerpt: String::new(),
+            deadline_seconds: None,
+            deadline_at: None,
+            detected_at: "2020-01-01T00:00:00Z".into(),
+            kind: "permission".into(),
+            options: vec![],
+        });
+        assert!(!hidden(&approval));
+    }
+
+    #[test]
+    fn a_recent_person_keeps_a_finished_session_and_an_old_one_does_not() {
+        let mut recent = aged(1, vogt_engine_contract::ActivityState::Exited);
+        recent.last_person_input_at = Some("2026-10-12T11:00:00Z".into());
+        assert!(!hidden(&recent), "a person within the window keeps it");
+
+        let mut old = aged(1, vogt_engine_contract::ActivityState::Exited);
+        old.last_person_input_at = Some("2026-10-11T00:00:00Z".into());
+        assert!(hidden(&old), "person input outside the window does not");
+
+        // An agent's writes never land on this clock, so a session whose only
+        // recent activity is agent input — last_event_at and last_person_input_at
+        // both old — still hides.
+        assert!(hidden(&aged(
+            1,
+            vogt_engine_contract::ActivityState::Exited
+        )));
+    }
+
+    #[test]
+    fn a_recent_event_keeps_it_and_off_disables_hiding() {
+        let mut fresh = aged(1, vogt_engine_contract::ActivityState::Exited);
+        fresh.last_event_at = Some("2026-10-12T10:00:00Z".into());
+        assert!(!hidden(&fresh));
+
+        let old = aged(1, vogt_engine_contract::ActivityState::Exited);
+        assert!(
+            !super::session_is_hidden(&old, None, now()),
+            "retain off hides nothing"
+        );
+    }
+
+    #[test]
+    fn latest_event_is_the_newest_clock() {
+        let mut summary = aged(1, vogt_engine_contract::ActivityState::Exited);
+        summary.last_output_at = Some("2026-10-12T01:00:00Z".into());
+        summary.blocked = Some(vogt_engine_contract::BlockedReport {
+            reason: "x".into(),
+            items: vec![],
+            since: "2026-10-12T09:00:00Z".into(),
+        });
+        summary.last_person_input_at = Some("2026-10-12T08:00:00Z".into());
+        assert_eq!(super::latest_event_at(&summary), "2026-10-12T09:00:00Z");
+    }
+
+    #[test]
+    fn the_list_orders_oversight_first_then_the_latest_event() {
+        let mut old_oversight = aged(1, vogt_engine_contract::ActivityState::Idle);
+        old_oversight.role = vogt_engine_contract::SessionRole::Oversight;
+        old_oversight.last_event_at = Some("2020-01-01T00:00:00Z".into());
+
+        let mut newer = aged(3, vogt_engine_contract::ActivityState::Idle);
+        newer.last_event_at = Some("2026-10-12T11:00:00Z".into());
+        newer.created_at = "2026-01-01T00:00:00Z".into();
+
+        let mut older = aged(2, vogt_engine_contract::ActivityState::Idle);
+        older.last_event_at = Some("2026-10-12T09:00:00Z".into());
+
+        let mut tied_later = aged(5, vogt_engine_contract::ActivityState::Idle);
+        tied_later.last_event_at = Some("2026-10-12T09:00:00Z".into());
+        tied_later.created_at = "2026-06-01T00:00:00Z".into();
+
+        let mut tied_same = aged(4, vogt_engine_contract::ActivityState::Idle);
+        tied_same.last_event_at = Some("2026-10-12T09:00:00Z".into());
+        tied_same.created_at = "2026-06-01T00:00:00Z".into();
+
+        let mut rows = [
+            tied_same.clone(),
+            older.clone(),
+            newer.clone(),
+            tied_later.clone(),
+            old_oversight.clone(),
+        ];
+        rows.sort_by(super::session_list_order);
+        let ids: Vec<u128> = rows.iter().map(|s| s.id.as_u128()).collect();
+        assert_eq!(ids, vec![1, 3, 4, 5, 2]);
     }
 }

@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from vogt.core.dispatch import Purpose
 from vogt.core.entities import (
     Actor,
+    AgentPolicy,
     AuditRecord,
     AuthDecision,
     Comment,
@@ -33,6 +35,7 @@ from vogt.core.entities import (
     DriftProposal,
     Effort,
     Event,
+    HandoffFields,
     Initiative,
     InitiativeState,
     Label,
@@ -86,6 +89,18 @@ class Result(BaseModel):
 #: bodies included, which is what a GUI rendering a detail pane needs.
 ListMode = Literal["summary", "full"]
 
+#: How much of a session row the session tools return. `digest` is one line of
+#: state (design C1); `full` is the SessionSummary a GUI already renders.
+SessionViewMode = Literal["digest", "full"]
+
+#: Session states a digest listing keeps unless the caller names others.
+#: Hibernated, stopped and exited stay in `counts` but not in the rows.
+DIGEST_LIVE_STATES: frozenset[str] = frozenset(
+    {"running", "idle", "waiting", "blocked", "approval", "stalled", "unknown"}
+)
+
+_DIGEST_ROW_BUDGET = 300
+
 
 def apply_aliases(data: object, aliases: dict[str, str], *, model: str) -> object:
     """Rename a tolerated parameter alias to the field it means.
@@ -126,12 +141,14 @@ SessionRole = Literal["worker", "oversight"]
 class InboxAction(Result):
     """A typed target for the action a row can take."""
 
-    kind: Literal["drift", "observation", "session", "grant"]
+    kind: Literal["drift", "observation", "session", "grant", "decision"]
     drift_id: str | None = None
     subject_key: str | None = None
     session_id: str | None = None
     #: A pending grant a person approves or denies (WI-973).
     grant_id: str | None = None
+    #: A pending decision a person answers (WI-1321).
+    decision_id: str | None = None
 
 
 class InboxEntry(Result):
@@ -393,6 +410,13 @@ class StatusResult(Result):
             "backup (`vogt clone`); absent on an instance that never was."
         ),
     )
+    disk: EngineDiskStatus | None = Field(
+        default=None,
+        description=(
+            "The workspace volume, when a session engine answers. "
+            "needs_attention once used space passes its threshold."
+        ),
+    )
 
 
 class DiagnosticsParams(Params):
@@ -614,9 +638,10 @@ class UpdateProjectParams(Params):
 
     Deliberately narrow. `lifecycle_state` is absent because it has its own
     operation with a validated edge (`project transition`), and the observed
-    fields are absent because nothing declares them. What is left is the two
-    facts a registration can get wrong and nothing else could fix: where the
-    project is published, and what collection should skip.
+    fields are absent because nothing declares them. What is left is what a
+    registration can get wrong and nothing else could fix — where the project
+    is published, what collection should skip — and the agent policy, which is
+    data the project states rather than something derived.
     """
 
     slug: str = Field(description="Project to update.")
@@ -628,6 +653,17 @@ class UpdateProjectParams(Params):
         description=(
             "Replaces the current list entirely. Leave unset to keep it; pass "
             "an empty list to collect everything."
+        ),
+    )
+    agent_policy: AgentPolicy | None = Field(
+        default=None,
+        description=(
+            "Replaces the project's agent policy entirely. Leave unset to keep "
+            "it. `forbidden_text` entries are regexes and must compile, and so "
+            "must `landing.branch_pattern` once `{n}` stands for a number; "
+            "`landing.merge_mode` is `fast_forward` or `rebase` — `merge` is "
+            "refused. A pattern that does not compile is refused rather than "
+            "stored."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
@@ -1009,6 +1045,61 @@ class SessionHibernation(Result):
             "process in the same directory, not where it left off."
         ),
     )
+    superseded_by: str | None = Field(
+        default=None,
+        description=(
+            "The session this one's work was handed to, when the hibernate "
+            "named a successor. A wake is refused (409) while it is set, unless "
+            "forced; send the work to the successor instead."
+        ),
+    )
+
+
+class SessionDigest(Result):
+    """One line of session state (design C1).
+
+    Target under 300 characters so fifty rows fit in one 15k tool result.
+    `budget` is the engine's economics line when its tailer has metered the
+    session, and null until then. `supervisor` is named for WI-956 and stays
+    null until that exists. `brief_file` is null until the engine reports a
+    brief path; the launch argv stays on `mode=full`.
+    """
+
+    id: str
+    name: str | None = None
+    work_item: str | None = None
+    activity: str | None = None
+    attention: str | None = None
+    ready: bool | None = None
+    blocked_reason: str | None = Field(
+        default=None,
+        description="First 120 characters of the blocked report (engine reason).",
+    )
+    turn_started_at: datetime | None = None
+    last_reply_excerpt: str | None = Field(
+        default=None,
+        description="First 120 characters of the last reply.",
+    )
+    template: str | None = None
+    brief_file: str | None = None
+    budget: str | None = Field(
+        default=None,
+        description=(
+            "The engine's economics line for the session, e.g. "
+            "`96 turns, 2 compactions`; null when the engine has not metered it."
+        ),
+    )
+    supervisor: str | None = Field(
+        default=None, description="Reserved for WI-956; null until supervision exists."
+    )
+    extra: dict[str, Any] | None = Field(
+        default=None,
+        description="SessionSummary attributes named in `fields`, when asked.",
+    )
+
+    def over_budget(self) -> bool:
+        """True when the JSON of this row exceeds the 300-character target."""
+        return len(self.model_dump_json(exclude_none=True)) > _DIGEST_ROW_BUDGET
 
 
 class SessionSummary(Result):
@@ -1082,6 +1173,29 @@ class SessionSummary(Result):
         description=(
             "Why Vogt started the session. Null for an unlinked engine "
             "session, which declares no reason."
+        ),
+    )
+    purpose: str | None = Field(
+        default=None,
+        description=(
+            "The dispatch purpose the start named (WI-1323): implement, "
+            "implement-careful, review, mechanical, investigate or design. "
+            "Null when it named none, and for an unlinked engine session."
+        ),
+    )
+    started_by_session: str | None = Field(
+        default=None,
+        description=(
+            "Engine id of the session that started this one (WI-1323), read "
+            "from the starter's verified identity. Null for a person's start."
+        ),
+    )
+    started_by_kind: Literal["person", "oversight", "worker"] | None = Field(
+        default=None,
+        description=(
+            "Who started it (WI-1323): `person`, or the starting session's "
+            "engine role at that moment. Null when the engine could not be "
+            "asked, and for a session started before this was recorded."
         ),
     )
     started_at: datetime | None = Field(
@@ -1233,6 +1347,13 @@ class SessionSummary(Result):
             "Null is the default posture."
         ),
     )
+    account: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the named Claude Code account the session "
+            "runs under. Null is the engine's default account."
+        ),
+    )
     running: SessionRuntime | None = Field(
         default=None,
         description=(
@@ -1249,6 +1370,13 @@ class SessionSummary(Result):
             "session's process tree, sampled every few seconds. Null before "
             "the first sample, for a hibernated or exited session, or when "
             "the engine cannot sample."
+        ),
+    )
+    budget: SessionBudgetParams | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the limits this session was started with "
+            "(C7). Null when it has none, or when the engine could not be asked."
         ),
     )
     conversation_id: str | None = Field(
@@ -1435,6 +1563,20 @@ class WorkResult(Result):
 class GetWorkParams(Params):
     ref: str = Field(description="Work item reference, e.g. WI-7. Alias: `id`.")
     comment_limit: int = Field(default=50, ge=0, le=500)
+    mode: ListMode = Field(
+        default="full",
+        description=(
+            "`summary` omits the item body and comments; `full` (default) keeps them."
+        ),
+    )
+    comment_order: Literal["newest", "oldest"] = Field(
+        default="newest",
+        description=(
+            "Which end of the comment thread `comment_limit` keeps. `newest` "
+            "(default) returns the newest comments, newest first; `oldest` "
+            "returns the oldest, oldest first."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -1466,6 +1608,45 @@ class WorkItemRow(Result):
             priority=item.priority,
             project_slug=item.project_slug,
         )
+
+
+#: How many refs one `work.get_many` may name: enough for every session a
+#: rail shows at once, few enough that the read stays a handful of indexed
+#: lookups and the query string a sane length.
+WORK_GET_MANY_LIMIT = 200
+
+
+class GetManyWorkParams(Params):
+    refs: list[str] = Field(
+        min_length=1,
+        max_length=WORK_GET_MANY_LIMIT,
+        description=(
+            "Work item references to read, e.g. [WI-7, WI-9]; a subject key "
+            "resolves as it does for `work.get`. A repeated ref is read once."
+        ),
+    )
+
+    @field_validator("refs")
+    @classmethod
+    def _refs_are_refs(cls, refs: list[str]) -> list[str]:
+        for ref in refs:
+            if not ref or len(ref) > 200:
+                msg = "each ref is 1-200 characters"
+                raise ValueError(msg)
+        return refs
+
+
+class WorkManyResult(Result):
+    items: list[WorkItemRow] = Field(
+        description=(
+            "One compact row per ref that names a work item, in the order asked; "
+            "`work.get` with a ref returns the rest of it."
+        )
+    )
+    missing: list[str] = Field(
+        default_factory=list,
+        description="Refs that name no work item, in the order asked.",
+    )
 
 
 class ListWorkParams(Params):
@@ -1748,7 +1929,32 @@ class BindBranchParams(Params):
 class CommentParams(Params):
     ref: str
     body: Name = Field(description="The comment text.")
+    kind: Literal["note", "handoff"] = Field(
+        default="note",
+        description=(
+            "`note` (default) is an ordinary remark. `handoff` is the structured "
+            "hand-off a fresh session starts from, and requires `handoff`."
+        ),
+    )
+    handoff: HandoffFields | None = Field(
+        default=None,
+        description=(
+            "The structured fields of a hand-off: branch, head_sha, base, "
+            "done, remaining, touch_points, gates_run, blockers, session. "
+            "Required when kind is `handoff`, refused on a note."
+        ),
+    )
     reason: Reason
+
+    @model_validator(mode="after")
+    def _handoff_matches_kind(self) -> CommentParams:
+        if self.kind == "handoff" and self.handoff is None:
+            msg = "a hand-off comment requires handoff fields"
+            raise ValueError(msg)
+        if self.kind == "note" and self.handoff is not None:
+            msg = "handoff fields belong on a comment of kind handoff"
+            raise ValueError(msg)
+        return self
 
 
 class CommentResult(Result):
@@ -1823,6 +2029,12 @@ class InitiativeResult(Result):
 class ListInitiativesParams(Params):
     limit: int = Field(default=100, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
+    mode: ListMode = Field(
+        default="full",
+        description=(
+            "`summary` omits each initiative's body; `full` (default) keeps it."
+        ),
+    )
 
 
 class InitiativeListResult(Result):
@@ -2135,6 +2347,13 @@ class SweepResult(Result):
     subjects: int
     dep_refs: int
     reports: list[SweepReportView]
+    disk: EngineDiskStatus | None = Field(
+        default=None,
+        description=(
+            "The workspace volume, when a session engine answers. "
+            "needs_attention once used space passes its threshold."
+        ),
+    )
 
 
 class CoverageParams(Params):
@@ -3764,6 +3983,34 @@ class ConnectResult(Result):
 # -- coding sessions -------------------------------------------------------
 
 
+class SessionBudgetParams(Params):
+    """Limits the engine enforces on one session (C7).
+
+    Each field is one limit; a field left out is a limit not set. Zero is not
+    a limit, so every field is positive when present. On `session.start` the
+    object itself is tri-state: omitted means apply the default, and a present
+    object — even an empty one — means use exactly the limits it names.
+    """
+
+    turns: int | None = Field(default=None, gt=0, description="Turn limit.")
+    context_tokens: int | None = Field(
+        default=None, gt=0, description="Context-window limit, in tokens."
+    )
+    wall_clock_minutes: int | None = Field(
+        default=None,
+        gt=0,
+        description="Wall-clock limit in minutes, counted only while a turn runs.",
+    )
+    session_wall_clock_minutes: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Whole-session wall-clock limit in minutes: running time summed "
+            "across every turn, kept across hibernation. Unset by default."
+        ),
+    )
+
+
 class StartSessionParams(Params):
     """Open a terminal for a work item, or for a project.
 
@@ -3806,6 +4053,38 @@ class StartSessionParams(Params):
             "`template` when it is something to carry out."
         ),
     )
+    files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Files the task touches, each `path` or `path:start-end`. Rendered "
+            "under Touch points; a line range is a hint, not a slice of the file."
+        ),
+    )
+    symbols: list[str] = Field(
+        default_factory=list,
+        description="Symbols the task touches. Rendered under Touch points.",
+    )
+    done: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What finished looks like, one line each. Rendered under Touch points."
+        ),
+    )
+    gates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Checks that must pass before the task is done. "
+            "Rendered under Touch points."
+        ),
+    )
+    repo_map: bool | None = Field(
+        default=None,
+        description=(
+            "Include a two-level outline of the touch-point directories in the "
+            "brief. Omitted means include one when touch points name files, and "
+            "not otherwise. The outline is capped; it is a map, not a listing."
+        ),
+    )
     permission_mode: Literal["default", "accept_edits", "bypass"] = Field(
         default="default",
         description=(
@@ -3816,9 +4095,26 @@ class StartSessionParams(Params):
             "`accept_edits`: file edits auto-accepted, everything else asks. "
             "`bypass`: no permission checks at all, for one trusted task — "
             "only a person may grant it (an agent is refused), and it is "
-            "audited. Claude Code, opencode and Klaudia templates; Klaudia "
-            "takes `default` and `bypass` only (its `acceptEdits` is an alias "
-            "for its default autonomous mode, so `accept_edits` is refused)."
+            "audited. Claude Code, Codex, opencode and Klaudia templates. "
+            "Codex maps the same three postures: `default` is "
+            "`-a on-request -s danger-full-access`; `accept_edits` adds "
+            '`approvals_reviewer="auto_review"`; `bypass` is '
+            "`--dangerously-bypass-approvals-and-sandbox` and stays "
+            "people-only. A named Codex requirements file that is missing, "
+            "empty or unreadable refuses the Codex launch (400) and does not "
+            "fall through to bypass. Klaudia takes `default` and `bypass` "
+            "only (its `acceptEdits` is an alias for its default autonomous "
+            "mode, so `accept_edits` is refused)."
+        ),
+    )
+    account: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$",
+        description=(
+            "Run the session under a named Claude Code subscription account "
+            "(a name from the engine's ENGINE_AGENT_CLAUDE_ACCOUNTS). Omitted "
+            "uses the engine's default account. Claude Code templates only; "
+            "an unknown name is refused, never started on the default login."
         ),
     )
     resume: str | None = Field(
@@ -3881,10 +4177,70 @@ class StartSessionParams(Params):
             "rollouts, check on and revive worker sessions): it is pinned "
             "awake, so it comes back by itself after a redeploy, and the GUI "
             "lists it first. `worker` (default) is every other session. "
-            "Change it later with session.set_role."
+            "Only a person starts an oversight session; an agent caller is "
+            "refused. Change it later with session.set_role."
+        ),
+    )
+    from_handoff: str | None = Field(
+        default=None,
+        description=(
+            "Start a fresh session from a work item's hand-off comment: the "
+            "work item ref (e.g. WI-7). Refused when that item has no hand-off "
+            "comment, and refused when `work_item` is also given and names a "
+            "different item. The brief carries the latest hand-off."
+        ),
+    )
+    review_of: str | None = Field(
+        default=None,
+        description=(
+            "Start a reviewer on this work item (e.g. WI-7) instead of a "
+            "worker. The brief checks the diff named by the item's latest "
+            "hand-off against the item's own acceptance criteria, and it "
+            "does not carry the work on. Refused without a work item — a "
+            "review is of an item — and when `work_item` or `from_handoff` "
+            "names a different one."
+        ),
+    )
+    budget: SessionBudgetParams | None = Field(
+        default=None,
+        description=(
+            "Limits the engine enforces on this session (C7): a soft warning "
+            "as one is approached, then hibernation (trigger `budget`) when "
+            "one is reached. Omitted means the default for an agent template "
+            "started with a `task` as a worker — 120 turns and 90 minutes of "
+            "wall clock, no context limit — and no budget otherwise. An empty "
+            "object sets no limits, which is how a start declines the default."
+        ),
+    )
+    worktree: bool | None = Field(
+        default=None,
+        description=(
+            "Start the session in a git worktree of its own rather than in the "
+            "project's shared checkout (WI-1298). The engine cuts the worktree "
+            "from the project's integration branch — `agent_policy.base_branch` "
+            "when the project states one, otherwise `main` — onto a new branch "
+            "`<work item>-<session>` (or `<project>-<session>` when no work "
+            "item is given), and the session's working directory is that "
+            "worktree. The shared checkout is never written to, so a dirty "
+            "tree there cannot leak into the session and the session cannot "
+            "disturb it. Requires a project, or a work item that belongs to "
+            "one. Unset, the purpose's dispatch profile decides (WI-1323), and "
+            "with no purpose the session opens in the project's checkout, as "
+            "`false` does. Recorded on the audit row."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+    purpose: Purpose | None = Field(
+        default=None,
+        description=(
+            "What the session is for (WI-1323, design §2.4): implement, "
+            "implement-careful, review, mechanical, investigate or design. "
+            "The deployment's dispatch profile for it fills template, model, "
+            "effort, budget, worktree, repo_map and autopilot wherever this "
+            "start leaves them unset; a value given here wins and is audited "
+            "as an override. Recorded on the session."
+        ),
+    )
 
 
 #: The two id forms every session operation accepts. A session Vogt started
@@ -3930,11 +4286,47 @@ class SweepSessionsParams(Params):
         default=None,
         description="Only sessions Vogt linked to this project (slug).",
     )
+    mode: SessionViewMode = Field(
+        default="digest",
+        description=(
+            "`digest` (default) is one line per session; `full` is the "
+            "SessionSummary a GUI renders, including command."
+        ),
+    )
+    fields: list[str] = Field(
+        default=[],
+        description=(
+            "Extra SessionSummary attribute names copied onto each digest row."
+        ),
+    )
+    states: list[str] | None = Field(
+        default=None,
+        description=(
+            "Keep only these activities (or attention classes). Default excludes "
+            "hibernated, stopped and exited; pass an empty list for every state."
+        ),
+    )
+    attention: list[str] | None = Field(
+        default=None,
+        description=(
+            "Keep only these attention classes. `needs_you` means approval, "
+            "blocked and waiting."
+        ),
+    )
+    limit: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="How many rows to return. Counts cover every session.",
+    )
     screen_lines: int = Field(
-        default=8,
+        default=0,
         ge=0,
         le=40,
-        description="Non-blank lines from the bottom of each session's screen.",
+        description=(
+            "Non-blank lines from the bottom of each session's screen. Zero "
+            "(the default) asks for none; a positive value is honoured."
+        ),
     )
     stall_after_minutes: int = Field(
         default=10,
@@ -3958,7 +4350,8 @@ class SessionSweepRow(Result):
         )
     )
     attention_reason: str = Field(description="Why, in words.")
-    session: SessionSummary
+    session: SessionSummary | None = None
+    digest: SessionDigest | None = None
     screen_tail: list[str] = Field(
         default=[],
         description="The last non-blank lines of its screen. Untrusted terminal text.",
@@ -4031,11 +4424,27 @@ class HibernateSessionParams(Params):
             "shell). It wakes as a fresh process in the same directory."
         ),
     )
+    superseded_by: str | None = Field(
+        default=None,
+        description=(
+            "The session taking over this one's work (ses_… or the engine "
+            "UUID). Recorded on the hibernation, and a later wake is refused "
+            "unless forced — so the work stays with one session."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
 class WakeSessionParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
+    force: bool = Field(
+        default=False,
+        description=(
+            "Wake even though the session was superseded, or another live "
+            "session holds the same work item in the same directory. Off by "
+            "default, and session.input never sets it."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
@@ -4045,6 +4454,58 @@ class KeepSessionAwakeParams(Params):
         description="True pins the session awake; false lets policy hibernate it."
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class CommitForSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    message: str = Field(
+        min_length=1,
+        description="The commit message. The repo's own git identity authors it.",
+    )
+    paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths to stage before committing, relative to the repo. Empty "
+            "commits whatever the worker already staged."
+        ),
+    )
+    full_diff: bool = Field(
+        default=False,
+        description=(
+            "Return the full staged diff. Off by default, so the diff never "
+            "enters a caller's context unasked; the digest and stat always do."
+        ),
+    )
+    worktree: str | None = Field(
+        default=None,
+        description=(
+            "Commit in this linked worktree instead of the session's own "
+            "directory. It must be a worktree of the repo that directory "
+            "belongs to; a stranger repo is refused. A worker's commit never "
+            "lands in the repo's main checkout, where pool workers are "
+            "launched: name the worker's own worktree (absolute or "
+            "workspace-relative)."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class CommitForSessionResult(Result):
+    commit: str = Field(description="The new commit's full SHA.")
+    digest: str = Field(
+        description="One line naming what was committed, e.g. the diff stat summary."
+    )
+    diff_stat: str = Field(description="`git diff --stat` of what was committed.")
+    diff: str | None = Field(
+        default=None, description="The full staged diff, only when full_diff was set."
+    )
+    review: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Hunks to read before trusting the commit: counts of dependency "
+            "pins, `unsafe`, and foreign-function bindings."
+        ),
+    )
 
 
 class RenameSessionParams(Params):
@@ -4229,19 +4690,151 @@ class ListGrantsResult(Result):
     grants: list[SessionGrantView] = []
 
 
+# -- decisions a person makes (WI-1321) ------------------------------------
+#
+# An agent asks a person a question with 2-4 options, one recommended; the
+# person answers from the Inbox. Nothing is applied when it is answered.
+# `docs/design/agent-harness-services.md` §2.3.
+
+DecisionStateView = Literal["pending", "answered", "withdrawn", "expired"]
+
+
+class DecisionOptionModel(Params):
+    label: str = Field(min_length=1, max_length=60)
+    description: str = Field(default="", max_length=400)
+    recommended: bool = False
+
+
+class DecisionAnswerView(Result):
+    label: str
+    note: str = ""
+
+
+class DecisionView(Result):
+    """A decision as callers read it."""
+
+    id: str
+    asker: str = Field(description="identity_ref of who asked.")
+    asker_session: str | None = Field(
+        default=None, description="The asker's engine session id, if a session."
+    )
+    work_item: str | None = Field(default=None, description="WI ref, if any.")
+    question: str
+    options: list[DecisionOptionModel]
+    context: str = ""
+    state: DecisionStateView = Field(
+        description="`expired` is a pending decision past `expires_at`; "
+        "it implies no answer."
+    )
+    answer: DecisionAnswerView | None = None
+    answered_by: str | None = None
+    created_at: datetime
+    answered_at: datetime | None = None
+    expires_at: datetime
+    reason: str
+
+
+class DecisionResult(Result):
+    decision: DecisionView
+
+
+class AskDecisionParams(Params):
+    """Ask a person to decide between 2-4 options, one recommended."""
+
+    question: str = Field(min_length=1, max_length=2000)
+    options: list[DecisionOptionModel] = Field(
+        min_length=2,
+        max_length=4,
+        description="2-4 options; exactly one has recommended=true.",
+    )
+    context: str = Field(
+        default="",
+        max_length=4000,
+        description="The facts the person needs, in your words.",
+    )
+    work_item: str | None = Field(default=None, description="WI ref, if any.")
+    ttl_seconds: int = Field(
+        default=86_400,
+        ge=60,
+        le=604_800,
+        description="How long it stays answerable: default 24 h, at most 7 d. "
+        "Past it the decision reads `expired`, with no implied answer.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class AnswerDecisionParams(Params):
+    id: str = Field(description="The decision id (dec_…).")
+    label: str = Field(description="The label of the option chosen.")
+    note: str = Field(default="", max_length=2000)
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class WithdrawDecisionParams(Params):
+    id: str = Field(description="The decision id (dec_…).")
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ListDecisionsParams(Params):
+    state: DecisionStateView | None = None
+    work_item: str | None = Field(default=None, description="WI ref.")
+    asker: str | None = Field(
+        default=None, description="identity_ref of the asker, e.g. agent:session:…"
+    )
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class ListDecisionsResult(Result):
+    decisions: list[DecisionView] = []
+
+
 class ListSessionsParams(Params):
     project: str | None = Field(default=None, description="Project slug.")
     order: Literal["started", "rss"] = Field(
         default="started",
         description=(
-            "`started` (default): newest first, Vogt's links then unlinked "
+            "`started` (default): newest Vogt links first, then unlinked "
             "sessions. `rss`: heaviest process tree first, to find the "
-            "session holding the memory."
+            "session holding the memory. Either order is applied to the "
+            "joined set before the page is cut."
         ),
     )
     work_item: str | None = Field(default=None, description="Work item ref.")
     include_stopped: bool = Field(
         default=False, description="Include sessions Vogt has already stopped."
+    )
+    mode: SessionViewMode = Field(
+        default="digest",
+        description="`digest` (default) or `full` (every SessionSummary field).",
+    )
+    fields: list[str] = Field(
+        default=[],
+        description="Extra SessionSummary attribute names on each digest row.",
+    )
+    states: list[str] | None = Field(
+        default=None,
+        description=(
+            "Keep only these activities. Default excludes hibernated, stopped "
+            "and exited; pass an empty list for every state."
+        ),
+    )
+    stall_after_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=1440,
+        description=(
+            "A running session that has printed nothing for this long is "
+            "classified `stalled` on a digest row."
+        ),
+    )
+    include_hidden: bool = Field(
+        default=False,
+        description=(
+            "Also return sessions the engine hides from its default list "
+            "(WI-1289): aged out, finished or idle-and-not-alive, with no "
+            "recent person input. Off by default. `hidden_count` on the "
+            "result counts them either way, and session.get still resolves one."
+        ),
     )
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
@@ -4249,16 +4842,41 @@ class ListSessionsParams(Params):
 
 class SessionResult(Result):
     session: SessionSummary
+    digest: SessionDigest | None = None
 
 
 class SessionListResult(Result):
     sessions: list[SessionSummary] = []
+    digests: list[SessionDigest] = []
     engine: str | None = Field(
         default=None,
         description=(
             "What the engine said, when it could not be asked. The links are "
             "still returned: Vogt's record of what it started does not depend "
             "on the engine being up."
+        ),
+    )
+    total: int = Field(
+        default=0,
+        description=(
+            "How many sessions match the filters, before `limit`/`offset`. "
+            "`truncated` is set when this page is not all of them. When more "
+            "declared links match than `session.list` reads (500), `total` is "
+            "one past the number actually read and `truncated` stays true on "
+            "every page, including an empty one past the end."
+        ),
+    )
+    truncated: bool = Field(
+        default=False,
+        description="More sessions match than this page returns.",
+    )
+    hidden_count: int = Field(
+        default=0,
+        description=(
+            "How many sessions the engine left out of its default list "
+            "(WI-1289), counted before this operation's own filters and "
+            "paging. 0 from an engine that does not report it. Those "
+            "sessions are in `sessions` only when `include_hidden` was set."
         ),
     )
 
@@ -4282,6 +4900,10 @@ _HISTORY_ENGINE_FIELD_DESC = (
 class HistoryListParams(Params):
     limit: int = Field(default=50, ge=1, le=200)
     offset: int = Field(default=0, ge=0)
+    mode: ListMode = Field(
+        default="full",
+        description="`summary` omits each row's command; `full` (default) keeps it.",
+    )
 
 
 class HistorySessionRow(Result):
@@ -4362,6 +4984,17 @@ class EngineStatusParams(Params):
     pass
 
 
+class EngineDiskStatus(Result):
+    """The workspace volume's usage, as the engine reports it (WI-1304)."""
+
+    path: str | None = None
+    total_bytes: int | None = None
+    free_bytes: int | None = None
+    used_percent: int | None = None
+    threshold_percent: int | None = None
+    needs_attention: bool = False
+
+
 class EngineHistoryStatus(Result):
     """The engine's session-history archive, when it keeps one."""
 
@@ -4429,6 +5062,13 @@ class EngineStatusResult(Result):
             "name. Empty is healthy."
         ),
     )
+    disk: EngineDiskStatus | None = Field(
+        default=None,
+        description=(
+            "The workspace volume. needs_attention once used space passes the "
+            "engine's threshold (85% by default)."
+        ),
+    )
 
 
 class AgentCliListParams(Params):
@@ -4447,6 +5087,14 @@ class AgentCliRow(Result):
     tool: str
     package: str
     binary: str
+    kind: str = Field(
+        default="npm",
+        description=(
+            "How a version of it is fetched, as the engine's tool table names "
+            "it: npm, go-dist, go-src or github-release. A report from before "
+            "kinds existed is npm."
+        ),
+    )
     env_var: str = Field(description="The variable that pins it at container start.")
     baked_version: str | None = None
     active_version: str | None = None
@@ -4604,8 +5252,21 @@ class SessionInputParams(Params):
         ),
     )
     submit: bool = Field(
+        default=True,
+        description=(
+            "Press Enter last, after the text and keys. The default when text "
+            "is given: the line is sent, not left sitting in the input. A "
+            "call that names only keys does not press Enter unless this is "
+            "set. `draft` or an explicit `false` types without pressing Enter."
+        ),
+    )
+    draft: bool = Field(
         default=False,
-        description="Press Enter last, after the text and keys.",
+        description=(
+            "Type but do not press Enter: the text (and any keys) sit in the "
+            "input. Forces `submit` off. Use it to compose a line without "
+            "sending it."
+        ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
     confirm: bool = Field(
@@ -4656,6 +5317,7 @@ class SessionInputResult(Result):
         default=False,
         description="True when the session was hibernated and was woken first.",
     )
+    digest: SessionDigest | None = None
 
 
 class SessionScreenParams(Params):
@@ -4731,6 +5393,13 @@ class SessionWaitParams(Params):
         le=600,
         description="Seconds to wait at most (1-600). Answers `timeout` then.",
     )
+    screen: bool = Field(
+        default=False,
+        description=(
+            "True restores the full screen. False (default) returns the digest "
+            "row plus an 8-line screen tail."
+        ),
+    )
 
 
 class SessionWaitResult(Result):
@@ -4750,7 +5419,104 @@ class SessionWaitResult(Result):
         description="True when the outcome is what `until` asked for."
     )
     waited_ms: int
-    screen: SessionScreenResult
+    screen: SessionScreenResult | None = None
+    digest: SessionDigest | None = None
+    screen_tail: list[str] = []
+
+
+class SessionChange(Result):
+    """One session delta, oldest first in a page."""
+
+    seq: int
+    at: datetime | None = None
+    session: str = Field(
+        description=(
+            "The session: Vogt's `ses_…` id when the engine session is linked, "
+            "otherwise the engine's own UUID."
+        )
+    )
+    kind: str = Field(
+        description=(
+            "ready, approval, exited, errored, blocked, unblocked, hibernated or woken."
+        )
+    )
+    summary: str = ""
+
+
+class SessionChangesParams(Params):
+    since: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Return deltas published after this seq. 0 reads the retained "
+            "ring. Pass the previous result's `next_cursor`."
+        ),
+    )
+    ids: list[str] = Field(
+        default=[],
+        description=(
+            "Sessions to read, each `ses_…` or an engine UUID. Empty reads "
+            "every session. There is no supervised-by-me filter yet."
+        ),
+    )
+    limit: int = Field(
+        default=100, ge=1, le=500, description="How many deltas at most (1-500)."
+    )
+
+
+class SessionChangesResult(Result):
+    """Deltas since a cursor, and where to read from next."""
+
+    changes: list[SessionChange] = []
+    next_cursor: int = Field(description="The seq to pass as `since` on the next read.")
+    truncated: bool = Field(
+        description=(
+            "True when the ring no longer holds everything after `since`; "
+            "the page starts at the oldest event still retained."
+        )
+    )
+
+
+class SessionWaitAnyParams(Params):
+    ids: list[str] = Field(
+        default=[],
+        description=(
+            "Sessions to wait on, each `ses_…` or an engine UUID. Empty waits "
+            "on every session. There is no supervised-by-me filter yet."
+        ),
+    )
+    until: list[str] = Field(
+        default=[],
+        description=(
+            "Kinds that end the wait: ready, approval, exited, errored, "
+            "blocked, unblocked, hibernated, woken. Empty uses the engine's "
+            "default (ready, blocked, approval, exited, errored)."
+        ),
+    )
+    cursor: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Ignore deltas at or before this seq, so a replayed page is not "
+            "waited on twice. Omit to accept the next match."
+        ),
+    )
+    timeout_s: int = Field(
+        default=120,
+        ge=1,
+        le=600,
+        description="Seconds to wait at most (1-600). Answers `timeout` then.",
+    )
+
+
+class SessionWaitAnyResult(Result):
+    """Why a wait across sessions ended."""
+
+    outcome: str = Field(description="`changed` when a delta matched, else `timeout`.")
+    change: SessionChange | None = None
+    next_cursor: int = Field(
+        description="The seq to pass as `cursor` on the next wait."
+    )
 
 
 class SessionLastReplyParams(Params):
@@ -4790,6 +5556,141 @@ class SessionLastReplyResult(Result):
     )
     detail: str | None = Field(
         default=None, description="Why there are no messages, when there are none."
+    )
+
+
+class SessionEconomicsParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+
+
+class SessionEconomicsResult(Result):
+    """What a session's agent transcript cost (C16).
+
+    Read from the same transcript `session.last_reply` finds, whole rather
+    than tailed. `context_tokens` is the latest turn's window, not a sum.
+    `usage_measured` is true only when that number came from recorded usage
+    (Claude Code); Klaudia and Codex are estimated at four characters per
+    token. `cost_usd` stays null: this product has no price table, and a zero
+    would say the session was free. `commits` and `files_changed` stay null
+    until a worktree is measured; zero would say the tree was clean.
+    `detail` set means the transcript could not be read, and the counts are
+    then the empty reading, not a claim that the session did nothing.
+    """
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    agent: str | None = None
+    account: str | None = Field(
+        default=None,
+        description=(
+            "The named Claude Code account the session ran under, so usage "
+            "can be totalled per subscription. Null is the default account."
+        ),
+    )
+    conversation_id: str | None = None
+    basis: str | None = None
+    transcript: str | None = Field(
+        default=None, description="The transcript file the numbers came from."
+    )
+    turns: int = 0
+    context_tokens: int = 0
+    peak_context_tokens: int = 0
+    compactions: int = 0
+    tool_result_bytes: dict[str, int] = Field(
+        default_factory=dict,
+        description="Bytes of tool result the model was shown, by tool name.",
+    )
+    reads_repeated: int = 0
+    wall_clock_count: int = Field(
+        default=0, description="Gaps between consecutive timestamped turns."
+    )
+    wall_clock_max_ms: int = 0
+    wall_clock_mean_ms: int = 0
+    output_tokens: int = 0
+    usage_measured: bool = False
+    commits: int | None = Field(
+        default=None,
+        description=(
+            "Commits on the worktree since the session started; null when not measured."
+        ),
+    )
+    files_changed: int | None = Field(
+        default=None,
+        description="Files the worktree differs in; null when not measured.",
+    )
+    cost_usd: float | None = Field(
+        default=None,
+        description="Null: no price table is configured, so cost is not claimed.",
+    )
+    budget_line: str = Field(
+        default="",
+        description="The digest line, e.g. `96 turns, 2 compactions`.",
+    )
+    detail: str | None = Field(
+        default=None, description="Why the transcript was not read, when it was not."
+    )
+
+
+class SessionDigestParams(Params):
+    """One session's digest, read from the engine row rather than its transcript."""
+
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    context_window: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "The model's context window, in tokens. Given, `context_pct` is "
+            "`context_tokens` over this window; omitted, the percentage is null. "
+            "There is no model table."
+        ),
+    )
+
+
+class SessionDigestResult(Result):
+    """What an overseer reads instead of screen, last reply and git log (C3).
+
+    One engine `get_session`. Numbers come from that row's `economics` when
+    the engine sends one, and are null when it does not — this read does not
+    meter a transcript and does not open a transcript file. `last_reply_excerpt`
+    is likewise only what the row already carries, clipped to 120 characters.
+    `context_pct` needs the caller to name `context_window`. `budget_line` is
+    the same line `session.economics` builds, from those numbers.
+    """
+
+    id: str = Field(description="The id the caller named, as given.")
+    name: str | None = None
+    work_item: str | None = None
+    activity: str | None = None
+    blocked: SessionBlocked | None = Field(
+        default=None,
+        description="The blocked report (reason and items), or null when not blocked.",
+    )
+    last_reply_excerpt: str | None = Field(
+        default=None,
+        description="The row's last-reply excerpt, at most 120 characters.",
+    )
+    turns: int | None = None
+    context_tokens: int | None = None
+    peak_context_tokens: int | None = None
+    compactions: int | None = None
+    output_tokens: int | None = None
+    usage_measured: bool | None = Field(
+        default=None,
+        description="Whether context came from recorded usage; null when unmeasured.",
+    )
+    context_pct: int | None = Field(
+        default=None,
+        description=(
+            "context_tokens / context_window as a rounded percent, or null when "
+            "no window was given or no context was measured."
+        ),
+    )
+    budget_line: str | None = Field(
+        default=None,
+        description="The digest line, e.g. `96 turns, 61% ctx, 2 compactions`.",
+    )
+    updated_at: datetime | None = Field(
+        default=None, description="When the session's activity last changed."
     )
 
 
@@ -4952,6 +5853,14 @@ class AgentActivitySummaryParams(Params):
     )
     limit: int = Field(default=50, ge=1, le=200)
     offset: int = Field(default=0, ge=0)
+    economics: bool = Field(
+        default=False,
+        description=(
+            "Also meter each conversation's transcript (turns, context, "
+            "compactions). Off by default: a summary must not read every "
+            "transcript on the page."
+        ),
+    )
 
 
 class AgentActivitySessionSummary(Result):
@@ -4978,6 +5887,25 @@ class AgentActivitySessionSummary(Result):
     unfinished: int = Field(description="Calls with no result read (yet).")
     tools: dict[str, int] = Field(description="Calls per tool, most used first.")
     services: dict[str, int] = Field(description="Calls per service tag.")
+    turns: int | None = Field(
+        default=None,
+        description=(
+            "Assistant turns in the conversation's transcript. Null when the "
+            "transcript could not be read; zero would claim an empty one."
+        ),
+    )
+    context_tokens: int | None = Field(
+        default=None,
+        description="Latest context size of that transcript. Null when unread.",
+    )
+    peak_context_tokens: int | None = Field(
+        default=None,
+        description="Largest context size read from that transcript. Null when unread.",
+    )
+    compactions: int | None = Field(
+        default=None,
+        description="Compactions counted in that transcript. Null when unread.",
+    )
 
 
 class AgentActivitySummaryResult(Result):

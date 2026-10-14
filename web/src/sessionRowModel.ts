@@ -75,7 +75,7 @@ export function sessionResourceWord(s: SessionSummary): string | null {
  *  transcript (`session.list` → `running`, shown on the Oversight board). */
 export function sessionRuntimeHint(s: SessionSummary): string | null {
   const words = (s.command ?? "").split(/\s+/);
-  const agent = words.map((w) => w.split("/").pop() ?? "").find((w) => ["claude", "codex", "opencode"].includes(w));
+  const agent = words.map((w) => w.split("/").pop() ?? "").find((w) => ["claude", "codex", "opencode", "klaudia"].includes(w));
   const flag = words.findIndex((w) => w === "--model" || w === "-m");
   const model = flag >= 0 ? words[flag + 1] : words.find((w) => w.startsWith("--model="))?.slice(8);
   const parts = [
@@ -86,6 +86,14 @@ export function sessionRuntimeHint(s: SessionSummary): string | null {
     s.stop ? `stopped${s.stop.by ? ` by ${s.stop.by}` : ""}${s.stop.reason ? `: ${s.stop.reason}` : ""}` : null,
   ].filter((part): part is string => Boolean(part));
   return parts.length ? parts.join(" · ") : null;
+}
+
+/** A non-default permission posture, as a short visible label. The default
+ *  posture is stored as nothing and stays unmarked; bypass is the one a person
+ *  granted and a wake must not silently drop (WI-1250). */
+export function permissionPostureLabel(mode: string | null | undefined): string | null {
+  if (!mode || mode === "default") return null;
+  return mode === "bypass" ? "no permission checks" : mode;
 }
 
 /** The row's state word beside the dot: "waiting for input · 40s",
@@ -150,21 +158,23 @@ export function isOversight(s: Pick<SessionSummary, "role">): boolean {
   return s.role === "oversight";
 }
 
-/** Attention order plus two stable partitions for the Places rail: oversight
- *  sessions first (WI-957) — the one a reader goes to for the state of
- *  everything else — then bookmarks, then the rest. Within each partition the
- *  attention order holds. */
+/** Places-rail order (WI-1289). The engine already sorts the list: oversight
+ *  first, then `last_event_at` descending. This keeps that order and only
+ *  lifts bookmarked workers into the partition between oversight and the rest,
+ *  stable, so a bookmark does not lose its place among other bookmarks.
+ *  Attention is a badge on the row, not a reshuffle — except the phone pager,
+ *  which still calls `sortSessionsByAttention` on purpose. */
 export function sortSessionsForRail(
   sessions: SessionSummary[],
   bookmarked: ReadonlySet<string>,
 ): SessionSummary[] {
   const partition = (s: SessionSummary) => (isOversight(s) ? 0 : bookmarked.has(s.id) ? 1 : 2);
-  return sortSessionsByAttention(sessions).sort((left, right) => partition(left) - partition(right));
+  return [...sessions].sort((left, right) => partition(left) - partition(right));
 }
 
-/** Attention order with oversight sessions floated first (WI-957, WI-1091):
- *  the Sessions list, which has no bookmarks partition. The phone's terminal
- *  pager stays in plain attention order. */
+/** The engine's order, with oversight already first (WI-957, WI-1289): the
+ *  Sessions list, which has no bookmarks partition. The phone's terminal
+ *  pager stays in plain attention order and does not use this. */
 export function sortSessionsOversightFirst(sessions: SessionSummary[]): SessionSummary[] {
   return sortSessionsForRail(sessions, new Set());
 }

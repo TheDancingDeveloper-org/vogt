@@ -55,8 +55,8 @@ use crate::observability::{RequestId, REQUEST_ID_HEADER};
 pub const API_PREFIX: &str = "/api/vogt";
 
 /// How many `/api/vogt/*` requests this door will have open against the core
-/// at once. Beyond it a caller is told `503` with a `Retry-After` rather than
-/// queued.
+/// at once, across both pools below. Beyond a pool's share a caller is told
+/// `503` with a `Retry-After` rather than queued.
 ///
 /// A cap and not a queue, because the core cannot cancel work: a request the
 /// browser has abandoned still runs to completion there. On 2026-09-05 one
@@ -68,10 +68,78 @@ pub const API_PREFIX: &str = "/api/vogt";
 /// here before it can starve the core's other callers. `/mcp` is not capped:
 /// its responses can be long-lived streams, and an agent's own tool call is
 /// the thing the badges must not crowd out.
-pub const PROXIED_READS_IN_FLIGHT: usize = 16;
+///
+/// The total is split rather than shared (WI-1224). With one pool of 16 a
+/// burst of badge and aggregate reads — each one second or more in the core,
+/// and every tab asking at once — took every slot, and the cheap reads the
+/// shell needs to draw at all (`sessions`, `preferences`) were shed behind
+/// them. Heavy reads now get [`HEAVY_READS_IN_FLIGHT`] of the slots and
+/// everything else the rest, so a flood of one kind cannot shed the other.
+pub const PROXIED_READS_IN_FLIGHT: usize = HEAVY_READS_IN_FLIGHT + LIGHT_READS_IN_FLIGHT;
+
+/// Slots for the aggregate reads named in [`HEAVY_READ_PATHS`]. Small: the
+/// core serves them one at a time anyway (a single Python process), so a
+/// fifth concurrent copy only waits behind the first four, and the core
+/// shares one computation between concurrent badge reads.
+pub const HEAVY_READS_IN_FLIGHT: usize = 4;
+
+/// Slots for every other `/api/vogt/*` request: point reads, lists, writes.
+pub const LIGHT_READS_IN_FLIGHT: usize = 12;
+
+/// Core paths (after the `/api/vogt` → `/api` mapping) whose answer is an
+/// aggregate over the whole estate, and so cost the core a second or more
+/// where a point read costs milliseconds. Matched exactly, without the query.
+pub const HEAVY_READ_PATHS: [&str; 5] = [
+    "/api/place/metrics",
+    "/api/backlog",
+    "/api/bugs",
+    "/api/board/list",
+    "/api/inbox",
+];
+
+/// Which of the door's two in-flight pools a forwarded core path draws from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadPool {
+    /// An aggregate read; see [`HEAVY_READ_PATHS`].
+    Heavy,
+    /// Everything else.
+    Light,
+}
+
+impl ReadPool {
+    /// Classify a core path (already mapped from `/api/vogt` to `/api`).
+    pub fn for_core_path(path: &str) -> Self {
+        let path = path.trim_end_matches('/');
+        if HEAVY_READ_PATHS.contains(&path) {
+            Self::Heavy
+        } else {
+            Self::Light
+        }
+    }
+
+    fn capacity(self) -> usize {
+        match self {
+            Self::Heavy => HEAVY_READS_IN_FLIGHT,
+            Self::Light => LIGHT_READS_IN_FLIGHT,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Heavy => "heavy",
+            Self::Light => "light",
+        }
+    }
+}
 
 /// What a shed caller is told to wait before asking again, in seconds.
 const RETRY_AFTER_SECONDS: &str = "2";
+
+/// The `error.code` a shed response carries, and nothing else does. A
+/// `Retry-After` alone cannot tell a shed from an outage: the gate's "the core
+/// could not be asked about this bearer" `503` carries one too. The PWA reads
+/// this to render "busy, asking again" rather than "Vogt is down" (WI-1224).
+pub const BUSY_CODE: &str = "front_door_busy";
 pub const MCP_PREFIX: &str = "/mcp";
 
 /// The core's own prefixes, which the ones above map onto.
@@ -135,8 +203,11 @@ pub struct VogtCore {
     /// exposure value carries no default, and a URL this process
     /// guessed would be wrong in exactly the deployment the field exists for.
     public_url: Option<String>,
-    /// The in-flight cap for `/api/vogt/*`; see `PROXIED_READS_IN_FLIGHT`.
-    in_flight: Arc<tokio::sync::Semaphore>,
+    /// The in-flight cap for the aggregate reads; see `HEAVY_READS_IN_FLIGHT`.
+    heavy_in_flight: Arc<tokio::sync::Semaphore>,
+    /// The in-flight cap for every other `/api/vogt/*` request; see
+    /// `LIGHT_READS_IN_FLIGHT`.
+    light_in_flight: Arc<tokio::sync::Semaphore>,
 }
 
 impl VogtCore {
@@ -165,7 +236,8 @@ impl VogtCore {
             base,
             fallback_token: cfg.vogt_core_token.clone(),
             public_url: cfg.public_url.clone(),
-            in_flight: Arc::new(tokio::sync::Semaphore::new(PROXIED_READS_IN_FLIGHT)),
+            heavy_in_flight: Arc::new(tokio::sync::Semaphore::new(HEAVY_READS_IN_FLIGHT)),
+            light_in_flight: Arc::new(tokio::sync::Semaphore::new(LIGHT_READS_IN_FLIGHT)),
         }))
     }
 
@@ -501,14 +573,21 @@ pub async fn api(State(state): State<Arc<AppState>>, request: Request) -> Respon
         });
     };
 
+    let path = map_prefix(request.uri(), API_PREFIX, CORE_API_PREFIX);
     // Held until the core has started answering, which for `/api/*` is
     // when the work is done; the body that follows is a JSON document, not
     // a stream. `try_acquire` rather than `acquire`: waiting here is the
-    // queue this cap exists to refuse.
-    let Ok(_permit) = Arc::clone(&core.in_flight).try_acquire_owned() else {
-        return busy();
+    // queue this cap exists to refuse. The pool is chosen by path, so a
+    // flood of aggregate reads is shed from its own slots and never from
+    // the ones a session list or a preference read needs.
+    let pool = ReadPool::for_core_path(&path);
+    let semaphore = match pool {
+        ReadPool::Heavy => &core.heavy_in_flight,
+        ReadPool::Light => &core.light_in_flight,
     };
-    let path = map_prefix(request.uri(), API_PREFIX, CORE_API_PREFIX);
+    let Ok(_permit) = Arc::clone(semaphore).try_acquire_owned() else {
+        return busy(pool);
+    };
     let is_logout = path == CORE_LOGOUT_PATH;
     let response = core.forward(&path, Some(&injected), request).await;
     if is_logout && response.status().is_success() {
@@ -613,14 +692,17 @@ fn has_dot_segment(raw_path: &str) -> bool {
 
 // -- refusals, each with a reason ----------------------------------
 
-/// Too many requests already open against the core. A refusal with a
-/// reason and a `Retry-After`, so a client that backs off can, and one that
-/// does not is at least not queued.
-fn busy() -> Response {
+/// Too many requests of one kind already open against the core. A refusal
+/// with a reason, a `Retry-After` and the `BUSY_CODE`, so a client that backs
+/// off can, one that does not is at least not queued, and neither mistakes a
+/// door that is busy for a core that is gone.
+fn busy(pool: ReadPool) -> Response {
     let reason = format!(
-        "this front door already has {PROXIED_READS_IN_FLIGHT} requests open against vogt-core; retry shortly"
+        "this front door already has {} {} requests open against vogt-core; retry shortly",
+        pool.capacity(),
+        pool.label()
     );
-    let mut response = unavailable(&reason);
+    let mut response = coded_refusal(StatusCode::SERVICE_UNAVAILABLE, BUSY_CODE, &reason);
     if let Ok(value) = HeaderValue::from_str(RETRY_AFTER_SECONDS) {
         response.headers_mut().insert(header::RETRY_AFTER, value);
     }
@@ -640,7 +722,20 @@ fn bad_gateway(reason: &str) -> Response {
 }
 
 fn refusal(status: StatusCode, reason: &str) -> Response {
-    let mut response = (status, Json(json!({ "error": { "message": reason } }))).into_response();
+    front_door_response(status, json!({ "error": { "message": reason } }))
+}
+
+/// A refusal a client is expected to tell apart by more than its status: the
+/// same body as `refusal`, plus the `code` the core's own errors carry.
+fn coded_refusal(status: StatusCode, code: &str, reason: &str) -> Response {
+    front_door_response(
+        status,
+        json!({ "error": { "code": code, "message": reason } }),
+    )
+}
+
+fn front_door_response(status: StatusCode, body: serde_json::Value) -> Response {
+    let mut response = (status, Json(body)).into_response();
     // Says which half of the product refused, so an operator reading a 503 in
     // a browser console knows whether to look at the engine or the core.
     response.headers_mut().insert(
@@ -776,6 +871,37 @@ mod dot_segment_tests {
             "/api/vogt/a..b/c",
         ] {
             assert!(!has_dot_segment(p), "{p} should be allowed");
+        }
+    }
+}
+
+#[cfg(test)]
+mod read_pool_tests {
+    use super::{ReadPool, HEAVY_READ_PATHS};
+
+    #[test]
+    fn aggregate_reads_draw_from_the_heavy_pool() {
+        for path in HEAVY_READ_PATHS {
+            assert_eq!(ReadPool::for_core_path(path), ReadPool::Heavy, "{path}");
+        }
+        assert_eq!(
+            ReadPool::for_core_path("/api/place/metrics/"),
+            ReadPool::Heavy
+        );
+    }
+
+    #[test]
+    fn everything_else_draws_from_the_light_pool() {
+        for path in [
+            "/api/sessions",
+            "/api/preferences",
+            "/api/work",
+            "/api/work/get",
+            "/api/inbox/archive",
+            "/api/backlogs",
+            "/api/place",
+        ] {
+            assert_eq!(ReadPool::for_core_path(path), ReadPool::Light, "{path}");
         }
     }
 }

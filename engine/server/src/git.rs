@@ -9,10 +9,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
-use vogt_engine_contract::{BranchInfo, DiffResp, GitStatus, LogEntry, StatusEntry, StatusKind};
+use vogt_engine_contract::{
+    BranchInfo, DiffResp, GitStatus, LogEntry, SessionRole, StatusEntry, StatusKind,
+};
 
 use crate::{
     app::AppState,
+    auth::AuthorizedIdentity,
     error::{ApiError, Result},
     workspace_path,
 };
@@ -90,6 +93,185 @@ async fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
             "git {args:?}: {} (status {:?})",
             stderr.trim(),
             output.status.code()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A ref name safe to hand git as one argument: no whitespace, no control
+/// characters, and none of the characters git treats as starting an option or
+/// a path. The caller is asking for a branch and a base, not a command.
+fn clean_ref_name(what: &str, name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest(format!("{what} must not be empty")));
+    }
+    if name.starts_with('-') || name.contains("..") {
+        return Err(ApiError::BadRequest(format!(
+            "{what} {name:?} is not a ref name"
+        )));
+    }
+    if name.chars().any(|c| {
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(c, '~' | '^' | ':' | '\\' | '?' | '*' | '[' | '@' | '{')
+    }) {
+        return Err(ApiError::BadRequest(format!(
+            "{what} {name:?} is not a ref name"
+        )));
+    }
+    Ok(name.to_string())
+}
+
+/// A directory name for a worktree: one path component, so the worktree can
+/// only land beside the checkout and never outside it or over a nested path.
+fn clean_worktree_dirname(branch: &str) -> Result<String> {
+    if branch.contains(['/', '\\']) || branch == "." {
+        return Err(ApiError::BadRequest(format!(
+            "branch {branch:?} is not a single worktree directory name"
+        )));
+    }
+    Ok(branch.to_string())
+}
+
+/// Where [`create_worktree`] would put a worktree for `branch`: a sibling of
+/// `checkout`, named for the branch. Checks the names without touching git or
+/// the disk, so a caller can vet the destination before anything is cut.
+pub fn worktree_destination(checkout: &Path, branch: &str) -> Result<PathBuf> {
+    let branch = clean_ref_name("branch", branch)?;
+    let dirname = clean_worktree_dirname(&branch)?;
+    let parent = checkout.parent().ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "worktree checkout {} has no parent directory",
+            checkout.display()
+        ))
+    })?;
+    Ok(parent.join(dirname))
+}
+
+/// Create a git worktree of `checkout` for a session (WI-1298).
+///
+/// The worktree is [`worktree_destination`], on a new branch of that name cut
+/// from `base_ref`. `checkout` is the main working tree or a worktree of it;
+/// git cuts either way. The checkout's own tree is never written to: a dirty
+/// tree is left exactly as it was, because the new branch comes from
+/// `base_ref` rather than from the working tree.
+///
+/// `base_ref` is resolved in the checkout as it stands: it is never fetched,
+/// so a local branch that is behind its remote is cut where it is. A caller
+/// that wants the remote's tip names `origin/<branch>`.
+///
+/// Refuses before running git when the checkout is not a git tree, when
+/// either name is not a ref name, when the branch already exists, or when the
+/// destination already exists. When git itself refuses part way, neither the
+/// directory nor the branch is left behind.
+pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<PathBuf> {
+    let destination = worktree_destination(checkout, branch)?;
+    let branch = clean_ref_name("branch", branch)?;
+    let base_ref = clean_ref_name("base ref", base_ref)?;
+    if !checkout.is_dir() {
+        return Err(ApiError::BadRequest(format!(
+            "worktree checkout {} does not exist",
+            checkout.display()
+        )));
+    }
+    if git_output(checkout, &["rev-parse", "--is-inside-work-tree"])
+        .map(|out| out.trim() != "true")
+        .unwrap_or(true)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "{} is not a git checkout to cut a worktree from",
+            checkout.display()
+        )));
+    }
+    if destination.exists() {
+        return Err(ApiError::BadRequest(format!(
+            "worktree {} already exists",
+            destination.display()
+        )));
+    }
+    // Checked here rather than left to git so that, past this point, a branch
+    // of this name is one this call made and is safe to delete on failure.
+    let local = format!("refs/heads/{branch}");
+    if git_output(checkout, &["rev-parse", "--verify", "--quiet", &local]).is_ok() {
+        return Err(ApiError::BadRequest(format!(
+            "branch {branch:?} already exists in {}",
+            checkout.display()
+        )));
+    }
+    // The base must already be in the checkout. Fetching it here would reach
+    // the network and could move a remote-tracking ref the caller did not ask
+    // to move; an unknown base is a plain refusal.
+    if git_output(checkout, &["rev-parse", "--verify", "--quiet", &base_ref]).is_err() {
+        return Err(ApiError::BadRequest(format!(
+            "base ref {base_ref:?} is not in {}",
+            checkout.display()
+        )));
+    }
+    git_output(
+        checkout,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            &branch,
+            &destination.display().to_string(),
+            &base_ref,
+        ],
+    )
+    .map_err(|error| {
+        // git can leave the directory, the branch, or both when it fails
+        // part way.
+        remove_worktree(checkout, &destination, &branch);
+        ApiError::BadRequest(format!("could not create the worktree: {error}"))
+    })?;
+    Ok(destination)
+}
+
+/// Undo [`create_worktree`]: remove the worktree at `path` and delete
+/// `branch`. Best effort — each half runs whether or not the other did, and a
+/// failure is logged rather than returned, because the caller is already
+/// reporting the error that made it undo the cut.
+pub fn remove_worktree(checkout: &Path, path: &Path, branch: &str) {
+    if path.exists() {
+        let removed = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .current_dir(checkout)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output();
+        if !removed.as_ref().is_ok_and(|o| o.status.success()) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+    let _ = git_output(checkout, &["worktree", "prune"]);
+    let local = format!("refs/heads/{branch}");
+    if git_output(checkout, &["rev-parse", "--verify", "--quiet", &local]).is_ok() {
+        if let Err(e) = git_output(checkout, &["branch", "-D", branch]) {
+            tracing::warn!(branch, error = %e, "could not delete a session worktree's branch");
+        }
+    }
+}
+
+/// git, synchronously, with its stdout on success and its stderr in the error.
+///
+/// The session start that calls [`create_worktree`] is itself synchronous, and
+/// the worktree has to exist before the session's cwd is resolved, so this
+/// cannot wait on the async runtime.
+fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .map_err(|e| ApiError::Internal(format!("spawn git: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        return Err(ApiError::Internal(format!(
+            "git {}: {}",
+            args.join(" "),
+            stderr.trim()
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -410,6 +592,30 @@ pub enum GitOpReq {
         #[serde(default)]
         repo: String,
         message: String,
+        /// When set, commit on behalf of this session (C14): the engine runs
+        /// the oversight checklist and commits in the repo that session's
+        /// working directory belongs to. Absent, this is the GUI's plain
+        /// commit and nothing below applies.
+        #[serde(default)]
+        session: Option<String>,
+        /// Paths to stage before committing. Empty means commit whatever is
+        /// already staged.
+        #[serde(default)]
+        paths: Vec<String>,
+        /// Return the full staged diff, not only the stat. An overseer leaves
+        /// this off so the diff never enters its context unasked.
+        #[serde(default)]
+        full_diff: bool,
+        /// The project's forbidden-text patterns (C13). Checked against the
+        /// message and the branch name. Empty until a project policy exists,
+        /// which makes the check a no-op rather than a guess. Core sends `[]`
+        /// until it can read `project.agent_policy.forbidden_text` itself.
+        #[serde(default)]
+        forbidden_text: Vec<String>,
+        /// Commit in this linked worktree instead of the session's own
+        /// directory. Must be a worktree of the same repo, under the workspace.
+        #[serde(default)]
+        worktree: Option<String>,
     },
     Checkout {
         #[serde(default)]
@@ -427,12 +633,503 @@ pub struct GitOpResp {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// One line naming what was committed, for an overseer that must not read
+    /// the diff (C14). Set only by the session commit path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// `git diff --cached --stat` of what was committed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_stat: Option<String>,
+    /// The full staged diff, only when the caller asked for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    /// Hunks a reviewer should look at before trusting the commit: pins,
+    /// `unsafe`, and foreign-function bindings.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review: Vec<String>,
+}
+
+impl GitOpResp {
+    fn bare() -> Self {
+        Self {
+            ok: true,
+            branch: None,
+            commit: None,
+            digest: None,
+            diff_stat: None,
+            diff: None,
+            review: Vec::new(),
+        }
+    }
+}
+
+/// A line a reviewer should read before trusting a commit made for a worker.
+const REVIEW_PATTERNS: &[(&str, &str)] = &[
+    (
+        "pin",
+        r#"\b(rev|version|sha|commit)\s*[:=]\s*['"]?[0-9a-f]{7,}"#,
+    ),
+    ("unsafe", r"\bunsafe\b"),
+    (
+        "ffi",
+        r#"extern\s+"C"|#\[no_mangle\]|\b(ctypes|cffi|cdll)\b"#,
+    ),
+];
+
+/// Something that must not be committed: a conflict left unresolved, or a
+/// secret staged by mistake. Names and shapes only; a match refuses the commit.
+const REJECT_PATTERNS: &[(&str, &str)] = &[
+    ("conflict marker", r"^(<<<<<<<|>>>>>>>|=======)"),
+    ("private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    (
+        "credential assignment",
+        r#"(?i)\b(api[_-]?key|secret|token|password)\b\s*[:=]\s*["'][^"']{8,}"#,
+    ),
+];
+
+/// The oversight commit (C14). With no `session` this is the GUI's plain
+/// commit: stage nothing, check nothing, commit whatever is staged. With one,
+/// the worker must be idle, hibernated, waiting for input or blocked — never
+/// mid-turn — and the commit lands in the repo that worker's directory belongs
+/// to (or a linked worktree of it), under that repo's own identity. Detached
+/// HEAD and the repo's default branch are refused.
+#[allow(clippy::too_many_arguments)]
+async fn commit_op(
+    state: &Arc<AppState>,
+    repo: String,
+    message: String,
+    session: Option<String>,
+    paths: Vec<String>,
+    full_diff: bool,
+    forbidden_text: Vec<String>,
+    worktree: Option<String>,
+) -> Result<Json<GitOpResp>> {
+    let message = message.trim().to_string();
+    if message.is_empty() {
+        return Err(ApiError::BadRequest("message must not be empty".into()));
+    }
+    let repo = match session.as_deref() {
+        Some(id) => session_commit_dir(state, id, worktree.as_deref()).await?,
+        None => resolve_repo(state, &repo)
+            .await?
+            .ok_or(ApiError::NotFound)?,
+    };
+    for path in &paths {
+        let path = clean_repo_rel(path)?;
+        // `--literal-pathspecs` so `*`, `:(top)`, `:/` and `:(glob)**` are file
+        // names, not pathspecs that widen what gets staged. A miss is a 400:
+        // git exits 128, and `run_git` would otherwise report that as a 500.
+        match run_git(&repo, &["--literal-pathspecs", "add", "--", &path]).await {
+            Ok(_) => {}
+            Err(ApiError::Internal(detail)) if detail.contains("did not match any files") => {
+                return Err(ApiError::BadRequest(format!(
+                    "path {path:?} is not a file in this repo"
+                )));
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    if session.is_some() {
+        let branch = run_git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+        let branch = branch.trim();
+        if branch.is_empty() || branch == "HEAD" {
+            return Err(ApiError::BadRequest(
+                "refusing to commit: HEAD is detached; check out a branch first".into(),
+            ));
+        }
+        let default_branch = default_branch_name(&repo).await;
+        if branch == default_branch {
+            return Err(ApiError::BadRequest(format!(
+                "refusing to commit on the default branch {default_branch:?}; \
+                 check out a work branch first"
+            )));
+        }
+        check_forbidden(&forbidden_text, &message, branch)?;
+        let staged = run_git(&repo, &["diff", "--cached"]).await?;
+        // A conflicted merge has no cached diff (`* Unmerged path`), so the
+        // working-tree diff is what carries the markers.
+        let conflicts = run_git(&repo, &["diff"]).await?;
+        if let Some(why) = staged_rejection(&format!("{staged}\n{conflicts}")) {
+            return Err(ApiError::BadRequest(why));
+        }
+        // `git add -N` leaves an intent-to-add: status shows ` A`, and
+        // `diff --cached --raw` shows nothing at all for it.
+        let status = run_git(&repo, &["status", "--porcelain"]).await?;
+        if status.lines().any(is_intent_to_add) {
+            return Err(ApiError::BadRequest(
+                "staged diff has an intent-to-add entry (git add -N): add the file's \
+                 contents, or unstage it, before committing"
+                    .into(),
+            ));
+        }
+        let review = review_flags(&staged);
+        let stat = run_git(&repo, &["diff", "--cached", "--stat"]).await?;
+        let digest = digest_line(&stat);
+        run_git(&repo, &["commit", "-m", &message]).await?;
+        let sha = run_git(&repo, &["rev-parse", "HEAD"]).await?;
+        return Ok(Json(GitOpResp {
+            commit: Some(sha.trim().to_string()),
+            digest: Some(digest),
+            diff_stat: Some(stat.trim_end().to_string()),
+            diff: full_diff.then_some(staged),
+            review,
+            ..GitOpResp::bare()
+        }));
+    }
+    run_git(&repo, &["commit", "-m", &message]).await?;
+    let sha = run_git(&repo, &["rev-parse", "HEAD"]).await?;
+    Ok(Json(GitOpResp {
+        commit: Some(sha.trim().to_string()),
+        ..GitOpResp::bare()
+    }))
+}
+
+/// The directory an oversight commit lands in: the repo the session works in,
+/// or `worktree` when the caller named a linked worktree of that same repo.
+///
+/// A worker's commit never lands in the repo's main checkout (WI-1255): pool
+/// workers are launched in the shared main checkout, so a commit made for one
+/// without `worktree` would land on whatever branch that checkout — every
+/// other session's too — has out. The worker's own linked worktree is where
+/// its work is; name it.
+async fn session_commit_dir(
+    state: &Arc<AppState>,
+    id: &str,
+    worktree: Option<&str>,
+) -> Result<PathBuf> {
+    let (repo, role) = session_repo(state, id).await?;
+    let dir = match worktree.map(str::trim).filter(|s| !s.is_empty()) {
+        None => repo,
+        Some(worktree) => linked_worktree_of(state, &repo, worktree).await?,
+    };
+    if role == SessionRole::Worker && is_main_checkout(&dir).await? {
+        return Err(ApiError::BadRequest(format!(
+            "refusing to commit for worker session {id} in the repo's main checkout \
+             ({}): pass `worktree` naming the worker's own linked worktree",
+            dir.display()
+        )));
+    }
+    Ok(dir)
+}
+
+/// `worktree`, resolved under the workspace, when it is a worktree of the same
+/// repo as `repo`. Workspace-relative or absolute (inside the workspace): an
+/// overseer names a worktree by the path it sees.
+async fn linked_worktree_of(state: &Arc<AppState>, repo: &Path, worktree: &str) -> Result<PathBuf> {
+    let root = &state.config.workspace_root;
+    let candidate = workspace_path::resolve_existing_allow_absolute(root, worktree)?;
+    let worktree_repo = find_repo_root(&candidate, root).await.map_err(|_| {
+        ApiError::BadRequest(format!(
+            "worktree {worktree:?} is not inside a git repo under the workspace"
+        ))
+    })?;
+    let session_common = git_common_dir(repo).await?;
+    let worktree_common = git_common_dir(&worktree_repo).await?;
+    if session_common != worktree_common {
+        return Err(ApiError::BadRequest(format!(
+            "worktree {worktree:?} is not a worktree of the session's repo"
+        )));
+    }
+    Ok(worktree_repo)
+}
+
+/// Whether `repo` is the repo's main checkout rather than a linked worktree:
+/// its own git dir is the common one.
+async fn is_main_checkout(repo: &Path) -> Result<bool> {
+    let own = PathBuf::from(
+        run_git(repo, &["rev-parse", "--absolute-git-dir"])
+            .await?
+            .trim(),
+    );
+    let own = own.canonicalize().unwrap_or(own);
+    Ok(own == git_common_dir(repo).await?)
+}
+
+/// `git rev-parse --git-common-dir`, absolute, so two worktrees of one repo
+/// compare equal and a different repo does not.
+async fn git_common_dir(repo: &Path) -> Result<PathBuf> {
+    let raw = run_git(repo, &["rev-parse", "--git-common-dir"]).await?;
+    let reported = PathBuf::from(raw.trim());
+    let absolute = if reported.is_absolute() {
+        reported
+    } else {
+        repo.join(reported)
+    };
+    Ok(absolute.canonicalize().unwrap_or(absolute))
+}
+
+/// The repo's default branch: `refs/remotes/origin/HEAD`, else `main`. A repo
+/// with no origin is not an error — there is nothing to read, so `main`.
+async fn default_branch_name(repo: &Path) -> String {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .current_dir(repo)
+        .output()
+        .await;
+    let Ok(output) = output else {
+        return "main".to_string();
+    };
+    if !output.status.success() {
+        return "main".to_string();
+    }
+    let name = String::from_utf8_lossy(&output.stdout);
+    let short = name.trim().rsplit('/').next().unwrap_or("").trim();
+    if short.is_empty() {
+        "main".to_string()
+    } else {
+        short.to_string()
+    }
+}
+
+/// The repo the session works in, with the session's role: its directory,
+/// walked up to a git root inside the workspace. A session the engine does not
+/// know is a 404; one whose directory is not a repo is a 400 naming the
+/// directory.
+async fn session_repo(state: &Arc<AppState>, id: &str) -> Result<(PathBuf, SessionRole)> {
+    let uuid: uuid::Uuid = id
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("not a session id: {id}")))?;
+    let summary = match state.sessions.get(uuid) {
+        Ok(session) => session.summary(),
+        Err(ApiError::Conflict(_)) => state
+            .sessions
+            .hibernated_summary(uuid)
+            .ok_or(ApiError::NotFound)?,
+        Err(other) => return Err(other),
+    };
+    if !commit_quiet(summary.activity, summary.blocked.is_some()) {
+        return Err(ApiError::Conflict(format!(
+            "session {id} is {:?}: an oversight commit needs the worker idle, \
+             hibernated, waiting for input or blocked, not mid-turn",
+            summary.activity
+        )));
+    }
+    let cwd = PathBuf::from(&summary.cwd);
+    let repo = find_repo_root(&cwd, &state.config.workspace_root)
+        .await
+        .map_err(|_| {
+            ApiError::BadRequest(format!(
+                "session {id} works in {}, which is not inside a git repo",
+                summary.cwd
+            ))
+        })?;
+    Ok((repo, summary.role))
+}
+
+/// Quiet enough to commit over: not running, and not sitting on an approval.
+/// Waiting for the person is quiet — nothing is being written.
+fn commit_quiet(activity: vogt_engine_contract::ActivityState, blocked: bool) -> bool {
+    use vogt_engine_contract::ActivityState::{Hibernated, Idle, WaitingForInput};
+    matches!(activity, Idle | Hibernated | WaitingForInput) || blocked
+}
+
+/// Reject a message or branch the project's policy forbids. An empty list —
+/// what every project has until C13 lands — refuses nothing.
+fn check_forbidden(patterns: &[String], message: &str, branch: &str) -> Result<()> {
+    for pattern in patterns {
+        let re = regex::Regex::new(pattern).map_err(|e| {
+            ApiError::BadRequest(format!("forbidden_text {pattern:?} is not a regex: {e}"))
+        })?;
+        if re.is_match(message) {
+            return Err(ApiError::BadRequest(format!(
+                "commit message matches the project's forbidden text {pattern:?}"
+            )));
+        }
+        if re.is_match(branch) {
+            return Err(ApiError::BadRequest(format!(
+                "branch {branch:?} matches the project's forbidden text {pattern:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What must not be in the staged diff: an unresolved conflict or a secret.
+/// `None` when the diff is clean.
+fn staged_rejection(staged: &str) -> Option<String> {
+    for (name, pattern) in REJECT_PATTERNS {
+        let re = regex::Regex::new(pattern).expect("static pattern");
+        if staged.lines().any(|line| {
+            let body = line.trim_start_matches('+');
+            re.is_match(body)
+        }) {
+            return Some(format!(
+                "staged diff has a {name}: resolve it before committing"
+            ));
+        }
+    }
+    None
+}
+
+/// `git status --porcelain` marks an intent-to-add (`git add -N`) as a new
+/// file that is staged but has no content: a leading space, then `A`.
+fn is_intent_to_add(line: &str) -> bool {
+    line.starts_with(" A")
+}
+
+/// Added lines a reviewer should see: dependency pins, `unsafe`, FFI.
+fn review_flags(staged: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (name, pattern) in REVIEW_PATTERNS {
+        let re = regex::Regex::new(pattern).expect("static pattern");
+        let hits = staged
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .filter(|line| re.is_match(line))
+            .count();
+        if hits > 0 {
+            found.push(format!("{hits} {name}"));
+        }
+    }
+    found
+}
+
+/// `3 files changed, +40 -2` from a diff stat, so the result names the size
+/// without carrying the diff.
+fn digest_line(stat: &str) -> String {
+    stat.lines()
+        .last()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .unwrap_or("nothing staged")
+        .to_string()
+}
+
+impl GitOpReq {
+    /// The op as the wire names it, for audit lines and refusals.
+    fn name(&self) -> &'static str {
+        match self {
+            GitOpReq::Stage { .. } => "stage",
+            GitOpReq::Unstage { .. } => "unstage",
+            GitOpReq::Discard { .. } => "discard",
+            GitOpReq::Commit { .. } => "commit",
+            GitOpReq::Checkout { .. } => "checkout",
+        }
+    }
+
+    /// The session a commit is made on behalf of, when it is one (C14).
+    fn on_behalf_of(&self) -> Option<&str> {
+        match self {
+            GitOpReq::Commit {
+                session: Some(session),
+                ..
+            } => Some(session.trim()).filter(|s| !s.is_empty()),
+            _ => None,
+        }
+    }
+}
+
+/// Who may run a git op here (WI-1255).
+///
+/// `GitWrite` alone decided this, and every `work.write` token holds it — so
+/// every driven session could commit, check out or discard in any repo under
+/// the workspace, and commit for any other session without the oversight
+/// check `session.commit_for` makes in the core. Now:
+///
+/// - a person (a core actor of kind `human`) and the break-glass operator
+///   token run any op: they are who the GUI's Git panel serves;
+/// - vogt-core's own credential runs only a commit for a session — the core's
+///   `session.commit_for`, which has already decided its principal may;
+/// - any other caller is a session's token, and may only commit for another
+///   session, and only when its own engine role is `oversight` — the rule
+///   `session.commit_for` applies, so calling the engine directly gains
+///   nothing over calling the core.
+///
+/// Decided by the flags the authentication gate set, never by `name` alone
+/// (a core actor's `identity_ref` can be any string): `name` is only read to
+/// find which session an agent token belongs to, after the flags have ruled
+/// out a person.
+fn authorize_op(state: &AppState, identity: &AuthorizedIdentity, req: &GitOpReq) -> Result<()> {
+    if identity.person || identity.break_glass {
+        return Ok(());
+    }
+    let Some(target) = req.on_behalf_of() else {
+        return Err(ApiError::Forbidden(format!(
+            "{} may not run git {} through the engine; only a person \
+             uses the Git panel. A session commits a worker's staged work with \
+             session_commit_for, from an oversight session",
+            identity.name,
+            req.name()
+        )));
+    };
+    if identity.stack_secret {
+        return Ok(());
+    }
+    let Some(caller) = caller_session(state, &identity.name) else {
+        return Err(ApiError::Forbidden(format!(
+            "only a person, or an oversight session, commits for a \
+             session ({} is neither)",
+            identity.name
+        )));
+    };
+    if target.parse::<uuid::Uuid>().ok() == Some(caller) {
+        return Err(ApiError::Forbidden(format!(
+            "a session does not commit its own work; an oversight \
+             session, or a person, commits for it ({caller})"
+        )));
+    }
+    let role = state.sessions.summary_of(caller).map(|s| s.role);
+    if role != Some(SessionRole::Oversight) {
+        let role = role.map_or("unknown", |r| r.as_str());
+        return Err(ApiError::Forbidden(format!(
+            "only an oversight session commits for another session \
+             ({caller} is {role})"
+        )));
+    }
+    Ok(())
+}
+
+/// The engine session an agent token belongs to. A session vogt-core started
+/// is `agent:session:<ses_…>`, found through the `VOGT_SESSION_ID` its record
+/// carries, and only when exactly one session carries it; one the engine
+/// started is `agent:engine:<uuid>`, and that uuid is the engine's id.
+fn caller_session(state: &AppState, name: &str) -> Option<uuid::Uuid> {
+    if let Some(id) = name.strip_prefix("agent:engine:") {
+        return id.parse().ok().filter(|id| state.sessions.knows(*id));
+    }
+    let vogt_id = name.strip_prefix("agent:session:")?;
+    match state
+        .sessions
+        .engine_ids_for_vogt_session(vogt_id)
+        .as_slice()
+    {
+        [only] => Some(*only),
+        _ => None,
+    }
 }
 
 pub async fn operate(
     State(state): State<Arc<AppState>>,
+    identity: Option<axum::Extension<AuthorizedIdentity>>,
     Json(req): Json<GitOpReq>,
 ) -> Result<Json<GitOpResp>> {
+    let Some(axum::Extension(identity)) = identity else {
+        return Err(ApiError::Unauthorized);
+    };
+    if let Err(refused) = authorize_op(&state, &identity, &req) {
+        tracing::warn!(
+            target: "vogt::audit",
+            event = "git.op",
+            outcome = "refused",
+            caller = %identity.name,
+            op = req.name(),
+            session = req.on_behalf_of().unwrap_or("-"),
+            reason = %refused,
+            "git op refused"
+        );
+        return Err(refused);
+    }
+    if let Some(target) = req.on_behalf_of() {
+        tracing::info!(
+            target: "vogt::audit",
+            event = "git.op",
+            outcome = "allowed",
+            caller = %identity.name,
+            op = req.name(),
+            session = target,
+            "commit for a session allowed"
+        );
+    }
     match req {
         GitOpReq::Stage { repo, path } => {
             let repo = resolve_repo(&state, &repo)
@@ -440,11 +1137,7 @@ pub async fn operate(
                 .ok_or(ApiError::NotFound)?;
             let path = clean_repo_rel(&path)?;
             run_git(&repo, &["add", "--", &path]).await?;
-            Ok(Json(GitOpResp {
-                ok: true,
-                branch: None,
-                commit: None,
-            }))
+            Ok(Json(GitOpResp::bare()))
         }
         GitOpReq::Unstage { repo, path } => {
             let repo = resolve_repo(&state, &repo)
@@ -452,11 +1145,7 @@ pub async fn operate(
                 .ok_or(ApiError::NotFound)?;
             let path = clean_repo_rel(&path)?;
             run_git(&repo, &["reset", "HEAD", "--", &path]).await?;
-            Ok(Json(GitOpResp {
-                ok: true,
-                branch: None,
-                commit: None,
-            }))
+            Ok(Json(GitOpResp::bare()))
         }
         GitOpReq::Discard { repo, path } => {
             let repo = resolve_repo(&state, &repo)
@@ -487,30 +1176,28 @@ pub async fn operate(
             } else {
                 run_git(&repo, &["clean", "-fd", "--", &path]).await?;
             }
-            Ok(Json(GitOpResp {
-                ok: true,
-                branch: None,
-                commit: None,
-            }))
+            Ok(Json(GitOpResp::bare()))
         }
-        GitOpReq::Commit { repo, message } => {
-            let repo = resolve_repo(&state, &repo)
-                .await?
-                .ok_or(ApiError::NotFound)?;
-            let message = message.trim();
-            if message.is_empty() {
-                return Err(ApiError::BadRequest("message must not be empty".into()));
-            }
-            run_git(&repo, &["commit", "-m", message]).await?;
-            let commit = run_git(&repo, &["rev-parse", "HEAD"])
-                .await?
-                .trim()
-                .to_string();
-            Ok(Json(GitOpResp {
-                ok: true,
-                branch: None,
-                commit: Some(commit),
-            }))
+        GitOpReq::Commit {
+            repo,
+            message,
+            session,
+            paths,
+            full_diff,
+            forbidden_text,
+            worktree,
+        } => {
+            commit_op(
+                &state,
+                repo,
+                message,
+                session,
+                paths,
+                full_diff,
+                forbidden_text,
+                worktree,
+            )
+            .await
         }
         GitOpReq::Checkout {
             repo,
@@ -539,9 +1226,8 @@ pub async fn operate(
                 run_git(&repo, &["checkout", branch]).await?;
             }
             Ok(Json(GitOpResp {
-                ok: true,
                 branch: Some(branch.to_string()),
-                commit: None,
+                ..GitOpResp::bare()
             }))
         }
     }
@@ -568,5 +1254,284 @@ mod tests {
         assert!(clean_repo_rel("").is_err());
         assert!(clean_repo_rel("../outside").is_err());
         assert!(clean_repo_rel("/absolute/path").is_err());
+    }
+
+    #[test]
+    fn staged_diff_rejects_conflicts_and_secrets() {
+        let conflict = staged_rejection("++<<<<<<< HEAD\n+ours\n").unwrap();
+        assert!(conflict.contains("conflict marker"), "{conflict}");
+        assert!(staged_rejection("++=======\n")
+            .unwrap()
+            .contains("conflict"));
+
+        let secret = staged_rejection("+token = \"abcd1234efgh5678\"\n").unwrap();
+        assert!(secret.contains("credential"), "{secret}");
+        let key = staged_rejection("+-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+        assert!(key.contains("private key"), "{key}");
+
+        assert!(staged_rejection("+fn ordinary() {}\n").is_none());
+    }
+
+    #[test]
+    fn intent_to_add_is_a_zero_mode_new_file() {
+        assert!(is_intent_to_add(" A src/new.rs"));
+        assert!(!is_intent_to_add("A  src/added.rs"));
+        assert!(!is_intent_to_add(" M src/old.rs"));
+    }
+
+    #[test]
+    fn forbidden_text_checks_message_and_branch_and_is_a_noop_when_empty() {
+        check_forbidden(&[], "mentions grok", "feat/grok").unwrap();
+        let patterns = vec!["(?i)grok".to_string()];
+        assert!(check_forbidden(&patterns, "by grok", "feat/x").is_err());
+        assert!(check_forbidden(&patterns, "fine", "feat/grok-thing").is_err());
+        check_forbidden(&patterns, "fine", "feat/x").unwrap();
+        assert!(check_forbidden(&["[".to_string()], "m", "b").is_err());
+    }
+
+    #[test]
+    fn review_flags_count_pins_unsafe_and_ffi() {
+        let diff = concat!(
+            "+++ b/src/lib.rs\n",
+            "+fn safe() {}\n",
+            "+unsafe fn raw() {}\n",
+            "+extern \"C\" fn c_entry() {}\n",
+            "+rev = \"0123456789abcdef\"\n",
+        );
+        let flags = review_flags(diff);
+        assert!(flags.iter().any(|f| f == "1 pin"), "{flags:?}");
+        assert!(flags.iter().any(|f| f == "1 unsafe"), "{flags:?}");
+        assert!(flags.iter().any(|f| f == "1 ffi"), "{flags:?}");
+        assert!(review_flags("+fn plain() {}\n").is_empty());
+    }
+
+    #[test]
+    fn digest_line_is_the_stat_summary() {
+        assert_eq!(
+            digest_line(" a.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"),
+            "1 file changed, 1 insertion(+), 1 deletion(-)"
+        );
+        assert_eq!(digest_line(""), "nothing staged");
+    }
+
+    #[test]
+    fn waiting_for_input_is_quiet_enough_to_commit() {
+        use vogt_engine_contract::ActivityState;
+        assert!(commit_quiet(ActivityState::WaitingForInput, false));
+        assert!(commit_quiet(ActivityState::Idle, false));
+        assert!(commit_quiet(ActivityState::Hibernated, false));
+        assert!(commit_quiet(ActivityState::Running, true));
+        assert!(!commit_quiet(ActivityState::Running, false));
+        assert!(!commit_quiet(ActivityState::AwaitingApproval, false));
+    }
+
+    #[tokio::test]
+    async fn a_literal_pathspec_does_not_widen_the_add() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git(repo, &["init", "-b", "topic"]);
+        git(repo, &["config", "user.email", "t@example"]);
+        git(repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("keep.txt"), "keep\n").unwrap();
+        git(repo, &["add", "keep.txt"]);
+        git(repo, &["commit", "-m", "base"]);
+        std::fs::write(repo.join("star.txt"), "nope\n").unwrap();
+        std::fs::write(repo.join("real.txt"), "yes\n").unwrap();
+
+        let missed = run_git(repo, &["--literal-pathspecs", "add", "--", "*"])
+            .await
+            .expect_err("a literal `*` names no file");
+        let ApiError::Internal(detail) = &missed else {
+            panic!("pathspec miss must stay a git failure, not {missed:?}");
+        };
+        assert!(
+            detail.contains("did not match any files"),
+            "expected a pathspec miss, got {detail}"
+        );
+        let staged = run_git(repo, &["diff", "--cached", "--name-only"])
+            .await
+            .unwrap();
+        assert!(
+            staged.trim().is_empty(),
+            "`*` must not stage star.txt, staged: {staged:?}"
+        );
+
+        run_git(repo, &["--literal-pathspecs", "add", "--", "real.txt"])
+            .await
+            .unwrap();
+        let staged = run_git(repo, &["diff", "--cached", "--name-only"])
+            .await
+            .unwrap();
+        assert_eq!(staged.trim(), "real.txt");
+    }
+
+    #[tokio::test]
+    async fn the_default_branch_comes_from_origin_head_else_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git(repo, &["init", "-b", "topic"]);
+        assert_eq!(default_branch_name(repo).await, "main");
+
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "-b", "develop", "--bare"]);
+        git(
+            repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &origin.path().display().to_string(),
+            ],
+        );
+        git(repo, &["config", "user.email", "t@example"]);
+        git(repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "f\n").unwrap();
+        git(repo, &["add", "f.txt"]);
+        git(repo, &["commit", "-m", "base"]);
+        git(repo, &["push", "-u", "origin", "topic"]);
+        // `push` does not write `refs/remotes/origin/HEAD`. Point it at the one
+        // remote branch this clone has, the way `git remote set-head` would.
+        git(
+            repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/topic",
+            ],
+        );
+        assert_eq!(default_branch_name(repo).await, "topic");
+    }
+
+    #[tokio::test]
+    async fn a_linked_worktree_shares_the_common_dir_and_a_stranger_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "topic"]);
+        git(&repo, &["config", "user.email", "t@example"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "f\n").unwrap();
+        git(&repo, &["add", "f.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+
+        let linked = tmp.path().join("linked");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "side",
+                &linked.display().to_string(),
+            ],
+        );
+        let repo_common = git_common_dir(&repo).await.unwrap();
+        let linked_common = git_common_dir(&linked).await.unwrap();
+        assert_eq!(repo_common, linked_common);
+
+        let other = tmp.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        git(&other, &["init", "-b", "topic"]);
+        let other_common = git_common_dir(&other).await.unwrap();
+        assert_ne!(repo_common, other_common);
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A committed repo with one uncommitted edit, the state the shared
+    /// checkout is in when a worker must not touch it (WI-1298).
+    fn dirty_checkout(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "base\n").unwrap();
+        git(&repo, &["add", "f.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        git(&repo, &["branch", "integrate"]);
+        std::fs::write(repo.join("f.txt"), "dirty\n").unwrap();
+        repo
+    }
+
+    #[test]
+    fn a_worktree_is_cut_from_the_base_and_leaves_the_dirty_checkout_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let before = std::fs::read_to_string(repo.join("f.txt")).unwrap();
+
+        let worktree = create_worktree(&repo, "wi-1298-worker", "integrate").unwrap();
+
+        assert_eq!(worktree, tmp.path().join("wi-1298-worker"));
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
+            "base\n"
+        );
+        // The checkout the worktree was cut from is byte-for-byte as it was.
+        assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), before);
+        let head = git_output(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap();
+        assert_eq!(head.trim(), "wi-1298-worker");
+    }
+
+    #[test]
+    fn a_worktree_is_refused_for_a_bad_name_an_unknown_base_or_a_taken_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+
+        let bad_name = create_worktree(&repo, "has space", "integrate").unwrap_err();
+        assert!(
+            bad_name.to_string().contains("not a ref name"),
+            "{bad_name}"
+        );
+        let option = create_worktree(&repo, "--upload-pack=evil", "integrate").unwrap_err();
+        assert!(option.to_string().contains("not a ref name"), "{option}");
+        let unknown = create_worktree(&repo, "wi-1", "no-such-ref").unwrap_err();
+        assert!(unknown.to_string().contains("not in"), "{unknown}");
+
+        std::fs::create_dir(tmp.path().join("taken")).unwrap();
+        let taken = create_worktree(&repo, "taken", "integrate").unwrap_err();
+        assert!(taken.to_string().contains("already exists"), "{taken}");
+        // None of the refusals created a branch or a directory.
+        assert!(git_output(&repo, &["rev-parse", "--verify", "wi-1"]).is_err());
+        assert!(!tmp.path().join("has space").exists());
+    }
+
+    #[test]
+    fn an_existing_branch_is_refused_and_a_removed_worktree_takes_its_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let taken = create_worktree(&repo, "integrate", "main").unwrap_err();
+        assert!(taken.to_string().contains("already exists"), "{taken}");
+        assert!(!tmp.path().join("integrate").exists());
+
+        let worktree = create_worktree(&repo, "wi-2-gone", "integrate").unwrap();
+        remove_worktree(&repo, &worktree, "wi-2-gone");
+        assert!(!worktree.exists());
+        assert!(git_output(&repo, &["rev-parse", "--verify", "refs/heads/wi-2-gone"]).is_err());
+        // The branch it was cut from is not touched.
+        assert!(git_output(&repo, &["rev-parse", "--verify", "refs/heads/integrate"]).is_ok());
+    }
+
+    #[test]
+    fn a_worktree_can_be_cut_from_a_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let first = create_worktree(&repo, "first", "integrate").unwrap();
+        let second = create_worktree(&first, "second", "first").unwrap();
+        assert_eq!(second, tmp.path().join("second"));
+        assert_eq!(
+            git_output(&second, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap()
+                .trim(),
+            "second"
+        );
     }
 }

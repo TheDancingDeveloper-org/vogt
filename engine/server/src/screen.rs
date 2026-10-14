@@ -315,37 +315,88 @@ pub fn shows_opencode_prompt(lines: &[String]) -> bool {
     footer && bar && !working
 }
 
-/// The state a Klaudia TUI announces in its window title (WI-1090):
-/// `klaudia: ready`, `klaudia: working`, `klaudia: awaiting approval`,
-/// `klaudia: goal-loop`. Matched on the start of what follows the prefix, so
-/// a suffix (`klaudia: working · fixing tests`) is allowed. A build that sets
-/// no such title reads `None`, and its screen is consulted instead.
+/// The state an agent TUI announces in its window title.
+///
+/// Klaudia (WI-1090) writes `klaudia: ready`, `klaudia: working`,
+/// `klaudia: awaiting approval` and `klaudia: goal-loop`. The WI-1127 Codex
+/// fork (WI-1145) writes the same words under `codex:` — `codex: ready`,
+/// `codex: working`, `codex: awaiting approval` — and has no goal loop, so a
+/// `codex:` title never reads [`AgentTitle::GoalLoop`]. The fork's title is
+/// only a backstop for approvals (WI-1355): it turns to `awaiting approval`
+/// for an MCP elicitation form, but stays `codex: working` under its approval
+/// overlay (commands, patches), so the screen is what finds those. A launch
+/// whose title includes the spinner shows `[ ! ] Action Required` instead,
+/// blinking with `[ . ]`; the bang form is read as awaiting approval. Matched
+/// on the start of what follows the prefix, so a suffix (`klaudia: working ·
+/// fixing tests`) is allowed. A build that sets no such title reads `None`,
+/// and its screen is consulted instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KlaudiaTitle {
+pub enum AgentTitle {
     Ready,
     Working,
     AwaitingApproval,
     GoalLoop,
 }
 
-pub fn klaudia_title(title: Option<&str>) -> Option<KlaudiaTitle> {
+/// Klaudia's title states. Kept as the name the Klaudia call sites already use;
+/// it is the same set [`agent_title`] returns.
+pub type KlaudiaTitle = AgentTitle;
+
+/// Which program announced the title, when it is one this engine reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleAgent {
+    Klaudia,
+    Codex,
+}
+
+/// The agent and the state a window title announces, for the agents whose
+/// titles this engine trusts.
+pub fn agent_title(title: Option<&str>) -> Option<(TitleAgent, AgentTitle)> {
     let title = title?.trim().to_lowercase();
-    let state = title.strip_prefix("klaudia:")?.trim_start();
-    [
-        ("ready", KlaudiaTitle::Ready),
-        ("working", KlaudiaTitle::Working),
-        ("awaiting approval", KlaudiaTitle::AwaitingApproval),
-        ("approval", KlaudiaTitle::AwaitingApproval),
-        ("goal-loop", KlaudiaTitle::GoalLoop),
-        ("goal loop", KlaudiaTitle::GoalLoop),
-    ]
-    .into_iter()
-    .find(|(word, _)| {
-        state
-            .strip_prefix(word)
-            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '-'))
-    })
-    .map(|(_, found)| found)
+    // With the spinner in its title the fork shows `[ ! ] Action Required |
+    // <cwd>` while a turn waits on a person, blinking with `[ . ]` (WI-1355).
+    // Only the bang form is read, so the blink does not churn the activity.
+    if title.starts_with("[ ! ] action required") {
+        return Some((TitleAgent::Codex, AgentTitle::AwaitingApproval));
+    }
+    let (who, state) = if let Some(state) = title.strip_prefix("klaudia:") {
+        (TitleAgent::Klaudia, state)
+    } else {
+        let state = title.strip_prefix("codex:")?;
+        (TitleAgent::Codex, state)
+    };
+    let state = state.trim_start();
+    let words: &[(&str, AgentTitle)] = match who {
+        TitleAgent::Klaudia => &[
+            ("ready", AgentTitle::Ready),
+            ("working", AgentTitle::Working),
+            ("awaiting approval", AgentTitle::AwaitingApproval),
+            ("approval", AgentTitle::AwaitingApproval),
+            ("goal-loop", AgentTitle::GoalLoop),
+            ("goal loop", AgentTitle::GoalLoop),
+        ],
+        // The fork's `agent-state` title has no goal-loop word (WI-1145).
+        TitleAgent::Codex => &[
+            ("ready", AgentTitle::Ready),
+            ("working", AgentTitle::Working),
+            ("awaiting approval", AgentTitle::AwaitingApproval),
+            ("approval", AgentTitle::AwaitingApproval),
+        ],
+    };
+    words
+        .iter()
+        .find(|(word, _)| {
+            state
+                .strip_prefix(word)
+                .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '-'))
+        })
+        .map(|(_, found)| (who, *found))
+}
+
+/// The state a Klaudia title announces. A `codex:` title reads `None` here, so
+/// Klaudia's goal-loop check cannot fire on one.
+pub fn klaudia_title(title: Option<&str>) -> Option<KlaudiaTitle> {
+    agent_title(title).and_then(|(who, state)| (who == TitleAgent::Klaudia).then_some(state))
 }
 
 /// The last `n` non-blank lines of a screen, top to bottom: where a TUI
@@ -429,11 +480,13 @@ pub fn klaudia_goal_loop(title: Option<&str>, lines: &[String]) -> bool {
 /// A session `awaiting-approval` is not ready: it is at a permission dialog,
 /// where typed text and Enter answer the dialog rather than reach the agent.
 ///
-/// Klaudia has its own rules (WI-1090), because it keeps its input box on
-/// screen mid-turn and marks sent prompts with the same glyph: its title when
-/// it announces its state there, and otherwise its boxed input with nothing
-/// busy under it. `agent` is the agent CLI the session runs, `title` the
-/// window title.
+/// Klaudia (WI-1090) and the WI-1127 Codex fork (WI-1145) announce their state
+/// in the window title, and both keep drawing while a turn runs, so a glyph on
+/// screen is not enough. With a title this engine reads, ready means the title
+/// says ready, the session is at rest, and the screen does not show a turn or
+/// a question. Without one, Klaudia falls back to its boxed input and Codex to
+/// the glyph the other agents use. `agent` is the agent CLI the session runs,
+/// `title` the window title.
 pub fn is_ready(
     activity: ActivityState,
     alive: bool,
@@ -444,18 +497,29 @@ pub fn is_ready(
     if !alive {
         return false;
     }
-    if agent == Some("klaudia") {
+    let titled = match agent {
+        Some("klaudia") => true,
+        // Only a Codex that announced a title this engine reads. Stock Codex
+        // sets none, and stays on the glyph path below.
+        Some("codex") => agent_title(title).is_some_and(|(who, _)| who == TitleAgent::Codex),
+        _ => false,
+    };
+    if titled {
         let at_rest = matches!(
             activity,
             ActivityState::Idle | ActivityState::WaitingForInput
         );
-        return match klaudia_title(title) {
+        return match agent_title(title) {
             // The agent's own word. The activity reads `idle` already (the
             // title overrides output recency in `pty::compute_activity`)
-            // unless a dialog the engine recognises is open. Anything in the
-            // session can set a title (a `cat` of a file holding the escape),
-            // so a screen that shows a turn at work outranks it.
-            Some(KlaudiaTitle::Ready) => at_rest && !klaudia_busy(lines),
+            // unless a dialog the engine recognises — or the title itself —
+            // says otherwise. Anything in the session can set a title (a
+            // `cat` of a file holding the escape), so a screen that shows a
+            // turn at work outranks it. Codex has no screen marker of its own,
+            // so a spoofed `codex: ready` is refused only when the screen
+            // shows something Klaudia's check would call busy, or when the
+            // activity is already `awaiting-approval`.
+            Some((_, AgentTitle::Ready)) => at_rest && !klaudia_busy(lines),
             Some(_) => false,
             None => at_rest && shows_klaudia_prompt(lines),
         };
@@ -992,7 +1056,7 @@ mod klaudia_tests {
 
     #[test]
     fn klaudia_reads_its_title_contract() {
-        use KlaudiaTitle::*;
+        use AgentTitle::*;
         assert_eq!(klaudia_title(Some("klaudia: ready")), Some(Ready));
         assert_eq!(klaudia_title(Some("  Klaudia:Ready ")), Some(Ready));
         assert_eq!(
@@ -1105,7 +1169,8 @@ mod klaudia_tests {
             K,
             ready
         ));
-        // The title is read for Klaudia only.
+        // The title is read for Klaudia only, so a `klaudia:` title does not
+        // make another agent ready.
         assert!(!is_ready(
             ActivityState::Idle,
             true,
@@ -1113,6 +1178,102 @@ mod klaudia_tests {
             Some("claude"),
             ready
         ));
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &[],
+            Some("codex"),
+            ready
+        ));
+    }
+
+    /// The WI-1127 fork announces the same words under `codex:` (WI-1145),
+    /// except goal-loop, which it does not have.
+    #[test]
+    fn codex_reads_its_agent_state_title() {
+        use AgentTitle::*;
+        use TitleAgent::Codex;
+        assert_eq!(agent_title(Some("codex: ready")), Some((Codex, Ready)));
+        assert_eq!(agent_title(Some("  Codex:Ready ")), Some((Codex, Ready)));
+        assert_eq!(
+            agent_title(Some("codex: working · editing")),
+            Some((Codex, Working))
+        );
+        assert_eq!(
+            agent_title(Some("codex: awaiting approval")),
+            Some((Codex, AwaitingApproval))
+        );
+        // What the fork actually sets while a turn waits on a person (WI-1355),
+        // and the blink frame it alternates with, which is not approval.
+        assert_eq!(
+            agent_title(Some("[ ! ] Action Required | vogt")),
+            Some((Codex, AwaitingApproval))
+        );
+        assert_eq!(agent_title(Some("[ . ] Action Required | vogt")), None);
+        assert_eq!(
+            agent_title(Some("codex: approval")),
+            Some((Codex, AwaitingApproval))
+        );
+        // Not the contract: a word that only starts like a state, another
+        // program's title, or a goal loop the fork does not announce.
+        assert_eq!(agent_title(Some("codex: readying")), None);
+        assert_eq!(agent_title(Some("codex: goal-loop")), None);
+        assert_eq!(agent_title(Some("codex: goal loop")), None);
+        assert_eq!(agent_title(Some("claude: ready")), None);
+        assert_eq!(klaudia_title(Some("codex: ready")), None);
+        assert_eq!(klaudia_title(Some("codex: goal-loop")), None);
+    }
+
+    #[test]
+    fn codex_with_a_title_is_ready_only_when_it_says_ready() {
+        let c = Some("codex");
+        let ready = Some("codex: ready");
+        assert!(is_ready(ActivityState::Idle, true, &[], c, ready));
+        assert!(is_ready(
+            ActivityState::WaitingForInput,
+            true,
+            &[],
+            c,
+            ready
+        ));
+        for title in [
+            "codex: working",
+            "codex: awaiting approval",
+            "[ ! ] Action Required | vogt",
+        ] {
+            assert!(
+                !is_ready(ActivityState::Idle, true, &[], c, Some(title)),
+                "{title}"
+            );
+        }
+        // A dialog the engine recognises still wins over a spoofed ready.
+        assert!(!is_ready(
+            ActivityState::AwaitingApproval,
+            true,
+            &[],
+            c,
+            ready
+        ));
+        // And a screen that shows a turn or a question outranks the title,
+        // the same as it does for Klaudia.
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &frames::mid_turn(),
+            c,
+            ready
+        ));
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &frames::approval(),
+            c,
+            ready
+        ));
+        // Stock Codex sets no such title and stays on the glyph path: an empty
+        // screen at rest is not a prompt.
+        assert!(!is_ready(ActivityState::Idle, true, &[], c, None));
+        assert!(!is_ready(ActivityState::Idle, false, &[], c, ready));
     }
 
     #[test]

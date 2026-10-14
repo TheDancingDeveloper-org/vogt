@@ -137,10 +137,15 @@ pub fn capabilities_for_scopes(scopes: &[String]) -> Vec<TokenCapability> {
 /// `history` is a read: the core's `session-outcomes` collector asks
 /// `GET /api/history/{id}` for the archive of every session that has ended.
 /// Without it each sweep is refused and the collector reports `partial`.
-const STACK_SECRET_CAPABILITIES: [TokenCapability; 3] = [
+///
+/// `git-write` reaches `POST /api/git/op` for the core's `session.commit_for`
+/// (C14); the handler lets this credential make a commit for a session and
+/// nothing else (WI-1255). Without it every commit_for was refused here.
+const STACK_SECRET_CAPABILITIES: [TokenCapability; 4] = [
     TokenCapability::Sessions,
     TokenCapability::History,
     TokenCapability::AgentClisWrite,
+    TokenCapability::GitWrite,
 ];
 
 pub struct AuthRuntime {

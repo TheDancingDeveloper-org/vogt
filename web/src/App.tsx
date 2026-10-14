@@ -131,6 +131,7 @@ import {
   activityLabel,
   holdRailOrder,
   isOversight,
+  permissionPostureLabel,
   sessionActivityAge,
   sessionStateWord,
   sessionRuntimeHint,
@@ -531,12 +532,11 @@ const App: Component = () => {
   });
   const railNow = createNow(30_000);
   const [openMenuId, setOpenMenuId] = createSignal<string | null>(null);
-  // While a row's action menu is open, hold the rail order steady: an
-  // attention/recency reshuffle mid-interaction slides the row (and its menu)
-  // under the pointer, so a click meant for one session's Rename lands on the
-  // one that took its place (#686). `createMemo`'s previous value is the order
-  // already on screen; `holdRailOrder` keeps it while still refreshing each
-  // row by id. When no menu is open the rail sorts normally.
+  // While a row's action menu is open, hold the rail order steady: a
+  // reshuffle mid-interaction slides the row (and its menu) under the
+  // pointer, so a click meant for one session's Rename lands on the one that
+  // took its place (#686). The order itself is the engine's (oversight, then
+  // last event) with bookmarks lifted between the two (WI-1289).
   const railSessions = createMemo<SessionSummary[]>((prev) => {
     const sessions = sessionsStore.order
       .map((id) => sessionsStore.sessions[id])
@@ -1780,6 +1780,16 @@ const App: Component = () => {
                           );
                         }}
                       </Show>
+                      <Show when={permissionPostureLabel(s.permission_mode)}>
+                        {(label) => (
+                          <span
+                            class={`session-posture${s.permission_mode === "bypass" ? " session-posture--bypass" : ""}`}
+                            title={s.permission_mode === "bypass" ? "Started with no permission checks" : "Edits auto-accepted"}
+                          >
+                            {label()}
+                          </span>
+                        )}
+                      </Show>
                     </span>
                     <span class={`state${s.activity === "waiting-for-input" ? " state--waiting" : ""}`}>
                       {sessionStateWord(s, railNow(), sessionsStore.ready && !isConnected() ? sessionsStore.lastAnswerAt : null)}
@@ -1972,6 +1982,21 @@ const App: Component = () => {
             onNotify={(message) => showToast(message)}
           />
           <div class="places-rail-footer">
+            <Show when={sessionsStore.hiddenCount > 0 || railSections.showHidden}>
+              <button
+                type="button"
+                class="rail-hidden-toggle"
+                aria-pressed={railSections.showHidden}
+                onClick={() => {
+                  setRailSection("showHidden", !railSections.showHidden);
+                  void refreshSessions();
+                }}
+              >
+                {railSections.showHidden
+                  ? "Hide older sessions"
+                  : `${sessionsStore.hiddenCount} older ${sessionsStore.hiddenCount === 1 ? "session" : "sessions"} hidden · Show`}
+              </button>
+            </Show>
             <button type="button" onClick={openSettings}>Settings</button>
             {/* Reachable from the failure state, which is the case it is for:
                 a token that is wrong without being refused — pointed at the

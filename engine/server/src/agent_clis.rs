@@ -146,7 +146,8 @@ pub struct AgentCliTool {
     pub tool: String,
     /// Where it comes from: the npm package, or the Go release mirror.
     pub package: String,
-    /// How a version of it is fetched: `npm`, `go-dist` or `go-src`.
+    /// How a version of it is fetched: `npm`, `go-dist`, `go-src` or
+    /// `github-release` (a `fork-<commit>` GitHub release asset, WI-1142).
     #[serde(default = "default_kind")]
     pub kind: String,
     pub binary: String,

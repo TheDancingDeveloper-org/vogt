@@ -11,12 +11,24 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use uuid::Uuid;
-use vogt_engine_contract::{OkResponse, SessionDetail, SessionScreen, SessionSummary};
+use vogt_engine_contract::{OkResponse, SessionDetail, SessionList, SessionScreen, SessionSummary};
 
 use crate::{app::AppState, error::Result, pty::SessionSpec};
 
-pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
-    Json(state.sessions.list())
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    /// `hidden` returns the sessions the default list leaves out as well as
+    /// the ones it shows (WI-1289). Anything else, including absent, is the
+    /// visible set. `hidden_count` is reported either way.
+    pub include: Option<String>,
+}
+
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ListQuery>,
+) -> Json<SessionList> {
+    let include_hidden = q.include.as_deref() == Some("hidden");
+    Json(state.sessions.list(include_hidden))
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +62,62 @@ pub async fn wait_session(
     let session = state.sessions.get(id)?;
     Ok(Json(
         crate::wait::wait(&state.bus, session, until, timeout).await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangesQuery {
+    /// Replay events published after this sequence. `0` reads the whole ring.
+    pub since: Option<u64>,
+    /// Engine session ids, comma separated. Absent means every session.
+    pub ids: Option<String>,
+    /// At most this many changes; default 100, at most 500.
+    pub limit: Option<usize>,
+}
+
+/// Changes published after a cursor, so an overseer reads a delta instead of
+/// sweeping (WI-1246).
+pub async fn session_changes(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ChangesQuery>,
+) -> Result<Json<vogt_engine_contract::SessionChanges>> {
+    Ok(Json(crate::changes::changes(
+        &state.bus,
+        q.since.unwrap_or(0),
+        q.ids.as_deref(),
+        q.limit,
+    )?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WaitAnyQuery {
+    /// Engine session ids, comma separated. Absent means every session.
+    pub ids: Option<String>,
+    /// Kinds to wait for, comma separated. Defaults to the overseer set.
+    pub until: Option<String>,
+    /// Ignore changes at or before this sequence.
+    pub cursor: Option<u64>,
+    /// Seconds to wait at most; default 120, at most 600.
+    pub timeout_s: Option<u64>,
+}
+
+/// Block until one of the named sessions changes in a way `until` names, or
+/// the timeout passes (WI-1246).
+pub async fn session_wait_any(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<WaitAnyQuery>,
+) -> Result<Json<vogt_engine_contract::SessionWaitAny>> {
+    let until = crate::changes::parse_until(q.until.as_deref())?;
+    let timeout = Duration::from_secs(q.timeout_s.unwrap_or(120));
+    Ok(Json(
+        crate::changes::wait_any(
+            &state.bus,
+            q.ids.as_deref(),
+            &until,
+            q.cursor.unwrap_or(0),
+            timeout,
+        )
+        .await?,
     ))
 }
 
@@ -111,6 +179,7 @@ pub async fn hibernate_session(
                 req.reason,
                 vogt_engine_contract::HibernateTrigger::Manual,
                 req.allow_shell,
+                req.superseded_by,
             )
             .await?,
     ))
@@ -145,13 +214,56 @@ pub async fn keep_session_awake(
     Ok(Json(state.sessions.set_keep_awake(id, req.keep_awake)?))
 }
 
+/// Whether this caller may give a session a role other than `worker`, or
+/// change its role at all (WI-957, WI-1255).
+///
+/// The role is a person's nomination: vogt-core's `session.set_role` and
+/// `session.start` refuse every agent principal, and an oversight role is
+/// what lets a session commit for others (C14) and ask for grants on their
+/// behalf. So here too only a person, the break-glass operator, or vogt-core
+/// (which has made that check for its own caller) may assign it — otherwise
+/// any session token, holding `sessions`, could promote itself, or start an
+/// overseer and drive its terminal, and walk past both checks. Decided by the
+/// gate's flags, never by `name`. A refusal is a 403 with an audit line.
+fn require_role_authority(
+    identity: Option<&crate::auth::AuthorizedIdentity>,
+    session: &str,
+    role: vogt_engine_contract::SessionRole,
+) -> crate::error::Result<()> {
+    match identity {
+        Some(identity) if identity.person || identity.break_glass || identity.stack_secret => {
+            Ok(())
+        }
+        Some(identity) => {
+            tracing::warn!(
+                target: "vogt::audit",
+                event = "session.role",
+                outcome = "refused",
+                caller = %identity.name,
+                session = session,
+                role = role.as_str(),
+                "session role refused"
+            );
+            Err(crate::error::ApiError::Forbidden(format!(
+                "only a person nominates an oversight session, or changes a session's \
+                 role ({} is an agent); ask a person to do it from the GUI",
+                identity.name
+            )))
+        }
+        None => Err(crate::error::ApiError::Unauthorized),
+    }
+}
+
 /// Nominate a session as oversight, or make it a worker again (WI-957).
-/// Becoming oversight pins it awake too.
+/// Becoming oversight pins it awake too. Only a person, break-glass or
+/// vogt-core (`require_role_authority`).
 pub async fn set_session_role(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
     Json(req): Json<vogt_engine_contract::SessionRoleRequest>,
 ) -> Result<Json<SessionSummary>> {
+    require_role_authority(identity.as_deref(), &id.to_string(), req.role)?;
     Ok(Json(state.sessions.set_role(id, req.role)?))
 }
 
@@ -235,6 +347,119 @@ pub async fn report_own_conversation(
     match state.sessions.report_conversation(id, report) {
         Ok(summary) => Json(summary).into_response(),
         Err(e) => e.into_response(),
+    }
+}
+
+/// The broker route for a policy check: `/api/agent-auth/policy-check`.
+pub const POLICY_CHECK_ROUTE: &str = "/api/agent-auth/policy-check";
+
+/// What the hook posts: the PreToolUse payload, of which only the tool name,
+/// the command and the working directory are read. Unknown fields are
+/// ignored so a CLI that adds one does not start failing closed.
+#[derive(serde::Deserialize)]
+struct PolicyCheckRequest {
+    #[serde(default)]
+    tool_name: String,
+    #[serde(default)]
+    tool_input: PolicyCheckInput,
+    #[serde(default)]
+    cwd: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct PolicyCheckInput {
+    #[serde(default)]
+    command: String,
+}
+
+/// `POST /api/agent-auth/policy-check` — whether the shell command a session's
+/// agent is about to run breaks the project's policy (WI-1243). Authenticated
+/// like [`report_own_conversation`]: the session's own broker token, which
+/// names the session, so a session is only ever checked against its own
+/// policy. A session with no policy, or a tool that is not a shell, is
+/// allowed; the hook only asks about `Bash`.
+pub async fn policy_check(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::{http::header, response::IntoResponse};
+    let path = request.uri().path().to_string();
+    let request_id = request
+        .extensions()
+        .get::<crate::observability::RequestId>()
+        .map(|id| id.0.clone())
+        .unwrap_or_default();
+    let session = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|token| state.sessions.secret_broker().authenticate(token));
+    let Some(id) = session else {
+        crate::auth::record_auth_failure(
+            &axum::http::Method::POST,
+            &path,
+            &request_id,
+            "missing or unknown broker token",
+        )
+        .await;
+        return crate::error::ApiError::Unauthorized.into_response();
+    };
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(body) => body,
+        Err(_) => {
+            return crate::error::ApiError::BadRequest("policy check too large".into())
+                .into_response()
+        }
+    };
+    let req: PolicyCheckRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(e) => {
+            return crate::error::ApiError::BadRequest(format!("policy check: {e}")).into_response()
+        }
+    };
+    let allow = serde_json::json!({"decision": "allow"});
+    if req.tool_name != "Bash" {
+        return Json(allow).into_response();
+    }
+    let Ok(session) = state.sessions.get(id) else {
+        return Json(allow).into_response();
+    };
+    let Some(policy) = session.policy() else {
+        return Json(allow).into_response();
+    };
+    let cwd = if req.cwd.is_empty() {
+        std::path::PathBuf::from(&session.cwd)
+    } else {
+        std::path::PathBuf::from(&req.cwd)
+    };
+    let command = req.tool_input.command;
+    // The check reads a commit-message file and runs `git rev-parse`, both
+    // blocking, so it runs off the runtime and under a bound: a check that
+    // does not return is a refusal, not a pass.
+    let verdict = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::task::spawn_blocking(move || crate::policy::check(&policy, &command, &cwd)),
+    )
+    .await;
+    match verdict {
+        Ok(Ok(Some(reason))) => {
+            tracing::warn!(session = %id, event = "policy.deny", "project policy refused a command");
+            Json(serde_json::json!({"decision": "deny", "reason": reason})).into_response()
+        }
+        Ok(Ok(None)) => Json(allow).into_response(),
+        Ok(Err(_)) | Err(_) => {
+            // A check that did not finish says nothing, so it refuses, the same
+            // way the hook refuses a check it cannot read.
+            tracing::warn!(session = %id, event = "policy.timeout", "project policy check did not finish");
+            Json(serde_json::json!({
+                "decision": "deny",
+                "reason": "policy check timed out",
+            }))
+            .into_response()
+        }
     }
 }
 
@@ -487,8 +712,14 @@ pub async fn answer_session(
 
 pub async fn create_session(
     State(state): State<Arc<AppState>>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
     Json(spec): Json<SessionSpec>,
 ) -> Result<Json<SessionSummary>> {
+    // Starting an overseer is nominating one (WI-1255): a worker that could
+    // start one would drive its terminal and borrow its standing.
+    if !spec.role.is_worker() {
+        require_role_authority(identity.as_deref(), "(new)", spec.role)?;
+    }
     let s = state.sessions.create_launched(spec).await?;
     Ok(Json(s.summary()))
 }
@@ -612,6 +843,10 @@ pub struct SweepQuery {
     /// Include sessions whose process has exited (default false).
     #[serde(default)]
     pub include_exited: bool,
+    /// Include sessions the default list hides (WI-1289). Off by default, so
+    /// a sweep is the same set the rail shows.
+    #[serde(default)]
+    pub include_hidden: bool,
 }
 
 /// Every session at once, each with the tail of its screen: the oversight
@@ -630,7 +865,8 @@ pub async fn sweep_sessions(
     }
     let wanted: Vec<SessionSummary> = state
         .sessions
-        .list()
+        .list(q.include_hidden)
+        .sessions
         .into_iter()
         .filter(|s| {
             s.alive
@@ -678,6 +914,42 @@ pub async fn sweep_sessions(
     }))
     .await;
     Ok(Json(rows))
+}
+
+/// The workspace volume's usage, and whether it is past the threshold
+/// (WI-1304). A volume that cannot be read is reported as needing attention
+/// rather than as empty and fine.
+fn disk_status(path: &std::path::Path, threshold_percent: u8) -> DiskStatus {
+    disk_status_from(
+        path,
+        crate::worktree_clean::volume_usage(path),
+        threshold_percent,
+    )
+}
+
+fn disk_status_from(
+    path: &std::path::Path,
+    usage: Option<crate::worktree_clean::VolumeUsage>,
+    threshold_percent: u8,
+) -> DiskStatus {
+    match usage {
+        Some(usage) => DiskStatus {
+            path: path.display().to_string(),
+            total_bytes: usage.total_bytes,
+            free_bytes: usage.free_bytes,
+            used_percent: usage.used_percent,
+            threshold_percent,
+            needs_attention: usage.used_percent >= threshold_percent,
+        },
+        None => DiskStatus {
+            path: path.display().to_string(),
+            total_bytes: 0,
+            free_bytes: 0,
+            used_percent: 0,
+            threshold_percent,
+            needs_attention: true,
+        },
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -754,7 +1026,8 @@ pub async fn session_input(
     }
     let session = state.sessions.get(id)?;
     let identity = identity.map(|axum::Extension(identity)| identity);
-    if !crate::person_gate::is_person(identity.as_ref(), req.person) {
+    let person = crate::person_gate::is_person(identity.as_ref(), req.person);
+    if !person {
         let reading = Arc::clone(&session);
         let person = req.person;
         tokio::task::spawn_blocking(move || {
@@ -775,23 +1048,60 @@ pub async fn session_input(
     session
         .write_input(&bytes)
         .map_err(|e| crate::error::ApiError::Pty(format!("write input: {e}")))?;
+    // Only a person moves the retention clock. An agent's `/input` — the
+    // common case, and what `session.input` relays with `person: false` —
+    // writes the PTY and leaves `last_person_input_at` where it was.
+    if person {
+        session.note_person_input();
+    }
     Ok(Json(OkResponse::new(true)))
 }
 
 pub async fn events_stream(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
-    let rx = state.bus.subscribe();
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    // Subscribe before reading the ring, so an event published between the
+    // two is on the live stream and deduped by seq rather than lost.
+    let (replay, truncated, rx) = crate::changes::replay_then_live(&state.bus, last_event_id);
     let bus = state.bus.clone();
-    let stream = BroadcastStream::new(rx).filter_map(move |res| match res {
-        Ok(ev) => match serde_json::to_string(&ev) {
-            Ok(json) => Some(Ok(Event::default().data(json))),
-            Err(_) => None,
-        },
-        // A slow client fell behind and missed events. The stream goes on,
-        // but the client is told, in band, so it can re-read what it shows
-        // rather than trust state built from a stream with a hole in it
-        // (WI-920).
+    // One threshold dedupes the overlap between the replay and the live
+    // channel, which only delivers in seq order, without a set that grows
+    // for the life of the connection. It is the highest seq already handed to
+    // this stream: the last replayed seq. Not the client's cursor: after an
+    // engine restart the cursor is from the previous run's sequence and can
+    // be far above anything this run publishes, and every new event would be
+    // dropped. An event at or below a current cursor cannot arrive live
+    // anyway — it was published before the subscription.
+    let replay_max = replay.last().map(|ev| ev.seq).unwrap_or(0);
+    let mut prelude = Vec::new();
+    if truncated {
+        bus.note_lag("sse-events", 0);
+        prelude.push(Ok(Event::default().data(
+            serde_json::json!({ "type": "lagged", "skipped": 0 }).to_string(),
+        )));
+    }
+    for sequenced in replay {
+        prelude.push(Ok(Event::default()
+            .id(sequenced.seq.to_string())
+            .data(serde_json::to_string(&sequenced.event).unwrap_or_default())));
+    }
+    let live = BroadcastStream::new(rx).filter_map(move |res| match res {
+        Ok(sequenced) => {
+            if sequenced.seq <= replay_max {
+                return None;
+            }
+            match serde_json::to_string(&sequenced.event) {
+                Ok(json) => Some(Ok(Event::default()
+                    .id(sequenced.seq.to_string())
+                    .data(json))),
+                Err(_) => None,
+            }
+        }
         Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(skipped)) => {
             bus.note_lag("sse-events", skipped);
             Some(Ok(Event::default().data(
@@ -799,6 +1109,7 @@ pub async fn events_stream(
             )))
         }
     });
+    let stream = futures_util::stream::iter(prelude).chain(live);
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
@@ -934,12 +1245,25 @@ pub struct OperationalStatus {
     /// resident memory. Absent when chats are off.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chats: Option<ChatStatus>,
+    /// The workspace volume (WI-1304). `needs_attention` once used space
+    /// passes `ENGINE_DISK_WARN_PERCENT` (85 by default).
+    pub disk: DiskStatus,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ChatStatus {
     pub running: usize,
     pub rss_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiskStatus {
+    pub path: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub used_percent: u8,
+    pub threshold_percent: u8,
+    pub needs_attention: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -989,7 +1313,7 @@ pub async fn operational_status(
         source_ref: crate::product::SOURCE_REF,
         source_sha: crate::product::SOURCE_SHA,
         release_url: crate::product::release_url(),
-        session_count: state.sessions.list().len(),
+        session_count: state.sessions.list(false).sessions.len(),
         event_lag: state.bus.lags(),
         chats: match state.chats.clone() {
             Some(chats) => {
@@ -1035,6 +1359,7 @@ pub async fn operational_status(
             state_dir: state.config.state_dir.display().to_string(),
             workspace_root: state.config.workspace_root.display().to_string(),
         },
+        disk: disk_status(&state.config.workspace_root, state.config.disk_warn_percent),
     }))
 }
 
@@ -1306,5 +1631,41 @@ async fn check_backup_agreement(
             // over it would take the terminals with it.
             fatal: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod disk_status_tests {
+    use super::*;
+    use crate::worktree_clean::VolumeUsage;
+
+    fn at(percent: u8) -> Option<VolumeUsage> {
+        Some(VolumeUsage {
+            total_bytes: 100,
+            free_bytes: 100 - u64::from(percent),
+            used_percent: percent,
+        })
+    }
+
+    #[test]
+    fn needs_attention_from_the_threshold_up() {
+        let path = std::path::Path::new("/w");
+        assert!(!disk_status_from(path, at(84), 85).needs_attention);
+        assert!(disk_status_from(path, at(85), 85).needs_attention);
+        assert!(disk_status_from(path, at(100), 85).needs_attention);
+        assert!(!disk_status_from(path, at(95), 100).needs_attention);
+        let row = disk_status_from(path, at(50), 85);
+        assert_eq!(row.threshold_percent, 85);
+        assert_eq!(row.used_percent, 50);
+        assert_eq!(row.path, "/w");
+    }
+
+    /// A volume that cannot be read is not reported as an empty, fine one.
+    #[test]
+    fn an_unreadable_volume_needs_attention() {
+        let missing = std::path::Path::new("/nonexistent/vogt-wi-1304/volume");
+        let row = disk_status(missing, 85);
+        assert!(row.needs_attention);
+        assert_eq!(row.total_bytes, 0);
     }
 }

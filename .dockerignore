@@ -6,6 +6,7 @@
 !uv.lock
 !README.md
 !LICENSE
+!NOTICE
 !src/
 !src/**
 !vogt-lifecycle.sh

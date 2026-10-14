@@ -192,6 +192,9 @@ binary and `contract/` holds the shared wire DTOs. One module per concern:
   embedded PWA, the bearer gate, and the two proxied route families.
 - **Push and history** (`push*.rs`, `history.rs`) — web push (VAPID), native
   push (FCM), and archived session history.
+- **Session briefs** (`prompt_files.rs`) — the brief vogt-core composed and a
+  companion guide beside it. A project's agent policy is text in the brief;
+  the engine enforces none of it yet.
 
 The engine is bootable alone: with no core configured it serves sessions,
 stays ready, and refuses the Vogt routes with a named reason. The wire
@@ -287,7 +290,15 @@ Two SQLite databases with different write disciplines:
   labels, initiatives, actors, tokens, suppressions, contract adoptions and
   exemptions, coding sessions, drift proposals, workflow definitions, the
   `events` feed and the `audit` log. Every write goes through the
-  application layer with an actor and a reason.
+  application layer with an actor and a reason. A project also carries an
+  `agent_policy`: text a commit, branch or PR must not match, whether a merge
+  to a named branch deploys production, guidance (a commit identity, a test
+  recipe, free-text rules), and three optional structured blocks — `landing`
+  (base branch, branch pattern, who lands, who merges and how, who deploys),
+  `review` and `verification`. `project.update` replaces it wholesale.
+  Only the first two are enforced, and only by the session hooks the engine
+  writes (§4.2); the rest is told to the agent in its brief and nothing
+  else acts on it.
 - **`observed.sqlite3`** — what collectors found: `sweeps` (coverage records)
   and `observations` (immutable evidence rows), the derived
   `latest_observations` and `latest_dep_refs` tables rebuilt at sweep
@@ -489,8 +500,18 @@ $VOGT_DATA_DIR/                  (in the stack: /var/lib/vogt)
 ```
 
 Every connection opens with `journal_mode = WAL`, `foreign_keys = ON`, a busy
-timeout and the configured `sqlite_synchronous`. There is no external
+timeout and the configured `sqlite_synchronous`. A write opens its own
+connection per transaction. Reads borrow from a small per-file pool in the
+process (`storage/sqlite/connection.py`). A pooled connection is lent to one
+thread at a time, always outside a transaction. It is closed rather than lent
+again once a restore or clone has replaced its file. There is no external
 database, cache or queue; the core needs SQLite and `git`.
+
+The shell's badge counts (`place.metrics`) and the stored half of the Inbox
+are shared within the process between callers while neither store has moved
+(`application/memo.py`). The key is the declared revision, the newest event,
+and the observed projection's generation, which every `rebuild_latest` bumps.
+Concurrent callers share one computation (WI-1224).
 
 **Migrations** are forward-only SQL files under
 `src/vogt/storage/sqlite/migrations/{declared,observed}/`, applied by

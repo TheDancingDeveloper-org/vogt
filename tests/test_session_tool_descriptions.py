@@ -78,6 +78,7 @@ def test_session_input_warns_against_a_blind_enter(tools: dict[str, Any]) -> Non
     assert "session_screen" in description
     assert "blind Enter" in description
     assert "never the text" in description
+    assert "draft" in description
     assert tools["session_input"].scope == "work.write"
 
 

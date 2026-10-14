@@ -34,9 +34,18 @@ const MAX_ENTRIES: usize = 20_000;
 ///
 /// `agent` is the CLI's binary name (`claude`, `codex`); anything else, or a
 /// conversation the CLI keeps no readable transcript for, is `None`.
-pub fn conversation_cwd(agent: &str, id: &str, home: &Path) -> Option<PathBuf> {
+/// `claude_dirs` are further Claude Code config directories (a
+/// `CLAUDE_CONFIG_DIR` per account) searched after `~/.claude`.
+pub fn conversation_cwd(
+    agent: &str,
+    id: &str,
+    home: &Path,
+    claude_dirs: &[PathBuf],
+) -> Option<PathBuf> {
     let transcript = match agent {
-        "claude" => claude_transcript(&home.join(".claude").join("projects"), id),
+        "claude" => claude_roots(home, claude_dirs)
+            .iter()
+            .find_map(|root| claude_transcript(root, id)),
         "codex" => codex_transcript(&home.join(".codex").join("sessions"), id),
         // Klaudia files Claude Code's layout under its own root (WI-950).
         "klaudia" => claude_transcript(&home.join(".klaudia").join("sessions"), id),
@@ -45,8 +54,17 @@ pub fn conversation_cwd(agent: &str, id: &str, home: &Path) -> Option<PathBuf> {
     head_cwd(&transcript)
 }
 
+/// Where Claude Code keeps conversations: `~/.claude/projects`, then
+/// `<dir>/projects` for each further config directory.
+pub(crate) fn claude_roots(home: &Path, claude_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    std::iter::once(home.join(".claude"))
+        .chain(claude_dirs.iter().cloned())
+        .map(|dir| dir.join("projects"))
+        .collect()
+}
+
 /// `<root>/<cwd-key>/<id>.jsonl`, one directory level down.
-fn claude_transcript(root: &Path, id: &str) -> Option<PathBuf> {
+pub(crate) fn claude_transcript(root: &Path, id: &str) -> Option<PathBuf> {
     let file_name = format!("{id}.jsonl");
     std::fs::read_dir(root)
         .ok()?
@@ -58,7 +76,7 @@ fn claude_transcript(root: &Path, id: &str) -> Option<PathBuf> {
 
 /// `<root>/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl`, at most four levels
 /// down, newest dates first.
-fn codex_transcript(root: &Path, id: &str) -> Option<PathBuf> {
+pub(crate) fn codex_transcript(root: &Path, id: &str) -> Option<PathBuf> {
     let suffix = format!("-{id}.jsonl");
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     let mut seen = 0usize;
@@ -130,10 +148,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            conversation_cwd("claude", "abc-123", home.path()),
+            conversation_cwd("claude", "abc-123", home.path(), &[]),
             Some(PathBuf::from("/srv/work"))
         );
-        assert_eq!(conversation_cwd("claude", "missing", home.path()), None);
+        assert_eq!(
+            conversation_cwd("claude", "missing", home.path(), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn finds_a_conversation_under_an_accounts_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let account = tempfile::tempdir().unwrap();
+        let dir = account.path().join("projects/-srv-work");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("abc-123.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/srv/work\"}\n",
+        )
+        .unwrap();
+        // Not under ~/.claude, so the default lookup misses it...
+        assert_eq!(
+            conversation_cwd("claude", "abc-123", home.path(), &[]),
+            None
+        );
+        // ...and the account's directory finds it.
+        assert_eq!(
+            conversation_cwd(
+                "claude",
+                "abc-123",
+                home.path(),
+                &[account.path().to_path_buf()]
+            ),
+            Some(PathBuf::from("/srv/work"))
+        );
     }
 
     #[test]
@@ -147,7 +196,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            conversation_cwd("codex", "0199aaaa-bbbb", home.path()),
+            conversation_cwd("codex", "0199aaaa-bbbb", home.path(), &[]),
             Some(PathBuf::from("/srv/codex"))
         );
     }
@@ -163,11 +212,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            conversation_cwd("klaudia", "72d33a6b", home.path()),
+            conversation_cwd("klaudia", "72d33a6b", home.path(), &[]),
             Some(PathBuf::from("/srv/klaudia"))
         );
         // Not under Claude Code's root: the agent decides where to look.
-        assert_eq!(conversation_cwd("claude", "72d33a6b", home.path()), None);
+        assert_eq!(
+            conversation_cwd("claude", "72d33a6b", home.path(), &[]),
+            None
+        );
     }
 
     #[test]
@@ -176,7 +228,7 @@ mod tests {
         let dir = home.path().join(".claude/projects/x");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("id1.jsonl"), "{\"type\":\"summary\"}\nnot json\n").unwrap();
-        assert_eq!(conversation_cwd("claude", "id1", home.path()), None);
-        assert_eq!(conversation_cwd("opencode", "id1", home.path()), None);
+        assert_eq!(conversation_cwd("claude", "id1", home.path(), &[]), None);
+        assert_eq!(conversation_cwd("opencode", "id1", home.path(), &[]), None);
     }
 }

@@ -89,6 +89,18 @@ export interface SessionSummary {
   /** The permission posture when not the default: `accept-edits` or
    *  `bypass` (no permission checks) (WI-926). */
   permission_mode?: string | null;
+  /** Latest of the session's activity, output, person input and
+   *  exit/hibernation clocks (WI-1289). The engine sorts the list by it. */
+  last_event_at?: string | null;
+  /** Last keystroke a person sent. Agent input does not stamp it. */
+  last_person_input_at?: string | null;
+}
+
+/** `GET /api/sessions` (WI-1289). Older engines answered a bare array and
+ *  said nothing about what they hid, which this reader treats as a count of 0. */
+export interface SessionList {
+  sessions: SessionSummary[];
+  hidden_count: number;
 }
 
 /** What a session's process tree holds, sampled every ~10 s by the engine. */
@@ -204,6 +216,9 @@ export type ServerEvent =
       entity_kind: string;
       entity_id: string;
       seq: number;
+      /** The core event's own per-kind payload, verbatim — `{ref, ...}` on a
+       *  `work.updated` or `work.transitioned`. Absent when it carried none. */
+      summary?: unknown;
     };
 
 // The bearer token is persisted in localStorage on purpose. This is a PWA that
@@ -890,8 +905,16 @@ export interface AgentTaskUpsertRequest {
 }
 
 export const api = {
-  listSessions: (signal?: AbortSignal) =>
-    req<SessionSummary[]>("GET", "/api/sessions", undefined, signal),
+  listSessions: async (signal?: AbortSignal, includeHidden = false): Promise<SessionList> => {
+    const path = includeHidden ? "/api/sessions?include=hidden" : "/api/sessions";
+    const body = await req<SessionList | SessionSummary[]>("GET", path, undefined, signal);
+    if (Array.isArray(body)) return { sessions: body, hidden_count: 0 };
+    const count = body.hidden_count;
+    return {
+      sessions: Array.isArray(body.sessions) ? body.sessions : [],
+      hidden_count: typeof count === "number" && count >= 0 ? count : 0,
+    };
+  },
   createSession: (s: CreateSessionRequest) =>
     req<SessionSummary>("POST", "/api/sessions", s),
   getSession: (id: string, signal?: AbortSignal, tailBytes?: number) =>
@@ -1385,6 +1408,24 @@ export interface AssistantVogtWriteAction {
   target: string;
   reason: string;
   payload: string;
+  /** Approving it ends something for good (a session stop or remove). */
+  destructive?: boolean;
+  /**
+   * The session a session write acts on, resolved by the engine. Present for
+   * every session write: a card that showed only the id asked for approval
+   * of an opaque string (WI-1267).
+   */
+  session?: AssistantSessionTarget;
+  /** Other sessions the reason names: a sign the request was misheard. */
+  reason_names?: string[];
+}
+
+export interface AssistantSessionTarget {
+  id: string;
+  name: string;
+  activity: string;
+  work_item?: string;
+  cwd: string;
 }
 
 /** The exact card returned after a Vogt-write reason preview/update. */

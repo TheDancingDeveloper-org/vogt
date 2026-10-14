@@ -429,7 +429,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=main
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.9
+            VOGT_PRODUCT_VERSION=0.7.14
           cache-from: |
             type=registry,ref=${{ env.CACHE_IMAGE }}:stack-main
             type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main
@@ -545,7 +545,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=main
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.9
+            VOGT_PRODUCT_VERSION=0.7.14
           provenance: true
           sbom: true
           cache-from: |
@@ -680,7 +680,7 @@ jobs:
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.9
+            VOGT_PRODUCT_VERSION=0.7.14
             INSTALL_AI_CLIENTS=true
           # Layer cache on the operator's registry, its own tag so the
           # stack and core streams cannot evict each other.
@@ -712,6 +712,47 @@ jobs:
           done
           echo "stack image carries the agent CLIs"
 
+      # The Codex gitguard e2e (WI-1356) can only run where
+      # /etc/codex/requirements.toml is the shipped file and the real Codex
+      # fork and klaudia are installed: this image. Everywhere else it skips,
+      # so it is built as its own Dockerfile target and run inside the
+      # candidate with VOGT_CODEX_GITGUARD_E2E=1, which turns a missing
+      # prerequisite into a failure instead of a skip.
+      - timeout-minutes: 30
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: engine/Dockerfile
+          target: codex-gitguard-e2e
+          outputs: type=local,dest=${{ runner.temp }}/codex-gitguard-e2e
+          # The candidate's build args, so server-build is a cache hit.
+          build-args: |
+            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
+            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=0.7.14
+            INSTALL_AI_CLIENTS=true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
+
+      - name: Codex refuses destructive git with the shipped requirements
+        env:
+          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
+          E2E_DIR: ${{ runner.temp }}/codex-gitguard-e2e
+        run: |
+          set -euo pipefail
+          test -x "$E2E_DIR/codex_gitguard_e2e"
+          # The runner's dockerd lives in a sidecar that cannot see the job
+          # workspace, so a bind mount of $E2E_DIR arrives as an empty
+          # directory. Copy the binary into the container instead.
+          cid="$(docker create \
+            -e VOGT_CODEX_GITGUARD_E2E=1 \
+            --entrypoint /usr/local/bin/codex_gitguard_e2e \
+            "$CANDIDATE" --nocapture)"
+          trap 'docker rm -f "$cid" >/dev/null' EXIT
+          docker cp "$E2E_DIR/codex_gitguard_e2e" "$cid:/usr/local/bin/codex_gitguard_e2e"
+          docker start --attach "$cid"
+
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: push
         with:
@@ -730,7 +771,7 @@ jobs:
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.9
+            VOGT_PRODUCT_VERSION=0.7.14
             INSTALL_AI_CLIENTS=true
           provenance: true
           sbom: true

@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -92,6 +92,9 @@ pub struct Session {
     keep_awake: AtomicBool,
     /// On autopilot (see `SessionSummary::autopilot`, WI-949).
     autopilot: AtomicBool,
+    /// The project's agent policy (WI-1243), when the session carries one.
+    /// The policy-check route reads it; a wake restores it from the record.
+    policy: Mutex<Option<vogt_engine_contract::SessionPolicy>>,
     /// Times the engine told it to carry on.
     autopilot_nudges: std::sync::atomic::AtomicU32,
     /// Nominated to supervise other sessions (see `SessionSummary::role`,
@@ -101,16 +104,27 @@ pub struct Session {
     /// the session ending, so its record is kept and its history row says
     /// `hibernated`.
     hibernating: AtomicBool,
-    /// When input was last written to the PTY.
+    /// When input was last written to the PTY. Every writer moves this,
+    /// person or agent: the quiet clock and autopilot read it, and it
+    /// cannot tell them apart.
     last_input: Mutex<Option<Instant>>,
+    /// When a person last typed (WI-1289). Only the WebSocket path and a
+    /// person-gated HTTP `/input` set it. Agent input does not, so it
+    /// cannot keep a finished session on the default list.
+    last_person_input_at: Mutex<Option<time::OffsetDateTime>>,
     /// The process tree's last resource sample (`resources`).
     resources: Mutex<Option<vogt_engine_contract::SessionResources>>,
     /// The template it was started from, when one was named.
     template: Mutex<Option<String>>,
     /// The work item it serves (see `SessionSummary::work_item`, WI-998).
     work_item: Mutex<Option<String>>,
+    /// The session its work was handed to (WI-1251). Kept on the live session
+    /// so a later hibernation records the handoff again: the record is
+    /// rewritten from the session, and a forced wake must not forget it.
+    superseded_by: Mutex<Option<String>>,
     /// The permission posture, when not the default (WI-926).
     permission_mode: Mutex<Option<String>>,
+    account: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
     stop: Mutex<Option<vogt_engine_contract::StopRequest>>,
     /// What runs first in the session: `agent-auth` when the launch wrapper
@@ -120,6 +134,37 @@ pub struct Session {
     first_output_seen: AtomicBool,
     /// The launch wrapper's report was accepted; a second is refused.
     launch_reported: AtomicBool,
+    /// The economics tailer's place in this session's transcript, and the
+    /// snapshot it last produced (WI-1245).
+    economics: parking_lot::Mutex<Option<crate::economics::Tail>>,
+    economics_snapshot: parking_lot::Mutex<Option<vogt_engine_contract::SessionEconomics>>,
+    /// The budget the session was started with (WI-1245 / C7).
+    budget: Mutex<Option<vogt_engine_contract::SessionBudget>>,
+    /// The soft warning has been typed (or is waiting for the prompt). Once,
+    /// so a tick does not repeat it.
+    budget_soft_sent: AtomicBool,
+    /// The hard limit has been acted on. Once, so a wake does not hibernate
+    /// the session again for a budget it already met.
+    budget_hard_done: AtomicBool,
+    /// The overseer has been told this session cannot be hibernated. In memory
+    /// only: it is a notice, not a decision that must survive a restart, and it
+    /// is deliberately not `budget_soft_sent`, which a soft warning sets first
+    /// and which a wall-clock hard can fire before.
+    budget_refusal_noted: AtomicBool,
+    /// When the budget watcher last saw this session actually running, cleared
+    /// whenever it is idle, at its prompt, at a permission dialog, or blocked.
+    /// The budget's per-turn wall clock is measured from this, not from
+    /// `turn_started_at`: a dialog resumes the same turn, so measuring from the
+    /// turn would count the time a person spent answering it.
+    budget_running_since: Mutex<Option<time::OffsetDateTime>>,
+    /// Running time banked from stretches that have ended, for the
+    /// whole-session wall clock (WI-1281). A pause banks the stretch instead of
+    /// discarding it. Kept on the hibernation record, so a wake resumes it.
+    budget_session_banked: Mutex<Duration>,
+    /// A budget action (a soft warning or a hard stop) is due and waits for the
+    /// prompt. While set, autopilot does not re-prompt the session, so it comes
+    /// to rest at its prompt and the action lands at a turn boundary (WI-1281).
+    budget_hold: AtomicBool,
 }
 
 impl Session {
@@ -233,6 +278,89 @@ impl Session {
 
     pub fn set_autopilot(&self, on: bool) {
         self.autopilot.store(on, Ordering::Release);
+    }
+
+    /// The project policy this session enforces, when it has one (WI-1243).
+    pub fn policy(&self) -> Option<vogt_engine_contract::SessionPolicy> {
+        self.policy.lock().clone()
+    }
+
+    pub fn set_policy(&self, policy: Option<vogt_engine_contract::SessionPolicy>) {
+        *self.policy.lock() = policy;
+    }
+
+    pub fn budget(&self) -> Option<vogt_engine_contract::SessionBudget> {
+        self.budget.lock().clone()
+    }
+
+    pub fn set_budget(&self, budget: Option<vogt_engine_contract::SessionBudget>) {
+        *self.budget.lock() = budget;
+    }
+
+    pub fn budget_soft_sent(&self) -> bool {
+        self.budget_soft_sent.load(Ordering::Acquire)
+    }
+
+    pub fn set_budget_soft_sent(&self, sent: bool) {
+        self.budget_soft_sent.store(sent, Ordering::Release);
+    }
+
+    pub fn budget_hard_done(&self) -> bool {
+        self.budget_hard_done.load(Ordering::Acquire)
+    }
+
+    pub fn set_budget_hard_done(&self, done: bool) {
+        self.budget_hard_done.store(done, Ordering::Release);
+    }
+
+    pub fn budget_refusal_noted(&self) -> bool {
+        self.budget_refusal_noted.load(Ordering::Acquire)
+    }
+
+    pub fn set_budget_refusal_noted(&self, noted: bool) {
+        self.budget_refusal_noted.store(noted, Ordering::Release);
+    }
+
+    pub fn budget_running_since(&self) -> Option<time::OffsetDateTime> {
+        *self.budget_running_since.lock()
+    }
+
+    /// Remember or forget when the budget's wall clock started counting.
+    pub fn set_budget_running_since(&self, since: Option<time::OffsetDateTime>) {
+        *self.budget_running_since.lock() = since;
+    }
+
+    /// Running time banked from finished stretches.
+    pub fn budget_session_banked(&self) -> Duration {
+        *self.budget_session_banked.lock()
+    }
+
+    pub fn set_budget_session_banked(&self, banked: Duration) {
+        *self.budget_session_banked.lock() = banked;
+    }
+
+    /// The whole session's running time at `now`: what is banked, plus the
+    /// stretch in progress.
+    pub fn budget_session_running(&self, now: time::OffsetDateTime) -> Duration {
+        let current = self
+            .budget_running_since()
+            .map(|since| {
+                Duration::from_secs(
+                    now.unix_timestamp()
+                        .saturating_sub(since.unix_timestamp())
+                        .max(0) as u64,
+                )
+            })
+            .unwrap_or_default();
+        self.budget_session_banked() + current
+    }
+
+    pub fn budget_hold(&self) -> bool {
+        self.budget_hold.load(Ordering::Acquire)
+    }
+
+    pub fn set_budget_hold(&self, hold: bool) {
+        self.budget_hold.store(hold, Ordering::Release);
     }
 
     pub fn role(&self) -> vogt_engine_contract::SessionRole {
@@ -365,6 +493,8 @@ impl Session {
             activity_changed_at: format_rfc3339(*self.activity_changed_at.lock()),
             turn_started_at: self.turn_started_at.lock().map(format_rfc3339),
             last_output_at: self.last_output_at.lock().map(format_rfc3339),
+            last_event_at: None,
+            last_person_input_at: self.last_person_input_at.lock().map(format_rfc3339),
             approval: self.approval_prompt(),
             blocked: self.blocked(),
             conversation: self.conversation(),
@@ -377,8 +507,34 @@ impl Session {
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
+            account: self.account.lock().clone(),
             stop: self.stop.lock().clone(),
+            economics: self.economics_snapshot.lock().clone(),
+            budget: self.budget(),
         }
+    }
+
+    /// Take the tailer's place so it can read the transcript off the runtime
+    /// and hand it back through [`store_economics_tail`].
+    pub(crate) fn take_economics_tail(&self) -> Option<crate::economics::Tail> {
+        self.economics.lock().take()
+    }
+
+    /// Put the tailer's place back, with the snapshot the read produced.
+    pub(crate) fn store_economics_tail(
+        &self,
+        tail: crate::economics::Tail,
+        snapshot: Option<vogt_engine_contract::SessionEconomics>,
+    ) {
+        if snapshot.is_some() {
+            *self.economics_snapshot.lock() = snapshot;
+        }
+        *self.economics.lock() = Some(tail);
+    }
+
+    /// The snapshot the tailer last produced, for the exit and hibernate paths.
+    pub(crate) fn economics_snapshot(&self) -> Option<vogt_engine_contract::SessionEconomics> {
+        self.economics_snapshot.lock().clone()
     }
 
     /// Record that the session was asked to stop, before anything signals
@@ -414,6 +570,10 @@ impl Session {
         *self.permission_mode.lock() = mode;
     }
 
+    pub fn set_account(&self, account: Option<String>) {
+        *self.account.lock() = account;
+    }
+
     pub fn set_template(&self, template: Option<String>) {
         *self.template.lock() = template;
     }
@@ -430,6 +590,14 @@ impl Session {
         self.work_item.lock().clone()
     }
 
+    pub fn set_superseded_by(&self, superseded_by: Option<String>) {
+        *self.superseded_by.lock() = superseded_by;
+    }
+
+    pub fn superseded_by(&self) -> Option<String> {
+        self.superseded_by.lock().clone()
+    }
+
     pub fn set_resources(&self, resources: Option<vogt_engine_contract::SessionResources>) {
         *self.resources.lock() = resources;
     }
@@ -437,6 +605,14 @@ impl Session {
     /// What the session's agent reported it is blocked on, if anything.
     pub fn blocked(&self) -> Option<vogt_engine_contract::BlockedReport> {
         self.blocked.lock().clone()
+    }
+
+    /// Put a blocked report back onto a session that was just woken, without
+    /// announcing it. `set_blocked` publishes, and a publish becomes a push, so
+    /// restoring through it would page the operator again for a block they were
+    /// already told about. The next hibernation re-reads whatever is here.
+    pub fn restore_blocked(&self, report: Option<vogt_engine_contract::BlockedReport>) {
+        *self.blocked.lock() = report;
     }
 
     /// Record (or, with `None`, clear) the agent's blocked report and
@@ -472,9 +648,16 @@ impl Session {
     /// The dialog on the screen right now, read fresh from a render rather
     /// than from the last activity pass, so an answer is aimed at what is
     /// actually showing.
+    ///
+    /// When the rendered screen shows no dialog but the window title says the
+    /// agent is awaiting approval, a synthetic permission dialog stands in
+    /// (WI-1145, and WI-1279 for Klaudia). It carries no options, so an answer
+    /// refuses before any key is written: the guard only needs to know a
+    /// person must decide, not which choice to press.
     pub fn current_dialog(&self) -> Option<crate::approval::Detected> {
         let (rendered, scrollback) = self.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
         crate::approval::detect(&rendered.lines, &scrollback)
+            .or_else(|| title_approval_dialog(self.title().as_deref()))
     }
 
     /// When the current turn began.
@@ -601,6 +784,18 @@ impl Session {
         let mut w = self.writer.lock();
         w.write_all(data)?;
         w.flush()
+    }
+
+    /// Stamp that a person typed. Called only by the paths that already
+    /// know the caller is a person (the WebSocket, and HTTP `/input` after
+    /// `person_gate::is_person`). Agent writes go through `write_input`
+    /// alone and leave this clock where it is.
+    pub fn note_person_input(&self) {
+        *self.last_person_input_at.lock() = Some(time::OffsetDateTime::now_utc());
+    }
+
+    pub fn last_person_input_at(&self) -> Option<time::OffsetDateTime> {
+        *self.last_person_input_at.lock()
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -1028,14 +1223,18 @@ pub fn spawn(
         conversation: Mutex::new(None),
         keep_awake: AtomicBool::new(false),
         autopilot: AtomicBool::new(false),
+        policy: Mutex::new(None),
         autopilot_nudges: std::sync::atomic::AtomicU32::new(0),
         oversight: AtomicBool::new(false),
         hibernating: AtomicBool::new(false),
         last_input: Mutex::new(None),
+        last_person_input_at: Mutex::new(None),
         resources: Mutex::new(None),
         template: Mutex::new(None),
         work_item: Mutex::new(None),
+        superseded_by: Mutex::new(None),
         permission_mode: Mutex::new(None),
+        account: Mutex::new(None),
         stop: Mutex::new(None),
         launcher: if spawning_agent_auth_helper {
             "agent-auth"
@@ -1044,6 +1243,17 @@ pub fn spawn(
         },
         first_output_seen: AtomicBool::new(false),
         launch_reported: AtomicBool::new(false),
+        economics: parking_lot::Mutex::new(None),
+        economics_snapshot: parking_lot::Mutex::new(None),
+        // Set by the registry from the spec, like autopilot: the spawn path
+        // does not see the spec's budget.
+        budget: Mutex::new(None),
+        budget_soft_sent: AtomicBool::new(false),
+        budget_hard_done: AtomicBool::new(false),
+        budget_refusal_noted: AtomicBool::new(false),
+        budget_running_since: Mutex::new(None),
+        budget_session_banked: Mutex::new(Duration::ZERO),
+        budget_hold: AtomicBool::new(false),
     });
 
     spawn_reader_thread(
@@ -1139,6 +1349,81 @@ fn spawn_reader_thread(
     Ok(())
 }
 
+/// Record a session's economics in the Prometheus histograms, once, at the
+/// session's real end. A session started without a template is labelled
+/// `unknown`. The model is the `--model` its command was launched with, and a
+/// session whose command names none carries no model label rather than
+/// `unknown`.
+/// The `--model` (or `-m`) the session's command was launched with, if it
+/// names one. Read from the command the engine spawned, so it is the model
+/// the session actually runs rather than a guess from its transcript.
+pub(crate) fn launched_model(session: &Session) -> Option<String> {
+    let command = session.command()?;
+    let args: Vec<&str> = command.split_whitespace().collect();
+    let mut last = None;
+    let mut args = args.as_slice();
+    while let Some((flag, rest)) = args.split_first() {
+        if *flag == "--" {
+            break;
+        }
+        if *flag == "--model" || *flag == "-m" {
+            last = rest
+                .first()
+                .filter(|value| !value.starts_with('-'))
+                .copied();
+        } else if let Some(value) = flag.strip_prefix("--model=") {
+            if !value.is_empty() {
+                last = Some(value);
+            }
+        }
+        args = rest;
+    }
+    last.map(str::to_string)
+}
+
+pub(crate) fn observe_session_economics(session: &Session) {
+    let Some(snapshot) = session.economics_snapshot() else {
+        return;
+    };
+    let Ok(json) = serde_json::to_string(&snapshot) else {
+        return;
+    };
+    observe_economics(session.template(), launched_model(session), Some(&json));
+}
+
+/// Record a stored economics snapshot. `json` is the snapshot as the tailer
+/// persists it; a record without one records nothing.
+pub(crate) fn observe_economics(
+    template: Option<String>,
+    model: Option<String>,
+    json: Option<&str>,
+) {
+    let Some(json) = json else {
+        return;
+    };
+    let Ok(snapshot) = serde_json::from_str::<vogt_engine_contract::SessionEconomics>(json) else {
+        return;
+    };
+    let mut owned = vec![(
+        "template",
+        template.unwrap_or_else(|| "unknown".to_string()),
+    )];
+    if let Some(model) = model {
+        owned.push(("model", model));
+    }
+    let labels: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let metrics = crate::metrics::metrics();
+    metrics
+        .session_turns
+        .observe(&labels, snapshot.turns as f64);
+    metrics
+        .session_peak_context
+        .observe(&labels, snapshot.peak_context_tokens as f64);
+    metrics
+        .session_compactions
+        .observe(&labels, snapshot.compactions as f64);
+}
+
 fn spawn_exit_waiter(
     session: Arc<Session>,
     bus: EventBus,
@@ -1179,6 +1464,12 @@ fn spawn_exit_waiter(
         });
         if let Some(hook) = on_exit {
             hook(&session);
+        }
+        // A hibernation stops the process too, but the session is not over:
+        // a wake resumes it. It is counted when its hibernated record is
+        // removed, which is the end it does not come back from.
+        if !session.is_hibernating() {
+            observe_session_economics(&session);
         }
         try_spawn_archive(&session, history, &runtime);
     });
@@ -1233,6 +1524,9 @@ fn try_spawn_archive(
                 crate::history::END_EXITED
             }),
             identity: None,
+            economics: session
+                .economics_snapshot()
+                .and_then(|snapshot| serde_json::to_string(&snapshot).ok()),
         };
 
         if let Err(e) = history
@@ -1273,6 +1567,9 @@ pub async fn archive_live_session(session: &Arc<Session>, history: &SessionHisto
             crate::history::END_ENGINE_SHUTDOWN
         }),
         identity: None,
+        economics: session
+            .economics_snapshot()
+            .and_then(|snapshot| serde_json::to_string(&snapshot).ok()),
     };
     if let Err(e) = history
         .archive_session_with_output(record, output_text.as_ref())
@@ -1387,6 +1684,33 @@ fn wake_activity_watcher(session: &Session) {
 /// redraw of them is always recent output.
 const APPROVAL_SCAN_BYTES: usize = 4096;
 
+/// Whether the window title announces exactly this state, for either agent
+/// whose title this engine reads.
+fn title_says(title: Option<&str>, state: crate::screen::AgentTitle) -> bool {
+    crate::screen::agent_title(title).is_some_and(|(_, found)| found == state)
+}
+
+/// A permission dialog inferred from the window title alone, when the rendered
+/// screen showed none.
+///
+/// The WI-1127 fork's `agent-state` title and Klaudia's `awaiting approval`
+/// both name a dialog the screen parser does not always see (WI-1145,
+/// WI-1279). It is a `permission`, which is what the person gate refuses an
+/// agent for, and it offers no options: answering it fails before any key is
+/// written into the PTY, so a title cannot be used to press a choice.
+fn title_approval_dialog(title: Option<&str>) -> Option<crate::approval::Detected> {
+    title_says(title, crate::screen::AgentTitle::AwaitingApproval).then(|| {
+        crate::approval::Detected {
+            question: "awaiting approval".to_string(),
+            command_excerpt: String::new(),
+            deadline_seconds: None,
+            kind: "permission",
+            options: Vec::new(),
+            horizontal: false,
+        }
+    })
+}
+
 fn compute_activity(session: &Arc<Session>) -> ActivityState {
     let tail = {
         let sb = session.scrollback.lock();
@@ -1409,16 +1733,17 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
         *session.approval.lock() = None;
         return session.terminal_state().unwrap_or(state);
     }
-    // Klaudia says when it is at rest in its title (WI-1090), and its word
-    // outranks output recency: whatever it still draws there is not a turn.
-    // Only ever towards rest — a `running` the title would force could not
-    // collapse when the output stops, and the watcher would spin on it.
-    // A title anything in the session could have set is checked against the
-    // screen: no working line or question showing under it.
+    // Klaudia (WI-1090) and the WI-1127 Codex fork (WI-1145) say when they are
+    // at rest in the window title, and that word outranks output recency:
+    // whatever the TUI still draws there is not a turn. Only ever towards
+    // rest — a `running` the title would force could not collapse when the
+    // output stops, and the watcher would spin on it. A title anything in the
+    // session could have set is checked against the screen: no working line or
+    // question showing under it. Codex has no marker of its own, so it shares
+    // Klaudia's.
     let state = if state == ActivityState::Running
-        && crate::screen::klaudia_title(session.title().as_deref())
-            == Some(crate::screen::KlaudiaTitle::Ready)
-        && session.agent().as_deref() == Some("klaudia")
+        && title_says(session.title().as_deref(), crate::screen::AgentTitle::Ready)
+        && matches!(session.agent().as_deref(), Some("klaudia" | "codex"))
         && !crate::screen::klaudia_busy(&session.render_screen(0).0.lines)
     {
         ActivityState::Idle
@@ -1431,7 +1756,10 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // answer it rather than type at it. Confirmed on the rendered screen —
     // only rendered when the raw tail mentions a dialog — so one that was
     // answered and redrawn over is not reported from text lingering in the
-    // tail.
+    // tail. When the screen shows nothing but the title says the agent is
+    // awaiting approval, the title stands in: the fork's `agent-state` title
+    // and Klaudia's `awaiting approval` both name dialogs the screen parser
+    // does not always recognise.
     let detected = if crate::approval::mentions_approval(&strip_ansi(&tail)) {
         let (rendered, scrollback) =
             session.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
@@ -1439,6 +1767,7 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     } else {
         None
     };
+    let detected = detected.or_else(|| title_approval_dialog(session.title().as_deref()));
     let mut pending = session.approval.lock();
     match detected {
         Some(found) => {
@@ -1507,6 +1836,48 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
 fn begins_turn(old: ActivityState, new: ActivityState) -> bool {
     new == ActivityState::Running
         && matches!(old, ActivityState::Idle | ActivityState::WaitingForInput)
+}
+
+#[cfg(test)]
+mod economics_tests {
+    use super::observe_economics;
+
+    fn count_for(label: &str) -> u64 {
+        crate::metrics::metrics()
+            .render()
+            .lines()
+            .find(|line| line.starts_with(&format!("vogt_session_turns_count{{{label}}}")))
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Observing is what the exit waiter and the removal of a hibernated
+    /// record both call, and each calls it exactly once. A missing model is
+    /// no label, not `unknown`.
+    #[test]
+    fn observing_counts_once_and_omits_an_unnamed_model() {
+        let json = r#"{"turns":4,"context_tokens":10,"peak_context_tokens":10,"compactions":1,"tool_result_bytes":{},"reads_repeated":0,"wall_clock":{"count":0,"max_ms":0,"mean_ms":0},"output_tokens":0,"usage_measured":false}"#;
+        let label = "template=\"wi-1245-observe\"";
+        let before = count_for(label);
+        observe_economics(Some("wi-1245-observe".into()), None, Some(json));
+        assert_eq!(count_for(label), before + 1);
+        observe_economics(Some("wi-1245-observe".into()), None, None);
+        observe_economics(Some("wi-1245-observe".into()), None, Some("not json"));
+        assert_eq!(
+            count_for(label),
+            before + 1,
+            "a record without a snapshot adds nothing"
+        );
+        // The message names the label, not the rendered text: that text holds
+        // every family, including the secret-read counter, and has no place in
+        // a test log.
+        let rendered = crate::metrics::metrics().render();
+        assert!(
+            !rendered.contains("template=\"wi-1245-observe\",model="),
+            "an unnamed model was labelled on the wi-1245-observe series"
+        );
+    }
 }
 
 #[cfg(test)]

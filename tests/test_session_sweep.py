@@ -52,7 +52,9 @@ class Engine:
             self.rows[engine_id] = self.row(engine_id)
             return 200, json.dumps(self.rows[engine_id]).encode()
         if method == "GET" and path == "/api/sessions":
-            return 200, json.dumps(list(self.rows.values())).encode()
+            return 200, json.dumps(
+                {"sessions": list(self.rows.values()), "hidden_count": 0}
+            ).encode()
         if method == "GET" and path == "/api/sessions/sweep":
             if not self.sweep_supported:
                 return 404, b""
@@ -110,9 +112,16 @@ def test_one_call_returns_every_session_most_urgent_first(
     engine.rows[done_engine].update(activity="waiting-for-input")
     engine.rows[UNLINKED] = engine.row(UNLINKED, activity="hibernated", alive=False)
 
-    result = sweep_sessions(wired, SweepSessionsParams(screen_lines=5))
+    result = sweep_sessions(wired, SweepSessionsParams(mode="full", screen_lines=5))
 
-    assert [row.session.id for row in result.rows] == [asking, done, busy, UNLINKED]
+    sessions = [row.session for row in result.rows]
+    assert all(session is not None for session in sessions)
+    assert [session.id for session in sessions if session is not None] == [
+        asking,
+        done,
+        busy,
+        UNLINKED,
+    ]
     assert [row.attention for row in result.rows] == [
         "approval",
         "waiting",
@@ -121,11 +130,14 @@ def test_one_call_returns_every_session_most_urgent_first(
     ]
     assert "Do you want to proceed?" in result.rows[0].attention_reason
     assert result.rows[0].screen_tail == [f"tail of {asking_engine}", "> "]
-    assert result.rows[3].session.linked is False
+    third = result.rows[3].session
+    assert third is not None and third.linked is False
     assert result.counts["total"] == 4
     assert result.counts["needs_you"] == 2
     assert engine.sweep_queries == ["screen_lines=5"]
-    assert busy_engine in {row.session.engine_session_id for row in result.rows}
+    assert busy_engine in {
+        session.engine_session_id for session in sessions if session is not None
+    }
 
 
 def test_a_stopped_or_vanished_session_is_not_in_the_table(
@@ -135,7 +147,7 @@ def test_a_stopped_or_vanished_session_is_not_in_the_table(
     _, ended = _start(wired)
     del engine.rows[gone]
     engine.rows[ended].update(activity="errored", alive=False, exit_code=1)
-    assert sweep_sessions(wired, SweepSessionsParams()).rows == []
+    assert sweep_sessions(wired, SweepSessionsParams(mode="full")).rows == []
 
 
 def test_an_older_engine_still_gets_the_table_without_screens(
@@ -143,8 +155,9 @@ def test_an_older_engine_still_gets_the_table_without_screens(
 ) -> None:
     ses_id, _ = _start(wired)
     engine.sweep_supported = False
-    result = sweep_sessions(wired, SweepSessionsParams())
-    assert [row.session.id for row in result.rows] == [ses_id]
+    result = sweep_sessions(wired, SweepSessionsParams(mode="full"))
+    only = result.rows[0].session
+    assert only is not None and only.id == ses_id
     assert result.rows[0].screen_tail == []
 
 
@@ -174,15 +187,69 @@ def test_resources_ride_on_the_row_and_list_can_put_the_heaviest_first(
         "over_threshold": True,
     }
 
-    rows = list_sessions(wired, ListSessionsParams(order="rss")).sessions
+    rows = list_sessions(wired, ListSessionsParams(mode="full", order="rss")).sessions
     assert [row.id for row in rows] == [heavy, light, unmeasured]
     assert rows[0].resources is not None
     assert rows[0].resources.rss_bytes == 50 << 30
     assert rows[0].resources.over_threshold is True
     assert rows[2].resources is None
 
-    swept = sweep_sessions(wired, SweepSessionsParams())
-    by_id = {row.session.id: row.session for row in swept.rows}
+    swept = sweep_sessions(wired, SweepSessionsParams(mode="full"))
+    by_id = {
+        row.session.id: row.session for row in swept.rows if row.session is not None
+    }
     light_resources = by_id[light].resources
     assert light_resources is not None
     assert light_resources.processes == 6
+
+
+def test_digest_drops_hibernated_keeps_counts_and_fits_fifteen_k(
+    wired: AppContext, engine: Engine
+) -> None:
+    """C1: the default sweep is a digest. Counts include the rows the filter drops."""
+    started = [_start(wired) for _ in range(3)]
+    live_ids = [session_id for session_id, _engine_id in started]
+    _, hibernated_engine = _start(wired)
+    engine.rows[hibernated_engine].update(activity="hibernated", alive=False)
+
+    result = sweep_sessions(wired, SweepSessionsParams())
+
+    assert result.counts["total"] == 4
+    assert result.counts["hibernated"] == 1
+    assert len(result.rows) == 3
+    assert {row.digest.id for row in result.rows if row.digest} == set(live_ids)
+    assert all(row.session is None for row in result.rows)
+    assert all(row.screen_tail == [] for row in result.rows)
+    payload = result.model_dump_json(exclude_none=True)
+    assert len(payload) < 15_000
+    for row in result.rows:
+        assert row.digest is not None
+        assert row.digest.over_budget() is False
+        # No economics reported yet, so the digest carries no budget line.
+        assert row.digest.budget is None
+
+    metered, metered_engine = started[0]
+    engine.rows[metered_engine]["economics"] = {"turns": 7, "compactions": 2}
+    again = sweep_sessions(wired, SweepSessionsParams())
+    by_id = {row.digest.id: row.digest for row in again.rows if row.digest}
+    assert by_id[metered].budget == "7 turns, 2 compactions"
+    assert all(digest.budget is None for key, digest in by_id.items() if key != metered)
+
+
+def test_digest_attention_needs_you_and_limit(
+    wired: AppContext, engine: Engine
+) -> None:
+    asking, asking_engine = _start(wired)
+    _start(wired)
+    engine.rows[asking_engine].update(
+        activity="awaiting-approval",
+        approval={"question": "Proceed?", "detected_at": "2026-10-05T00:00:00Z"},
+    )
+    result = sweep_sessions(
+        wired, SweepSessionsParams(attention=["needs_you"], limit=1)
+    )
+    assert len(result.rows) == 1
+    assert result.rows[0].digest is not None
+    assert result.rows[0].digest.id == asking
+    assert result.counts["total"] == 2
+    assert result.counts["needs_you"] == 1

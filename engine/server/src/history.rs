@@ -96,6 +96,7 @@ const IDENTITY_COLUMNS: &[&str] = &[
     "conversation_agent",
     "conversation_id",
     "work_item",
+    "economics",
 ];
 
 /// The columns every metadata read selects. Spliced into queries with
@@ -152,6 +153,9 @@ pub struct ArchiveRecord {
     pub end_reason: Option<&'static str>,
     /// Set on the provisional row; `None` leaves what the row holds.
     pub identity: Option<SessionIdentity>,
+    /// The economics snapshot as JSON (WI-1245). `None` leaves what the row
+    /// holds, so a later archive without one does not erase it.
+    pub economics: Option<String>,
 }
 
 impl SessionHistory {
@@ -299,8 +303,8 @@ impl SessionHistory {
         sqlx::query(
             r#"
             INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason,
-                                  template, role, conversation_agent, conversation_id, work_item)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  template, role, conversation_agent, conversation_id, work_item, economics)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
@@ -316,7 +320,8 @@ impl SessionHistory {
                 role = COALESCE(excluded.role, sessions.role),
                 conversation_agent = COALESCE(excluded.conversation_agent, sessions.conversation_agent),
                 conversation_id = COALESCE(excluded.conversation_id, sessions.conversation_id),
-                work_item = COALESCE(excluded.work_item, sessions.work_item)
+                work_item = COALESCE(excluded.work_item, sessions.work_item),
+                economics = COALESCE(excluded.economics, sessions.economics)
             "#,
         )
         .bind(record.id.to_string())
@@ -333,6 +338,7 @@ impl SessionHistory {
         .bind(identity.conversation.as_ref().map(|c| c.agent.clone()))
         .bind(identity.conversation.map(|c| c.id))
         .bind(identity.work_item)
+        .bind(record.economics)
         .execute(&self.pool)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to archive session: {}", e)))?;
@@ -342,16 +348,16 @@ impl SessionHistory {
 
     /// Update a session row's identity (WI-962): its role when given, and its
     /// conversation when given. A conversation that ends is not cleared —
-    /// the row keeps the last one, which is what a resume needs. A row that
-    /// does not exist yet (history off, or the provisional write still in
-    /// flight) is left alone.
+    /// the row keeps the last one, which is what a resume needs. Whether a row
+    /// was there to update: `false` while the provisional row is still on its
+    /// way, so a caller can wait and try again instead of losing the report.
     pub async fn set_identity(
         &self,
         id: Uuid,
         role: Option<&'static str>,
         conversation: Option<&vogt_engine_contract::AgentConversation>,
-    ) -> Result<()> {
-        sqlx::query(
+    ) -> Result<bool> {
+        let done = sqlx::query(
             "UPDATE sessions SET role = COALESCE(?, role), \
              conversation_agent = COALESCE(?, conversation_agent), \
              conversation_id = COALESCE(?, conversation_id) WHERE id = ?",
@@ -363,7 +369,7 @@ impl SessionHistory {
         .execute(&self.pool)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to update session identity: {e}")))?;
-        Ok(())
+        Ok(done.rows_affected() > 0)
     }
 
     /// Set or clear a session row's work item (WI-998). Unlike the rest of
@@ -377,6 +383,18 @@ impl SessionHistory {
             .execute(&self.pool)
             .await
             .map_err(|e| ApiError::Internal(format!("failed to update session work item: {e}")))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// Write a session's economics snapshot (WI-1245). A row that is not there
+    /// yet — the provisional archive is still on its way — reports `false`.
+    pub async fn set_economics(&self, id: Uuid, economics: &str) -> Result<bool> {
+        let done = sqlx::query("UPDATE sessions SET economics = ? WHERE id = ?")
+            .bind(economics)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to update session economics: {e}")))?;
         Ok(done.rows_affected() > 0)
     }
 
@@ -1053,6 +1071,7 @@ mod tests {
                     conversation: None,
                     work_item: Some("WI-7".into()),
                 }),
+                economics: None,
             })
             .await
             .unwrap();
@@ -1060,14 +1079,21 @@ mod tests {
             agent: "claude".into(),
             id: "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f".into(),
         };
-        history
+        assert!(history
             .set_identity(id, None, Some(&conversation))
             .await
-            .unwrap();
-        history
+            .unwrap());
+        assert!(history
             .set_identity(id, Some("oversight"), None)
             .await
-            .unwrap();
+            .unwrap());
+        assert!(
+            !history
+                .set_identity(Uuid::new_v4(), Some("worker"), None)
+                .await
+                .unwrap(),
+            "no row yet is a miss, not a silent success"
+        );
         let row = history.get_session(id).await.unwrap();
         assert_eq!(row.role.as_deref(), Some("oversight"));
         assert_eq!(row.conversation_agent.as_deref(), Some("claude"));
@@ -1103,6 +1129,7 @@ mod tests {
                 scrollback_bytes: 10,
                 end_reason: Some(END_EXITED),
                 identity: None,
+                economics: None,
             })
             .await
             .unwrap();

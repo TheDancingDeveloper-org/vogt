@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -90,6 +92,12 @@ pub struct SessionSpec {
     /// a file the engine owns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// The standing guide written beside the brief (WI-1243): how to record
+    /// findings, report being blocked, and drive another session. The brief
+    /// names the file; the engine writes this text next to it. Omitted when
+    /// there is no brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion: Option<String>,
     /// Which model the agent CLI in `command` should run, and how hard it
     /// should think. The engine turns these into that CLI's own
     /// flags or environment; a command it has no mapping for is refused by
@@ -113,6 +121,13 @@ pub struct SessionSpec {
     /// permission check. Claude Code only; refused for anything else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// Which Claude Code subscription account to run under: a name from the
+    /// deployment's `ENGINE_AGENT_CLAUDE_ACCOUNTS`, which the engine maps to
+    /// that account's `CLAUDE_CONFIG_DIR`. Absent runs the engine's default
+    /// account. Claude Code only; an unknown name, or a command that is not
+    /// Claude Code, is refused rather than started on the wrong login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// Keep the agent working through its backlog unattended (WI-949): the
     /// idle policy leaves the session alone, and when the agent stops at its
     /// prompt without reporting itself blocked, the engine tells it to carry
@@ -120,6 +135,13 @@ pub struct SessionSpec {
     /// is reached. vogt-core sets it from `session.start`'s `autopilot`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autopilot: bool,
+    /// The project's agent policy (WI-1243), enforced by the session's
+    /// PreToolUse hook through `POST /api/agent-auth/policy-check`. Absent
+    /// when the project states none, which is the common case and must stay
+    /// off the wire: a create request that omits it is byte-identical to one
+    /// from before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SessionPolicy>,
     /// What the session is for (WI-957): an ordinary `worker`, or an
     /// `oversight` session that supervises others. An oversight session is
     /// pinned awake from the start, so a redeploy brings it back by itself,
@@ -135,12 +157,64 @@ pub struct SessionSpec {
     /// the record, so a wake keeps it, and in history, so a resume can.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// Start the session in a git worktree of its own (WI-1298). When set,
+    /// the engine creates the worktree under `cwd` — which must be the
+    /// checkout the worktree is cut from — on branch `worktree.branch` off
+    /// `worktree.base_ref`, and the session's working directory becomes that
+    /// worktree rather than `cwd`. Absent means the session opens in `cwd`,
+    /// byte-identical to a request from before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrollback_bytes: Option<usize>,
+    /// Limits the engine enforces on this session (WI-1245 / C7): turns,
+    /// context tokens, and a per-turn wall-clock cap. Absent means no budget.
+    /// An empty budget (every field absent) is also no budget — vogt-core
+    /// sends that to refuse the default it would otherwise apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<SessionBudget>,
+}
+
+/// Where a session's own git worktree comes from (WI-1298).
+///
+/// `branch` is the new branch, created by `git worktree add -b`. `base_ref`
+/// is what it is cut from — a branch, a tag, or a commit the checkout already
+/// has. Both are ref names the engine passes to git as arguments, never
+/// through a shell, so a name with spaces or shell metacharacters is a git
+/// error rather than a command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeSpec {
+    pub branch: String,
+    pub base_ref: String,
+}
+
+/// The part of a project's agent policy the engine enforces (WI-1243).
+///
+/// vogt-core copies it from the project onto the session at start, and the
+/// engine keeps it for the session's life, including a wake. The hook asks
+/// `POST /api/agent-auth/policy-check` before a shell command runs; the
+/// engine answers from this. Every field defaults, so a policy that states
+/// only one rule deserialises, and a record written before the field existed
+/// wakes without one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SessionPolicy {
+    /// Regular expressions. A shell command is refused when any of them
+    /// matches the command line, the body of a `git commit -F` message file,
+    /// or — for a push or a pull-request create — the current branch name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbidden_text: Vec<String>,
+    /// A merge into production is a deploy (the estate's release rule), so
+    /// refuse `gh pr merge` outright and refuse `git push` when it would
+    /// move a branch in `main_branches`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub merge_deploys_prod: bool,
+    /// The branches `merge_deploys_prod` protects. Empty means `main`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub main_branches: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +256,20 @@ pub struct SessionSummary {
     /// byte, and from older engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<String>,
+    /// The latest of the clocks the list sorts and hides by (WI-1289):
+    /// activity change, last output, last person input, a blocked or
+    /// approval change, and an exit or hibernation. RFC 3339. The engine
+    /// computes it; clients sort by it and do not recompute it. Absent from
+    /// an engine that predates the field, which a client treats as never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_at: Option<String>,
+    /// When a person last typed into this session: a WebSocket keystroke, or
+    /// `POST /input` from a caller the person gate counts as a person.
+    /// Agent `session.input` and an agent's `/input` do not move it, so a
+    /// session an agent keeps typing into still ages out of the default
+    /// list (WI-1289). RFC 3339; absent until a person types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_person_input_at: Option<String>,
     /// The permission dialog the session shows, while its activity is
     /// `awaiting-approval`; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,6 +314,9 @@ pub struct SessionSummary {
     /// (`accept-edits`, `bypass`) (WI-926).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The Claude Code account it was started under, when one was named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// The session template it was started from, by the name the caller
     /// gave (`claude`, `Codex (protected)`), when one was named (WI-919).
     /// Absent for a session started with an explicit command.
@@ -236,6 +327,74 @@ pub struct SessionSummary {
     /// and off Linux.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<SessionResources>,
+    /// What the session's transcript has cost so far (WI-1245 / C16), as last
+    /// read by the economics tailer. Absent until the first reading, and for
+    /// a session whose conversation the engine does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economics: Option<SessionEconomics>,
+    /// The budget the session was started with (WI-1245 / C7); absent when
+    /// none was set. The engine reads `economics` against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<SessionBudget>,
+}
+
+/// `GET /api/sessions` (WI-1289). `sessions` is the visible set unless the
+/// caller passed `?include=hidden`; `hidden_count` is how many the default
+/// list left out, so a client can offer to show them without a second read.
+/// Pagination counts the visible set; `hidden_count` is separate from it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionList {
+    pub sessions: Vec<SessionSummary>,
+    #[serde(default)]
+    pub hidden_count: u64,
+}
+
+/// Limits the engine enforces on one session (WI-1245 / C7). Every field is
+/// optional and independent: a session may be capped on turns and not on
+/// context. Zero is not a limit — the engine treats a missing field and a
+/// zero the same, as no limit on that dimension.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    /// Minutes one turn may run before the engine treats it as the looping
+    /// signature and hibernates at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_minutes: Option<u32>,
+    /// Minutes of running the whole session may accumulate across all its
+    /// turns (WI-1281). Separate from `wall_clock_minutes`, which is per turn;
+    /// unset by default, so only a session or project that names it is capped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_wall_clock_minutes: Option<u32>,
+}
+
+/// Wall-clock gaps between consecutive assistant turns, in milliseconds.
+/// Empty (`count` 0) when fewer than two turns carried a timestamp.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnTiming {
+    pub count: i64,
+    pub max_ms: i64,
+    pub mean_ms: i64,
+}
+
+/// The economics of one session's transcript. The same numbers
+/// `vogt.core.session_economics.meter` returns: every field is present even
+/// when the transcript said nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEconomics {
+    pub turns: i64,
+    pub context_tokens: i64,
+    pub peak_context_tokens: i64,
+    pub compactions: i64,
+    /// Tool name to the bytes of result the model was shown.
+    pub tool_result_bytes: BTreeMap<String, i64>,
+    pub reads_repeated: i64,
+    pub wall_clock: TurnTiming,
+    pub output_tokens: i64,
+    /// True when context came from recorded usage, false when it was estimated.
+    pub usage_measured: bool,
 }
 
 /// One sample of a session's process tree: the PTY child and every process
@@ -302,6 +461,8 @@ pub enum HibernateTrigger {
     /// Found at boot without a process: the engine stopped without the
     /// chance to hibernate it (a SIGKILL, a crash).
     Recovered,
+    /// A budget reached its hard limit (WI-1245 / C7).
+    Budget,
 }
 
 /// A hibernated session's record of when and why.
@@ -316,6 +477,11 @@ pub struct Hibernation {
     /// fresh shell in the same directory (`false`, a shell hibernated on
     /// request).
     pub resumable: bool,
+    /// The session this one's work was handed to (WI-1251). While set, a wake
+    /// is refused so the successor is not joined by the session it replaced;
+    /// `WakeRequest::force` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 /// `POST /api/sessions/{id}/hibernate`.
@@ -328,6 +494,12 @@ pub struct HibernateRequest {
     /// screen kept for reading. Off unless asked for.
     #[serde(default)]
     pub allow_shell: bool,
+    /// The session this one's work was handed to (WI-1251): an engine session
+    /// id the engine already knows, other than this one. A wake is then
+    /// refused until `WakeRequest::force`. Setting it on a session that is
+    /// already hibernated records it without touching the stopped process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 /// `POST /api/sessions/{id}/wake`.
@@ -342,6 +514,11 @@ pub struct WakeRequest {
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
+    /// Wake even though the session was superseded, or another live session
+    /// is already working on the same work item in the same directory
+    /// (WI-1251). Off unless asked for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
 }
 
 /// What a session is for (WI-957). Absent on the wire means `worker`.
@@ -514,6 +691,43 @@ pub struct SessionWait {
     pub waited_ms: u64,
     /// The session's screen at the moment the wait ended.
     pub screen: SessionScreen,
+}
+
+/// One change an overseer waits on (WI-1246), derived from a sequenced bus
+/// event about a session. `kind` is one of `ready`, `approval`, `exited`,
+/// `errored`, `blocked`, `unblocked`, `hibernated`, `woken`. `reply`,
+/// `commit` and `budget` are reserved for later slices and are not emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChange {
+    pub seq: u64,
+    /// When the bus published it (RFC 3339).
+    pub at: String,
+    pub session: Uuid,
+    pub kind: String,
+    /// At most 120 characters.
+    pub summary: String,
+}
+
+/// The answer to `GET /api/sessions/changes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChanges {
+    pub changes: Vec<SessionChange>,
+    /// The last sequence returned, or the bus head when nothing matched, so a
+    /// caller advances its cursor either way.
+    pub next_cursor: u64,
+    /// True when `since` is older than the ring: events were dropped and the
+    /// caller cannot reconstruct them from this answer.
+    pub truncated: bool,
+}
+
+/// The answer to `GET /api/sessions/wait-any`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWaitAny {
+    /// `changed` or `timeout`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<SessionChange>,
+    pub next_cursor: u64,
 }
 
 /// A permission dialog an agent CLI is showing, read off the rendered screen
@@ -759,7 +973,7 @@ pub struct AssistantHistory {
     pub pending_action: Option<PendingAction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ServerEvent {
     SessionCreated {
@@ -970,6 +1184,15 @@ pub enum ServerEvent {
         /// Parsed cost in USD when the CLI reported usage, else absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
+    },
+    /// A session's budget crossed a threshold (WI-1245 / C7). `level` is
+    /// `soft` (the engine typed one hand-off line and the session is still
+    /// working) or `hard` (the engine is about to hibernate it with
+    /// `trigger=budget`). `summary` says which limit and the numbers.
+    SessionBudget {
+        id: Uuid,
+        level: String,
+        summary: String,
     },
 }
 
@@ -1397,6 +1620,14 @@ mod tests {
         let spec: SessionSpec =
             serde_json::from_str(r#"{"name":"term","prompt":"Fix the flaky test."}"#).unwrap();
         assert_eq!(spec.prompt.as_deref(), Some("Fix the flaky test."));
+    }
+
+    #[test]
+    fn session_spec_reads_a_companion_from_the_wire() {
+        // vogt-core codes against this exact field name (WI-1243).
+        let spec: SessionSpec =
+            serde_json::from_str(r##"{"name":"term","companion":"# guide"}"##).unwrap();
+        assert_eq!(spec.companion.as_deref(), Some("# guide"));
     }
 
     #[test]

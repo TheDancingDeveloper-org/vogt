@@ -193,3 +193,6 @@ class ActivitySessionRow:
     wait_ms: int
     tools: dict[str, int] = field(default_factory=dict)
     services: dict[str, int] = field(default_factory=dict)
+    #: Newest indexed transcript for this conversation, when the index has one.
+    #: Context and compaction counts are not stored; a caller meters this file.
+    transcript_path: str | None = None

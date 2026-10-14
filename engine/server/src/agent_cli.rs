@@ -34,7 +34,7 @@
 //! to the brief file, so a paragraphs-long work-item brief stays out of `ps`
 //! and out of quoting.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
@@ -72,7 +72,10 @@ pub const CLAUDE_QUIET_ENV: &[(&str, &str)] = &[
 ];
 
 /// What a session asked of the agent CLI it runs, beyond the command itself.
-#[derive(Debug, Default, Clone, Copy)]
+///
+/// Not `Default`: `codex_session_id` is on unless a caller opts out, and a
+/// derived default would silently turn the pin off (WI-1354).
+#[derive(Debug, Clone)]
 pub struct LaunchRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
@@ -81,19 +84,54 @@ pub struct LaunchRequest<'a> {
     /// Where the session's brief will be written, when it has one. The agent
     /// is told to read it as its first prompt.
     pub brief_file: Option<&'a Path>,
-    /// The engine's id for the session. A fresh, bare Claude Code launch uses
-    /// it as the conversation id, so the conversation can later be resumed by
-    /// the id every session and history listing already shows.
+    /// The engine's id for the session. A fresh, bare Claude Code, Klaudia or
+    /// fork-Codex launch uses it as the conversation id, so the conversation
+    /// can later be resumed by the id every session and history listing
+    /// already shows. Codex is pinned when
+    /// [`LaunchRequest::codex_session_id`] is set, which it is by default:
+    /// the image bakes the fork that accepts the flag (WI-1354).
     pub session_id: Option<Uuid>,
+    /// The Codex binary accepts `--session-id` (the WI-1126 fork the image
+    /// bakes). A fresh Codex launch is pinned when this is true, the default.
+    /// Stock npm Codex refuses an unknown flag, so a deployment that pins
+    /// that binary sets it false and the launch is left unpinned.
+    pub codex_session_id: bool,
     /// `default` / `accept-edits` / `bypass` (WI-926). Klaudia takes
-    /// `default` and `bypass` only.
+    /// `default` and `bypass` only. Codex takes all three (WI-1143); its
+    /// sandbox is `danger-full-access` because the pod cannot create the user
+    /// namespace `workspace-write` needs.
     pub permission_mode: Option<&'a str>,
     /// The deployment's driven-session settings (an `autoMode` policy) to
-    /// hand Claude Code with `--settings`, when it has one.
+    /// hand Claude Code with `--settings`, when it has one. Klaudia has no
+    /// `--settings` flag (msp-klaudia #57), so it never receives this.
     pub settings_file: Option<&'a Path>,
+    /// Extra directories the agent may read, as `--add-dir`. A fresh Claude
+    /// launch derives this from the brief's parent; a wake passes the
+    /// directories recorded at the first start so they survive a brief that
+    /// is not sent again (WI-1250).
+    pub add_dirs: &'a [std::path::PathBuf],
     /// The deployment's opencode driven-session policy (an opencode config
     /// with a `permission` block), for the default posture (WI-932).
     pub opencode_config: Option<&'a str>,
+}
+
+impl<'a> LaunchRequest<'a> {
+    /// A launch that asks for nothing extra. Codex is pinned (`codex_session_id`
+    /// true): the image bakes the fork that accepts `--session-id` (WI-1354).
+    pub fn bare() -> Self {
+        Self {
+            model: None,
+            effort: None,
+            resume: None,
+            brief_file: None,
+            session_id: None,
+            codex_session_id: true,
+            permission_mode: None,
+            settings_file: None,
+            add_dirs: &[],
+            opencode_config: None,
+        }
+    }
 }
 
 /// opencode's `accept-edits` posture: file work is allowed, everything else
@@ -128,6 +166,53 @@ pub fn permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
             "acceptEdits".to_string(),
         ])),
         Some("bypass") => Ok(Some(vec!["--dangerously-skip-permissions".to_string()])),
+        Some(other) => Err(ApiError::BadRequest(format!(
+            "permission_mode {other:?} is not one of default, accept-edits, bypass"
+        ))),
+    }
+}
+
+/// A permission posture as Codex flags (WI-1143).
+///
+/// The pod is the isolation boundary and cannot create a user namespace, so
+/// `workspace-write` (and `--approve-for-me`, which hard-wires it) would fail
+/// the launch. Every posture therefore uses `-s danger-full-access`. Default
+/// still asks (`-a on-request`). Accept-edits pins the same `-a on-request`,
+/// so a user's `~/.codex/config.toml` with `approval_policy = "never"` cannot
+/// turn approvals off under `danger-full-access`, and then routes those asks
+/// through Codex's automatic reviewer (`-c approvals_reviewer="auto_review"`)
+/// without changing the sandbox. Bypass drops both approvals and the sandbox
+/// and is a person's grant only.
+///
+/// `exec` is a `codex exec` launch. That subcommand rejects `-a`, so the
+/// approval pin is left off; the sandbox, and for accept-edits the reviewer,
+/// stay.
+///
+/// `None` means the caller did not ask for a posture. That is not the default
+/// posture: the wrapper used to force bypass, and a launch that omitted the
+/// flags would look like it had applied one.
+pub fn codex_permission_flags(mode: Option<&str>, exec: bool) -> Result<Option<Vec<String>>> {
+    let sandbox = ["-s".to_string(), "danger-full-access".to_string()];
+    let ask = if exec {
+        Vec::new()
+    } else {
+        vec!["-a".to_string(), "on-request".to_string()]
+    };
+    match mode.map(str::trim).filter(|m| !m.is_empty()) {
+        None => Ok(None),
+        Some("default") => Ok(Some(ask.into_iter().chain(sandbox).collect())),
+        Some("accept-edits") | Some("accept_edits") => Ok(Some(
+            ask.into_iter()
+                .chain([
+                    "-c".to_string(),
+                    "approvals_reviewer=\"auto_review\"".to_string(),
+                ])
+                .chain(sandbox)
+                .collect(),
+        )),
+        Some("bypass") => Ok(Some(vec![
+            "--dangerously-bypass-approvals-and-sandbox".to_string()
+        ])),
         Some(other) => Err(ApiError::BadRequest(format!(
             "permission_mode {other:?} is not one of default, accept-edits, bypass"
         ))),
@@ -170,7 +255,7 @@ pub fn apply(
         &LaunchRequest {
             model,
             effort,
-            ..LaunchRequest::default()
+            ..LaunchRequest::bare()
         },
     )?
     .command)
@@ -198,7 +283,18 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
         validate_conversation_id(value)?;
     }
     let permission = permission_flags(req.permission_mode)?;
-    let asked = model.is_some() || effort.is_some() || resume.is_some() || permission.is_some();
+    // `codex exec` rejects `-a`. The binary is not known yet, so the pin is
+    // decided from the word after it and only the codex arm reads the result.
+    let codex_exec = command.filter(|c| !c.is_empty()).is_some_and(|c| {
+        let (idx, binary) = agent_binary(c);
+        binary == "codex" && c.get(idx + 1).is_some_and(|arg| arg == "exec")
+    });
+    let codex_permission = codex_permission_flags(req.permission_mode, codex_exec)?;
+    let asked = model.is_some()
+        || effort.is_some()
+        || resume.is_some()
+        || permission.is_some()
+        || codex_permission.is_some();
 
     let Some(command) = command.filter(|c| !c.is_empty()) else {
         if asked {
@@ -223,14 +319,6 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             )));
         }
         return Ok(Launch::default());
-    }
-    if permission.is_some() && binary == "codex" {
-        // Named rather than dropped: a posture that silently did not apply
-        // is the failure this refusal exists against.
-        return Err(ApiError::BadRequest(format!(
-            "permission_mode is applied to Claude Code, opencode and Klaudia; `{binary}` has \
-             its own approval settings in its launcher and is not told one per session"
-        )));
     }
     if binary == "klaudia"
         && matches!(
@@ -300,12 +388,20 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 // `--add-dir`, so it can never take a following positional.
                 rewritten.push(format!("--settings={}", file.display()));
             }
-            if let Some(dir) = req.brief_file.and_then(Path::parent) {
-                // The brief lives under the engine's state directory, outside
-                // the session's working directory, and reading it there would
-                // stop a fresh session at a permission prompt before it began
-                // (WI-912). `--add-dir` is variadic: the `=` form takes one
-                // value, so the positional prompt after it stays a prompt.
+            // The brief lives under the engine's state directory, outside the
+            // session's working directory, and reading it there would stop a
+            // fresh session at a permission prompt before it began (WI-912).
+            // `--add-dir` is variadic: the `=` form takes one value, so the
+            // positional prompt after it stays a prompt. A wake passes the
+            // directories recorded at the first start (`req.add_dirs`) because
+            // it has no new brief to derive them from (WI-1250).
+            let mut dirs: Vec<&Path> = req.add_dirs.iter().map(PathBuf::as_path).collect();
+            if dirs.is_empty() {
+                if let Some(dir) = req.brief_file.and_then(Path::parent) {
+                    dirs.push(dir);
+                }
+            }
+            for dir in dirs {
                 rewritten.push(format!("--add-dir={}", dir.display()));
             }
             // Positional, and last: `claude [options] [prompt]`.
@@ -336,6 +432,39 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 // override, and `-c key=value` is a first-class argument
                 // rather than a trick.
                 rewritten.extend(["-c".to_string(), format!("model_reasoning_effort={effort}")]);
+            }
+            // WI-1143. A launch that names no posture still gets the default:
+            // the wrapper no longer forces bypass, and omitting the flags would
+            // look like the session had applied one. An explicit posture is
+            // never dropped onto that default. `codex exec` rejects `-a`, so
+            // that launch keeps the sandbox and the reviewer but not the pin.
+            let flags = codex_permission.unwrap_or_else(|| {
+                codex_permission_flags(Some("default"), codex_exec)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            });
+            rewritten.extend(flags);
+            // The WI-1127 fork reads its state back through the window title
+            // (WI-1145). Stock Codex accepts `-c` and ignores a `tui` key it
+            // does not know, so every launch asks for the `agent-state` title
+            // and turns the animations off — they repaint without changing the
+            // screen, which keeps a finished turn reading as busy. The values
+            // are TOML: an array needs its brackets and quotes, a bool does not.
+            rewritten.extend([
+                "-c".to_string(),
+                "tui.terminal_title=[\"agent-state\"]".to_string(),
+                "-c".to_string(),
+                "tui.animations=false".to_string(),
+            ]);
+            // Fresh only, and only when the binary accepts the flag (WI-1126,
+            // on by default since WI-1354). A resume already names its id via
+            // the subcommand, and a template with arguments of its own is left
+            // alone.
+            if resume.is_none() && bare && req.codex_session_id {
+                if let Some(id) = req.session_id {
+                    rewritten.extend(["--session-id".to_string(), id.to_string()]);
+                }
             }
             // Positional, and last: `codex [PROMPT]` / `codex resume [ID] [PROMPT]`.
             if let Some(prompt) = prompt {
@@ -379,6 +508,19 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             if let Some(flags) = permission {
                 rewritten.extend(flags);
             }
+            // The same extra directories Claude Code is handed (WI-1250):
+            // without them a woken Klaudia session could not re-read a brief
+            // that lives outside its working directory. Never `--settings`:
+            // Klaudia has no such flag and refuses to start with one.
+            let mut dirs: Vec<&Path> = req.add_dirs.iter().map(PathBuf::as_path).collect();
+            if dirs.is_empty() {
+                if let Some(dir) = req.brief_file.and_then(Path::parent) {
+                    dirs.push(dir);
+                }
+            }
+            for dir in dirs {
+                rewritten.push(format!("--add-dir={}", dir.display()));
+            }
             // Never positional: Klaudia reads a positional prompt as `-p`
             // (answer and exit), so a session started that way did one turn
             // and ended. `--prompt-interactive` opens the TUI and submits it
@@ -407,14 +549,16 @@ pub fn agent_name(command: &[String]) -> Option<String> {
 
 /// The agent conversation a session started with `command` runs, when its
 /// id is known before the CLI says anything: the one it resumes, or — for a
-/// bare Claude Code launch, which [`launch`] pins with `--session-id` — the
-/// engine's own id for the session. `None` for anything else, including a
-/// fresh Codex or OpenCode session, whose id the CLI mints itself: resuming
-/// by a guess could continue somebody else's conversation.
+/// bare launch [`launch`] pins with `--session-id` — the engine's own id for
+/// the session. Claude Code and Klaudia are always pinned that way. Codex is
+/// pinned when `codex_session_id` is set (the WI-1126 fork the image bakes, on
+/// by default); stock Codex (`codex_session_id` false) and OpenCode mint their
+/// own id, and guessing one could continue somebody else's conversation.
 pub fn conversation(
     command: Option<&[String]>,
     resume: Option<&str>,
     session_id: Uuid,
+    codex_session_id: bool,
 ) -> Option<vogt_engine_contract::AgentConversation> {
     let command = command.filter(|c| !c.is_empty())?;
     let (binary_idx, binary) = agent_binary(command);
@@ -429,12 +573,12 @@ pub fn conversation(
             id: id.to_string(),
         });
     }
-    (matches!(binary.as_str(), "claude" | "klaudia") && binary_idx + 1 == command.len()).then(
-        || vogt_engine_contract::AgentConversation {
-            agent: binary,
-            id: session_id.to_string(),
-        },
-    )
+    let pinned = matches!(binary.as_str(), "claude" | "klaudia")
+        || (binary.as_str() == "codex" && codex_session_id);
+    (pinned && binary_idx + 1 == command.len()).then(|| vogt_engine_contract::AgentConversation {
+        agent: binary,
+        id: session_id.to_string(),
+    })
 }
 
 /// Whether `value` is a well-formed conversation id (see
@@ -465,6 +609,28 @@ fn agent_binary(command: &[String]) -> (usize, String) {
         .unwrap_or(candidate)
         .to_string();
     (idx, name)
+}
+
+/// `command` with the workspace guidance override inserted right after the
+/// Codex binary (WI-1357), or `None` when it is not a Codex launch, already
+/// carries one, or there is nothing to carry. Only the argument list changes:
+/// `CODEX_HOME` is never set, so the user's `~/.codex` (MCP servers,
+/// providers, trust, login, transcripts) stays the config Codex reads.
+pub fn with_codex_guidance(
+    command: &[String],
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Option<Vec<String>> {
+    if agent_name(command).as_deref() != Some("codex")
+        || crate::codex_guidance::has_override(command)
+    {
+        return None;
+    }
+    let value = crate::codex_guidance::developer_instructions_override(cwd, home)?;
+    let (idx, _) = agent_binary(command);
+    let mut out = command.to_vec();
+    out.splice(idx + 1..idx + 1, ["-c".to_string(), value]);
+    Some(out)
 }
 
 /// A conversation id becomes an argument to the agent CLI, so it is held to a
@@ -521,6 +687,29 @@ pub(crate) fn validate(field: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn codex_guidance_is_an_argument_and_leaves_codex_home_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let repo = home.join("Working").join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(home.join("Working").join("AGENTS.md"), "WS").unwrap();
+        let command: Vec<String> = ["env", "X=1", "--", "/usr/bin/codex", "--yolo"]
+            .map(String::from)
+            .to_vec();
+        let out = with_codex_guidance(&command, &repo, Some(&home)).unwrap();
+        assert_eq!(&out[..4], &command[..4]);
+        assert_eq!(out[4], "-c");
+        assert!(out[5].starts_with("developer_instructions=\""));
+        assert_eq!(out[6], "--yolo");
+        // The user's ~/.codex stays the config home: nothing names CODEX_HOME.
+        assert!(!out.iter().any(|arg| arg.contains("CODEX_HOME")));
+        // A second start does not stack another copy; other agents are untouched.
+        assert!(with_codex_guidance(&out, &repo, Some(&home)).is_none());
+        let claude = vec!["claude".to_string()];
+        assert!(with_codex_guidance(&claude, &repo, Some(&home)).is_none());
+    }
     use super::*;
 
     fn cmd(parts: &[&str]) -> Vec<String> {
@@ -566,7 +755,15 @@ mod tests {
                 "-m",
                 "gpt-5.6",
                 "-c",
-                "model_reasoning_effort=medium"
+                "model_reasoning_effort=medium",
+                "-a",
+                "on-request",
+                "-s",
+                "danger-full-access",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false"
             ])
         );
     }
@@ -602,7 +799,22 @@ mod tests {
         let out = apply(Some(&cmd(&["/usr/local/bin/codex"])), Some("gpt-5.6"), None)
             .unwrap()
             .unwrap();
-        assert_eq!(out, cmd(&["/usr/local/bin/codex", "-m", "gpt-5.6"]));
+        assert_eq!(
+            out,
+            cmd(&[
+                "/usr/local/bin/codex",
+                "-m",
+                "gpt-5.6",
+                "-a",
+                "on-request",
+                "-s",
+                "danger-full-access",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false"
+            ])
+        );
     }
 
     #[test]
@@ -685,7 +897,7 @@ mod tests {
     fn with_brief() -> LaunchRequest<'static> {
         LaunchRequest {
             brief_file: Some(Path::new(BRIEF)),
-            ..LaunchRequest::default()
+            ..LaunchRequest::bare()
         }
     }
 
@@ -706,8 +918,19 @@ mod tests {
             .unwrap()
             .command
             .unwrap();
-        assert_eq!(codex.len(), 5);
-        assert!(codex[4].contains(BRIEF));
+        // The brief stays last. Ahead of it: the default posture (WI-1143)
+        // and the two `-c` pairs that ask the fork for its `agent-state` title
+        // (WI-1145).
+        assert_eq!(codex.len(), 13);
+        assert!(codex[12].contains(BRIEF));
+        assert!(codex.windows(2).any(|w| w == ["-a", "on-request"]));
+        assert!(codex.windows(2).any(|w| w == ["-s", "danger-full-access"]));
+        assert!(codex
+            .windows(2)
+            .any(|w| w == ["-c", "tui.terminal_title=[\"agent-state\"]"]));
+        assert!(codex
+            .windows(2)
+            .any(|w| w == ["-c", "tui.animations=false"]));
 
         let opencode = launch(Some(&protected("opencode")), &with_brief())
             .unwrap()
@@ -759,7 +982,7 @@ mod tests {
         let req = LaunchRequest {
             resume: Some(id),
             model: Some("m1"),
-            ..LaunchRequest::default()
+            ..LaunchRequest::bare()
         };
         assert_eq!(
             launch(Some(&protected("claude")), &req)
@@ -769,27 +992,59 @@ mod tests {
             [protected("claude"), cmd(&["--model", "m1", "--resume", id])].concat()
         );
         // `resume` is a codex subcommand, so it sits straight after the
-        // binary, ahead of the flags.
+        // binary, ahead of the flags, and the title overrides follow.
         assert_eq!(
             launch(Some(&protected("codex")), &req)
                 .unwrap()
                 .command
                 .unwrap(),
-            [protected("codex"), cmd(&["resume", id, "-m", "m1"])].concat()
+            [
+                protected("codex"),
+                cmd(&[
+                    "resume",
+                    id,
+                    "-m",
+                    "m1",
+                    "-a",
+                    "on-request",
+                    "-s",
+                    "danger-full-access",
+                    "-c",
+                    "tui.terminal_title=[\"agent-state\"]",
+                    "-c",
+                    "tui.animations=false"
+                ])
+            ]
+            .concat()
         );
         assert_eq!(
             launch(Some(&cmd(&["codex", "--search"])), &req)
                 .unwrap()
                 .command
                 .unwrap(),
-            cmd(&["codex", "resume", id, "--search", "-m", "m1"])
+            cmd(&[
+                "codex",
+                "resume",
+                id,
+                "--search",
+                "-m",
+                "m1",
+                "-a",
+                "on-request",
+                "-s",
+                "danger-full-access",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false"
+            ])
         );
         assert_eq!(
             launch(
                 Some(&protected("opencode")),
                 &LaunchRequest {
                     resume: Some("ses_abc123"),
-                    ..LaunchRequest::default()
+                    ..LaunchRequest::bare()
                 }
             )
             .unwrap()
@@ -803,7 +1058,7 @@ mod tests {
     fn resume_on_a_shell_is_refused() {
         let req = LaunchRequest {
             resume: Some("abc"),
-            ..LaunchRequest::default()
+            ..LaunchRequest::bare()
         };
         assert!(launch(Some(&cmd(&["bash"])), &req).is_err());
         assert!(launch(None, &req).is_err());
@@ -822,7 +1077,7 @@ mod tests {
         ] {
             let req = LaunchRequest {
                 resume: Some(hostile),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             };
             assert!(
                 launch(Some(&protected("claude")), &req).is_err(),
@@ -838,7 +1093,7 @@ mod tests {
         let sid = Uuid::new_v4();
         let req = LaunchRequest {
             session_id: Some(sid),
-            ..LaunchRequest::default()
+            ..LaunchRequest::bare()
         };
         assert_eq!(
             launch(Some(&protected("claude")), &req)
@@ -868,18 +1123,107 @@ mod tests {
         .command
         .unwrap();
         assert!(!resumed.contains(&"--session-id".to_string()));
-        // Codex cannot be told an id, so nothing is added for it.
-        assert!(launch(Some(&protected("codex")), &req)
+        // Stock Codex refuses `--session-id`, so that flag is added only when
+        // the deployment says its binary is the fork (WI-1126 / WI-1144).
+        // The image bakes that fork, so the pin is on by default (WI-1354):
+        // a fresh bare Codex launch gets the engine id without the caller
+        // having to set the flag, and hibernation then has a conversation to
+        // resume. The `agent-state` title overrides are added either way
+        // (WI-1145): stock Codex accepts `-c` and ignores a `tui` key it does
+        // not know.
+        let pinned = launch(Some(&protected("codex")), &req)
             .unwrap()
             .command
-            .is_none());
+            .unwrap();
+        assert_eq!(
+            pinned,
+            [
+                protected("codex"),
+                cmd(&[
+                    "-a",
+                    "on-request",
+                    "-s",
+                    "danger-full-access",
+                    "-c",
+                    "tui.terminal_title=[\"agent-state\"]",
+                    "-c",
+                    "tui.animations=false",
+                    "--session-id",
+                    &sid.to_string()
+                ])
+            ]
+            .concat()
+        );
+        // An explicit opt-out (stock npm Codex, which refuses the flag) leaves
+        // the launch unpinned. The title overrides stay.
+        let stock = LaunchRequest {
+            codex_session_id: false,
+            ..req
+        };
+        let titled = launch(Some(&protected("codex")), &stock)
+            .unwrap()
+            .command
+            .unwrap();
+        assert!(!titled.iter().any(|arg| arg == "--session-id"));
+        let forked = LaunchRequest {
+            codex_session_id: true,
+            ..req
+        };
+        assert_eq!(
+            launch(Some(&protected("codex")), &forked)
+                .unwrap()
+                .command
+                .unwrap(),
+            [
+                protected("codex"),
+                cmd(&[
+                    "-a",
+                    "on-request",
+                    "-s",
+                    "danger-full-access",
+                    "-c",
+                    "tui.terminal_title=[\"agent-state\"]",
+                    "-c",
+                    "tui.animations=false",
+                    "--session-id",
+                    &sid.to_string()
+                ])
+            ]
+            .concat()
+        );
+        // `--session-id` is not added when the template carries arguments of
+        // its own, nor when resuming: `codex resume <id>` already names the
+        // conversation. The title overrides still are.
+        let searching = launch(Some(&cmd(&["codex", "--search"])), &forked)
+            .unwrap()
+            .command
+            .unwrap();
+        assert!(!searching.iter().any(|arg| arg == "--session-id"));
+        assert!(searching
+            .windows(2)
+            .any(|w| w == ["-c", "tui.animations=false"]));
+        let resumed = launch(
+            Some(&protected("codex")),
+            &LaunchRequest {
+                resume: Some("abc"),
+                ..forked
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(!resumed.iter().any(|arg| arg == "--session-id"));
+        assert!(resumed.windows(2).any(|w| w == ["resume", "abc"]));
+        assert!(resumed
+            .windows(2)
+            .any(|w| w == ["-c", "tui.terminal_title=[\"agent-state\"]"]));
     }
 
     #[test]
     fn claude_sessions_get_the_quiet_defaults_and_others_do_not() {
         // WI-832: prompt suggestions are accepted by a bare Enter, which a
         // driving agent sends.
-        let env = launch(Some(&protected("claude")), &LaunchRequest::default())
+        let env = launch(Some(&protected("claude")), &LaunchRequest::bare())
             .unwrap()
             .env;
         assert!(env.contains(&(
@@ -890,11 +1234,11 @@ mod tests {
             "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY".to_string(),
             "1".to_string()
         )));
-        assert!(launch(Some(&protected("codex")), &LaunchRequest::default())
+        assert!(launch(Some(&protected("codex")), &LaunchRequest::bare())
             .unwrap()
             .env
             .is_empty());
-        assert!(launch(Some(&cmd(&["bash"])), &LaunchRequest::default())
+        assert!(launch(Some(&cmd(&["bash"])), &LaunchRequest::bare())
             .unwrap()
             .env
             .is_empty());
@@ -917,7 +1261,7 @@ mod opencode_posture_tests {
             &LaunchRequest {
                 permission_mode: mode,
                 opencode_config: policy,
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -947,17 +1291,28 @@ mod opencode_posture_tests {
     }
 
     #[test]
-    fn codex_is_still_not_told_a_posture() {
+    fn codex_bypass_is_its_own_flag_and_not_claudes_settings() {
         let command = vec!["codex".to_string()];
-        let err = launch(
+        let got = launch(
             Some(&command),
             &LaunchRequest {
                 permission_mode: Some("bypass"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
-        .expect_err("codex has no per-session posture");
-        assert!(err.to_string().contains("codex"), "{err}");
+        .expect("codex takes a posture");
+        assert_eq!(
+            got.command.unwrap(),
+            [
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false",
+            ]
+        );
+        assert!(got.env.is_empty(), "codex is not given claude settings");
     }
 }
 
@@ -974,25 +1329,34 @@ mod conversation_tests {
     fn a_bare_claude_runs_the_engines_id_and_a_resume_runs_its_own() {
         let id = Uuid::new_v4();
         let wrapped = argv(&["vogt-agent-auth", "run", "--", "claude"]);
-        let found = conversation(Some(&wrapped), None, id).unwrap();
+        let found = conversation(Some(&wrapped), None, id, false).unwrap();
         assert_eq!((found.agent.as_str(), found.id), ("claude", id.to_string()));
 
-        let resumed = conversation(Some(&wrapped), Some("abc-123"), id).unwrap();
+        let resumed = conversation(Some(&wrapped), Some("abc-123"), id, false).unwrap();
         assert_eq!(resumed.id, "abc-123");
-        let codex = conversation(Some(&argv(&["codex"])), Some("r1"), id).unwrap();
+        let codex = conversation(Some(&argv(&["codex"])), Some("r1"), id, false).unwrap();
         assert_eq!((codex.agent.as_str(), codex.id.as_str()), ("codex", "r1"));
     }
 
     #[test]
     fn an_unknown_id_is_none_not_a_guess() {
         let id = Uuid::new_v4();
-        // Codex mints its own id; a claude with arguments of its own may
-        // carry `--continue` or a session id the engine did not pin.
-        assert!(conversation(Some(&argv(&["codex"])), None, id).is_none());
-        assert!(conversation(Some(&argv(&["claude", "--continue"])), None, id).is_none());
-        assert!(conversation(Some(&argv(&["bash"])), Some("x"), id).is_none());
-        assert!(conversation(None, None, id).is_none());
-        assert!(conversation(Some(&argv(&["claude"])), Some("-bad"), id).is_none());
+        // The fork (codex_session_id, on by default) is pinned to the engine
+        // id when the command is bare, and not when it carries arguments of
+        // its own. Stock Codex (the flag explicitly off) mints its own id. A
+        // claude with arguments of its own may carry `--continue` or a session
+        // id the engine did not pin.
+        assert!(conversation(Some(&argv(&["codex"])), None, id, false).is_none());
+        let forked = conversation(Some(&argv(&["codex"])), None, id, true).unwrap();
+        assert_eq!(
+            (forked.agent.as_str(), forked.id.as_str()),
+            ("codex", id.to_string().as_str())
+        );
+        assert!(conversation(Some(&argv(&["codex", "--search"])), None, id, true).is_none());
+        assert!(conversation(Some(&argv(&["claude", "--continue"])), None, id, false).is_none());
+        assert!(conversation(Some(&argv(&["bash"])), Some("x"), id, false).is_none());
+        assert!(conversation(None, None, id, false).is_none());
+        assert!(conversation(Some(&argv(&["claude"])), Some("-bad"), id, false).is_none());
     }
 }
 
@@ -1017,6 +1381,44 @@ mod permission_tests {
             Some(cmd(&["--dangerously-skip-permissions"]))
         );
         assert!(permission_flags(Some("yolo")).is_err());
+        assert!(codex_permission_flags(Some("yolo"), false).is_err());
+        assert_eq!(codex_permission_flags(None, false).unwrap(), None);
+        assert_eq!(
+            codex_permission_flags(Some("default"), false).unwrap(),
+            Some(cmd(&["-a", "on-request", "-s", "danger-full-access"]))
+        );
+        // Accept-edits pins `-a on-request` too, so a user config of
+        // `approval_policy = "never"` cannot drop the asks the reviewer is
+        // meant to answer.
+        assert_eq!(
+            codex_permission_flags(Some("accept_edits"), false).unwrap(),
+            Some(cmd(&[
+                "-a",
+                "on-request",
+                "-c",
+                "approvals_reviewer=\"auto_review\"",
+                "-s",
+                "danger-full-access"
+            ]))
+        );
+        assert_eq!(
+            codex_permission_flags(Some("bypass"), false).unwrap(),
+            Some(cmd(&["--dangerously-bypass-approvals-and-sandbox"]))
+        );
+        // `codex exec` rejects `-a`. The sandbox and the reviewer stay.
+        assert_eq!(
+            codex_permission_flags(Some("default"), true).unwrap(),
+            Some(cmd(&["-s", "danger-full-access"]))
+        );
+        assert_eq!(
+            codex_permission_flags(Some("accept-edits"), true).unwrap(),
+            Some(cmd(&[
+                "-c",
+                "approvals_reviewer=\"auto_review\"",
+                "-s",
+                "danger-full-access"
+            ]))
+        );
     }
 
     #[test]
@@ -1027,7 +1429,7 @@ mod permission_tests {
             &LaunchRequest {
                 permission_mode: Some("bypass"),
                 settings_file: Some(policy),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1041,28 +1443,105 @@ mod permission_tests {
             out.contains(&format!("--settings={}", policy.display())),
             "{out:?}"
         );
-        // Codex and a plain shell are refused a posture, never started plain.
-        for command in [cmd(&["codex"]), cmd(&["bash"])] {
-            let refused = launch(
-                Some(&command),
-                &LaunchRequest {
-                    permission_mode: Some("bypass"),
-                    ..LaunchRequest::default()
-                },
-            );
-            assert!(refused.is_err(), "{command:?}");
-        }
-        // A policy file alone is not an ask: Codex starts without it.
+        // A plain shell is refused a posture, never started plain. Codex is
+        // told its own flags (WI-1143) and is not handed Claude's settings file.
+        let refused = launch(
+            Some(&cmd(&["bash"])),
+            &LaunchRequest {
+                permission_mode: Some("bypass"),
+                ..LaunchRequest::bare()
+            },
+        );
+        assert!(refused.is_err(), "bash");
+        let codex = launch(
+            Some(&cmd(&["codex"])),
+            &LaunchRequest {
+                permission_mode: Some("bypass"),
+                settings_file: Some(policy),
+                ..LaunchRequest::bare()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(codex.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(!codex
+            .iter()
+            .any(|arg| arg.contains("driven-session-settings")));
+        assert!(!codex.iter().any(|arg| arg == "--approve-for-me"));
+        let edits = launch(
+            Some(&cmd(&["codex"])),
+            &LaunchRequest {
+                permission_mode: Some("accept-edits"),
+                ..LaunchRequest::bare()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(edits.windows(2).any(|w| w == ["-a", "on-request"]));
+        assert!(edits
+            .windows(2)
+            .any(|w| w == ["-c", "approvals_reviewer=\"auto_review\""]));
+        assert!(edits.windows(2).any(|w| w == ["-s", "danger-full-access"]));
+        // A policy file alone is not an ask of the caller, but a Codex launch
+        // that names no posture still starts on the default one: the wrapper
+        // no longer forces bypass, so omitting the flags would look like it had.
         assert_eq!(
             launch(
                 Some(&cmd(&["codex"])),
                 &LaunchRequest {
                     settings_file: Some(policy),
-                    ..LaunchRequest::default()
+                    ..LaunchRequest::bare()
                 }
             )
+            .unwrap()
+            .command
             .unwrap(),
-            Launch::default()
+            cmd(&[
+                "codex",
+                "-a",
+                "on-request",
+                "-s",
+                "danger-full-access",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false"
+            ])
+        );
+        // `codex exec` rejects `-a`, so neither a default launch nor an
+        // accept-edits launch emits it. The sandbox and the reviewer stay.
+        let exec = launch(
+            Some(&cmd(&["codex", "exec"])),
+            &LaunchRequest {
+                permission_mode: Some("accept-edits"),
+                ..LaunchRequest::bare()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(!exec.iter().any(|arg| arg == "-a"), "{exec:?}");
+        assert!(exec
+            .windows(2)
+            .any(|w| w == ["-c", "approvals_reviewer=\"auto_review\""]));
+        assert!(exec.windows(2).any(|w| w == ["-s", "danger-full-access"]));
+        assert_eq!(
+            launch(Some(&cmd(&["codex", "exec"])), &LaunchRequest::bare())
+                .unwrap()
+                .command
+                .unwrap(),
+            cmd(&[
+                "codex",
+                "exec",
+                "-s",
+                "danger-full-access",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false"
+            ])
         );
     }
 
@@ -1076,7 +1555,7 @@ mod permission_tests {
                 model: Some("grok-4.7"),
                 brief_file: Some(brief),
                 session_id: Some(id),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap();
@@ -1113,13 +1592,32 @@ mod permission_tests {
     }
 
     #[test]
+    fn klaudia_never_takes_settings_even_when_the_deployment_has_one() {
+        // Klaudia has no `--settings` flag (msp-klaudia #57). A deployment
+        // policy that Claude Code would receive must not be handed to it.
+        let out = launch(
+            Some(&cmd(&["klaudia"])),
+            &LaunchRequest {
+                settings_file: Some(Path::new("/state/policy.json")),
+                brief_file: Some(Path::new("/state/sessions/x.md")),
+                ..LaunchRequest::bare()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(!out.iter().any(|a| a.starts_with("--settings")));
+        assert!(out.iter().any(|a| a.starts_with("--add-dir=")));
+    }
+
+    #[test]
     fn klaudia_resumes_by_id_and_a_fresh_one_never_picks_up_another() {
         let out = launch(
             Some(&cmd(&["klaudia"])),
             &LaunchRequest {
                 resume: Some("72d33a6b-bed4-4229-8f35-ac6bbcf960f5"),
                 session_id: Some(Uuid::new_v4()),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1139,7 +1637,7 @@ mod permission_tests {
             Some(&cmd(&["klaudia"])),
             &LaunchRequest {
                 model: Some("opus"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
@@ -1155,18 +1653,39 @@ mod permission_tests {
             &LaunchRequest {
                 permission_mode: Some("bypass"),
                 session_id: Some(Uuid::nil()),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap()
         .command
         .unwrap();
         assert!(out.contains(&"--dangerously-skip-permissions".to_string()));
+        // Klaudia has no `--settings` flag and refuses to start with one, so
+        // the deployment's settings file never reaches its argv (WI-1250).
+        let settings = Path::new("/state/driven-settings.json");
+        let dirs = [PathBuf::from("/state/agent-task-prompts/sessions")];
+        let out = launch(
+            Some(&cmd(&["klaudia"])),
+            &LaunchRequest {
+                settings_file: Some(settings),
+                add_dirs: &dirs,
+                session_id: Some(Uuid::nil()),
+                ..LaunchRequest::bare()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(!out.iter().any(|a| a.starts_with("--settings")), "{out:?}");
+        assert!(
+            out.contains(&"--add-dir=/state/agent-task-prompts/sessions".to_string()),
+            "{out:?}"
+        );
         let refused = launch(
             Some(&cmd(&["klaudia"])),
             &LaunchRequest {
                 effort: Some("high"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap_err();
@@ -1176,7 +1695,7 @@ mod permission_tests {
             Some(&cmd(&["klaudia"])),
             &LaunchRequest {
                 permission_mode: Some("accept-edits"),
-                ..LaunchRequest::default()
+                ..LaunchRequest::bare()
             },
         )
         .unwrap_err();
@@ -1186,7 +1705,7 @@ mod permission_tests {
     #[test]
     fn a_bare_klaudia_launch_runs_the_engines_conversation() {
         let id = Uuid::new_v4();
-        let conversation = conversation(Some(&cmd(&["klaudia"])), None, id).unwrap();
+        let conversation = conversation(Some(&cmd(&["klaudia"])), None, id, false).unwrap();
         assert_eq!(conversation.agent, "klaudia");
         assert_eq!(conversation.id, id.to_string());
         assert_eq!(

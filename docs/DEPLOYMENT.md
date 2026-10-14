@@ -42,7 +42,7 @@ sidecar, released as a pair and run by one Compose file,
   on by default (`COMPOSE_PROFILES=voice`).
 
 The engine is not optional: it is the only way in. The core image,
-`ghcr.io/thedancingdeveloper-org/vogt:0.7.9`, is also published at every
+`ghcr.io/thedancingdeveloper-org/vogt:0.7.14`, is also published at every
 release because the stack image is built from it by digest and the release
 manifest records both — it is a build input, not a deployment target.
 `deploy/vogt.compose.yml` and `deploy/engine.overlay.yml` run a core and an
@@ -136,8 +136,8 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `ENGINE_BIND` | no | `127.0.0.1` | Host interface the port is published on. Loopback until you mean to expose it. |
 | `ENGINE_PORT` | no | `8910` | Host port the container's 8910 is published on. |
 | `ENGINE_PUBLIC_URL` | no | — | The URL clients reach the stack at. Set it once there is a stable one (§4). |
-| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.9` | The image to run. Pin a digest (§6). |
-| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.9` | The sidecar. Pin the same release as the stack. |
+| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.14` | The image to run. Pin a digest (§6). |
+| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.14` | The sidecar. Pin the same release as the stack. |
 | `COMPOSE_PROFILES` | no | `voice` | Clear it to run without the sidecar; the voice controls stay present but inert. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | no | `agent:engine` | Who the adopted stack secret acts as — and therefore whom a break-glass token's Vogt calls are attributed to. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | no | `read,work.write,project.write` | What it may do. Everything in the pod can read the file, so this is the blast radius. |
@@ -147,10 +147,17 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `ENGINE_AGENT_GRANT_PROJECTS` | no | none | Secrets-manager projects, besides the ones `ENGINE_AGENT_AUTH_SECRETS` already names, that a person-approved grant may fetch a secret from (space- or comma-separated ids). Unset, grants reach only the manifest's projects ([`ENGINE.md` §9](ENGINE.md)). |
 | `ENGINE_METRICS_ADDR` | no | off | Serve `GET /metrics` (Prometheus text) on this address, a listener of its own, never the API port: session launch latency and its stages ([`ENGINE.md`, "Launch timing, logs and metrics"](ENGINE.md#launch-timing-logs-and-metrics)). `0.0.0.0:9464` inside the container; publish or route the port only where your scraper sits. |
 | `ENGINE_AGENT_OPENCODE_CONFIG` | no | the image's policy | The opencode half of the driven-session policy: an opencode config with a `permission` block, given to every engine-launched opencode session as `OPENCODE_CONFIG_CONTENT` (the user's own config is not edited). Allow `gh pr merge` here where agents may merge their own PRs. `off` turns it off ([`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture)). |
+| `ENGINE_AGENT_CODEX_POLICY` | no | the image file, else `/etc/codex/requirements.toml` | The Codex half. Codex itself reads `/etc/codex/requirements.toml`; the engine checks the named path exists, is readable and wires the gitguard hook (`[[hooks.SessionStart]]` + `[[hooks.PreToolUse]]` running `klaudia hook gitguard` with `failClosed = true`, plus the `[features] hooks = true` pin that stops a session switching hooks off) before a Codex launch. Empty uses the image file at `/usr/local/share/vogt/driven-session-codex-requirements.toml`, then `/etc/codex/requirements.toml`. `off` is the only way a deployment that has the file skips the check. A path that is missing, empty, unreadable or without that hook refuses the Codex launch (400) and does not fall through to bypass; Claude and opencode are not blocked. The shipped file wires the hook for the Codex fork (WI-1356) ([`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture)). |
 | `ENGINE_SESSION_RSS_WARN` | no | off | Flag any session whose process tree's resident memory reaches this (`8GiB`). Usage is shown either way; this only marks the heavy ones. |
+| `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` | no | off | When a session is hibernated or stopped and its directory is a linked git worktree, remove regenerable build output there (`target` beside a `Cargo.toml`, `node_modules`, `.venv`). A repo's main checkout is never touched, and a tracked file is never deleted ([`ENGINE.md`, "Worktree build output"](ENGINE.md#worktree-build-output)). |
+| `ENGINE_DISK_WARN_PERCENT` | no | `85` | Flag the workspace volume on `sweep`, `status` and `engine.status` once this percent of it is used. A whole percent from 1 to 100; anything else fails the boot. |
+| `ENGINE_ECONOMICS_TICK_SECS` | no | `15` | How often the engine reads each live session's transcript to meter its turns, context and compactions, reported on the session summary and as histograms on `GET /metrics` ([`ENGINE.md`, "Session economics"](ENGINE.md#session-economics)). `0` disables it. |
 | `ENGINE_HIBERNATE_IDLE_AFTER` | no | off | Hibernate an agent session quiet this long (`2h`, `30m`): its processes stop, it stays listed, and a wake resumes its conversation ([`ENGINE.md`, "Hibernation"](ENGINE.md#hibernation)). Sessions running a turn, at a permission dialog, blocked on a person, running a tool shell, pinned awake or on autopilot are exempt (autopilot only from this idle trigger). |
 | `ENGINE_AUTOPILOT_NUDGE_AFTER`, `ENGINE_AUTOPILOT_MAX_NUDGES` | no | `60s`, `100` | How long an autopilot session sits at its prompt before the engine tells it to carry on, and the most times it does; `0` never nudges ([`ENGINE.md`, "Autopilot"](ENGINE.md#autopilot)). |
+| `ENGINE_BUDGET_SOFT_PCT`, `ENGINE_BUDGET_TICK_SECS` | no | `80`, `15` | Percent of a turn or context budget at which the soft warning fires, and how often live sessions are checked; a tick of `0` enforces nothing. A value that does not parse stops the engine at startup. A wall-clock budget is hard only, and hibernates at once ([`ENGINE.md`, "Session budgets"](ENGINE.md#session-budgets)). |
 | `ENGINE_AGENT_CONVERSATION_HOOK` | no | `1` | Whether the entrypoint installs Claude Code's `SessionStart`/`SessionEnd` hook into the pod user's settings, so a `claude` typed into a plain shell reports its conversation and the session becomes resumable across a restart; `0` skips it ([`ENGINE.md`, "A conversation reported from inside the session"](ENGINE.md#a-conversation-reported-from-inside-the-session)). |
+| `ENGINE_CARGO_CACHE_PERSIST` | no | `1` | Whether the entrypoint moves Cargo's crate index and downloaded sources (`$CARGO_HOME/registry` and `git`, which live in the image layer) onto the home volume under `~/.cache/vogt-cargo` and links them back, so a redeploy does not reset them and offline cargo gates keep working; `0` skips it. `ENGINE_CARGO_CACHE_DIR` moves the store. |
+| `ENGINE_AGENT_POLICY_HOOK` | no | `1` | Whether the entrypoint installs the project-policy hook (`vogt-policy-hook`) into Claude Code's settings and Klaudia's config, so a `git` or `gh` command an agent is about to run is refused when it breaks the project's policy; `0` skips it ([`ENGINE.md`, "Project policy enforcement"](ENGINE.md#project-policy-enforcement)). |
 | `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` | no | off | While the pod's available memory is below this (`2GiB`), hibernate the quietest eligible session, one a minute, with the same exemptions. |
 | `ENGINE_ASSISTANT_STT_*`, `ENGINE_ASSISTANT_TTS_*` | no | the sidecar | Repoint speech at any OpenAI-compatible audio endpoint; a cloud provider wants `ENGINE_ASSISTANT_TTS_FORMAT=mp3`. |
 | `VOGT_CLAUDE_CODE_VERSION`, `VOGT_CODEX_VERSION`, `VOGT_OPENCODE_VERSION`, `VOGT_GO_VERSION`, `VOGT_KLAUDIA_VERSION` | no | the baked version | An exact version is installed at start into `engine-agent-clis` and preferred over the image's copy. `latest`/`stable` are refused unless `VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1`. `VOGT_GO_VERSION` (`1.27.1`) is a Go release from go.dev, checked against the sha256 its release index gives; `latest` there is the newest stable Go. `VOGT_KLAUDIA_VERSION` is a full commit id, built from source at start (a minute or so the first time; the module cache stays on the volume). |
@@ -586,9 +593,9 @@ a deployment are separate acts, and the digest line is what moves one.
 Resolve the digests of a release:
 
 ```console
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.9 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.14 \
   | grep -m 1 Digest
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.9 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.14 \
   | grep -m 1 Digest
 ```
 

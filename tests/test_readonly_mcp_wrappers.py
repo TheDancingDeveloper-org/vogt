@@ -505,3 +505,353 @@ def test_bootstrap_registers_vogt_and_readonly_servers_for_klaudia_and_opencode(
     bootstrap({})
     servers = json.loads(klaudia_config.read_text(encoding="utf-8"))["mcpServers"]
     assert servers == {"vogt": {"command": "/usr/local/bin/vogt-mcp"}}
+
+
+def _codex_tables(text: str) -> dict[str, dict[str, Any]]:
+    import tomllib
+
+    parsed = tomllib.loads(text)
+    servers = parsed["mcp_servers"]
+    assert isinstance(servers, dict)
+    return servers
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_parallel_codex_bootstraps_write_one_table_each(tmp_path: Path) -> None:
+    """GitHub #914: unlocked check-then-append raced when several sessions
+    started together, leaving duplicate `[mcp_servers.*]` tables. The file
+    then no longer parsed, so every later start appended again."""
+    import tomllib
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # The rewrite no longer asks `codex mcp` while a server is wanted, but the
+    # bootstrap still requires the binary to be present before it touches the file.
+    codex = bindir / "codex"
+    codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    codex.chmod(0o755)
+    for name in ("github-mcp-server", "mcp-grafana", "gitea-mcp"):
+        (bindir / name).write_text("#!/bin/sh\n", encoding="utf-8")
+        (bindir / name).chmod(0o755)
+    wrapper = bindir / "vogt-readonly-mcp"
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    codex_home = tmp_path / "codex"
+    config = codex_home / "config.toml"
+    config.parent.mkdir()
+    # An operator's own table must survive the rewrite.
+    config.write_text("[other]\nkept = true\n", encoding="utf-8")
+    env = {
+        "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "HOME": str(tmp_path),
+        "CODEX_HOME": str(codex_home),
+        "VOGT_SRC": str(tmp_path / "absent"),
+        "VOGT_READONLY_MCP_WRAPPER": str(wrapper),
+        "GITHUB_MCP_TOKEN": "x",
+        "VOGT_GITHUB_MCP_TOOLSETS": "repos",
+        "GRAFANA_URL": "http://grafana.example",
+        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "viewer",
+        "GITEA_HOST": "https://forge.example",
+        "GITEA_MCP_TOKEN": "y",
+    }
+    procs = [
+        subprocess.Popen(
+            ["bash", str(BOOTSTRAP)],
+            env=env,
+            cwd=tmp_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(8)
+    ]
+    for proc in procs:
+        stdout, stderr = proc.communicate(timeout=60)
+        assert proc.returncode == 0, stderr
+        assert stdout == "", "stdout is the MCP transport"
+        assert "not valid TOML" not in stderr
+
+    text = config.read_text(encoding="utf-8")
+    servers = _codex_tables(text)
+    assert set(servers) == {"github-ro", "grafana-ro", "forgejo-ro"}
+    assert text.count("[mcp_servers.github-ro]") == 1
+    assert text.count("[mcp_servers.grafana-ro]") == 1
+    assert text.count("[mcp_servers.forgejo-ro]") == 1
+    assert servers["github-ro"]["command"] == str(wrapper)
+    assert servers["github-ro"]["args"] == ["github"]
+    assert "GITHUB_MCP_TOKEN" in servers["github-ro"]["env_vars"]
+    assert tomllib.loads(text)["other"] == {"kept": True}
+    assert tomllib.loads(text)["features"]["daemon_auto_start"] is False
+
+    # A second wave replaces the tables in place instead of appending copies.
+    again = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert again.returncode == 0, again.stderr
+    assert config.read_text(encoding="utf-8").count("[mcp_servers.") == 3
+
+    # A config that does not parse is not appended to.
+    duplicate = "[mcp_servers.github-ro]\n[mcp_servers.github-ro]\n"
+    config.write_text(duplicate, encoding="utf-8")
+    broken = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert broken.returncode == 0, broken.stderr
+    assert "not valid TOML" in broken.stderr
+    assert config.read_text(encoding="utf-8") == duplicate
+
+
+def _codex_bootstrap(
+    tmp_path: Path, extra: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    codex = bindir / "codex"
+    if not codex.exists():
+        codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        codex.chmod(0o755)
+    return subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "VOGT_SRC": str(tmp_path / "absent"),
+            **extra,
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_daemon_flag_merges_into_an_existing_features_table(tmp_path: Path) -> None:
+    """WI-1142: a client that skips --no-daemon still must not start the
+    app-server daemon. An existing [features] table used to hide the key."""
+    import tomllib
+
+    codex_home = tmp_path / "codex"
+    config = codex_home / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        "[features]\napprovals = true\n\n[other]\nkept = true\n",
+        encoding="utf-8",
+    )
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["features"] == {"approvals": True, "daemon_auto_start": False}
+    assert parsed["other"] == {"kept": True}
+    assert "mcp_servers" not in parsed
+
+    # A key an operator set to true is forced off: the pin depends on it.
+    config.write_text(
+        "daemon_auto_start = true\n\n[features]\napprovals = true\n",
+        encoding="utf-8",
+    )
+    again = _codex_bootstrap(tmp_path, {})
+    assert again.returncode == 0, again.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["features"] == {"approvals": True, "daemon_auto_start": False}
+    assert parsed["daemon_auto_start"] is True
+
+    # Already off: the LiteLLM provider was written by the run above, and a
+    # later bootstrap leaves the file byte-for-byte.
+    settled = config.read_text(encoding="utf-8")
+    assert "model_providers.litellm" in settled
+    third = _codex_bootstrap(tmp_path, {})
+    assert third.returncode == 0, third.stderr
+    assert config.read_text(encoding="utf-8") == settled
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
+    tmp_path: Path,
+) -> None:
+    """WI-1147: Codex sessions default to the estate router. The session key
+    is named, never written, and an operator's other provider survives."""
+    import tomllib
+
+    codex_home = tmp_path / "codex"
+    config = codex_home / "config.toml"
+
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["model"] == "grok"
+    assert parsed["model_provider"] == "litellm"
+    litellm = parsed["model_providers"]["litellm"]
+    assert litellm["base_url"] == "http://100.92.54.45:4000/v1"
+    assert litellm["wire_api"] == "chat"
+    assert litellm["env_key"] == "HOMELAB_LITELLM_SESSION_KEY"
+    assert litellm["web_search"] == "disabled"
+    assert "experimental_bearer_token" not in litellm
+    # grok is not in Codex's bundled catalog, so bootstrap hands it one:
+    # apply_patch freeform, and no tool_mode (code mode stays off).
+    catalog_path = codex_home / "vogt-model-catalog.json"
+    assert parsed["model_catalog_json"] == str(catalog_path)
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    # The router's groups, and only those: no DLab community or free models.
+    # The fork sorts by priority ascending and defaults to the first visible one.
+    by_priority = sorted(catalog["models"], key=lambda model: model["priority"])
+    assert [model["slug"] for model in by_priority] == [
+        "grok",
+        "code",
+        "small",
+        "reasoning",
+        "vision",
+        "premium",
+    ]
+    assert by_priority[0]["slug"] == "grok"
+    assert by_priority[0]["visibility"] == "list"
+    assert by_priority[-1]["slug"] == "premium"
+    assert by_priority[-1]["visibility"] == "hide"
+    model = by_priority[0]
+    assert all(
+        row["apply_patch_tool_type"] == "freeform" and "tool_mode" not in row
+        for row in catalog["models"]
+    )
+    # ModelsResponse rejects a missing availability_nux (no serde default) and a
+    # model with neither base_instructions nor model_messages.instructions_template.
+    assert model["availability_nux"] is None
+    template = model["model_messages"]["instructions_template"]
+    assert isinstance(template, str) and template.strip()
+    clawbay = parsed["model_providers"]["theclawbay"]
+    assert clawbay["base_url"] == "https://api.theclawbay.com/backend-api/codex"
+    assert clawbay["wire_api"] == "responses"
+    assert "experimental_bearer_token" not in clawbay
+    assert "HOMELAB_LITELLM" not in config.read_text(encoding="utf-8").replace(
+        'env_key = "HOMELAB_LITELLM_SESSION_KEY"', ""
+    )
+
+    # A theclawbay default, including the old pinned model id, moves to the router.
+    config.write_text(
+        'model = "grok-4.7"\nmodel_provider = "theclawbay"\n\n'
+        "[model_providers.theclawbay]\n"
+        'base_url = "https://api.theclawbay.com/backend-api/codex"\n'
+        'experimental_bearer_token = "operator-token"\n',
+        encoding="utf-8",
+    )
+    moved = _codex_bootstrap(tmp_path, {})
+    assert moved.returncode == 0, moved.stderr
+    text = config.read_text(encoding="utf-8")
+    parsed = tomllib.loads(text)
+    assert parsed["model"] == "grok"
+    assert parsed["model_provider"] == "litellm"
+    assert parsed["model_providers"]["theclawbay"]["experimental_bearer_token"] == (
+        "operator-token"
+    )
+    assert text.count("[model_providers.theclawbay]") == 1
+
+    # Some other provider and model are the operator's choice.
+    config.write_text(
+        'model = "gpt-5.6"\nmodel_provider = "dlab"\n\n[other]\nkept = true\n',
+        encoding="utf-8",
+    )
+    kept = _codex_bootstrap(tmp_path, {})
+    assert kept.returncode == 0, kept.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["model"] == "gpt-5.6"
+    assert parsed["model_provider"] == "dlab"
+    assert parsed["other"] == {"kept": True}
+    assert "litellm" in parsed["model_providers"]
+    # No catalog was configured, so grok's is written. One the operator
+    # already chose is not replaced, and the file is not written for it.
+    assert parsed["model_catalog_json"] == str(codex_home / "vogt-model-catalog.json")
+    chosen = codex_home / "operator-catalog.json"
+    config.write_text(
+        f'model = "gpt-5.6"\nmodel_provider = "dlab"\n'
+        f'model_catalog_json = "{chosen}"\n',
+        encoding="utf-8",
+    )
+    (codex_home / "vogt-model-catalog.json").unlink()
+    foreign = _codex_bootstrap(tmp_path, {})
+    assert foreign.returncode == 0, foreign.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["model_catalog_json"] == str(chosen)
+    assert not (codex_home / "vogt-model-catalog.json").exists()
+
+    # Invalid TOML is not rewritten.
+    duplicate = "[model_providers.litellm]\n[model_providers.litellm]\n"
+    config.write_text(duplicate, encoding="utf-8")
+    broken = _codex_bootstrap(tmp_path, {})
+    assert broken.returncode == 0, broken.stderr
+    assert "not valid TOML" in broken.stderr
+    assert config.read_text(encoding="utf-8") == duplicate
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_codex_gets_the_browser_and_the_isolated_subagent(tmp_path: Path) -> None:
+    """WI-1358: a Codex session has no browser of its own and its spawn_agent
+    cannot take a working directory. The bootstrap registers the two stdio
+    servers the klaudia binary serves, and points the sub-agent at the real
+    codex binary rather than the full-access wrapper on PATH."""
+    import tomllib
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("codex", "klaudia"):
+        path = bindir / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", "stdout is the MCP transport"
+
+    config = tmp_path / "codex" / "config.toml"
+    servers = _codex_tables(config.read_text(encoding="utf-8"))
+    assert servers["browser"]["command"] == str(bindir / "klaudia")
+    assert servers["browser"]["args"] == ["mcp", "browser"]
+    assert servers["browser"]["tool_timeout_sec"] == 60
+    sub = servers["codex-subagent"]
+    assert sub["command"] == str(bindir / "klaudia")
+    assert sub["args"] == [
+        "mcp",
+        "codex-subagent",
+        "--codex",
+        "/usr/local/libexec/codex-real",
+        "--root",
+        str(tmp_path),
+    ]
+    # The registration is a command and arguments, never a credential.
+    assert "env" not in sub and "bearer_token" not in sub
+
+    # A second run replaces the tables in place.
+    again = _codex_bootstrap(tmp_path, {})
+    assert again.returncode == 0, again.stderr
+    settled = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]
+    assert settled["browser"] == servers["browser"]
+    assert config.read_text(encoding="utf-8").count("[mcp_servers.browser]") == 1
+
+    # No klaudia binary, no tables: nothing is written that cannot be run.
+    bindir.joinpath("klaudia").unlink()
+    config.write_text("[other]\nkept = true\n", encoding="utf-8")
+    absent = _codex_bootstrap(tmp_path, {})
+    assert absent.returncode == 0, absent.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert "mcp_servers" not in parsed
+    assert parsed["other"] == {"kept": True}

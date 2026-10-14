@@ -37,6 +37,7 @@ from vogt.application.services.auth import (
     adopt_bootstrap_agent_token,
     adopt_bootstrap_core_token,
 )
+from vogt.application.services.engine_status import workspace_disk
 from vogt.application.test_hooks import refuse_hooks_off_loopback
 from vogt.errors import InvalidRequest, VogtError
 from vogt.observability import (
@@ -177,6 +178,7 @@ def registry_dump(ctx: AppContext, params: RegistryDumpParams) -> RegistryDumpRe
 def status(ctx: AppContext, params: StatusParams) -> StatusResult:
     """Report what this instance is and how much is in it."""
     del params
+    disk = workspace_disk(ctx)
     with ctx.declared.read() as view:
         counts = view.counts()
         stamp = view.clone_stamp()
@@ -203,6 +205,7 @@ def status(ctx: AppContext, params: StatusParams) -> StatusResult:
                 cloned_at=stamp.cloned_at,
                 backup_taken_at=stamp.backup_taken_at,
             ),
+            disk=disk,
         )
 
 

@@ -281,10 +281,9 @@ describe("a pasted link opens the surface it names", () => {
     await waitFor(() => expect(shell.url()).toBe("/sessions"));
   });
 
-  it("orders the rail's Running sessions by attention, like Sessions", async () => {
-    // The rail now shares Sessions' attention spine (sortSessionsByAttention):
-    // waiting-for-input leads, then running, then idle — whatever order the
-    // engine listed them in.
+  it("keeps the engine's rail order instead of reshuffling by attention (WI-1289)", async () => {
+    // The engine already lists oversight first, then last event. The rail
+    // keeps that order; attention stays a badge. Waiting does not jump ahead.
     const sessions = [
       { id: "eng-idle", name: "idle-one", cwd: "/a", activity: "idle", exit_code: null },
       { id: "eng-wait", name: "waiting-one", cwd: "/b", activity: "waiting-for-input", exit_code: null },
@@ -299,9 +298,9 @@ describe("a pasted link opens the surface it names", () => {
     // store until this mount's list request lands; wait for identities, not
     // merely for a coincidentally equal row count.
     await waitFor(() =>
-      expect(names()).toEqual(["waiting-one", "running-one", "idle-one"]),
+      expect(names()).toEqual(["idle-one", "waiting-one", "running-one"]),
     );
-    expect(names()).toEqual(["waiting-one", "running-one", "idle-one"]);
+    expect(names()).toEqual(["idle-one", "waiting-one", "running-one"]);
   });
 
   it("shows a session's work item as a chip and binds and unbinds it (WI-998)", async () => {
@@ -313,15 +312,15 @@ describe("a pasted link opens the surface it names", () => {
     const { container, vogt } = mountShell("/sessions", {
       sessions,
       vogt: {
-        "GET /work": (call) => ({
+        "GET /work/get-many": {
           body: {
             items: [
-              call.query.get("query") === "WI-7"
-                ? { ref: "WI-7", title: "terminal render bug", state: "in_progress" }
-                : { ref: "WI-8", title: "shipped thing", state: "done" },
+              { ref: "WI-7", title: "terminal render bug", state: "in_progress" },
+              { ref: "WI-8", title: "shipped thing", state: "done" },
             ],
+            missing: [],
           },
-        }),
+        },
         "POST /sessions/work-item": { body: { session: {}, engine_label: "written" } },
       },
     });
@@ -334,6 +333,12 @@ describe("a pasted link opens the surface it names", () => {
     await waitFor(() => expect(chip("WI-8")?.className).toContain("session-work-chip--finished"));
     expect(chip("WI-8")?.textContent).toContain("· done");
     expect(container.querySelectorAll("[data-testid=session-work-chip]")).toHaveLength(2);
+    // Both chips came from one read (WI-1224), not one search each.
+    expect(vogt.matching("GET /work/get-many")).toHaveLength(1);
+    expect(vogt.matching("GET /work/get-many")[0]?.query.getAll("refs").sort()).toEqual([
+      "WI-7",
+      "WI-8",
+    ]);
 
     const unbind = [...container.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find(
       (button) => button.getAttribute("aria-label") === "Unbind on-item from WI-7",

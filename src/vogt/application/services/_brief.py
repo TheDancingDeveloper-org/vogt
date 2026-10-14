@@ -15,12 +15,27 @@ else. Two rules shaped it:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from vogt.application.models import WhyResult
-from vogt.core.entities import WorkItem
+from vogt.core.entities import Comment, HandoffFields, Project, WorkItem
 from vogt.storage.interface import ReadView
 
-#: How a session reaches the others. Said in the brief because a capability
-#: an agent is not told about is one it goes looking for in engine source.
+#: The deployment's own rules, which are the same for every project and live
+#: in the deployment's settings rather than in this brief. One line, because
+#: copying them in would drift from the file that actually enforces them.
+_DEPLOYMENT_POLICY = (
+    "The deployment's session policy — what an agent may do without asking — "
+    "is the settings file this session was started with, not this brief."
+)
+#: Written beside the brief. That directory is already on the agent's readable
+#: path (`--add-dir`), so one line in the brief is enough to point at it.
+COMPANION_SUFFIX = ".guide.md"
+
+
+#: How a session reaches the others. Said once, in the companion, because a
+#: capability an agent is not told about is one it goes looking for in engine
+#: source.
 DRIVING_OTHER_SESSIONS = (
     "## Driving other sessions\n"
     "\n"
@@ -28,7 +43,8 @@ DRIVING_OTHER_SESSIONS = (
     "UUID; every session tool takes either). `session_screen` reads what a "
     "terminal shows now, `session_log_tail` its output log, and "
     "`session_input` types into it — text, then named keys (enter, esc, "
-    "arrows, ctrl-c, ...), then Enter with `submit` — audited with a "
+    "arrows, ctrl-c, ...), then Enter (the default; `draft` types without "
+    "sending) — audited with a "
     "reason. Wait with `session_wait` (it blocks until the session is "
     "`ready`, needs a person, or exits) before typing, and "
     "never send a blind Enter: at a menu it picks whatever is highlighted "
@@ -90,18 +106,370 @@ AUTOPILOT = (
 )
 
 
+@dataclass(frozen=True)
+class ComposedBrief:
+    """A session brief plus the text written beside it.
+
+    The brief stays short: the boilerplate that used to be copied into every
+    one is one file per session, and the brief names it. `companion` is empty
+    when there is nothing to point at, which is only a brief built by hand.
+    """
+
+    text: str
+    companion: str = ""
+
+
+def _policy_section(project: Project | None) -> list[str]:
+    """The project's agent policy, stated as what it recorded.
+
+    Rendered only for the facts the project actually set, so a project with
+    no policy adds nothing — an empty section would read as a rule.
+    """
+    if project is None:
+        return []
+    policy = project.agent_policy
+    rows: list[str] = []
+    if policy.forbidden_text:
+        rendered = ", ".join(f"`{pattern}`" for pattern in policy.forbidden_text)
+        rows.append(
+            f"- **Forbidden text** {rendered} — must not appear in a commit "
+            "message, author, trailer, pull-request text or branch name."
+        )
+    if policy.merge_deploys_prod:
+        branches = ", ".join(f"`{b}`" for b in policy.main_branches) or "`main`"
+        rows.append(
+            "- **Merges deploy production.** Merging a pull request onto "
+            f"{branches} ships it. Do not run `gh pr merge` there; a person "
+            "merges."
+        )
+    if policy.commit_identity:
+        rows.append(f"- **Commit identity** {policy.commit_identity}")
+    if policy.test_recipe:
+        rows.append(f"- **Tests** {policy.test_recipe}")
+    rows.extend(f"- {rule}" for rule in policy.rules)
+    if not rows:
+        return []
+    return [f"## Project policy — {project.slug}", "", *rows, ""]
+
+
+def _landing_section(project: Project, item: WorkItem | None) -> list[str]:
+    """The landing rule, with `{n}` filled from the item the brief is for.
+
+    A project brief has no item, so the pattern is shown with `{n}` in place.
+    A project with no landing block renders nothing, which is what keeps a
+    brief for a project that states none byte-for-byte as it was.
+    """
+    landing = project.agent_policy.landing
+    if landing is None:
+        return []
+    number = ""
+    if item is not None and "-" in item.ref:
+        number = item.ref.split("-", 1)[1]
+    pattern = landing.branch_pattern.replace("{n}", number or "{n}")
+    return [
+        "## Landing rule for this repo",
+        "",
+        f"- **Base** `{landing.base_branch}`",
+        f"- **Branch pattern** `{pattern}`",
+        f"- **Lands by** {landing.worker_lands_by}",
+        f"- **Merge by** {landing.merge_by} ({landing.merge_mode})",
+        f"- **Deploy by** {landing.deploy_by}",
+        "",
+    ]
+
+
+def _companion(session_id: str, *, work_ref: str | None) -> str:
+    """The boilerplate, written once beside the brief instead of into it."""
+    bound = (
+        f"This session is bound to {work_ref} (`VOGT_WORK_ITEM`). If you move "
+        "on to a different item, rebind with `session_bind_work` so the items "
+        "say who is on them; binding never changes an item's state.\n\n"
+        if work_ref is not None
+        else ""
+    )
+    return (
+        "# Session guide\n"
+        "\n"
+        "## Recording what you find\n"
+        "\n"
+        f"This session is `{session_id}` and holds a token bound to its own "
+        "actor, so anything it writes to Vogt is attributed to this session "
+        "rather than to whoever started it.\n"
+        "\n"
+        "Vogt is reachable over MCP at the URL in `VOGT_URL`, with the token "
+        "in `VOGT_HTTP_TOKEN`. The token may read, and may write work items "
+        "and comments — nothing else. Every write needs a reason you have "
+        "actually got: it is stored, and it is what somebody reads later when "
+        "they ask why this changed.\n"
+        "\n" + bound + WHEN_BLOCKED + "\n" + DRIVING_OTHER_SESSIONS
+    )
+
+
+def _pointer(session_id: str, *, work_ref: str | None) -> list[str]:
+    bound = (
+        f" It is bound to {work_ref}; rebind with `session_bind_work` if you move on."
+        if work_ref is not None
+        else ""
+    )
+    # The engine names the brief and the guide for its own session id, which
+    # the core does not know when it writes this; so the guide is named by
+    # its relation to this file rather than by an id that may not be it.
+    return [
+        "## Before you start",
+        "",
+        f"This session is `{session_id}`.{bound} How to record what you find, "
+        "how to say you are blocked, and how to drive another session are in "
+        f"the guide beside this brief: the same file name, ending "
+        f"`{COMPANION_SUFFIX}` instead of `.md`.",
+        "",
+    ]
+
+
+#: What a reviewer is for. Said once, in place of the worker brief's ranking
+#: and thread: a reviewer checks a diff against the item's own acceptance
+#: criteria and reports, and it does not carry the work on.
+_REVIEW = (
+    "## Review\n"
+    "\n"
+    "You are reviewing this item, not carrying it out. Read the diff named "
+    "below and check it against **Done means**, which is the item's own "
+    "acceptance criteria. Report what holds and what does not, with the "
+    "place in the diff each finding comes from. Do not implement the "
+    "remaining work, do not resume the worker's session, and do not read "
+    "the worker's screen or transcript — the diff and this brief are the "
+    "whole of what you review.\n"
+    "\n"
+    "This review is read-only. Make no edits to the branch or the checkout, "
+    "and no commits, pushes, merges or deploys; do not open, approve or "
+    "merge a pull request. Run the gates in a scratch worktree checked out "
+    "at the head below. The one thing you write is your verdict.\n"
+)
+
+#: The shape of the answer. Fixed text so a driver can read the first line
+#: without parsing prose, and pinned to a sha so a verdict on an older head
+#: is never taken for one on the branch as it stands.
+_REVIEW_VERDICT = (
+    "## Verdict\n"
+    "\n"
+    "Post the verdict as one `work_comment` on this item. Its first line is "
+    "exactly one of:\n"
+    "\n"
+    "- `no blockers (head <sha>)` — every line of **Done means** holds at "
+    "that head;\n"
+    "- `blockers (head <sha>):` followed by a numbered list, one blocker a "
+    "line, each naming the line of **Done means** it fails and the place "
+    "in the diff.\n"
+    "\n"
+    "`<sha>` is the commit you reviewed. Then say **which deployment paths "
+    "the tests cover**: in-process only, or the deployed topology described "
+    "under **Deployed setup**. A test that passed in-process is not "
+    "evidence for a path it never ran. Do not write `no blockers` while "
+    "describing a regression or a gap — that is a blocker.\n"
+)
+
+
+def _latest_handoff(view: ReadView, item: WorkItem) -> Comment | None:
+    """The newest hand-off comment, or nothing when the item has none."""
+    comments = view.comments_for(item.id, limit=200, order="newest")
+    return next((one for one in comments if one.kind == "handoff"), None)
+
+
+def _handoff_where(fields: HandoffFields) -> list[str]:
+    """Where the hand-off says its work is, one bullet a line."""
+    rows: list[str] = []
+    for label, value in (
+        ("branch", fields.branch),
+        ("head", fields.head_sha),
+        ("base", fields.base),
+        ("session", fields.session),
+    ):
+        if value:
+            rows.append(f"- **{label}** {value}")
+    return rows
+
+
+def _handoff_lists(fields: HandoffFields) -> list[tuple[str, list[str]]]:
+    return [
+        (label, values)
+        for label, values in (
+            ("done", fields.done),
+            ("remaining", fields.remaining),
+            ("touch points", fields.touch_points),
+            ("gates run", fields.gates_run),
+            ("blockers", fields.blockers),
+        )
+        if values
+    ]
+
+
+def _handoff_facts(fields: HandoffFields) -> list[str]:
+    """The structured half of a hand-off, one bullet a line, blanks dropped."""
+    rows = _handoff_where(fields)
+    for label, values in _handoff_lists(fields):
+        rows.append(f"- **{label}** {'; '.join(values)}")
+    return rows
+
+
+def _handoff_claims(fields: HandoffFields) -> list[str]:
+    """The hand-off's lists, each line marked as the worker's claim."""
+    rows: list[str] = []
+    for label, values in _handoff_lists(fields):
+        rows.append(f"- **{label}** (claimed)")
+        rows.extend(f"  - claimed, not verified: {value}" for value in values)
+    return rows
+
+
+def _review_diff(fields: HandoffFields) -> list[str]:
+    """The concrete diff command, with the hand-off's own base and head."""
+    head = fields.head_sha or fields.branch
+    lines = [
+        f"Review `git diff {fields.base}...{head}` — branch `{fields.branch}` "
+        f"against `{fields.base}` — and nothing older.",
+        "",
+    ]
+    if fields.head_sha:
+        lines += [
+            f"Check the branch tip first (`git rev-parse {fields.branch}`). If "
+            f"it is not `{fields.head_sha}`, review `{fields.head_sha}` and say "
+            "the branch has moved.",
+            "",
+        ]
+    else:
+        lines += [
+            "The hand-off names no head sha. Resolve one with "
+            f"`git rev-parse {fields.branch}` before you start, review that "
+            "sha, and say in the verdict that the hand-off left it out.",
+            "",
+        ]
+    return lines
+
+
+def _review_project(project: Project | None) -> list[str]:
+    """What a reviewer needs from the project: its gates and how it is deployed.
+
+    Not `_policy_section`: that carries the worker's landing rules — commit,
+    push, hand off — which a read-only review must not follow.
+    """
+    lines: list[str] = []
+    policy = project.agent_policy if project is not None else None
+    if policy is not None and policy.test_recipe:
+        lines += ["## Gates", "", f"- **Tests** {policy.test_recipe}", ""]
+    lines += ["## Deployed setup", ""]
+    if policy is not None and policy.deployed_setup.strip():
+        lines += [policy.deployed_setup.strip(), ""]
+    else:
+        lines += [
+            "This project records no deployed-setup notes "
+            "(`agent_policy.deployed_setup`). Say so in the verdict, and do "
+            "not count an in-process test as covering how the project is "
+            "deployed.",
+            "",
+        ]
+    return lines
+
+
+def review_brief_for_work_item(
+    view: ReadView,
+    item: WorkItem,
+    session_id: str,
+    *,
+    project: Project | None = None,
+) -> ComposedBrief:
+    """A reviewer's brief: the diff against the item's own "done means".
+
+    Deliberately not the worker brief. A worker is told why the item ranks
+    and where the last session stopped, which reads as "carry on"; a reviewer
+    is told what the change has to satisfy and where the change is, and
+    nothing that would start it working. The acceptance criteria are the
+    item's description — what the item itself says done looks like — and the
+    hand-off's `done` is reported as what the worker claims, which a review
+    checks rather than trusts.
+
+    With no hand-off there is no branch to diff, so the brief says the diff
+    was not named rather than inventing `main`.
+    """
+    lines: list[str] = [f"# Review {item.ref} — {item.title}", ""]
+    facts = [
+        f"**Kind** {item.kind}",
+        f"**State** {item.state}",
+        f"**Priority** {item.priority}",
+    ]
+    if item.project_slug:
+        facts.append(f"**Project** {item.project_slug}")
+    lines += [" · ".join(facts), "", _REVIEW]
+
+    lines += ["## Done means", ""]
+    if item.body.strip():
+        lines += [item.body.strip(), ""]
+    else:
+        lines += [
+            "This item records no description, so it states no acceptance "
+            "criteria. Say so in the review; do not invent ones.",
+            "",
+        ]
+
+    lines += ["## The diff", ""]
+    handoff = _latest_handoff(view, item)
+    if handoff is not None and handoff.handoff is not None:
+        fields = handoff.handoff
+        lines += _handoff_where(fields)
+        lines.append("")
+        if fields.branch and fields.base:
+            lines += _review_diff(fields)
+        else:
+            lines += [
+                "The hand-off does not name both a branch and a base, so "
+                "there is no diff to review yet. Report that and stop.",
+                "",
+            ]
+        claims = _handoff_claims(fields)
+        claimed = handoff.body.strip()
+        if claims or claimed:
+            lines += [
+                "## What the worker claims",
+                "",
+                "Everything in this section is the worker's hand-off: a claim, "
+                "not evidence. Check each line against the diff and the gates "
+                "you run yourself; do not repeat it as a finding.",
+                "",
+                *claims,
+            ]
+            if claims:
+                lines.append("")
+            if claimed:
+                lines += ["In its own words:", "", claimed, ""]
+    else:
+        lines += [
+            "This item has no hand-off, so no branch or base was named and "
+            "there is no diff to review yet. Report that and stop.",
+            "",
+        ]
+
+    lines += _review_project(project)
+    lines += [_REVIEW_VERDICT]
+    lines += ["## Deployment policy", "", _DEPLOYMENT_POLICY, ""]
+    lines += _pointer(session_id, work_ref=item.ref)
+    return ComposedBrief(
+        text="\n".join(lines), companion=_companion(session_id, work_ref=item.ref)
+    )
+
+
 def brief_for_work_item(
     view: ReadView,
     item: WorkItem,
     session_id: str,
     ranking: WhyResult | None = None,
-) -> str:
+    *,
+    project: Project | None = None,
+) -> ComposedBrief:
     """The work item, as a page an agent can read before it starts.
 
     `ranking` is optional because the brief must survive a ranking that
     cannot be computed — an observed subject, a store mid-sweep — and a
     session that refused to start because a score was unavailable would be
-    the tail wagging the dog.
+    the tail wagging the dog. `project` carries the agent policy; without it
+    the brief says nothing about one, which is also what a project with an
+    empty policy says.
     """
     lines: list[str] = [f"# {item.ref} — {item.title}", ""]
 
@@ -161,37 +529,41 @@ def brief_for_work_item(
                 lines.append(f"- {name} — {note}")
         lines.append("")
 
-    comments = view.comments_for(item.id, limit=20)
-    if comments:
+    comments = view.comments_for(item.id, limit=200, order="newest")
+    handoff = next((one for one in comments if one.kind == "handoff"), None)
+    if handoff is not None and handoff.handoff is not None:
+        # The latest hand-off is its own section, ahead of the remarks, so a
+        # fresh session reads where the last one stopped before the thread.
+        lines += ["## Hand-off", "", *_handoff_facts(handoff.handoff)]
+        lines += ["", handoff.body.strip(), ""]
+    # A hand-off supersedes the thread before it — old root causes, old
+    # verdicts — so only the remarks made since the latest one are pasted.
+    # `comments` is newest first, so the ones ahead of the hand-off are later.
+    since = comments if handoff is None else comments[: comments.index(handoff)]
+    notes = [one for one in since if one.kind == "note"][:20]
+    if notes:
         lines += ["## Comments", ""]
-        for comment in comments:
+        for comment in notes:
             lines.append(f"- {comment.body.strip()}")
         lines.append("")
 
-    lines += [
-        "## Recording what you find",
-        "",
-        f"This session is `{session_id}` and holds a token bound to its own "
-        "actor, so anything it writes to Vogt is attributed to this session "
-        "rather than to whoever started it.",
-        "",
-        "Vogt is reachable over MCP at the URL in `VOGT_URL`, with the token "
-        "in `VOGT_HTTP_TOKEN`. The token may read, and may write work items "
-        "and comments — nothing else. Every write needs a reason you have "
-        "actually got: it is stored, and it is what somebody reads later when "
-        "they ask why this changed.",
-        "",
-        f"This session is bound to {item.ref} (`VOGT_WORK_ITEM`). If you move "
-        "on to a different item, rebind with `session_bind_work` so the items "
-        "say who is on them; binding never changes an item's state.",
-        "",
-        WHEN_BLOCKED,
-        DRIVING_OTHER_SESSIONS,
-    ]
-    return "\n".join(lines)
+    lines += _policy_section(project)
+    if project is not None:
+        lines += _landing_section(project, item)
+    lines += ["## Deployment policy", "", _DEPLOYMENT_POLICY, ""]
+    lines += _pointer(session_id, work_ref=item.ref)
+    return ComposedBrief(
+        text="\n".join(lines), companion=_companion(session_id, work_ref=item.ref)
+    )
 
 
-def brief_for_project(view: ReadView, project_slug: str, session_id: str) -> str:
+def brief_for_project(
+    view: ReadView,
+    project_slug: str,
+    session_id: str,
+    *,
+    project: Project | None = None,
+) -> ComposedBrief:
     """A terminal opened on a project, which is a plain shell with context.
 
     Deliberately thinner than the work-item brief. Nobody asked for anything
@@ -200,23 +572,31 @@ def brief_for_project(view: ReadView, project_slug: str, session_id: str) -> str
     which is the half of the reversed non-goal that stayed refused.
     """
     del view
-    return (
-        f"# {project_slug}\n"
-        "\n"
+    lines = [
+        f"# {project_slug}",
+        "",
         "A terminal opened on this project. No work item is attached, so "
         "there is no task here beyond what you were asked for directly — "
         "when you take one up, call `session_bind_work` with its ref (and no "
-        "`id`), so the item shows who is on it.\n"
-        "\n"
-        f"This session is `{session_id}`. Vogt is at `VOGT_URL` with the "
-        "token in `VOGT_HTTP_TOKEN`, scoped to read and to write work items.\n"
-        "\n" + WHEN_BLOCKED + "\n" + DRIVING_OTHER_SESSIONS
+        "`id`), so the item shows who is on it.",
+        "",
+        *_policy_section(project),
+        "## Deployment policy",
+        "",
+        _DEPLOYMENT_POLICY,
+        "",
+        *_pointer(session_id, work_ref=None),
+    ]
+    return ComposedBrief(
+        text="\n".join(lines), companion=_companion(session_id, work_ref=None)
     )
 
 
 __all__ = [
     "AUTOPILOT",
     "WHEN_BLOCKED",
+    "ComposedBrief",
     "brief_for_project",
     "brief_for_work_item",
+    "review_brief_for_work_item",
 ]

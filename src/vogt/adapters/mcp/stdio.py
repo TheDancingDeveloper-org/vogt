@@ -205,14 +205,7 @@ class StdioServer:
             return _result(
                 message_id, _tool_error("error", f"internal error (ref {ref})")
             )
-        return _result(
-            message_id,
-            {
-                "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
-                "structuredContent": payload,
-                "isError": False,
-            },
-        )
+        return _result(message_id, tool_success(payload))
 
 
 def _result(message_id: MessageId, result: dict[str, Any]) -> dict[str, Any]:
@@ -236,6 +229,33 @@ def _tool_error(code: str, message: str) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": f"{code}: {message}"}],
         "isError": True,
+    }
+
+
+def _without_nulls(value: object) -> object:
+    """Drop null-valued keys at every depth; list items are kept as they are."""
+    if isinstance(value, dict):
+        return {k: _without_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_without_nulls(item) for item in value]
+    return value
+
+
+def tool_success(payload: dict[str, Any]) -> dict[str, Any]:
+    """structuredContent plus the same result as compact text (design C1).
+
+    The text is the whole result, never truncated: Klaudia (msp-klaudia
+    `internal/mcp/result.go`) shows the model the text and reads
+    structuredContent only when there is none, so a summary there would hide
+    the result. The saving is in the shape instead: no indentation and no
+    null-valued keys. structuredContent is the full result, nulls included, so
+    it matches CLI and REST. Errors stay text-only via `_tool_error`.
+    """
+    text = json.dumps(_without_nulls(payload), separators=(",", ":"), default=str)
+    return {
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": payload,
+        "isError": False,
     }
 
 

@@ -24,7 +24,9 @@ from vogt.application.models import (
     AgentCliListResult,
     AgentCliUpdateParams,
     AgentCliUpdateResult,
+    AnswerDecisionParams,
     AnswerSessionParams,
+    AskDecisionParams,
     AuditListResult,
     AuthDecisionListParams,
     AuthDecisionListResult,
@@ -57,6 +59,8 @@ from vogt.application.models import (
     CloneResult,
     CommentParams,
     CommentResult,
+    CommitForSessionParams,
+    CommitForSessionResult,
     ComplianceParams,
     ComplianceResult,
     ConnectParams,
@@ -79,6 +83,7 @@ from vogt.application.models import (
     CreateUserParams,
     CreateWorkParams,
     DecideGrantParams,
+    DecisionResult,
     DeployedVersionsParams,
     DeployedVersionsResult,
     DepsParams,
@@ -110,6 +115,7 @@ from vogt.application.models import (
     ForgePublishResult,
     ForgeReposParams,
     ForgeReposResult,
+    GetManyWorkParams,
     GetProjectParams,
     GetWorkParams,
     HibernateSessionParams,
@@ -136,6 +142,8 @@ from vogt.application.models import (
     LabelResult,
     ListActorsParams,
     ListAuditParams,
+    ListDecisionsParams,
+    ListDecisionsResult,
     ListEventsParams,
     ListGrantsParams,
     ListGrantsResult,
@@ -198,6 +206,12 @@ from vogt.application.models import (
     ServeResult,
     SessionAnswerResult,
     SessionBlockedResult,
+    SessionChangesParams,
+    SessionChangesResult,
+    SessionDigestParams,
+    SessionDigestResult,
+    SessionEconomicsParams,
+    SessionEconomicsResult,
     SessionGrantResult,
     SessionInputParams,
     SessionInputResult,
@@ -208,6 +222,8 @@ from vogt.application.models import (
     SessionScreenParams,
     SessionScreenResult,
     SessionSweepResult,
+    SessionWaitAnyParams,
+    SessionWaitAnyResult,
     SessionWaitParams,
     SessionWaitResult,
     SetPasswordParams,
@@ -239,9 +255,11 @@ from vogt.application.models import (
     WhoamiResult,
     WhyParams,
     WhyResult,
+    WithdrawDecisionParams,
     WorkflowListParams,
     WorkflowListResult,
     WorkListResult,
+    WorkManyResult,
     WorkResult,
     WriteBackListParams,
     WriteBackListResult,
@@ -487,6 +505,21 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.get_work,
             route=HttpRoute("GET", "/work/get"),
             cli=CliBinding(("work", "get")),
+        ),
+        Operation(
+            name="work.get_many",
+            summary=(
+                "Compact rows (ref, title, kind, state, priority, project) for "
+                "up to 200 refs in one read; refs that name nothing come back "
+                "in `missing`."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=GetManyWorkParams,
+            result_model=WorkManyResult,
+            handler=services.get_many_work,
+            route=HttpRoute("GET", "/work/get-many"),
+            cli=CliBinding(("work", "get-many")),
         ),
         Operation(
             name="work.list",
@@ -1042,12 +1075,17 @@ def build_operations() -> list[Operation[Any, Any]]:
             name="session.input",
             summary=(
                 "Type into a session: text, then named keys (enter, esc, tab, "
-                "arrows, ctrl-c, ctrl-d, backspace), then Enter if submit. "
-                "Takes either id: ses_… or the engine UUID. Read "
+                "arrows, ctrl-c, ctrl-d, backspace), then Enter. Enter is "
+                "pressed by default; pass draft=true (or submit=false) to type "
+                "without sending. Takes either id: ses_… or the engine UUID. "
+                "Read "
                 "session_screen first and never send a blind Enter: at a "
                 "menu it accepts whatever is highlighted (dismiss with esc). "
                 "While a permission prompt shows, only a person's input is "
                 "typed: an agent's is refused (403 person_required). "
+                "On a hibernated session it wakes first, and that wake is "
+                "never forced: a session handed to a successor, or whose work "
+                "item is already live in the same directory, is refused (409). "
                 "Audited (byte count and keys, never the text)."
             ),
             scope="work.write",
@@ -1090,7 +1128,9 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "wakes it) resumes the same agent conversation under the same "
                 "id. Only for a session whose conversation id the engine knows "
                 "(Claude Code started by Vogt, or any resume); a shell needs "
-                "allow_shell and wakes fresh. Takes either id."
+                "allow_shell and wakes fresh. superseded_by names the session "
+                "taking over the work (ses_… or the engine UUID); a later wake "
+                "is then refused unless forced. Takes either id."
             ),
             scope="work.write",
             mutating=True,
@@ -1105,10 +1145,13 @@ def build_operations() -> list[Operation[Any, Any]]:
             summary=(
                 "Wake a hibernated session: start it again under the same id, "
                 "resuming its agent conversation in the directory it ran in, "
-                "with a new token for the same actor. A live session is "
-                "returned as it is. session_input wakes one by itself; wait "
-                "for ready (session_wait) before typing after this. Takes "
-                "either id."
+                "with a new token for the same actor. Refused (409) when the "
+                "session was hibernated naming a successor, or when another "
+                "live session holds the same work item in the same directory, "
+                "unless force, which only a person or an oversight session may "
+                "set. A live session is returned as it is. "
+                "session_input wakes one by itself and never forces; wait for "
+                "ready (session_wait) before typing after this. Takes either id."
             ),
             scope="work.write",
             mutating=True,
@@ -1131,6 +1174,25 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.keep_session_awake,
             route=HttpRoute("POST", "/sessions/keep-awake"),
             cli=CliBinding(("session", "keep-awake")),
+        ),
+        Operation(
+            name="session.commit_for",
+            summary=(
+                "Commit a worker session's staged changes on its behalf. The "
+                "worker must be idle, hibernated or blocked — never mid-turn — "
+                "and the commit is refused when the staged diff carries a "
+                "conflict marker, a secret or an intent-to-add entry, or when "
+                "the message or branch matches the project's forbidden text. "
+                "Committed under the repo's own git identity. Returns a digest "
+                "line and the SHA; the full diff only when asked. Takes either id."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=CommitForSessionParams,
+            result_model=CommitForSessionResult,
+            handler=services.commit_for_session,
+            route=HttpRoute("POST", "/sessions/commit"),
+            cli=CliBinding(("session", "commit")),
         ),
         Operation(
             name="session.rename",
@@ -1264,6 +1326,67 @@ def build_operations() -> list[Operation[Any, Any]]:
             cli=CliBinding(("session", "grants")),
         ),
         Operation(
+            name="decision.ask",
+            summary=(
+                "Ask a person to decide (WI-1321): a question, 2-4 options "
+                "(label, description) with exactly one recommended, and the "
+                "context they need. It appears in the Inbox; you do not block — "
+                "carry on with what does not depend on it and read the answer "
+                "with decision.list. Pending past expires_at (default 24 h, "
+                "max 7 d) it reads `expired`, with no implied answer. Your "
+                "session is recorded from your token."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=AskDecisionParams,
+            result_model=DecisionResult,
+            handler=services.ask_decision,
+            route=HttpRoute("POST", "/decisions"),
+            cli=CliBinding(("decision", "ask")),
+        ),
+        Operation(
+            name="decision.answer",
+            summary=(
+                "Answer a pending decision with one of its option labels and "
+                "an optional note. A person only: every agent is refused "
+                "(403 person_required). Nothing is applied when it is answered."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=AnswerDecisionParams,
+            result_model=DecisionResult,
+            handler=services.answer_decision,
+            route=HttpRoute("POST", "/decisions/answer"),
+            cli=CliBinding(("decision", "answer")),
+        ),
+        Operation(
+            name="decision.list",
+            summary=(
+                "Decisions, newest first, by state (pending, answered, "
+                "withdrawn, expired), work item or asker (identity_ref)."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=ListDecisionsParams,
+            result_model=ListDecisionsResult,
+            handler=services.list_decisions,
+            route=HttpRoute("GET", "/decisions"),
+            cli=CliBinding(("decision", "list")),
+        ),
+        Operation(
+            name="decision.withdraw",
+            summary=(
+                "Withdraw a pending decision. A person, or the session that asked, may."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=WithdrawDecisionParams,
+            result_model=DecisionResult,
+            handler=services.withdraw_decision,
+            route=HttpRoute("POST", "/decisions/withdraw"),
+            cli=CliBinding(("decision", "withdraw")),
+        ),
+        Operation(
             name="session.answer",
             summary=(
                 "Answer the dialog a session shows (activity awaiting-approval) "
@@ -1336,6 +1459,41 @@ def build_operations() -> list[Operation[Any, Any]]:
             cli=CliBinding(("session", "last-reply")),
         ),
         Operation(
+            name="session.economics",
+            summary=(
+                "Read what a session's agent transcript cost: turns, context "
+                "tokens (measured for Claude Code, estimated otherwise), peak "
+                "context, compactions, tool-result bytes, repeated reads and "
+                "per-turn wall clock. Cost is null (no price table) and the "
+                "worktree is not counted. Takes either id."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionEconomicsParams,
+            result_model=SessionEconomicsResult,
+            handler=services.economics,
+            route=HttpRoute("GET", "/sessions/economics"),
+            cli=CliBinding(("session", "economics")),
+        ),
+        Operation(
+            name="session.digest",
+            summary=(
+                "Read one session's digest from the engine row: activity, the "
+                "blocked report, a last-reply excerpt the row already carries "
+                "(at most 120 characters), and the economics the engine already "
+                "computed (turns, context, compactions). Numbers are null when "
+                "the row has none — this does not meter a transcript. Pass "
+                "context_window to get context_pct. Takes either id."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionDigestParams,
+            result_model=SessionDigestResult,
+            handler=services.digest,
+            route=HttpRoute("GET", "/sessions/digest"),
+            cli=CliBinding(("session", "digest")),
+        ),
+        Operation(
             name="session.wait",
             summary=(
                 "Wait for a session instead of polling it: blocks (up to "
@@ -1352,6 +1510,42 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.session_wait,
             route=HttpRoute("GET", "/sessions/wait"),
             cli=CliBinding(("session", "wait")),
+        ),
+        Operation(
+            name="session.changes",
+            summary=(
+                "Read session deltas published after `since`: ready, approval, "
+                "exited, errored, blocked, unblocked, hibernated, woken. "
+                "`next_cursor` is the seq to pass next; `truncated` means the "
+                "ring dropped events, so the page starts at the oldest still "
+                "kept. `ids` names the sessions (either id form); empty reads "
+                "every session. One page instead of re-sweeping."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionChangesParams,
+            result_model=SessionChangesResult,
+            handler=services.session_changes,
+            route=HttpRoute("GET", "/sessions/changes"),
+            cli=CliBinding(("session", "changes")),
+        ),
+        Operation(
+            name="session.wait_any",
+            summary=(
+                "Wait for any of the named sessions instead of polling them: "
+                "blocks (up to timeout_s, max 600) until one publishes a kind "
+                "in `until` (default: ready, blocked, approval, exited, "
+                "errored). Returns the delta, or `timeout`. Pass `cursor` (the "
+                "previous `next_cursor`) so a replayed page is not waited on "
+                "twice. `ids` empty waits on every session."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionWaitAnyParams,
+            result_model=SessionWaitAnyResult,
+            handler=services.session_wait_any,
+            route=HttpRoute("GET", "/sessions/wait-any"),
+            cli=CliBinding(("session", "wait-any")),
         ),
         # An agent saying it cannot go on without a person. `work.write`, the
         # scope a session's own token holds, because it is the agent's own

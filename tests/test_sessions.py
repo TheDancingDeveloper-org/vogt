@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from pathlib import Path
 from typing import Any, Literal
 
 import pytest
@@ -20,6 +21,7 @@ from pydantic import ValidationError
 from vogt.adapters.engine import EngineClient, EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    CommitForSessionParams,
     CreateWorkParams,
     GetWorkParams,
     HistoryListParams,
@@ -30,10 +32,14 @@ from vogt.application.models import (
     RegisterProjectParams,
     RelateWorkParams,
     SearchOutputParams,
+    SessionBudgetParams,
+    SessionSummary,
     StartSessionParams,
     StopSessionParams,
+    UpdateProjectParams,
 )
 from vogt.application.services import (
+    commit_for_session,
     create_work,
     get_work,
     history_list,
@@ -46,9 +52,12 @@ from vogt.application.services import (
     search_output,
     start_session,
     stop_session,
+    update_project,
 )
 from vogt.core.auth import hash_token
-from vogt.errors import InvalidRequest, MissingReason, NotFound
+from vogt.core.entities import AgentPolicy
+from vogt.errors import Conflict, InvalidRequest, MissingReason, NotFound, RoleRefused
+from vogt.storage.interface import ProjectUpdate
 
 from tests.conftest import native_work_item
 
@@ -77,8 +86,16 @@ class StandInEngine:
         #: When set, POST /api/sessions is refused with this reason (400),
         #: the way the engine refuses an effort with no agent CLI to take it.
         self.refuse_start: str | None = None
-        #: When set, a start that carries `resume` answers with this cwd — the
-        #: engine starting a resumed conversation where its transcript ran.
+        #: POST /api/git/op answers. `None` commits; a tuple is the status and
+        #: error text the engine refuses with (400 checklist, 409 mid-turn).
+        self.git_refusal: tuple[int, str] | None = None
+        #: Engine role of a session id, for GET /api/sessions/{id}. A session
+        #: that is not named here is a worker.
+        self.roles: dict[str, str] = {}
+        #: How many the engine says it hid from the default list (WI-1289).
+        self.hidden_count: int = 0
+        #: A resumed session starts back in the directory its transcript
+        #: records; tests that assert that set this.
         self.resume_cwd: str | None = None
 
     def __call__(
@@ -91,6 +108,19 @@ class StandInEngine:
         payload = json.loads(body.decode("utf-8")) if body else {}
         self.sent.append({"url": url, "method": method, "body": payload})
 
+        if method == "POST" and url.endswith("/api/git/op"):
+            if self.git_refusal is not None:
+                status, said = self.git_refusal
+                return status, json.dumps({"error": said}).encode()
+            return 200, json.dumps(
+                {
+                    "ok": True,
+                    "commit": "abc123def456",
+                    "digest": "1 file changed, 2 insertions(+)",
+                    "diff_stat": " a.rs | 2 ++\n 1 file changed, 2 insertions(+)",
+                    "review": ["1 pin"],
+                }
+            ).encode()
         if method == "POST" and url.endswith("/api/sessions"):
             if self.refuse_start is not None:
                 return 400, json.dumps({"error": self.refuse_start}).encode()
@@ -103,7 +133,9 @@ class StandInEngine:
                     "name": payload.get("name", ""),
                     "activity": "running",
                     "cwd": (
-                        self.resume_cwd
+                        str(Path(payload["cwd"]).parent / payload["worktree"]["branch"])
+                        if payload.get("worktree")
+                        else self.resume_cwd
                         if self.resume_cwd and payload.get("resume")
                         else payload.get("cwd", "")
                     ),
@@ -115,20 +147,40 @@ class StandInEngine:
             self.killed.append(engine_id)
             existed = self.alive.pop(engine_id, None) is not None
             return (200, b'{"ok":true}') if existed else (404, b"")
-        if method == "GET" and url.endswith("/api/sessions"):
+        if method == "GET" and url.split("?", 1)[0].endswith("/api/sessions"):
+            rows = [
+                {
+                    "id": key,
+                    "name": key,
+                    "activity": state,
+                    "cwd": ROOT,
+                    "created_at": "2026-01-03T00:00:00Z",
+                    "exit_code": self.exit_codes.get(key),
+                    "alive": key not in self.exit_codes,
+                }
+                for key, state in {**self.alive, **self.unlinked}.items()
+            ]
+            # The engine's list is `{sessions, hidden_count}` (WI-1289). The
+            # bare-list shape an older engine still answers is covered by the
+            # client's own reader; this stand-in speaks the current one.
             return 200, json.dumps(
-                [
-                    {
-                        "id": key,
-                        "name": key,
-                        "activity": state,
+                {"sessions": rows, "hidden_count": self.hidden_count}
+            ).encode()
+        if method == "GET" and "/api/sessions/" in url:
+            engine_id = url.rstrip("/").rsplit("/", 1)[-1]
+            known = {**self.alive, **self.unlinked}
+            if engine_id not in known and engine_id not in self.roles:
+                return 404, b""
+            return 200, json.dumps(
+                {
+                    "summary": {
+                        "id": engine_id,
+                        "name": engine_id,
+                        "activity": known.get(engine_id, "idle"),
                         "cwd": ROOT,
-                        "created_at": "2026-01-03T00:00:00Z",
-                        "exit_code": self.exit_codes.get(key),
-                        "alive": key not in self.exit_codes,
+                        "role": self.roles.get(engine_id, "worker"),
                     }
-                    for key, state in {**self.alive, **self.unlinked}.items()
-                ]
+                }
             ).encode()
         # Session history. Canned rows; tests assert both the mapping
         # and, via `self.sent`, that the query params were forwarded.
@@ -302,11 +354,19 @@ def test_no_task_leaves_the_brief_untouched(
 def test_every_brief_says_how_to_report_being_blocked(
     wired: AppContext, engine: StandInEngine
 ) -> None:
-    """WI-873: the convention is in the brief, not left to be discovered."""
+    """WI-873: the convention travels with the session, not left to be discovered.
+
+    It lives in the companion guide rather than copied into the brief: the
+    brief names that file, and the guide carries the full text.
+    """
     start_session(wired, StartSessionParams(project="vogt", reason=WHY))
-    assert "session_report_blocked" in engine.last_spec["prompt"]
+    prompt = engine.last_spec["prompt"]
+    guide = engine.last_spec["companion"]
+    assert ".guide.md" in prompt
+    assert "session_report_blocked" not in prompt
+    assert "session_report_blocked" in guide
     start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
-    assert "session_report_unblocked" in engine.last_spec["prompt"]
+    assert "session_report_unblocked" in engine.last_spec["companion"]
 
 
 def test_autopilot_adds_the_keep_going_convention_and_is_audited(
@@ -372,6 +432,196 @@ def test_autopilot_reaches_the_engine_and_is_on_by_default_for_an_agent_task(
         wired, StartSessionParams(project="vogt", task="look around", reason=WHY)
     )
     assert "autopilot" not in engine.last_spec
+
+
+def test_the_enforced_policy_reaches_the_engine_and_guidance_does_not(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1243: the session spec carries only what a hook can refuse on.
+
+    A project with nothing to refuse sends no policy at all, so the start
+    stays byte-identical to one from before enforcement.
+    """
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "policy" not in engine.last_spec
+
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(
+                forbidden_text=["(?i)grok"],
+                merge_deploys_prod=True,
+                main_branches=["main", "release"],
+                commit_identity="a person",
+                test_recipe="uv run pytest",
+                rules=["guidance only"],
+            ),
+            reason=WHY,
+        ),
+    )
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert engine.last_spec["policy"] == {
+        "forbidden_text": ["(?i)grok"],
+        "merge_deploys_prod": True,
+        "main_branches": ["main", "release"],
+    }
+
+
+def test_a_worktree_session_is_cut_from_the_integration_branch(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1298: the session opens in its own worktree, never the checkout.
+
+    The branch is the work item plus the session, cut from the project's
+    integration branch. The engine reports the worktree back as the cwd, and
+    that is what the session records — the shared checkout stays untouched.
+    """
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(base_branch="integrate/vogt-next"),
+            reason=WHY,
+        ),
+    )
+    result = start_session(
+        wired, StartSessionParams(work_item="WI-1", worktree=True, reason=WHY)
+    )
+    spec = engine.last_spec["worktree"]
+    assert spec["base_ref"] == "integrate/vogt-next"
+    assert spec["branch"].startswith("WI-1-")
+    assert engine.last_spec["cwd"] == ROOT
+    worktree = str(Path(ROOT).parent / spec["branch"])
+    assert result.session.cwd == worktree
+
+    # No stated integration branch means main, and a session with no work
+    # item takes the project's slug.
+    update_project(
+        wired,
+        UpdateProjectParams(slug="vogt", agent_policy=AgentPolicy(), reason=WHY),
+    )
+    start_session(wired, StartSessionParams(project="vogt", worktree=True, reason=WHY))
+    spec = engine.last_spec["worktree"]
+    assert spec["base_ref"] == "main"
+    assert spec["branch"].startswith("vogt-")
+
+    # The default leaves the request exactly as it was.
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "worktree" not in engine.last_spec
+
+
+def test_the_whole_session_clock_is_unset_unless_the_project_sets_it(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1281 (operator, 2026-10-13): the whole-session wall clock is off by
+    default. A project's agent_policy turns it on for the default budget; the
+    per-turn 90 minutes and the 120 turns stay as they are."""
+    task = StartSessionParams(
+        project="vogt", template="klaudia", task="work the backlog", reason=WHY
+    )
+    start_session(wired, task)
+    assert "session_wall_clock_minutes" not in engine.last_spec["budget"]
+    assert AgentPolicy().session_wall_clock_minutes is None
+    with pytest.raises(ValueError):
+        AgentPolicy(session_wall_clock_minutes=0)
+
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(session_wall_clock_minutes=240),
+            reason=WHY,
+        ),
+    )
+    start_session(wired, task)
+    assert engine.last_spec["budget"] == {
+        "turns": 120,
+        "wall_clock_minutes": 90,
+        "session_wall_clock_minutes": 240,
+    }
+    # A session's own budget is used exactly, and can name the clock itself.
+    start_session(
+        wired,
+        task.model_copy(
+            update={"budget": SessionBudgetParams(session_wall_clock_minutes=30)}
+        ),
+    )
+    assert engine.last_spec["budget"] == {"session_wall_clock_minutes": 30}
+
+
+def test_a_worker_agent_task_gets_the_default_budget(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1245: an agent template with a task in the worker role is bounded
+    unless the caller says otherwise."""
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", template="opencode", task="work the backlog", reason=WHY
+        ),
+    )
+    assert engine.last_spec["budget"] == {"turns": 120, "wall_clock_minutes": 90}
+
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt",
+            template="opencode",
+            task="one question",
+            budget=SessionBudgetParams(turns=5),
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["budget"] == {"turns": 5}
+
+    # An empty object is the explicit decline, not the default.
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt",
+            template="opencode",
+            task="unbounded",
+            budget=SessionBudgetParams(),
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["budget"] == {}
+
+    # A shell, a start with no task, and an overseer are not bounded.
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "budget" not in engine.last_spec
+    start_session(
+        wired,
+        StartSessionParams(project="vogt", template="claude", reason=WHY),
+    )
+    assert "budget" not in engine.last_spec
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt",
+            template="opencode",
+            task="watch the others",
+            role="oversight",
+            reason=WHY,
+        ),
+    )
+    assert "budget" not in engine.last_spec
+
+
+def test_the_digest_leaves_the_budget_line_to_the_economics_tailer() -> None:
+    """C7's digest line is built by the economics tailer (WI-1245 A2), not here."""
+    from vogt.application.services.sessions import _digest_of
+
+    digest = _digest_of(
+        SessionSummary(
+            id="ses-1",
+            engine_session_id="eng-1",
+            cwd="/work",
+            budget=SessionBudgetParams(turns=120, context_tokens=200_000),
+        )
+    )
+    assert digest.budget is None
 
 
 def test_a_template_is_sent_by_name_for_the_engine_to_expand(
@@ -450,7 +700,7 @@ def test_a_blank_reason_is_refused_before_the_engine_starts(
         )
 
     assert len(engine.sent) == before, "an invalid write must start no terminal"
-    assert list_sessions(wired, ListSessionsParams()).sessions == []
+    assert list_sessions(wired, ListSessionsParams(mode="full")).sessions == []
 
 
 def test_a_work_item_with_no_project_has_no_tree_to_open_in(
@@ -555,7 +805,7 @@ def test_stopping_a_session_revokes_what_it_held(
 
 def test_the_session_is_linked_to_its_work_item(wired: AppContext) -> None:
     result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
-    listed = list_sessions(wired, ListSessionsParams(work_item="WI-1"))
+    listed = list_sessions(wired, ListSessionsParams(mode="full", work_item="WI-1"))
     assert [row.id for row in listed.sessions] == [result.session.id]
     assert listed.sessions[0].work_item == "WI-1"
     assert listed.sessions[0].reason == WHY
@@ -570,10 +820,13 @@ def test_activity_comes_from_the_engine_not_from_storage(
     "running" would outlive the process it described.
     """
     result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
-    assert list_sessions(wired, ListSessionsParams()).sessions[0].activity == "running"
+    assert (
+        list_sessions(wired, ListSessionsParams(mode="full")).sessions[0].activity
+        == "running"
+    )
 
     engine.alive.clear()
-    after = list_sessions(wired, ListSessionsParams()).sessions[0]
+    after = list_sessions(wired, ListSessionsParams(mode="full")).sessions[0]
     assert after.activity is None
     assert after.alive is False
     assert after.id == result.session.id, "the link survives the process"
@@ -594,7 +847,7 @@ def test_an_exited_process_is_not_alive_though_the_engine_still_lists_it(
     engine.alive[engine_id] = "exited"
     engine.exit_codes[engine_id] = 0
 
-    row = list_sessions(wired, ListSessionsParams()).sessions[0]
+    row = list_sessions(wired, ListSessionsParams(mode="full")).sessions[0]
     assert row.activity == "exited"
     assert row.alive is False
 
@@ -605,10 +858,12 @@ def test_an_exited_unlinked_session_is_listed_only_with_the_stopped_ones(
     engine.unlinked["eng-smoke"] = "exited"
     engine.exit_codes["eng-smoke"] = 0
 
-    default = list_sessions(wired, ListSessionsParams()).sessions
+    default = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     assert all(row.id != "eng-smoke" for row in default)
 
-    kept = list_sessions(wired, ListSessionsParams(include_stopped=True)).sessions
+    kept = list_sessions(
+        wired, ListSessionsParams(mode="full", include_stopped=True)
+    ).sessions
     smoke = [row for row in kept if row.id == "eng-smoke"]
     assert len(smoke) == 1
     assert smoke[0].alive is False
@@ -630,8 +885,8 @@ def test_a_stopped_session_leaves_the_list(wired: AppContext) -> None:
     result = start_session(wired, StartSessionParams(project="vogt", reason=WHY))
     stop_session(wired, StopSessionParams(id=result.session.id, reason=WHY))
 
-    assert list_sessions(wired, ListSessionsParams()).sessions == []
-    kept = list_sessions(wired, ListSessionsParams(include_stopped=True))
+    assert list_sessions(wired, ListSessionsParams(mode="full")).sessions == []
+    kept = list_sessions(wired, ListSessionsParams(mode="full", include_stopped=True))
     assert [row.id for row in kept.sessions] == [result.session.id]
     assert kept.sessions[0].stopped_at is not None
 
@@ -654,7 +909,7 @@ def test_an_unlinked_live_session_is_reported(
 ) -> None:
     engine.unlinked["eng-foreign"] = "running"
 
-    listed = list_sessions(wired, ListSessionsParams()).sessions
+    listed = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     foreign = [row for row in listed if row.id == "eng-foreign"]
     assert len(foreign) == 1, "a live session Vogt never started must still show"
     row = foreign[0]
@@ -676,7 +931,7 @@ def test_linked_and_unlinked_sessions_appear_together(
     result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
     engine.unlinked["eng-foreign"] = "idle"
 
-    listed = list_sessions(wired, ListSessionsParams()).sessions
+    listed = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     by_linked = {row.linked: row for row in listed}
     assert by_linked[True].id == result.session.id
     assert by_linked[True].work_item == "WI-1"
@@ -690,7 +945,9 @@ def test_a_project_filter_excludes_unlinked_sessions(
     start_session(wired, StartSessionParams(project="vogt", reason=WHY))
     engine.unlinked["eng-foreign"] = "running"
 
-    listed = list_sessions(wired, ListSessionsParams(project="vogt")).sessions
+    listed = list_sessions(
+        wired, ListSessionsParams(mode="full", project="vogt")
+    ).sessions
     assert all(row.linked for row in listed)
     assert "eng-foreign" not in {row.id for row in listed}
 
@@ -700,10 +957,69 @@ def test_unlinked_sessions_are_not_repeated_across_pages(
 ) -> None:
     engine.unlinked["eng-foreign"] = "running"
 
-    first = list_sessions(wired, ListSessionsParams(limit=50, offset=0)).sessions
-    later = list_sessions(wired, ListSessionsParams(limit=50, offset=50)).sessions
-    assert "eng-foreign" in {row.id for row in first}
-    assert "eng-foreign" not in {row.id for row in later}
+    first = list_sessions(wired, ListSessionsParams(mode="full", limit=50, offset=0))
+    later = list_sessions(wired, ListSessionsParams(mode="full", limit=50, offset=50))
+    assert "eng-foreign" in {row.id for row in first.sessions}
+    assert "eng-foreign" not in {row.id for row in later.sessions}
+    assert first.total == 1 and first.truncated is False
+    assert later.total == 1 and later.sessions == []
+
+
+def test_a_page_of_hibernated_links_does_not_hide_a_live_unlinked_session(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1266: filter, then page.
+
+    A declared page that is already full of hibernated links used to be
+    sliced to `limit` before the digest state filter ran, so the one live
+    session the engine held unlinked never appeared and digest mode then
+    dropped the hibernated rows, returning nothing.
+    """
+    for _ in range(51):
+        started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+        engine_id = started.session.engine_session_id
+        assert engine_id is not None
+        engine.alive[engine_id] = "hibernated"
+    engine.unlinked["eng-live"] = "running"
+
+    digest = list_sessions(wired, ListSessionsParams())
+    assert [row.id for row in digest.digests] == ["eng-live"]
+    assert digest.total == 1 and digest.truncated is False
+    assert digest.sessions == []
+
+    # Full mode does not apply the digest state filter, so the hibernated
+    # links lead and the live unlinked session is on the next page.
+    full = list_sessions(wired, ListSessionsParams(mode="full"))
+    assert "eng-live" not in {row.id for row in full.sessions}
+    assert full.total == 52 and full.truncated is True
+    assert len(full.sessions) == 50
+
+    page = list_sessions(wired, ListSessionsParams(mode="full", limit=50, offset=50))
+    assert [row.id for row in page.sessions] == ["ses_0001", "eng-live"]
+    assert page.total == 52 and page.truncated is False
+
+
+def test_more_declared_links_than_the_read_cap_is_reported_truncated(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1266 review: the declared half is capped, and the cap must not look
+    complete. One past the 500 links that are read makes `truncated` stay true
+    and `total` a floor, on the last page and on an empty page past it."""
+    for _ in range(501):
+        start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+
+    last = list_sessions(
+        wired, ListSessionsParams(mode="full", states=[], limit=500, offset=0)
+    )
+    assert len(last.sessions) == 500
+    assert last.truncated is True and last.total == 501
+
+    beyond = list_sessions(
+        wired, ListSessionsParams(mode="full", states=[], limit=500, offset=500)
+    )
+    assert beyond.sessions == []
+    assert beyond.truncated is True and beyond.total == 501
+    assert "eng-1" not in {row.engine_session_id for row in last.sessions}
 
 
 def test_a_dead_engine_hides_no_unlinked_sessions(wired: AppContext) -> None:
@@ -714,7 +1030,7 @@ def test_a_dead_engine_hides_no_unlinked_sessions(wired: AppContext) -> None:
         engine=EngineClient(base_url="http://127.0.0.1:8910", transport=DeadEngine()),
     )
     start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
-    listed = list_sessions(dead, ListSessionsParams()).sessions
+    listed = list_sessions(dead, ListSessionsParams(mode="full")).sessions
     assert all(row.linked for row in listed)
 
 
@@ -737,11 +1053,32 @@ def test_with_no_engine_the_links_still_list(wired: AppContext) -> None:
     result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
     without = dataclasses.replace(wired, engine=None)
 
-    listed = list_sessions(without, ListSessionsParams())
+    listed = list_sessions(without, ListSessionsParams(mode="full"))
     assert [row.id for row in listed.sessions] == [result.session.id]
     assert listed.engine is not None and "VOGT_ENGINE_URL" in listed.engine
     assert listed.sessions[0].alive is None, (
         "unasked is not the same answer as not running"
+    )
+    assert listed.hidden_count == 0
+
+
+def test_the_engines_hidden_count_is_reported_and_the_flag_is_forwarded(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The rail's "N older sessions hidden" reads the engine's count, and
+    Show asks for the rows it left out (`?include=hidden`, WI-1289)."""
+    engine.hidden_count = 4
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+
+    listed = list_sessions(wired, ListSessionsParams(mode="full"))
+    assert len(listed.sessions) == 1
+    assert listed.hidden_count == 4
+    assert all("include=hidden" not in row["url"] for row in engine.sent)
+
+    shown = list_sessions(wired, ListSessionsParams(mode="full", include_hidden=True))
+    assert shown.hidden_count == 4
+    assert any(
+        row["url"].endswith("/api/sessions?include=hidden") for row in engine.sent
     )
 
 
@@ -754,7 +1091,7 @@ def test_a_dead_engine_is_reported_not_rendered_as_stopped(
     )
     start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
 
-    listed = list_sessions(dead, ListSessionsParams())
+    listed = list_sessions(dead, ListSessionsParams(mode="full"))
     assert len(listed.sessions) == 1
     assert listed.engine is not None and "not answering" in listed.engine
     assert listed.sessions[0].alive is None
@@ -796,8 +1133,14 @@ def test_the_work_items_brief_travels_with_the_session(
     assert "WI-2 — Sweep drops a page" in brief
     assert "The second page of results never arrives." in brief
     assert result.session.id in brief, "the brief says which session it belongs to"
-    assert "VOGT_HTTP_TOKEN" in brief, (
-        "a brief that describes the work without saying how to record what was "
+    guide = engine.last_spec["companion"]
+    # The engine names the guide for its own id, so the brief points at it by
+    # its relation to the brief file, never by the Vogt id.
+    assert ".guide.md" in brief
+    assert f"{result.session.id}.guide.md" not in brief
+    assert "VOGT_HTTP_TOKEN" not in brief
+    assert "VOGT_HTTP_TOKEN" in guide, (
+        "a session that describes the work without saying how to record what was "
         "found leaves the write capability undiscovered"
     )
 
@@ -1036,7 +1379,7 @@ def test_the_model_asked_for_is_recorded_and_read_back(
     assert started.session.model == "claude-opus-4-5"
     assert started.session.effort == "high"
 
-    listed = list_sessions(wired, ListSessionsParams()).sessions
+    listed = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     assert [(row.model, row.effort) for row in listed] == [("claude-opus-4-5", "high")]
 
 
@@ -1299,6 +1642,40 @@ def test_a_person_can_grant_one_task_a_posture_and_it_is_on_the_record(
     assert engine.last_spec["permission_mode"] == "accept-edits"
 
 
+def test_no_account_sends_nothing_and_a_named_one_is_sent_and_audited(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert "account" not in engine.last_spec
+    assert _last_started_summary(wired)["account"] is None
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", template="claude", account="acct2", reason=WHY
+        ),
+    )
+    # The name only: the engine owns the mapping to a config directory, so no
+    # path (and no CLAUDE_CONFIG_DIR) comes from Vogt.
+    assert engine.last_spec["account"] == "acct2"
+    assert "CLAUDE_CONFIG_DIR" not in engine.env_of_last_start()
+    assert _last_started_summary(wired)["account"] == "acct2"
+
+
+@pytest.mark.parametrize("bad", ["../x", "Acct", "a b", "/etc", "", "x" * 33])
+def test_an_account_must_be_a_plain_name(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        StartSessionParams(work_item="WI-1", account=bad, reason=WHY)
+
+
+def test_a_sessions_account_comes_back_from_the_engine() -> None:
+    from vogt.adapters.engine.client import EngineSession
+
+    payload = {"id": "s1", "name": "n", "alive": True, "account": "acct2"}
+    assert EngineSession.from_payload(payload).account == "acct2"
+    assert EngineSession.from_payload({**payload, "account": None}).account is None
+    assert EngineSession.from_payload({"id": "s1", "name": "n"}).account is None
+
+
 def test_an_agent_cannot_start_a_bypassed_session(
     wired: AppContext, engine: StandInEngine
 ) -> None:
@@ -1346,7 +1723,10 @@ def test_every_brief_says_a_denial_is_reported_not_routed_around(
         wired, StartSessionParams(work_item="WI-1", autopilot=True, reason=WHY)
     )
     prompt = engine.last_spec["prompt"]
-    assert "A permission denial is one of these" in prompt
+    guide = engine.last_spec["companion"]
+    assert "A permission denial is one of these" not in prompt
+    assert "A permission denial is one of these" in guide
+    # Autopilot's own line stays in the brief: it is per start, not boilerplate.
     assert "never routed around" in prompt
 
 
@@ -1475,6 +1855,200 @@ def test_only_the_engine_may_mint_a_session_token(wired: AppContext) -> None:
         EngineSessionTokenParams(engine_session_id="../../etc", reason=WHY)
 
 
+def test_commit_for_a_session_returns_the_digest_and_is_audited(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """C14: the commit goes through the engine's git op, named by the session,
+    and the audit records the SHA and digest — never the diff."""
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    result = commit_for_session(
+        wired,
+        CommitForSessionParams(
+            id=started.session.id,
+            message="record the session commit",
+            paths=["src/a.rs"],
+            reason=WHY,
+        ),
+    )
+    assert result.commit == "abc123def456"
+    assert result.digest == "1 file changed, 2 insertions(+)"
+    assert result.diff is None
+    assert result.review == ["1 pin"]
+    sent = [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+    assert sent[-1]["body"] == {
+        "op": "commit",
+        "session": started.session.engine_session_id,
+        "message": "record the session commit",
+        "paths": ["src/a.rs"],
+        "full_diff": False,
+        "forbidden_text": [],
+    }
+    audit = list_audit(wired, ListAuditParams(operation="session.commit_for"))
+    assert audit.records, "the commit is an audited action"
+    events = [
+        event
+        for event in list_events(wired, ListEventsParams()).events
+        if event.kind == "session.committed"
+    ]
+    assert events[-1].summary["commit"] == "abc123def456"
+    assert "diff" not in events[-1].summary
+
+
+def test_a_blank_commit_message_never_reaches_the_engine(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    with pytest.raises(InvalidRequest):
+        commit_for_session(
+            wired,
+            CommitForSessionParams(id=started.session.id, message="   ", reason=WHY),
+        )
+    assert not [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+
+
+@pytest.mark.parametrize(
+    ("status", "said", "error"),
+    [
+        (400, "staged diff has a conflict marker", InvalidRequest),
+        (400, "staged diff has an intent-to-add entry", InvalidRequest),
+        (400, "message matches forbidden text", InvalidRequest),
+        (409, "session eng-1 is Running: a commit waits until it is quiet", Conflict),
+    ],
+)
+def test_the_engines_commit_refusal_reaches_the_caller(
+    wired: AppContext,
+    engine: StandInEngine,
+    status: int,
+    said: str,
+    error: type[Exception],
+) -> None:
+    """Each checklist rejection (conflict, secret, intent-to-add, forbidden
+    text, a worker mid-turn) is the engine's word, surfaced as a typed error
+    and never audited as a commit."""
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    engine.git_refusal = (status, said)
+    with pytest.raises(error, match=said):
+        commit_for_session(
+            wired,
+            CommitForSessionParams(
+                id=started.session.id, message="should not land", reason=WHY
+            ),
+        )
+    assert not list_audit(
+        wired, ListAuditParams(operation="session.commit_for")
+    ).records
+
+
+def test_a_named_worktree_is_forwarded_and_patterns_are_not(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The caller names a worktree; it never names the forbidden patterns.
+    A project with no policy sends none."""
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    commit_for_session(
+        wired,
+        CommitForSessionParams(
+            id=started.session.id,
+            message="commit in the linked worktree",
+            worktree="/srv/estate/vogt-wt",
+            reason=WHY,
+        ),
+    )
+    sent = [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+    assert sent[-1]["body"]["worktree"] == "/srv/estate/vogt-wt"
+    assert sent[-1]["body"]["forbidden_text"] == []
+
+
+def test_the_projects_forbidden_text_is_what_the_engine_checks(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """C13 meets C14: the patterns come from the target's project policy."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(forbidden_text=["(?i)grok"]),
+            reason=WHY,
+        ),
+    )
+    started = start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    commit_for_session(
+        wired,
+        CommitForSessionParams(
+            id=started.session.id, message="commit for the worker", reason=WHY
+        ),
+    )
+    sent = [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+    assert sent[-1]["body"]["forbidden_text"] == ["(?i)grok"]
+    assert "forbidden_text" not in CommitForSessionParams.model_fields
+
+
+def test_a_session_cannot_commit_its_own_work(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    caller = _as(wired, f"agent:session:{started.session.id}")
+    with pytest.raises(RoleRefused, match="does not commit its own work"):
+        commit_for_session(
+            caller,
+            CommitForSessionParams(
+                id=started.session.id, message="my own commit", reason=WHY
+            ),
+        )
+    assert not [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+
+
+def test_a_worker_cannot_commit_for_another_worker(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    target = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    caller = _as(wired, f"agent:engine:{ENGINE_SESSION}")
+    engine.roles[ENGINE_SESSION] = "worker"
+    with pytest.raises(RoleRefused, match="is worker"):
+        commit_for_session(
+            caller,
+            CommitForSessionParams(
+                id=target.session.id, message="another worker's commit", reason=WHY
+            ),
+        )
+    assert not [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+
+
+def test_oversight_may_commit_for_a_worker(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    target = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    caller = _as(wired, f"agent:engine:{ENGINE_SESSION}")
+    engine.roles[ENGINE_SESSION] = "oversight"
+    result = commit_for_session(
+        caller,
+        CommitForSessionParams(
+            id=target.session.id, message="oversight commits it", reason=WHY
+        ),
+    )
+    assert result.commit == "abc123def456"
+
+
+def test_a_person_may_commit_without_a_role_lookup(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    person = _as(wired, "local:someone", kind="human")
+    result = commit_for_session(
+        person,
+        CommitForSessionParams(
+            id=started.session.id, message="a person commits it", reason=WHY
+        ),
+    )
+    assert result.commit == "abc123def456"
+    looked_up = [
+        row
+        for row in engine.sent
+        if row["method"] == "GET" and "/api/sessions/" in row["url"]
+    ]
+    assert looked_up == []
+
+
 def test_the_engines_stack_secret_may_mint_whoever_it_was_issued_to(
     wired: AppContext, tmp_path: Any
 ) -> None:
@@ -1525,3 +2099,445 @@ def test_the_engines_stack_secret_may_mint_whoever_it_was_issued_to(
             as_bearer(phone),
             EngineSessionTokenParams(engine_session_id=ENGINE_SESSION, reason=WHY),
         )
+
+
+def test_a_project_policy_is_in_the_brief_and_only_the_enforced_slice_is_sent(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The brief says the whole policy. The engine gets only what a hook can
+    refuse on (WI-1243): guidance stays in the brief."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(
+                forbidden_text=["(?i)wip"],
+                merge_deploys_prod=True,
+                main_branches=["release"],
+                commit_identity="Author Name <name@example.com>",
+                test_recipe="uv run pytest",
+                rules=["Never commit the design directory."],
+            ),
+            reason=WHY,
+        ),
+    )
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert "## Project policy — vogt" in brief
+    assert "(?i)wip" in brief
+    assert "Merges deploy production" in brief
+    assert "`release`" in brief
+    assert "uv run pytest" in brief
+    assert "Never commit the design directory." in brief
+    assert engine.last_spec["policy"] == {
+        "forbidden_text": ["(?i)wip"],
+        "merge_deploys_prod": True,
+        "main_branches": ["release"],
+    }
+
+
+def test_a_landing_block_is_stored_and_rendered_with_the_item_number(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1318: the three blocks round-trip, and the brief fills `{n}` in."""
+    from vogt.core.entities import LandingPolicy, ReviewPolicy, VerificationPolicy
+
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(
+                landing=LandingPolicy(
+                    base_branch="integrate/vogt-next",
+                    worker_lands_by="push_branch",
+                    merge_by="oversight",
+                    merge_mode="rebase",
+                ),
+                review=ReviewPolicy(never_models=["grok-4.7"]),
+                verification=VerificationPolicy(
+                    required_for_done=True, lanes=["vogt-dev"]
+                ),
+            ),
+            reason=WHY,
+        ),
+    )
+    with wired.declared.read() as view:
+        stored = view.project_by_slug("vogt")
+    assert stored is not None and stored.agent_policy.landing is not None
+    assert stored.agent_policy.landing.merge_mode == "rebase"
+    assert stored.agent_policy.review is not None
+    assert stored.agent_policy.review.never_models == ["grok-4.7"]
+    assert stored.agent_policy.verification is not None
+    assert stored.agent_policy.verification.required_for_done is True
+
+    item = native_work_item(wired, title="land me", project="vogt")
+    start_session(wired, StartSessionParams(work_item=item.ref, reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert "## Landing rule for this repo" in brief
+    assert f"`^wi-{item.ref.split('-', 1)[1]}-[a-z0-9-]+$`" in brief
+    assert "**Base** `integrate/vogt-next`" in brief
+    assert "**Lands by** push_branch" in brief
+    assert "**Merge by** oversight (rebase)" in brief
+    assert "**Deploy by** operator" in brief
+    # The blocks are recorded, not enforced: the hook payload is unchanged.
+    assert "policy" not in engine.last_spec
+
+
+def test_a_project_without_a_landing_block_renders_no_landing_rule(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "Landing rule" not in engine.last_spec["prompt"]
+
+
+def test_a_bad_branch_pattern_or_a_merge_commit_mode_is_refused(
+    wired: AppContext,
+) -> None:
+    from vogt.core.entities import LandingPolicy
+
+    with pytest.raises(ValidationError, match="branch_pattern"):
+        update_project(
+            wired,
+            UpdateProjectParams(
+                slug="vogt",
+                agent_policy=AgentPolicy(
+                    landing=LandingPolicy(
+                        base_branch="main",
+                        branch_pattern="(unclosed",
+                        worker_lands_by="push_branch",
+                        merge_by="oversight",
+                        merge_mode="rebase",
+                    )
+                ),
+                reason=WHY,
+            ),
+        )
+    with pytest.raises(ValidationError, match="merge_mode"):
+        LandingPolicy(
+            base_branch="main",
+            worker_lands_by="push_branch",
+            merge_by="oversight",
+            merge_mode="merge",  # type: ignore[arg-type]
+        )
+
+
+def test_a_policy_with_nothing_to_enforce_sends_no_hook_payload(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Guidance alone changes the brief and nothing about the start request."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(test_recipe="uv run pytest"),
+            reason=WHY,
+        ),
+    )
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "uv run pytest" in engine.last_spec["prompt"]
+    assert "policy" not in engine.last_spec
+
+
+def test_a_pattern_that_does_not_compile_is_refused(wired: AppContext) -> None:
+    """A rule that could never match is a mistake, stored it would do nothing."""
+    with pytest.raises(ValidationError, match="does not compile"):
+        update_project(
+            wired,
+            UpdateProjectParams(
+                slug="vogt",
+                agent_policy=AgentPolicy(forbidden_text=["(unclosed"]),
+                reason=WHY,
+            ),
+        )
+
+
+def test_a_pattern_the_engine_dialect_cannot_match_is_refused(
+    wired: AppContext,
+) -> None:
+    """Python compiles lookaround, backreferences, conditional groups and
+    named-group references; the engine's regex crate does not, so such a
+    pattern would be stored and then never fire. The refusal happens at the
+    write, not when the model is built."""
+    for pattern in (
+        "secret(?=key)",
+        "secret(?!key)",
+        "(?<=pre)secret",
+        "(?<!pre)secret",
+        r"(\w+)\s+\1",
+        r"(?P<name>\w+) (?P=name)",
+        r"(a)?(?(1)yes|no)",
+    ):
+        # Building the model is allowed: a project stored before this rule
+        # existed must still load.
+        AgentPolicy(forbidden_text=[pattern])
+        with pytest.raises(InvalidRequest, match="does not support"):
+            update_project(
+                wired,
+                UpdateProjectParams(
+                    slug="vogt",
+                    agent_policy=AgentPolicy(forbidden_text=[pattern]),
+                    reason=WHY,
+                ),
+            )
+
+
+def test_a_stored_unsupported_pattern_still_loads(wired: AppContext) -> None:
+    """The dialect rule is a write-time check. A project whose policy was
+    stored before it existed must still load, not vanish from every read."""
+    stored = AgentPolicy(
+        forbidden_text=[r"(?P<name>\w+) (?P=name)", r"(a)?(?(1)yes|no)"]
+    )
+    with wired.declared.write() as txn:
+        project = txn.project_by_slug("vogt")
+        assert project is not None
+        txn.update_project(
+            project.id,
+            ProjectUpdate(agent_policy=stored),
+            at=wired.clock(),
+        )
+    with wired.declared.read() as view:
+        loaded = view.project_by_slug("vogt")
+    assert loaded is not None
+    assert loaded.agent_policy.forbidden_text == [
+        r"(?P<name>\w+) (?P=name)",
+        r"(a)?(?(1)yes|no)",
+    ]
+
+
+def test_touch_points_render_and_the_map_stays_inside_the_tree(
+    instance: AppContext, engine: StandInEngine, tmp_path: Path
+) -> None:
+    """Files, symbols, done and gates are a block; the map is the tree they sit in.
+
+    A file outside the working tree is a hint that was wrong, so it adds no
+    directory. Dotfiles are skipped, and a brief with no touch points is
+    unchanged.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "lib.py").write_text("x = 1\n", encoding="utf-8")
+    (src / ".secret").write_text("no\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("hi\n", encoding="utf-8")
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    register_project(
+        ctx, RegisterProjectParams(name="Mapped", root_path=str(tmp_path), reason=WHY)
+    )
+    start_session(
+        ctx,
+        StartSessionParams(
+            project="mapped",
+            task="wire the map",
+            files=["src/lib.py", "README.md:1-3", "/etc/passwd"],
+            symbols=["lib"],
+            done=["the map renders"],
+            gates=["uv run pytest"],
+            reason=WHY,
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    assert "## Touch points" in brief
+    assert "`src/lib.py`" in brief
+    assert "**Symbols** `lib`" in brief
+    assert "the map renders" in brief
+    assert "uv run pytest" in brief
+    assert "`/etc/passwd`" in brief
+    outline = brief.split("**Repo map**", 1)[1]
+    assert "src/" in outline
+    assert "lib.py" in outline
+    assert ".secret" not in outline
+    assert "passwd" not in outline
+    start_session(ctx, StartSessionParams(project="mapped", reason=WHY))
+    assert "## Touch points" not in engine.last_spec["prompt"]
+
+
+# -- dispatch purposes and start provenance (WI-1323) -----------------------
+
+
+def _last_started(ctx: AppContext) -> dict[str, Any]:
+    started = [
+        event
+        for event in list_events(ctx, ListEventsParams()).events
+        if event.kind == "session.started"
+    ]
+    return dict(started[-1].summary)
+
+
+def test_purpose_implement_resolves_the_implement_profile(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="implement", task="fix it", reason=WHY
+        ),
+    )
+    spec = engine.last_spec
+    assert spec["template"] == "klaudia"
+    assert spec["model"] == "grok-4.7"
+    assert "effort" not in spec
+    assert spec["budget"] == {"turns": 120, "wall_clock_minutes": 90}
+    assert spec["autopilot"] is True
+    summary = _last_started(wired)
+    assert summary["purpose"] == "implement"
+    assert summary["worktree"] is True
+    assert summary["repo_map"] is True
+    assert summary["overrides"] == []
+    assert result.session.purpose == "implement"
+
+
+def test_purpose_review_resolves_opus_low_forty_turns_read_only(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="review", reason=WHY)
+    )
+    spec = engine.last_spec
+    assert (spec["template"], spec["model"], spec["effort"]) == (
+        "claude",
+        "opus",
+        "low",
+    )
+    assert spec["budget"] == {"turns": 40}
+    assert "autopilot" not in spec
+    assert "## Read only" in spec["prompt"]
+
+
+def test_an_explicit_param_wins_over_the_profile_and_is_audited(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="implement", model="grok-4.8", reason=WHY
+        ),
+    )
+    assert engine.last_spec["model"] == "grok-4.8"
+    assert engine.last_spec["template"] == "klaudia"
+    assert _last_started(wired)["overrides"] == ["model"]
+
+
+def test_no_purpose_leaves_a_start_as_it_was(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert "model" not in engine.last_spec
+    assert result.session.purpose is None
+    assert _last_started(wired)["overrides"] == []
+
+
+def test_the_deployment_profile_preference_overrides_one_field(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    from vogt.application.models import PreferenceSetParams
+    from vogt.application.services import set_preference
+
+    set_preference(
+        wired,
+        PreferenceSetParams(
+            key="dispatch.profiles",
+            value={"implement": {"model": "grok-4.8"}},
+            reason=WHY,
+        ),
+    )
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="implement", reason=WHY)
+    )
+    spec = engine.last_spec
+    assert spec["model"] == "grok-4.8"
+    assert spec["template"] == "klaudia"
+    assert spec["budget"] == {"turns": 120, "wall_clock_minutes": 90}
+
+
+def test_an_agent_cannot_set_the_dispatch_table(wired: AppContext) -> None:
+    from vogt.application.models import PreferenceSetParams
+    from vogt.application.services import set_preference
+    from vogt.errors import PersonRequired
+
+    with pytest.raises(PersonRequired):
+        set_preference(
+            _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+            PreferenceSetParams(
+                key="dispatch.profiles",
+                value={"review": {"model": "grok-4.7"}},
+                reason=WHY,
+            ),
+        )
+
+
+def test_a_profile_cannot_grant_the_oversight_role(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Resolved after the role guard, and no profile field carries a role."""
+    from vogt.application.models import PreferenceSetParams
+    from vogt.application.services import set_preference
+    from vogt.errors import InvalidPreference
+
+    with pytest.raises(InvalidPreference, match="role"):
+        set_preference(
+            wired,
+            PreferenceSetParams(
+                key="dispatch.profiles",
+                value={"implement": {"role": "oversight"}},
+                reason=WHY,
+            ),
+        )
+    agent = _as(wired, f"agent:engine:{ENGINE_SESSION}")
+    with pytest.raises(RoleRefused):
+        start_session(
+            agent,
+            StartSessionParams(
+                work_item="WI-1", purpose="implement", role="oversight", reason=WHY
+            ),
+        )
+    start_session(
+        agent, StartSessionParams(work_item="WI-1", purpose="implement", reason=WHY)
+    )
+    assert "role" not in engine.last_spec
+
+
+def test_a_person_start_records_person_and_no_session(
+    wired: AppContext,
+) -> None:
+    result = start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="review", reason=WHY)
+    )
+    assert result.session.started_by_kind == "person"
+    assert result.session.started_by_session is None
+    [listed] = list_sessions(wired, ListSessionsParams(mode="full")).sessions
+    assert (listed.purpose, listed.started_by_kind) == ("review", "person")
+
+
+@pytest.mark.parametrize("role", ["oversight", "worker"])
+def test_a_session_start_records_the_starters_engine_role(
+    wired: AppContext, engine: StandInEngine, role: str
+) -> None:
+    engine.roles[ENGINE_SESSION] = role
+    result = start_session(
+        _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+        StartSessionParams(work_item="WI-1", purpose="mechanical", reason=WHY),
+    )
+    assert result.session.started_by_session == ENGINE_SESSION
+    assert result.session.started_by_kind == role
+    summary = _last_started(wired)
+    assert summary["started_by_kind"] == role
+    assert summary["started_by_session"] == ENGINE_SESSION
+
+
+def test_a_vogt_started_session_is_named_by_its_engine_id(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    parent = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    child = start_session(
+        _as(wired, f"agent:session:{parent.session.id}"),
+        StartSessionParams(work_item="WI-1", reason=WHY),
+    )
+    assert child.session.started_by_session == parent.session.engine_session_id
+    assert child.session.started_by_kind == "worker"
+
+
+def test_a_purpose_outside_the_six_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        StartSessionParams(work_item="WI-1", purpose="anything", reason=WHY)  # type: ignore[arg-type]

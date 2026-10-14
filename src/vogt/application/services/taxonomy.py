@@ -168,9 +168,10 @@ def list_initiatives(
     ctx: AppContext, params: ListInitiativesParams
 ) -> InitiativeListResult:
     with ctx.declared.read() as view:
-        return InitiativeListResult(
-            initiatives=view.list_initiatives(limit=params.limit, offset=params.offset)
-        )
+        initiatives = view.list_initiatives(limit=params.limit, offset=params.offset)
+        if params.mode == "summary":
+            initiatives = [item.model_copy(update={"body": ""}) for item in initiatives]
+        return InitiativeListResult(initiatives=initiatives)
 
 
 def create_actor(ctx: AppContext, params: CreateActorParams) -> ActorResult:

@@ -187,9 +187,18 @@ class EngineSession:
     template: str | None = None
     #: The permission posture, when not the default (WI-926).
     permission_mode: str | None = None
+    #: The Claude Code account it runs under, when one was named.
+    account: str | None = None
     #: Who asked the session to stop, and why (WI-913).
     stopped_by: str | None = None
     stop_reason: str | None = None
+    #: The engine's live reading of the agent transcript (WI-1245), when its
+    #: tailer has one. `None` from an engine that predates it, or one that
+    #: has not read the transcript yet.
+    economics: dict[str, Any] | None = None
+    #: The limits the session was started with (WI-1245), when the row carries
+    #: them. Absent means no budget; the core does not invent one.
+    budget: dict[str, Any] | None = None
 
     @property
     def hibernated(self) -> bool:
@@ -226,11 +235,18 @@ class EngineSession:
             resources=EngineResources.from_payload(payload.get("resources")),
             template=_optional_str(payload.get("template")),
             permission_mode=_optional_str(payload.get("permission_mode")),
+            account=_optional_str(payload.get("account")),
             stopped_by=_optional_str((payload.get("stop") or {}).get("by"))
             if isinstance(payload.get("stop"), dict)
             else None,
             stop_reason=_optional_str((payload.get("stop") or {}).get("reason"))
             if isinstance(payload.get("stop"), dict)
+            else None,
+            economics=payload.get("economics")
+            if isinstance(payload.get("economics"), dict)
+            else None,
+            budget=payload["budget"]
+            if isinstance(payload.get("budget"), dict)
             else None,
         )
 
@@ -276,6 +292,8 @@ class EngineHibernation:
     trigger: str
     resumable: bool = True
     reason: str | None = None
+    #: The session this one's work was handed to, when the hibernate named one.
+    superseded_by: str | None = None
 
     @classmethod
     def from_payload(cls, payload: object) -> EngineHibernation | None:
@@ -286,6 +304,7 @@ class EngineHibernation:
             trigger=str(payload.get("trigger", "")),
             resumable=payload.get("resumable") is not False,
             reason=_optional_str(payload.get("reason")),
+            superseded_by=_optional_str(payload.get("superseded_by")),
         )
 
 
@@ -520,6 +539,69 @@ class EngineWait:
 
 
 @dataclass(frozen=True)
+class EngineChange:
+    """One session delta from `GET /api/sessions/changes`."""
+
+    seq: int
+    at: str
+    session: str
+    kind: str
+    summary: str
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineChange:
+        return cls(
+            seq=_optional_int(payload.get("seq")) or 0,
+            at=_optional_str(payload.get("at")) or "",
+            session=str(payload.get("session", "")),
+            kind=str(payload.get("kind", "")),
+            summary=str(payload.get("summary", "")),
+        )
+
+
+@dataclass(frozen=True)
+class EngineChanges:
+    """A page of session deltas since a cursor."""
+
+    changes: tuple[EngineChange, ...]
+    next_cursor: int
+    truncated: bool
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineChanges:
+        raw = payload.get("changes")
+        return cls(
+            changes=tuple(
+                EngineChange.from_payload(row) for row in raw if isinstance(row, dict)
+            )
+            if isinstance(raw, list)
+            else (),
+            next_cursor=_optional_int(payload.get("next_cursor")) or 0,
+            truncated=bool(payload.get("truncated", False)),
+        )
+
+
+@dataclass(frozen=True)
+class EngineWaitAny:
+    """Why `GET /api/sessions/wait-any` returned."""
+
+    outcome: str
+    change: EngineChange | None
+    next_cursor: int
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineWaitAny:
+        change = payload.get("change")
+        return cls(
+            outcome=str(payload.get("outcome", "")),
+            change=(
+                EngineChange.from_payload(change) if isinstance(change, dict) else None
+            ),
+            next_cursor=_optional_int(payload.get("next_cursor")) or 0,
+        )
+
+
+@dataclass(frozen=True)
 class EngineTaskFinding:
     """Something a bound agent-task run reported about itself.
 
@@ -682,9 +764,14 @@ class EngineClient:
         effort: str | None = None,
         resume: str | None = None,
         permission_mode: str | None = None,
+        account: str | None = None,
         autopilot: bool = False,
         role: str = "worker",
         work_item: str | None = None,
+        companion: str | None = None,
+        policy: dict[str, Any] | None = None,
+        budget: dict[str, Any] | None = None,
+        worktree: dict[str, str] | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -728,6 +815,11 @@ class EngineClient:
             # Sent only when not the default, so a default start is the
             # request this client has always made.
             spec["permission_mode"] = permission_mode.replace("_", "-")
+        if account:
+            # A Claude Code account *name* from the engine's own allowlist;
+            # the engine maps it to a config directory and refuses a name it
+            # does not know. Sent only when named, like the fields above.
+            spec["account"] = account
         if autopilot:
             # The engine keeps it awake and re-prompts it at its prompt
             # (WI-949); sent only when on, like the fields above.
@@ -739,13 +831,56 @@ class EngineClient:
             # The item the session serves (WI-998), as a label the engine
             # keeps with the record and reports back on the summary.
             spec["work_item"] = work_item
+        if companion:
+            # The standing guide written beside the brief (WI-1243). The
+            # brief points at it by name; the engine writes the text.
+            spec["companion"] = companion
+        if policy:
+            # The project's agent policy (WI-1243), enforced by the session's
+            # hook. Sent only when the project states one, so a project
+            # without one is byte-for-byte the request this client has always
+            # made.
+            spec["policy"] = policy
+        if budget is not None:
+            # Present even when empty (WI-1245): `{}` is "no limits", which
+            # the engine reads differently from a start that named no budget.
+            spec["budget"] = budget
+        if worktree:
+            # Cut a worktree and start in it (WI-1298). Sent only when asked,
+            # so a start that did not is byte-for-byte the request this client
+            # has always made.
+            spec["worktree"] = worktree
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 
-    def list_sessions(self) -> list[EngineSession]:
-        payload = self._call("/api/sessions")
-        rows = payload if isinstance(payload, list) else []
-        return [EngineSession.from_payload(row) for row in rows]
+    def list_sessions(
+        self, *, include_hidden: bool = False
+    ) -> tuple[list[EngineSession], int]:
+        """The engine's sessions, and how many the default list hides.
+
+        `include_hidden` asks for the aged-out rows as well (`?include=hidden`,
+        WI-1289). The default is the visible set, which is what every caller
+        that does not name the flag has always read.
+
+        The engine answers `{sessions, hidden_count}`. An older engine answers
+        a bare list and says nothing about what it hid, so `hidden_count` is 0
+        there: absence is not a count of hidden sessions.
+        """
+        path = "/api/sessions?include=hidden" if include_hidden else "/api/sessions"
+        payload = self._call(path)
+        if isinstance(payload, dict):
+            rows = payload.get("sessions")
+            hidden = payload.get("hidden_count")
+            count = hidden if isinstance(hidden, int) and hidden >= 0 else 0
+        else:
+            rows = payload
+            count = 0
+        if not isinstance(rows, list):
+            rows = []
+        return (
+            [EngineSession.from_payload(row) for row in rows if isinstance(row, dict)],
+            count,
+        )
 
     def sweep_sessions(self, *, screen_lines: int = 8) -> list[EngineSweepEntry] | None:
         """Every live and hibernated session with its screen's last lines,
@@ -1001,6 +1136,59 @@ class EngineClient:
             return None
         return EngineWait.from_payload(payload)
 
+    def session_changes(
+        self,
+        *,
+        since: int,
+        ids: list[str] | None = None,
+        limit: int = 100,
+    ) -> EngineChanges | None:
+        """Session deltas published after `since` (0 reads the whole ring).
+
+        `ids` restricts the page to those engine session ids (absent: every
+        session). `None` on a 404 (an engine without the route).
+        """
+        query: dict[str, str] = {"since": str(int(since)), "limit": str(int(limit))}
+        if ids:
+            query["ids"] = ",".join(ids)
+        payload = self._call(
+            f"/api/sessions/changes?{urllib.parse.urlencode(query)}",
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineChanges.from_payload(payload)
+
+    def wait_any(
+        self,
+        *,
+        ids: list[str] | None = None,
+        until: list[str] | None = None,
+        cursor: int | None = None,
+        timeout_s: int = 120,
+    ) -> EngineWaitAny | None:
+        """Block until one of `ids` publishes a kind in `until`, or time runs
+        out. `None` on a 404 (an engine without the route).
+
+        The HTTP timeout is the wait plus a margin, so a wait that runs its
+        full course is answered rather than cut off by the client.
+        """
+        query: dict[str, str] = {"timeout_s": str(int(timeout_s))}
+        if ids:
+            query["ids"] = ",".join(ids)
+        if until:
+            query["until"] = ",".join(until)
+        if cursor is not None:
+            query["cursor"] = str(int(cursor))
+        payload = self._call(
+            f"/api/sessions/wait-any?{urllib.parse.urlencode(query)}",
+            allow_missing=True,
+            timeout=timeout_s + 15,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineWaitAny.from_payload(payload)
+
     def set_blocked(
         self,
         session_id: str,
@@ -1051,7 +1239,12 @@ class EngineClient:
     # -- hibernation ---------------------------------------------------------
 
     def hibernate_session(
-        self, session_id: str, *, reason: str | None = None, allow_shell: bool = False
+        self,
+        session_id: str,
+        *,
+        reason: str | None = None,
+        allow_shell: bool = False,
+        superseded_by: str | None = None,
     ) -> EngineSession | None:
         """Stop the session's process tree, keeping it listed to wake later.
 
@@ -1063,6 +1256,10 @@ class EngineClient:
         body: dict[str, Any] = {"allow_shell": allow_shell}
         if reason:
             body["reason"] = reason
+        # Omitted when unset, so a plain hibernate body stays exactly what it
+        # has always been.
+        if superseded_by:
+            body["superseded_by"] = superseded_by
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/hibernate",
             method="POST",
@@ -1076,7 +1273,11 @@ class EngineClient:
         return EngineSession.from_payload(payload)
 
     def wake_session(
-        self, session_id: str, *, env: dict[str, str] | None = None
+        self,
+        session_id: str,
+        *,
+        env: dict[str, str] | None = None,
+        force: bool = False,
     ) -> EngineSession | None:
         """Start a hibernated session again under its own id, resuming its
         conversation, with `env` set on top of what the engine recorded (which
@@ -1086,6 +1287,10 @@ class EngineClient:
         body: dict[str, Any] = {}
         if env:
             body["env"] = [[key, value] for key, value in env.items()]
+        # The engine skips a false `force` on the wire too, so it is sent only
+        # when it changes what the wake does.
+        if force:
+            body["force"] = True
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/wake",
             method="POST",
@@ -1095,6 +1300,36 @@ class EngineClient:
         if not isinstance(payload, dict):
             return None
         return EngineSession.from_payload(payload)
+
+    def git_commit(
+        self,
+        *,
+        session_id: str,
+        message: str,
+        paths: list[str],
+        full_diff: bool,
+        forbidden_text: list[str],
+        worktree: str | None = None,
+    ) -> dict[str, Any]:
+        """Commit on a session's behalf (C14). The engine runs the checklist
+        and commits in the repo that session works in, under the repo's own
+        identity. A refusal arrives as `InvalidRequest` (400: conflict marker,
+        secret, intent-to-add, forbidden text) or `Conflict` (409: mid-turn)."""
+        body: dict[str, Any] = {
+            "op": "commit",
+            "session": session_id,
+            "message": message,
+            "paths": paths,
+            "full_diff": full_diff,
+            "forbidden_text": forbidden_text,
+        }
+        if worktree:
+            body["worktree"] = worktree
+        payload = self._call("/api/git/op", method="POST", payload=body)
+        if not isinstance(payload, dict):
+            msg = f"the {self.label} returned no commit for session {session_id}"
+            raise EngineUnavailable(msg)
+        return payload
 
     def keep_awake(self, session_id: str, *, keep_awake: bool) -> EngineSession | None:
         """Pin a session awake (or unpin it); `None` on a 404."""

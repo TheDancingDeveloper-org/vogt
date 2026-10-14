@@ -34,7 +34,12 @@ fn main() {
             );
             return;
         }
-        let placeholder = "<!doctype html>\n<meta charset=\"utf-8\">\n<title>Vogt engine</title>\n<p>Placeholder PWA bundle. Build the real one with <code>cd web &amp;&amp; pnpm build</code>.</p>\n";
+        // The restrictive CSP test embeds whatever index.html this build
+        // produced, and a clean clone has only this placeholder. It must
+        // carry the theme bootstrap as an external script (the real bundle
+        // does) and never a raw inline <script>, or the assertion fails on
+        // a tree that has not run `pnpm build`.
+        let placeholder = "<!doctype html>\n<meta charset=\"utf-8\">\n<title>Vogt engine</title>\n<script src=\"/theme-bootstrap.js\"></script>\n<p>Placeholder PWA bundle. Build the real one with <code>cd web &amp;&amp; pnpm build</code>.</p>\n";
         if let Err(e) = fs::write(&index, placeholder) {
             println!(
                 "cargo:warning=could not write placeholder {} ({e})",

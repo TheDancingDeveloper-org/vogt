@@ -32,7 +32,7 @@ const KEYS: &[&str] = &[
 /// Whether, and where, the engine answers the questions. Off by default —
 /// which is what a test's hand-built config gets, so a test never writes the
 /// real `~/.claude.json` — and read from the environment by `config::load`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Onboarding {
     pub enabled: bool,
     /// The directory Claude Code's `.claude.json` is in when a session does
@@ -48,6 +48,89 @@ pub struct Onboarding {
     /// default posture, as `OPENCODE_CONFIG_CONTENT`. Read and checked once,
     /// at start. See [`opencode_config_from`].
     pub opencode_config: Option<String>,
+    /// The named Claude Code accounts a session may be started under
+    /// (`ENGINE_AGENT_CLAUDE_ACCOUNTS`), each a config directory holding its
+    /// own login. See [`parse_accounts`].
+    pub accounts: Vec<ClaudeAccount>,
+    /// The Codex half (WI-1143 / WI-1146): the managed requirements file Codex
+    /// reads from `/etc/codex/requirements.toml`, or a deployment's own path.
+    /// Unlike the opencode policy, a named file that is missing or unreadable
+    /// is an error the launch must refuse — never a reason to start without
+    /// the gitguard hook. See [`codex_policy_from`].
+    pub codex_policy: Result<Option<PathBuf>, String>,
+}
+
+/// One Claude Code subscription account: a name callers use, and the
+/// `CLAUDE_CONFIG_DIR` that holds its login, `.claude.json` and transcripts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeAccount {
+    pub name: String,
+    pub dir: PathBuf,
+}
+
+/// The longest account name accepted.
+const ACCOUNT_NAME_MAX: usize = 32;
+
+/// Whether `name` is usable as an account name: lowercase letters, digits,
+/// `-` and `_`, starting with a letter or digit. Names appear on the wire and
+/// in records, so they stay boring.
+pub fn is_account_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= ACCOUNT_NAME_MAX
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// `ENGINE_AGENT_CLAUDE_ACCOUNTS`, read: comma-separated `name=/abs/dir`
+/// pairs. The engine, not the caller, maps a name to a directory, so a
+/// session can only be pointed at a directory the operator listed. A malformed
+/// or duplicate entry, or a relative directory, is skipped with a warning:
+/// one bad entry must not stop the engine or disable the others.
+pub fn parse_accounts(value: Option<&str>) -> Vec<ClaudeAccount> {
+    let mut accounts: Vec<ClaudeAccount> = Vec::new();
+    for entry in value.unwrap_or_default().split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((name, dir)) = entry.split_once('=') else {
+            tracing::warn!(
+                entry,
+                "ENGINE_AGENT_CLAUDE_ACCOUNTS entry is not name=dir; ignored"
+            );
+            continue;
+        };
+        let (name, dir) = (name.trim(), dir.trim());
+        if !is_account_name(name) {
+            tracing::warn!(
+                name,
+                "ENGINE_AGENT_CLAUDE_ACCOUNTS name is not [a-z0-9][a-z0-9_-]{{0,31}}; ignored"
+            );
+            continue;
+        }
+        if !Path::new(dir).is_absolute() {
+            tracing::warn!(
+                name,
+                dir,
+                "ENGINE_AGENT_CLAUDE_ACCOUNTS directory is not absolute; ignored"
+            );
+            continue;
+        }
+        if accounts.iter().any(|a| a.name == name) {
+            tracing::warn!(
+                name,
+                "ENGINE_AGENT_CLAUDE_ACCOUNTS names the account twice; the first wins"
+            );
+            continue;
+        }
+        accounts.push(ClaudeAccount {
+            name: name.to_string(),
+            dir: PathBuf::from(dir),
+        });
+    }
+    accounts
 }
 
 /// `ENGINE_AGENT_CLAUDE_SETTINGS`, read: a path names a deployment's own
@@ -67,6 +150,16 @@ pub const IMAGE_SETTINGS_FILE: &str = "/usr/local/share/vogt/driven-session-sett
 
 /// Where the image installs the default opencode driven-session policy.
 pub const IMAGE_OPENCODE_CONFIG: &str = "/usr/local/share/vogt/driven-session-opencode.json";
+
+/// Where the image installs the default Codex requirements file. The same
+/// bytes are also copied to [`CODEX_REQUIREMENTS_FILE`], which is the path
+/// stock Codex reads without a flag.
+pub const IMAGE_CODEX_POLICY: &str = "/usr/local/share/vogt/driven-session-codex-requirements.toml";
+
+/// The managed requirements path Codex reads. A deployment that points
+/// `ENGINE_AGENT_CODEX_POLICY` elsewhere still has to put that file where
+/// Codex will load it; the engine only checks the named path exists.
+pub const CODEX_REQUIREMENTS_FILE: &str = "/etc/codex/requirements.toml";
 
 /// The permission values opencode accepts. Anything else makes opencode
 /// refuse its whole configuration and fail to start, so a policy with one is
@@ -91,6 +184,130 @@ pub fn opencode_config_from(value: Option<&str>) -> Option<String> {
             tracing::warn!(path = %path.display(), reason = %why, "opencode driven-session policy ignored");
             None
         }
+    }
+}
+
+/// `ENGINE_AGENT_CODEX_POLICY`, read like `ENGINE_AGENT_CLAUDE_SETTINGS` (a
+/// path, empty for the image's requirements file when it is installed, `off`).
+///
+/// Fail closed (WI-1143) when a policy is named. A path that is missing,
+/// empty, or unreadable is `Err`: the session must not start, and must not
+/// start with bypass because the hook could not be loaded. Unset or empty
+/// tries the image copy, then `/etc/codex/requirements.toml`; if neither
+/// exists the result is `Ok(None)` ("no policy configured") so a checkout or
+/// a pod built before the file existed still starts. `off` is the only way a
+/// deployment that *has* the file starts Codex without it. OpenCode's
+/// broken-policy warning is deliberately not copied.
+pub fn codex_policy_from(value: Option<&str>) -> Result<Option<PathBuf>, String> {
+    match value.map(str::trim) {
+        Some("off") => Ok(None),
+        Some(path) if !path.is_empty() => readable_policy(PathBuf::from(path)),
+        _ => match readable_policy(PathBuf::from(IMAGE_CODEX_POLICY)) {
+            Ok(path) => Ok(path),
+            Err(_) => match readable_policy(PathBuf::from(CODEX_REQUIREMENTS_FILE)) {
+                Ok(path) => Ok(path),
+                // A checkout, a unit test, or a pod built before the policy
+                // existed has neither file. That is "no policy configured",
+                // which launch treats as off. A deployment that *names* a
+                // missing file still fails above.
+                Err(_) => Ok(None),
+            },
+        },
+    }
+}
+
+fn readable_policy(path: PathBuf) -> Result<Option<PathBuf>, String> {
+    match std::fs::read(&path) {
+        Ok(bytes) if !bytes.is_empty() => {
+            let text = String::from_utf8_lossy(&bytes);
+            check_codex_policy(&text).map_err(|why| {
+                format!(
+                    "Codex driven-session policy {} does not wire the gitguard hook ({why}); refusing to start a Codex session without it",
+                    path.display()
+                )
+            })?;
+            Ok(Some(path))
+        }
+        Ok(_) => Err(format!(
+            "Codex driven-session policy {} is empty; refusing to start a Codex session without the gitguard hook",
+            path.display()
+        )),
+        Err(e) => Err(format!(
+            "Codex driven-session policy {} cannot be read ({e}); refusing to start a Codex session without the gitguard hook",
+            path.display()
+        )),
+    }
+}
+
+/// The hook command the Codex requirements file must run (WI-1136).
+const GITGUARD_HOOK: &str = "klaudia hook gitguard";
+
+/// PreToolUse tool names the gitguard matcher must select: the fork sends
+/// `Bash` for shell, exec_command and write_stdin, and `apply_patch` for
+/// patches (WI-1356).
+const GITGUARD_TOOLS: &[&str] = &["Bash", "apply_patch"];
+
+/// Why a Codex requirements file would let a session run without gitguard
+/// (WI-1356). It must be TOML with `[[hooks.SessionStart]]` and
+/// `[[hooks.PreToolUse]]` groups, each holding a `type = "command"` handler
+/// that runs `klaudia hook gitguard` with `failClosed = true`, and the
+/// PreToolUse group's matcher must select every name in [`GITGUARD_TOOLS`].
+/// It must also pin `[features] hooks = true`: the fork runs managed hooks
+/// only while that feature is on, and without the pin a session could switch
+/// it off with `-c features.hooks=false` or `--disable hooks`.
+/// A comments-only file — what WI-1146 shipped — fails here, so the launch
+/// is refused rather than run unguarded.
+pub fn check_codex_policy(text: &str) -> std::result::Result<(), String> {
+    let value: toml::Table = toml::from_str(text).map_err(|e| format!("not TOML: {e}"))?;
+    let pinned = value
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .and_then(|features| features.get("hooks"))
+        .and_then(toml::Value::as_bool);
+    if pinned != Some(true) {
+        return Err("no [features] hooks = true pin".to_string());
+    }
+    let hooks = value
+        .get("hooks")
+        .and_then(toml::Value::as_table)
+        .ok_or("no [hooks] table")?;
+    for event in ["SessionStart", "PreToolUse"] {
+        let groups = hooks
+            .get(event)
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| format!("no [[hooks.{event}]]"))?;
+        let guarded = groups.iter().any(|group| {
+            let matcher = group.get("matcher").and_then(toml::Value::as_str);
+            let selects_tools = event != "PreToolUse" || matcher_selects_gitguard_tools(matcher);
+            let handlers = group.get("hooks").and_then(toml::Value::as_array);
+            selects_tools
+                && handlers.is_some_and(|handlers| {
+                    handlers.iter().any(|h| {
+                        h.get("type").and_then(toml::Value::as_str) == Some("command")
+                            && h.get("command")
+                                .and_then(toml::Value::as_str)
+                                .map(str::trim)
+                                == Some(GITGUARD_HOOK)
+                            && h.get("failClosed").and_then(toml::Value::as_bool) == Some(true)
+                    })
+                })
+        });
+        if !guarded {
+            return Err(format!(
+                "no [[hooks.{event}]] runs `{GITGUARD_HOOK}` with failClosed = true"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a Codex hook matcher selects every gitguard tool. Codex treats a
+/// missing, empty or `*` matcher as match-all and anything else as a regex.
+fn matcher_selects_gitguard_tools(matcher: Option<&str>) -> bool {
+    match matcher.map(str::trim) {
+        None | Some("") | Some("*") => true,
+        Some(pattern) => regex::Regex::new(pattern)
+            .is_ok_and(|re| GITGUARD_TOOLS.iter().all(|tool| re.is_match(tool))),
     }
 }
 
@@ -123,6 +340,21 @@ pub fn check_opencode_config(text: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+impl Default for Onboarding {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_dir: None,
+            settings_file: None,
+            opencode_config: None,
+            accounts: Vec::new(),
+            // A hand-built config has no policy. A named missing file is the
+            // error; "not configured" is not.
+            codex_policy: Ok(None),
+        }
+    }
+}
+
 impl Onboarding {
     /// On unless `ENGINE_AGENT_QUIET_ONBOARDING=0`.
     pub fn from_env() -> Self {
@@ -142,7 +374,48 @@ impl Onboarding {
                     .ok()
                     .as_deref(),
             ),
+            accounts: parse_accounts(
+                std::env::var("ENGINE_AGENT_CLAUDE_ACCOUNTS")
+                    .ok()
+                    .as_deref(),
+            ),
+            codex_policy: codex_policy_from(
+                std::env::var("ENGINE_AGENT_CODEX_POLICY").ok().as_deref(),
+            ),
         }
+    }
+
+    /// The `CLAUDE_CONFIG_DIR` for the account `name`, or why there is none.
+    pub fn account_dir(&self, name: &str) -> std::result::Result<&Path, String> {
+        self.accounts
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.dir.as_path())
+            .ok_or_else(|| {
+                let known: Vec<&str> = self.accounts.iter().map(|a| a.name.as_str()).collect();
+                if known.is_empty() {
+                    format!("account {name:?}: no accounts are configured (ENGINE_AGENT_CLAUDE_ACCOUNTS)")
+                } else {
+                    format!("account {name:?} is not one of {}", known.join(", "))
+                }
+            })
+    }
+
+    /// Every Claude Code config directory whose `projects/` may hold a
+    /// transcript: the engine's own `CLAUDE_CONFIG_DIR` when set, then each
+    /// configured account. The default `~/.claude` is the caller's to add.
+    pub fn claude_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+        for account in &self.accounts {
+            if !dirs.contains(&account.dir) {
+                dirs.push(account.dir.clone());
+            }
+        }
+        dirs
     }
 
     /// Claude Code's global config file for a session with `env`.
@@ -278,12 +551,55 @@ mod tests {
     }
 
     #[test]
+    fn accounts_parse_to_named_absolute_directories() {
+        let accounts = parse_accounts(Some(" main=/home/a/.claude , acct2=/home/a/.claude-acct2,"));
+        assert_eq!(
+            accounts,
+            vec![
+                ClaudeAccount {
+                    name: "main".into(),
+                    dir: PathBuf::from("/home/a/.claude")
+                },
+                ClaudeAccount {
+                    name: "acct2".into(),
+                    dir: PathBuf::from("/home/a/.claude-acct2")
+                },
+            ]
+        );
+        assert!(parse_accounts(None).is_empty());
+    }
+
+    #[test]
+    fn a_bad_account_entry_is_skipped_and_the_rest_kept() {
+        let accounts = parse_accounts(Some(
+            "noequals,Upper=/x,rel=relative/dir,ok=/ok,ok=/second,=/empty,../up=/y",
+        ));
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].dir, PathBuf::from("/ok"));
+    }
+
+    #[test]
+    fn an_unknown_account_is_refused_with_the_known_names() {
+        let onboarding = Onboarding {
+            accounts: parse_accounts(Some("a=/a,b=/b")),
+            ..Default::default()
+        };
+        assert_eq!(onboarding.account_dir("b"), Ok(Path::new("/b")));
+        let err = onboarding.account_dir("c").unwrap_err();
+        assert!(err.contains("a, b"), "{err}");
+        let none = Onboarding::default().account_dir("a").unwrap_err();
+        assert!(none.contains("no accounts are configured"), "{none}");
+    }
+
+    #[test]
     fn the_session_config_dir_wins() {
         let onboarding = Onboarding {
             enabled: true,
             default_dir: Some(PathBuf::from("/home/pod")),
             settings_file: None,
             opencode_config: None,
+            accounts: Vec::new(),
+            codex_policy: Ok(None),
         };
         let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())];
         assert_eq!(
@@ -707,5 +1023,113 @@ mod driven_policy_tests {
                 "{probe} should match {command}"
             );
         }
+    }
+
+    /// A throwaway file the policy resolver can be pointed at. The value is
+    /// passed in; these tests do not touch process env.
+    fn policy_file(bytes: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-codex-policy-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("requirements.toml");
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn codex_policy_off_is_none() {
+        assert_eq!(super::codex_policy_from(Some("off")).unwrap(), None);
+        assert_eq!(super::codex_policy_from(Some("  off  ")).unwrap(), None);
+    }
+
+    #[test]
+    fn codex_policy_named_file_must_be_readable_and_non_empty() {
+        let (dir, path) = policy_file(SHIPPED_CODEX_POLICY.as_bytes());
+        let got = super::codex_policy_from(Some(path.to_str().unwrap()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, path);
+        std::fs::remove_dir_all(dir).ok();
+
+        let (dir, empty_path) = policy_file(b"");
+        let err = super::codex_policy_from(Some(empty_path.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+        let missing = dir.join("missing.toml");
+        let err = super::codex_policy_from(Some(missing.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("cannot be read"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    const SHIPPED_CODEX_POLICY: &str =
+        include_str!("../../deploy/driven-session-codex-requirements.toml");
+
+    #[test]
+    fn the_shipped_codex_policy_wires_gitguard() {
+        super::check_codex_policy(SHIPPED_CODEX_POLICY).unwrap();
+    }
+
+    #[test]
+    fn a_codex_policy_without_a_fail_closed_gitguard_hook_is_refused() {
+        // The comments-only file WI-1146 shipped: Codex ran unguarded.
+        let (dir, path) = policy_file(b"# requirements\n");
+        let err = super::codex_policy_from(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("does not wire the gitguard hook"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+
+        let check = super::check_codex_policy;
+        let without = |from: &str, to: &str| {
+            assert!(SHIPPED_CODEX_POLICY.contains(from), "{from}");
+            SHIPPED_CODEX_POLICY.replacen(from, to, 1)
+        };
+        // failClosed missing or false on either event.
+        assert!(check(&without("\nfailClosed = true", "\nfailClosed = false")).is_err());
+        assert!(check(&SHIPPED_CODEX_POLICY.replace("failClosed = true\n", "")).is_err());
+        // No SessionStart group: PreToolUse would have no baseline to compare.
+        assert!(check(&without("[[hooks.SessionStart]]", "[[hooks.Stop]]")).is_err());
+        // A matcher that misses apply_patch, or one that is not a regex.
+        assert!(check(&SHIPPED_CODEX_POLICY.replace(
+            "^(Bash|shell|exec_command|write_stdin|apply_patch)$",
+            "^Bash$"
+        ))
+        .is_err());
+        assert!(check(&SHIPPED_CODEX_POLICY.replace(
+            "^(Bash|shell|exec_command|write_stdin|apply_patch)$",
+            "(Bash"
+        ))
+        .is_err());
+        // Another command.
+        assert!(check(&SHIPPED_CODEX_POLICY.replace("klaudia hook gitguard", "true")).is_err());
+        assert!(check("not = [toml").is_err());
+        // The hooks feature not pinned on: a session could disable it.
+        let err = check(&without("[features]\nhooks = true\n", "")).unwrap_err();
+        assert!(err.contains("[features] hooks = true"), "{err}");
+        assert!(check(&without(
+            "[features]\nhooks = true",
+            "[features]\nhooks = false"
+        ))
+        .is_err());
+        assert!(check(&without(
+            "[features]\nhooks = true",
+            "[features]\nhooks = \"true\""
+        ))
+        .is_err());
+        assert!(check(&without(
+            "[features]\nhooks = true",
+            "[features]\nother = true"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn codex_policy_unset_without_image_files_is_unconfigured() {
+        // Neither the image path nor /etc/codex/requirements.toml exists in
+        // the unit-test tree. Unset and empty are "no policy configured",
+        // not a refusal — a named missing path is the error, above.
+        assert_eq!(super::codex_policy_from(None).unwrap(), None);
+        assert_eq!(super::codex_policy_from(Some("")).unwrap(), None);
+        assert_eq!(super::codex_policy_from(Some("   ")).unwrap(), None);
     }
 }

@@ -23,8 +23,10 @@ from vogt.application.models import (
     RegisterProjectParams,
     ReportBlockedParams,
     ReportUnblockedParams,
+    SessionChangesParams,
     SessionInputParams,
     SessionScreenParams,
+    SessionWaitAnyParams,
     SessionWaitParams,
     StartSessionParams,
     StopSessionParams,
@@ -36,9 +38,11 @@ from vogt.application.services import (
     register_project,
     report_blocked,
     report_unblocked,
+    session_changes,
     session_input,
     session_screen,
     session_wait,
+    session_wait_any,
     start_session,
     stop_session,
 )
@@ -66,6 +70,12 @@ class Engine:
         self.screen_queries: list[str] = []
         self.wait_queries: list[str] = []
         self.wait_supported = True
+        self.changes_queries: list[str] = []
+        self.changes_supported = True
+        self.wait_any_queries: list[str] = []
+        self.wait_any_supported = True
+        #: The engine id a canned change names as linked, when a test sets it.
+        self.linked: str | None = None
         #: The blocked report the engine holds (one for the whole stand-in).
         self.blocked: dict[str, Any] | None = None
         #: Bodies sent to POST /answer.
@@ -108,6 +118,54 @@ class Engine:
                 ]
             ).encode()
         parts = path.split("/")  # ['', 'api', 'sessions', id, verb?]
+        if method == "GET" and path == "/api/sessions/changes":
+            if not self.changes_supported:
+                return 404, b""
+            self.changes_queries.append(url.partition("?")[2])
+            return 200, json.dumps(
+                {
+                    "changes": [
+                        {
+                            "seq": 7,
+                            "at": "2026-10-11T00:00:00Z",
+                            "session": self.linked or UNLINKED,
+                            "kind": "ready",
+                            "summary": "ready",
+                        },
+                        {
+                            "seq": 8,
+                            "at": "2026-10-11T00:00:01Z",
+                            "session": UNLINKED,
+                            "kind": "blocked",
+                            "summary": "blocked: needs a token",
+                        },
+                    ],
+                    "next_cursor": 8,
+                    "truncated": False,
+                }
+            ).encode()
+        if method == "GET" and path == "/api/sessions/wait-any":
+            if not self.wait_any_supported:
+                return 404, b""
+            self.wait_any_queries.append(url.partition("?")[2])
+            query = url.partition("?")[2]
+            if "timeout" in query and "until=exited" in query:
+                return 200, json.dumps(
+                    {"outcome": "timeout", "next_cursor": 8}
+                ).encode()
+            return 200, json.dumps(
+                {
+                    "outcome": "changed",
+                    "change": {
+                        "seq": 8,
+                        "at": "2026-10-11T00:00:01Z",
+                        "session": UNLINKED,
+                        "kind": "blocked",
+                        "summary": "blocked: needs a token",
+                    },
+                    "next_cursor": 8,
+                }
+            ).encode()
         if len(parts) >= 4 and parts[2] == "sessions":
             engine_id = parts[3]
             verb = parts[4] if len(parts) > 4 else ""
@@ -341,6 +399,88 @@ def test_an_unknown_key_is_refused_by_the_model() -> None:
         )
 
 
+def test_text_submits_by_default(wired: AppContext, engine: Engine) -> None:
+    result = session_input(
+        wired, SessionInputParams(id=UNLINKED, text="hi", reason=WHY)
+    )
+    assert engine.inputs() == [
+        (UNLINKED, {"text": "hi", "submit": False}),
+        (UNLINKED, {"text": "", "submit": True}),
+    ]
+    assert result.submitted is True
+    assert result.delivery != "typed"
+
+
+def test_keys_alone_press_only_the_keys(wired: AppContext, engine: Engine) -> None:
+    result = session_input(
+        wired,
+        SessionInputParams.model_validate(
+            {"id": UNLINKED, "keys": ["esc"], "reason": WHY}
+        ),
+    )
+    assert engine.inputs() == [(UNLINKED, {"text": "\x1b", "submit": False})]
+    assert result.submitted is False
+
+
+def test_text_and_enter_key_press_enter_once(wired: AppContext, engine: Engine) -> None:
+    result = session_input(
+        wired,
+        SessionInputParams(id=UNLINKED, text="go on", keys=["enter"], reason=WHY),
+    )
+    assert engine.inputs() == [
+        (UNLINKED, {"text": "go on", "submit": False}),
+        (UNLINKED, {"text": "\r", "submit": False}),
+    ]
+    assert result.submitted is True
+
+
+def test_text_and_a_non_enter_key_still_submit(
+    wired: AppContext, engine: Engine
+) -> None:
+    session_input(
+        wired,
+        SessionInputParams(id=UNLINKED, text="ls", keys=["tab"], reason=WHY),
+    )
+    assert engine.inputs() == [
+        (UNLINKED, {"text": "ls", "submit": False}),
+        (UNLINKED, {"text": "\t", "submit": False}),
+        (UNLINKED, {"text": "", "submit": True}),
+    ]
+
+
+def test_draft_types_without_pressing_enter(wired: AppContext, engine: Engine) -> None:
+    result = session_input(
+        wired,
+        SessionInputParams(id=UNLINKED, text="hi", draft=True, reason=WHY),
+    )
+    assert engine.inputs() == [(UNLINKED, {"text": "hi", "submit": False})]
+    assert result.submitted is False
+    assert result.delivery == "typed"
+    assert "no Enter" in result.delivery_evidence
+
+
+def test_explicit_submit_false_does_not_press_enter(
+    wired: AppContext, engine: Engine
+) -> None:
+    result = session_input(
+        wired,
+        SessionInputParams(id=UNLINKED, text="hi", submit=False, reason=WHY),
+    )
+    assert engine.inputs() == [(UNLINKED, {"text": "hi", "submit": False})]
+    assert result.submitted is False
+    assert result.delivery == "typed"
+
+
+def test_draft_wins_over_submit(wired: AppContext, engine: Engine) -> None:
+    result = session_input(
+        wired,
+        SessionInputParams(id=UNLINKED, text="hi", submit=True, draft=True, reason=WHY),
+    )
+    assert engine.inputs() == [(UNLINKED, {"text": "hi", "submit": False})]
+    assert result.submitted is False
+    assert result.delivery == "typed"
+
+
 def test_input_accepts_an_unlinked_engine_uuid(
     wired: AppContext, engine: Engine
 ) -> None:
@@ -348,7 +488,10 @@ def test_input_accepts_an_unlinked_engine_uuid(
         wired, SessionInputParams(id=UNLINKED, text="hi", reason=WHY)
     )
     assert result.linked is False
-    assert engine.inputs() == [(UNLINKED, {"text": "hi", "submit": False})]
+    assert engine.inputs() == [
+        (UNLINKED, {"text": "hi", "submit": False}),
+        (UNLINKED, {"text": "", "submit": True}),
+    ]
 
 
 def test_input_accepts_the_engine_uuid_of_a_linked_session(
@@ -376,6 +519,10 @@ def test_input_is_audited_without_the_text(wired: AppContext, engine: Engine) ->
         events = view.list_events(after=0, limit=50)
     row = next(one for one in audit if one.operation == "session.input")
     assert row.entity_id == UNLINKED
+    assert engine.inputs() == [
+        (UNLINKED, {"text": secret, "submit": False}),
+        (UNLINKED, {"text": "\r", "submit": False}),
+    ], "Enter as a key is the submit: no second, blind Enter after it"
     assert row.reason == WHY
     event = next(one for one in events if one.kind == "session.input")
     assert event.summary["bytes"] == len(secret)
@@ -497,7 +644,7 @@ def test_session_list_and_inbox_show_a_permission_dialog(
 ) -> None:
     engine.extra = dict(APPROVAL)
     _started(wired)
-    rows = list_sessions(wired, ListSessionsParams()).sessions
+    rows = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     assert rows and all(row.activity == "awaiting-approval" for row in rows)
     approval = rows[0].approval
     assert approval is not None and approval.deadline_seconds == 61
@@ -516,13 +663,15 @@ def test_wait_passes_until_and_timeout_and_returns_why(
     """WI-874: one call waits on the engine and says why it stopped."""
     ses_id, engine_id = _started(wired)
     waited = session_wait(
-        wired, SessionWaitParams(id=ses_id, until="any_change", timeout_s=30)
+        wired,
+        SessionWaitParams(id=ses_id, until="any_change", timeout_s=30, screen=True),
     )
     assert engine.wait_queries[-1] == "until=any-change&timeout_s=30"
     assert waited.engine_session_id == engine_id
     assert waited.outcome == "awaiting-approval"
     assert waited.matched is False
     assert waited.waited_ms == 1234
+    assert waited.screen is not None
     assert waited.screen.approval is not None
     assert waited.screen.ready is False
 
@@ -538,6 +687,72 @@ def test_wait_on_an_engine_without_the_route_says_so(
 def test_wait_bounds_its_timeout() -> None:
     with pytest.raises(ValueError):
         SessionWaitParams(id=UNLINKED, timeout_s=601)
+
+
+def test_changes_maps_a_linked_session_and_keeps_an_unlinked_uuid(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1246: a delta names Vogt's id when the engine session is linked."""
+    ses_id, engine_id = _started(wired)
+    engine.linked = engine_id
+    page = session_changes(wired, SessionChangesParams(since=3, ids=[ses_id], limit=10))
+    assert engine.changes_queries[-1] == f"since=3&limit=10&ids={engine_id}"
+    assert page.next_cursor == 8 and page.truncated is False
+    linked, unlinked = page.changes
+    assert linked.session == ses_id and linked.kind == "ready" and linked.seq == 7
+    assert unlinked.session == UNLINKED and unlinked.kind == "blocked"
+    assert unlinked.summary == "blocked: needs a token"
+
+
+def test_changes_on_an_engine_without_the_route_says_so(
+    wired: AppContext, engine: Engine
+) -> None:
+    engine.changes_supported = False
+    with pytest.raises(EngineUnavailable, match="does not support changes yet"):
+        session_changes(wired, SessionChangesParams())
+
+
+def test_changes_rejects_an_unknown_session(wired: AppContext) -> None:
+    with pytest.raises(NotFound):
+        session_changes(wired, SessionChangesParams(ids=["ses_nope"]))
+
+
+def test_wait_any_passes_its_query_and_returns_the_mapped_change(
+    wired: AppContext, engine: Engine
+) -> None:
+    ses_id, _engine_id = _started(wired)
+    waited = session_wait_any(
+        wired,
+        SessionWaitAnyParams(
+            ids=[ses_id, UNLINKED], until=["blocked"], cursor=4, timeout_s=30
+        ),
+    )
+    query = engine.wait_any_queries[-1]
+    assert "timeout_s=30" in query and "until=blocked" in query and "cursor=4" in query
+    assert UNLINKED in query
+    assert waited.outcome == "changed"
+    assert waited.change is not None and waited.change.session == UNLINKED
+    assert waited.next_cursor == 8
+
+
+def test_wait_any_timeout_has_no_change(wired: AppContext, engine: Engine) -> None:
+    waited = session_wait_any(
+        wired, SessionWaitAnyParams(until=["exited"], timeout_s=5)
+    )
+    assert waited.outcome == "timeout" and waited.change is None
+
+
+def test_wait_any_on_an_engine_without_the_route_says_so(
+    wired: AppContext, engine: Engine
+) -> None:
+    engine.wait_any_supported = False
+    with pytest.raises(EngineUnavailable, match="does not support wait-any yet"):
+        session_wait_any(wired, SessionWaitAnyParams())
+
+
+def test_wait_any_bounds_its_timeout() -> None:
+    with pytest.raises(ValueError):
+        SessionWaitAnyParams(timeout_s=601)
 
 
 def test_a_session_reports_itself_blocked_without_naming_itself(
@@ -568,7 +783,9 @@ def test_a_session_reports_itself_blocked_without_naming_itself(
     assert sent["body"]["blocked"] is True
     # It is on the list and in the Inbox, and the write is audited with it.
     row = next(
-        r for r in list_sessions(wired, ListSessionsParams()).sessions if r.id == ses_id
+        r
+        for r in list_sessions(wired, ListSessionsParams(mode="full")).sessions
+        if r.id == ses_id
     )
     assert row.blocked is not None
     assert row.blocked.blocker == "needs the Telegram bot token"
@@ -676,7 +893,9 @@ def test_a_session_is_told_where_the_engine_is(
     )
     env = dict(create["body"]["env"])
     assert env["VOGT_ENGINE_URL"] == "http://127.0.0.1:8910"
-    assert DRIVING_OTHER_SESSIONS in create["body"]["prompt"]
+    # The driving instructions moved to the companion; the brief only names it.
+    assert ".guide.md" in create["body"]["prompt"]
+    assert DRIVING_OTHER_SESSIONS in create["body"]["companion"]
 
 
 # -- session.answer (WI-917) ------------------------------------------------

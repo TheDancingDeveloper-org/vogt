@@ -36,6 +36,7 @@ from vogt.application.models import (
     CommentParams,
     CommentResult,
     CreateWorkParams,
+    GetManyWorkParams,
     GetWorkParams,
     ListSessionsParams,
     ListWorkParams,
@@ -45,6 +46,7 @@ from vogt.application.models import (
     UpdateWorkParams,
     WorkItemRow,
     WorkListResult,
+    WorkManyResult,
     WorkResult,
 )
 from vogt.application.services import _resolve, upstream, writeback
@@ -559,7 +561,9 @@ def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
         item = upstream.resolve_work_ref(ctx, view, params.ref)
         native = view.work_item_by_ref(params.ref) is not None
         comments = (
-            view.comments_for(item.id, limit=params.comment_limit)
+            view.comments_for(
+                item.id, limit=params.comment_limit, order=params.comment_order
+            )
             if params.comment_limit and native
             else []
         )
@@ -574,13 +578,36 @@ def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
         # written back onto the item.
         git = git_story_for(ctx, view, item, branches)
     sessions = (
-        list_sessions(ctx, ListSessionsParams(work_item=item.ref)).sessions
+        list_sessions(ctx, ListSessionsParams(work_item=item.ref, mode="full")).sessions
         if native
         else []
     )
+    if params.mode == "summary":
+        item = item.model_copy(update={"body": ""})
+        comments = []
     return WorkResult(
         item=item, comments=comments, sessions=sessions, branches=branches, git=git
     )
+
+
+def get_many_work(ctx: AppContext, params: GetManyWorkParams) -> WorkManyResult:
+    """Compact rows for a set of refs, in one read.
+
+    What a surface asks when it already knows which items it names — the
+    session rail's work-item chips — so a render costs one request rather
+    than one `work.list` text search per ref (WI-1224). Each ref resolves
+    exactly as `work.get` resolves it, inside one read view; a ref that names
+    nothing is reported in `missing` rather than failing the rest.
+    """
+    items: list[WorkItemRow] = []
+    missing: list[str] = []
+    with ctx.declared.read() as view:
+        for ref in dict.fromkeys(params.refs):
+            try:
+                items.append(WorkItemRow.of(upstream.resolve_work_ref(ctx, view, ref)))
+            except NotFound:
+                missing.append(ref)
+    return WorkManyResult(items=items, missing=missing)
 
 
 def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
@@ -965,7 +992,9 @@ def _warn_live_sessions(ctx: AppContext, result: WorkResult) -> WorkResult:
     with ctx.declared.read() as view:
         if view.work_item_by_ref(item.ref) is None:
             return result  # an upstream item: no session rows point at it
-    sessions = list_sessions(ctx, ListSessionsParams(work_item=item.ref)).sessions
+    sessions = list_sessions(
+        ctx, ListSessionsParams(mode="full", work_item=item.ref)
+    ).sessions
     live = [
         session
         for session in sessions
@@ -1377,6 +1406,14 @@ def comment_work(ctx: AppContext, params: CommentParams) -> CommentResult:
         )
     if not native:
         assert project is not None  # an upstream item always has its project
+        if params.kind == "handoff":
+            # The forge thread has no kind: posting a hand-off there would
+            # flatten it to free text and the next session could not find it.
+            msg = (
+                f"{item.ref} is an upstream item; a hand-off comment is a "
+                "local record and cannot be posted to the forge"
+            )
+            raise InvalidRequest(msg)
         return _comment_upstream(ctx, params, item, project)
     # As with transitions, a native item's comment is local whatever the
     # project's link state; there is no upstream thread to post to (#770).
@@ -1393,6 +1430,8 @@ def _comment_native(ctx: AppContext, params: CommentParams) -> CommentResult:
             actor_display_name=actor.display_name,
             body=params.body,
             created_at=ctx.clock(),
+            kind=params.kind,
+            handoff=params.handoff,
         )
         txn.insert_comment(comment)
 

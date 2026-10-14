@@ -121,6 +121,7 @@ def test_session_input_says_what_became_of_it(
         ctx, SessionInputParams(id=ses_id, text="go on", keys=["enter"], reason=WHY)
     )
     assert result.submitted is True, "Enter as a key is a submit"
+    assert engine.inputs == 2, "the text and the Enter key, no second Enter"
     assert result.delivery == delivery
     assert result.delivery_evidence
 
@@ -128,7 +129,9 @@ def test_session_input_says_what_became_of_it(
 def test_text_without_enter_is_typed_and_not_watched(instance: AppContext) -> None:
     engine = Engine("idle", [("idle", [])])
     ctx, ses_id = _wired(instance, engine)
-    result = session_input(ctx, SessionInputParams(id=ses_id, text="draft", reason=WHY))
+    result = session_input(
+        ctx, SessionInputParams(id=ses_id, text="draft", draft=True, reason=WHY)
+    )
     assert result.submitted is False
     assert result.delivery == "typed"
     assert engine.screens == 0

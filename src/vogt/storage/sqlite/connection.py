@@ -1,14 +1,26 @@
 """Connection handling for the SQLite backend.
 
-Connections are opened per transaction and closed after it. That is slightly
-wasteful and completely thread-safe, which is the right trade while the same
-data directory is reachable from a CLI process, a server process and a stdio
-MCP process at the same time (`DEPLOYMENT.md`).
+Write connections are opened per transaction and closed after it. That is
+slightly wasteful and completely thread-safe, which is the right trade while
+the same data directory is reachable from a CLI process, a server process and
+a stdio MCP process at the same time (`DEPLOYMENT.md`).
+
+Read connections are pooled per database file (`borrow_read`, WI-1224). A
+read transaction opened on a fresh connection paid for the open, four pragmas
+and a cold page cache every time, and one shell badge read opened ~130 of
+them. A pooled connection is handed to one thread at a time, always outside a
+transaction, and is still a plain SQLite connection: another process's
+commits are visible to its next `BEGIN` exactly as they would be to a new one.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import threading
+from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 
 BUSY_TIMEOUT_MS = 5_000
@@ -37,20 +49,27 @@ DEFAULT_SYNCHRONOUS = "normal"
 
 
 def connect(
-    path: Path, *, create: bool, synchronous: str = DEFAULT_SYNCHRONOUS
+    path: Path,
+    *,
+    create: bool,
+    synchronous: str = DEFAULT_SYNCHRONOUS,
+    shared: bool = False,
 ) -> sqlite3.Connection:
     """Open a connection with Vogt's pragmas applied.
 
     `isolation_level=None` puts the driver in autocommit mode so that this
     package issues its own `BEGIN`/`COMMIT`. Transaction boundaries are a
     correctness concern here and are not left to the driver.
+
+    `shared` lets the connection be used from a thread other than the one
+    that opened it — one thread at a time, which `borrow_read` guarantees.
     """
     if not create and not path.exists():
         msg = f"no database at {path}"
         raise FileNotFoundError(msg)
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, isolation_level=None)
+    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=not shared)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
@@ -62,6 +81,145 @@ def connect(
         raise ValueError(msg)
     conn.execute(f"PRAGMA synchronous = {synchronous.upper()}")
     return conn
+
+
+#: Idle read connections kept per database file. Enough for a burst of
+#: concurrent reads in one process; more only holds file descriptors.
+READ_POOL_IDLE_MAX = 8
+
+#: Database files with a pool at once, least recently used dropped first. A
+#: server has two; a test suite creates thousands of throwaway instances, and
+#: their idle connections must not pile up as open descriptors.
+READ_POOL_FILES_MAX = 4
+
+#: What identifies the database a connection was opened on: the database
+#: file's and its WAL index's `(st_dev, st_ino)`. A clone renames a new file
+#: over the path; a restore copies over it in place but deletes the `-shm`
+#: beside it, so a new index is created by the next connection. Either way
+#: the identity moves and the idle connections, opened on the database that
+#: was there before, are closed rather than lent.
+FileIdentity = tuple[int, int, int, int]
+
+
+@dataclass
+class _ReadPool:
+    """Idle read connections to one database file, as it was when used."""
+
+    identity: FileIdentity
+    idle: list[sqlite3.Connection] = field(default_factory=list)
+
+
+_pools: OrderedDict[tuple[str, str], _ReadPool] = OrderedDict()
+_pools_lock = threading.Lock()
+#: Moves on every drain. A connection lent before a drain is closed when it
+#: comes back rather than pooled.
+_drains = 0
+
+
+def _file_identity(path: Path) -> FileIdentity:
+    stat = path.stat()
+    try:
+        index = path.with_name(f"{path.name}-shm").stat()
+    except FileNotFoundError:
+        return (stat.st_dev, stat.st_ino, 0, 0)
+    return (stat.st_dev, stat.st_ino, index.st_dev, index.st_ino)
+
+
+def _close_all(conns: list[sqlite3.Connection]) -> None:
+    for conn in conns:
+        with suppress(sqlite3.Error):
+            conn.close()
+
+
+@contextmanager
+def borrow_read(
+    path: Path, *, synchronous: str = DEFAULT_SYNCHRONOUS
+) -> Iterator[sqlite3.Connection]:
+    """Lend a pooled connection for one read, outside any transaction.
+
+    The caller opens and ends its own transaction. A connection returned
+    still inside one, or after an error, is closed rather than pooled, so the
+    next borrower always starts clean.
+    """
+    if not path.exists():
+        msg = f"no database at {path}"
+        raise FileNotFoundError(msg)
+    key = (str(path), synchronous)
+    conn: sqlite3.Connection | None = None
+    stale: list[sqlite3.Connection] = []
+    with _pools_lock:
+        drains = _drains
+        pool = _pools.get(key)
+        if pool is not None and pool.idle:
+            if pool.identity == _file_identity(path):
+                conn = pool.idle.pop()
+            else:
+                stale, pool.idle = pool.idle, []
+    _close_all(stale)
+    if conn is None:
+        conn = connect(path, create=False, synchronous=synchronous, shared=True)
+    healthy = False
+    try:
+        yield conn
+        healthy = not conn.in_transaction
+    finally:
+        _return(key, path, conn, healthy=healthy, drains=drains)
+
+
+def _return(
+    key: tuple[str, str],
+    path: Path,
+    conn: sqlite3.Connection,
+    *,
+    healthy: bool,
+    drains: int,
+) -> None:
+    evicted: list[sqlite3.Connection] = []
+    keep = False
+    if healthy:
+        try:
+            # Taken after use, so the WAL index the connection created or
+            # joined is part of it.
+            identity = _file_identity(path)
+        except FileNotFoundError:
+            healthy = False
+    if healthy:
+        with _pools_lock:
+            pool = _pools.get(key)
+            if pool is None:
+                pool = _pools[key] = _ReadPool(identity=identity)
+            elif pool.identity != identity:
+                evicted, pool.idle = pool.idle, []
+                pool.identity = identity
+            _pools.move_to_end(key)
+            if drains == _drains and len(pool.idle) < READ_POOL_IDLE_MAX:
+                pool.idle.append(conn)
+                keep = True
+            while len(_pools) > READ_POOL_FILES_MAX:
+                _, dropped = _pools.popitem(last=False)
+                evicted.extend(dropped.idle)
+    if not keep:
+        evicted.append(conn)
+    _close_all(evicted)
+
+
+def drain_read_pool(path: Path | None = None) -> None:
+    """Close every idle pooled connection (to one file, or to all).
+
+    Called before a restore or clone replaces a store's files, so no
+    connection outlives the database it was opened on, and by tests. A
+    connection lent out at the time is closed when it comes back.
+    """
+    global _drains
+    with _pools_lock:
+        _drains += 1
+        if path is None:
+            dropped = list(_pools.values())
+            _pools.clear()
+        else:
+            dropped = [_pools.pop(key) for key in list(_pools) if key[0] == str(path)]
+    for pool in dropped:
+        _close_all(pool.idle)
 
 
 def split_statements(script: str) -> list[str]:

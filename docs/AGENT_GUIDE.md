@@ -150,10 +150,70 @@ A session is how a checkout gets bound to a work item. `session_start` (availabl
 when the engine is running) opens a PTY in the project's registered working tree
 and writes the item's brief — its description, its `why`, its relations — to a
 prompt file the agent is pointed at, so you begin with the item's context rather
-than reconstructing it.
+than reconstructing it. The brief is short on purpose. Standing instructions
+(how to report being blocked, how to drive another session, how to record a
+result) live in a guide beside it, `<session-id>.guide.md`, which the brief
+names in one line. A task can also name **touch points** — `files`, `symbols`,
+`done`, `gates` — rendered as a block in the brief, with a one-level map of the
+directories those files sit in when one was asked for.
+
+A project can carry an **agent policy** (`project.update --agent-policy`). The
+brief states all of it: text that must not appear in a commit, branch or PR
+(`forbidden_text`, regexes checked when the policy is saved), whether merging
+deploys production (`merge_deploys_prod`, with `main_branches`; an empty list
+means `main`), `commit_identity`, `test_recipe`, `deployed_setup` and `rules`. It may
+also carry three structured blocks. `landing` names the base branch, the branch pattern
+(`{n}` is the work item number, and the brief fills it in), how a worker lands
+(`push_branch` or `open_pr`), who merges (`oversight` or `operator`) and by
+which mode (`fast_forward` or `rebase` — a merge commit is refused), and who
+deploys; when it is set the brief renders a "Landing rule for this repo"
+block, and when it is absent the brief says nothing about one. `review` names
+the template, model, effort, models a review must not run on, and a turn
+budget. `verification` says whether an item needs a verification record before
+it is done and which deploy lanes that record must cover. Today all of it is
+guidance. The brief says it and nothing refuses it; enforcement is a
+follow-up.
 
 ```console
 $ uv run vogt session start --work-item WI-42 --reason "start on the login-timeout fix"
+```
+
+#### Start for a purpose
+
+`session_start` takes `purpose`, one of `implement`, `implement-careful`,
+`review`, `mechanical`, `investigate` or `design`. The deployment's dispatch
+profile for that purpose fills `template`, `model`, `effort`, `budget`,
+`worktree`, `repo_map` and `autopilot` wherever the start leaves them unset:
+
+| Purpose | Template | Model | Effort | Budget | Other |
+| --- | --- | --- | --- | --- | --- |
+| `implement` | klaudia | grok-4.7 | — | 120 turns, 90 min | worktree, repo map, autopilot |
+| `implement-careful` | claude | opus | low | 150 turns | autopilot |
+| `review` | claude | opus | low | 40 turns | no autopilot, a read-only hint in the brief |
+| `mechanical` | claude | haiku | — | 60 turns | autopilot |
+| `investigate`, `design` | claude | opus | low | 60 turns | autopilot |
+
+A field you pass yourself wins, and the `session.started` event lists it
+under `overrides`. A profile never sets `role` or `permission_mode`: it is
+applied after the checks that stop an agent starting an overseer or granting
+`bypass`. `worktree` is recorded but not yet acted on (WI-1298).
+
+The table is the deployment's, not yours. A person overrides fields with
+`preference_set` on `dispatch.profiles` (for example
+`{"implement": {"model": "grok-4.8"}}` changes only that one field). The same
+store holds `dispatch.max_workers_per_overseer` (`{"value": 5}`),
+`dispatch.escalate_after_failed_reviews` (`{"value": 2}`) and
+`dispatch.review_by_oversight_only` (`{"value": true}`). An agent cannot set
+any `dispatch.*` key.
+
+Every session records `purpose`, `started_by_session` (the engine id of the
+session that started it) and `started_by_kind` (`person`, or the starter's
+engine role at that moment: `oversight` or `worker`). Vogt reads the last two
+from the caller's credential, never from the start's parameters. They show
+in `session_list` full mode and never change after the start.
+
+```console
+$ uv run vogt session start --work-item WI-42 --purpose review --reason "review WI-42"
 ```
 
 The session is linked back to the item: the item shows a live-activity badge
@@ -162,6 +222,52 @@ the item. If you are running as a **scheduled agent task** instead, bind the tas
 to its subject with `vogt_work_item` (a ref like `WI-42`) or `vogt_project` (a
 slug) so the run's findings file as observations against that subject with the
 same freshness and trust every other kind of evidence carries.
+
+### Fresh sessions start from the hand-off
+
+A worker starts a **fresh** session from the item's hand-off, never by resuming
+the previous worker's conversation:
+
+```console
+$ uv run vogt session start --from-handoff WI-42 --reason "continue from the hand-off"
+```
+
+That refuses when the item has no hand-off comment. Before stopping, the worker
+writes one with `work.comment --kind handoff`, carrying the branch, head, what
+is done, what remains, and the free-text body. Resume is only for recovering a
+session that died mid-turn, and only once.
+
+An overseer resumes (that is what a long-running investigation is for) and
+writes a checkpoint before any planned restart. A review session is fresh too,
+and it is started as one: `session_start(review_of=WI-n)` (a template and a
+model on top, the same as any other start). Its brief is not the worker's. It
+carries the item's own description under **Done means** — the acceptance
+criteria the item itself states — and **The diff**, taken from the latest
+hand-off's branch, base and head, rendered as the real command
+(`git diff <base>...<head sha>`, or the branch when the hand-off names no sha,
+which the brief flags). It does not carry the ranking, the comment thread, the
+project's worker landing rules, or an instruction to continue the work, and a
+`task` given alongside lands under **Also asked** rather than as a Task to go
+and do. The review is read-only: no edits, commits, pushes, merges or deploys.
+Every hand-off field — done, remaining, gates run, blockers and the free text —
+sits under **What the worker claims**, marked as a claim, not evidence. The
+brief also carries the project's gates (`test_recipe`) and **Deployed setup**
+(`agent_policy.deployed_setup`, or a line saying none is recorded), and the
+verdict format: a first line of `no blockers (head <sha>)` or
+`blockers (head <sha>):` with a numbered list, then which deployment paths the
+tests cover. When the item has no hand-off, or the hand-off names no branch
+and base, the brief says there is no diff to review and the reviewer reports
+that and stops. A reviewer reads the diff and that brief, never the worker's
+screen or transcript.
+
+A worker brief pastes only the remarks made since the latest hand-off; the
+thread before it — old root causes, old verdicts — is superseded by it.
+
+The same hand-off is how a budget ends. A worker session carries a budget
+(120 turns and 90 minutes, unless the start named one), and when it crosses
+the limit the engine hibernates it and emits a `budget` change. Auto-split is
+not done for it: the overseer that reads that change starts the successor
+itself with `session_start(from_handoff=WI-n)`.
 
 ### Search session history — live and archived
 
@@ -229,7 +335,14 @@ The recipe is **start with a task → wait until ready → read → answer → s
    task goes into the brief as its `## Task` section, and the agent starts on a
    first prompt telling it to read the brief and carry the task out. You do not
    type the task in. Without `template` you get a plain shell, which does
-   nothing until typed into. `resume` continues an earlier conversation, and
+   nothing until typed into. `worktree: true` starts the session in a git
+   worktree of its own instead of the project's shared checkout: the engine
+   cuts it from the project's integration branch (`agent_policy.base_branch`,
+   or `main` when the project states none) onto `<work item>-<session>`, and
+   the session's `cwd` is that worktree. The shared checkout is never written
+   to, so a dirty tree there cannot leak into the session. The base is the
+   local ref and is not fetched first. `worktree` cannot be combined with
+   `resume`. `resume` continues an earlier conversation, and
    the session starts in the directory that conversation ran in (from its
    transcript), so give the project it belongs to or any project — the
    directory follows the conversation. If your `session_start` tool has no
@@ -250,14 +363,18 @@ The recipe is **start with a task → wait until ready → read → answer → s
    agents share a directory). `session_screen` gives the visible `lines` now;
    `session_log_tail` the raw history. `session_list` shows each live agent
    session's `last_reply_excerpt`, so you can pick which to act on without
-   prompting every one.
+   prompting every one. An overseer reads `session_digest` instead of
+   `session_screen` plus `session_last_reply` plus a git log: one engine row,
+   with the blocked report and the economics the engine already computed.
 4. **Answer.** `session_input` types `text`, then presses the named `keys` in
    order (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`,
-   `ctrl-d`, `backspace`), then Enter if `submit`. A menu or dialog: `keys:
-   ["esc"]` to dismiss it, or arrows then `enter` to choose. When Enter is
-   pressed (`submit`, or `enter` among the `keys`), the result says what
-   became of the input in `delivery`: `delivered` means a turn started;
-   `queued` means it waits behind a running turn; `unconfirmed` means
+   `ctrl-d`, `backspace`), then Enter. Enter is pressed by default, so
+   `session_input(id, text)` sends the line; `draft: true` (or an explicit
+   `submit: false`) types without sending and the result says `typed`. A menu
+   or dialog: `keys: ["esc"]` to dismiss it, or arrows then `enter` to choose.
+   When Enter is pressed (the default, or `enter` among the `keys`), the result
+   says what became of the input in `delivery`: `delivered` means a turn
+   started; `queued` means it waits behind a running turn; `unconfirmed` means
    nothing showed within about 2 s, so read the screen. `typed` means no
    Enter, and the text sits in the input box. `delivery_evidence` says how
    that was judged. Then wait again.
@@ -268,7 +385,7 @@ The recipe is **start with a task → wait until ready → read → answer → s
 $ uv run vogt session start --project vogt --template claude --task "run the test suite and report failures" --reason "delegate the test run"
 $ uv run vogt session screen --id <session-id>
 $ uv run vogt session input --id <session-id> --keys esc --reason "dismiss the dialog"
-$ uv run vogt session input --id <session-id> --text "now fix the first failure" --submit --reason "follow-up"
+$ uv run vogt session input --id <session-id> --text "now fix the first failure" --reason "follow-up"
 $ uv run vogt session stop --id <session-id> --reason "done"
 ```
 
@@ -296,6 +413,11 @@ Rules:
   one call, most urgent first (`approval`, `blocked`, `waiting`, `stalled`,
   …). Each row carries its reason, last reply excerpt and the tail of its
   screen. Act on the top rows, then sweep again, or `session_wait` on one.
+  When you already know which sessions you oversee, prefer the delta loop:
+  `session_wait_any` (their ids, the kinds you care about) blocks until one
+  of them changes, then `session_changes` from the `next_cursor` it returns
+  reads what happened. There is no supervised-by-me filter yet, so pass the
+  ids yourself. A `truncated` page means events were dropped; sweep once.
 - **Hibernated sessions** (`activity: "hibernated"`) have had their
   processes stopped to free memory. Their screen is the last one they
   showed, and their conversation is intact. `session_input` wakes one by
@@ -304,8 +426,15 @@ Rules:
   at once with `outcome: "hibernated"` rather than waiting, and reading the
   screen never wakes anything. To free memory from a session you are done
   with for now but may come back to, use `session_hibernate` rather than
-  `session_stop`. `session_keep_awake` pins one that must never be
-  hibernated, such as a long-running driver.
+  `session_stop`. When the work has moved to another session, pass that
+  session as `superseded_by`: a later wake, including the one `session_input`
+  does by itself, is then refused (`409`), and `session_input` never forces
+  past it. `session_wake` is also refused while another live session holds the
+  same work item in the same directory. `force` on `session_wake` is the
+  deliberate override, and only a person or an oversight session may set it; do not reach for it to retry a refusal — send the work
+  to the successor. `session_keep_awake` pins one that must never be
+  hibernated, such as a long-running driver. A pin does not bring a manually
+  hibernated session back at the next restart.
 - **Naming and tidying:** `session_rename` gives a session the name the GUI
   shows (`session_list` returns it as `name`). `session_remove` is the GUI's
   Remove: it kills a session if it still runs and forgets it, output
@@ -359,6 +488,20 @@ then stop. From inside a session Vogt started, omit `id`; otherwise pass
 and ends a driver's `session_wait`. Call `session_report_unblocked` once you
 can go on. A driver that sees `blocked` does what it asks, or relays it to
 the operator — it does not re-prompt the agent to "continue".
+
+**A choice, not a stop.** When what you need is a person's *choice* between
+known options and you have other work to do meanwhile, ask it with
+`decision_ask` instead: a `question`, two to four `options` (`label` ≤ 60,
+`description`, exactly one `recommended: true`), the `context` the person
+needs, and optionally the `work_item`. It shows in the Inbox as
+`decision.pending` with the options and your recommendation; you do not
+block. Read the answer with `decision_list` (by `state`, `work_item` or
+`asker`). Only a person answers (`decision_answer`); an agent gets
+`person_required`. Unanswered past `expires_at` (default 24 h, `ttl_seconds`
+up to 7 days) it reads `expired`, which implies no answer — what that means
+is yours to decide. `decision_withdraw` takes back one you no longer need.
+Nothing is applied when a decision is answered: act on the answer through the
+op that checks the action.
 
 **Autopilot.** `session_start` with `autopilot: true` adds an Autopilot
 section to the brief: when the agent's next step needs no person, it carries
@@ -719,7 +862,7 @@ the engine's HTTP API at `$VOGT_ENGINE_URL` is the fallback):
    `alive` is false).
 3. **Read:** `session_screen` for what is on screen now, `session_log_tail` for
    history.
-4. **Answer:** `session_input` — `text` with `submit`, or `keys` such as `esc`
+4. **Answer:** `session_input` — `text` (Enter is pressed; `draft: true` types without sending), or `keys` such as `esc`
    (dismiss a menu) or `down` then `enter` (choose). Never send a blind Enter:
    read the screen first.
 5. **Stop:** `session_stop`.

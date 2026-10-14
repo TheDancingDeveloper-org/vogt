@@ -243,6 +243,10 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ("forge.onboard", {"project": "parity-project", "reason": WHY}),
     ("work.get", {"ref": "WI-1"}),
     ("work.get", {"ref": "gh:parity-org/parity-project#1"}),
+    (
+        "work.get_many",
+        {"refs": ["WI-1", "gh:parity-org/parity-project#1", "WI-404"]},
+    ),
     ("work.list", {"project": "parity-project"}),
     (
         "board.list",
@@ -470,10 +474,37 @@ SCRIPT: list[tuple[str, StepParams]] = [
         lambda seen: {"id": seen["session.start"]["session"]["id"], "n": 2},
     ),
     (
+        "session.economics",
+        lambda seen: {"id": seen["session.start"]["session"]["id"]},
+    ),
+    (
+        "session.digest",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "context_window": 200_000,
+        },
+    ),
+    (
         "session.wait",
         lambda seen: {
             "id": seen["session.start"]["session"]["id"],
             "until": "ready",
+            "timeout_s": 5,
+        },
+    ),
+    (
+        "session.changes",
+        lambda seen: {
+            "since": 0,
+            "ids": [seen["session.start"]["session"]["id"]],
+            "limit": 10,
+        },
+    ),
+    (
+        "session.wait_any",
+        lambda seen: {
+            "ids": [seen["session.start"]["session"]["id"]],
+            "until": ["ready"],
             "timeout_s": 5,
         },
     ),
@@ -502,6 +533,14 @@ SCRIPT: list[tuple[str, StepParams]] = [
         lambda seen: {
             "id": seen["session.start"]["session"]["id"],
             "keep_awake": True,
+            "reason": WHY,
+        },
+    ),
+    (
+        "session.commit_for",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "message": "record the session's own commit",
             "reason": WHY,
         },
     ),
@@ -572,6 +611,43 @@ SCRIPT: list[tuple[str, StepParams]] = [
         "session.grant_revoke",
         lambda seen: {
             "id": seen["session.grant_request"]["grant"]["id"],
+            "reason": WHY,
+        },
+    ),
+    # Decisions (WI-1321): one asked, listed and withdrawn; a second asked
+    # and answered by the harness's person.
+    (
+        "decision.ask",
+        {
+            "question": "Merge the branch?",
+            "options": [
+                {"label": "Merge", "description": "now", "recommended": True},
+                {"label": "Hold", "description": "later", "recommended": False},
+            ],
+            "reason": WHY,
+        },
+    ),
+    ("decision.list", {"state": "pending"}),
+    (
+        "decision.withdraw",
+        lambda seen: {"id": seen["decision.ask"]["decision"]["id"], "reason": WHY},
+    ),
+    (
+        "decision.ask",
+        {
+            "question": "Merge the branch?",
+            "options": [
+                {"label": "Merge", "description": "now", "recommended": True},
+                {"label": "Hold", "description": "later", "recommended": False},
+            ],
+            "reason": WHY,
+        },
+    ),
+    (
+        "decision.answer",
+        lambda seen: {
+            "id": seen["decision.ask"]["decision"]["id"],
+            "label": "Merge",
             "reason": WHY,
         },
     ),
@@ -1092,6 +1168,16 @@ def _stand_in_engine() -> EngineClient:
             ).encode()
         if method == "POST" and url.endswith("/input"):
             return 200, b'{"ok":true}'
+        if method == "POST" and url.endswith("/api/git/op"):
+            return 200, json.dumps(
+                {
+                    "ok": True,
+                    "commit": "abc123def456",
+                    "digest": "1 file changed, 2 insertions(+)",
+                    "diff_stat": " a.rs | 2 ++",
+                    "review": [],
+                }
+            ).encode()
         if method == "POST" and path.endswith("/blocked"):
             blocked = (
                 {
@@ -1111,6 +1197,24 @@ def _stand_in_engine() -> EngineClient:
                     "blocked": blocked,
                 }
             ).encode()
+        if method == "GET" and path.endswith("/api/sessions/changes"):
+            return 200, json.dumps(
+                {
+                    "changes": [
+                        {
+                            "seq": 1,
+                            "at": "2026-10-11T00:00:00Z",
+                            "session": "eng-1",
+                            "kind": "ready",
+                            "summary": "ready",
+                        }
+                    ],
+                    "next_cursor": 1,
+                    "truncated": False,
+                }
+            ).encode()
+        if method == "GET" and path.endswith("/api/sessions/wait-any"):
+            return 200, json.dumps({"outcome": "timeout", "next_cursor": 1}).encode()
         if method == "GET" and path.endswith("/wait"):
             return 200, json.dumps(
                 {
