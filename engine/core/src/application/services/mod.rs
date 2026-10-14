@@ -12,6 +12,8 @@
 
 pub mod auth;
 pub mod forge_accounts;
+pub mod forge_repos;
+pub mod forge_writeback;
 pub mod freshness;
 pub mod history;
 pub mod install;

@@ -548,3 +548,59 @@ fn forge_account_unlink_removes_the_stored_account() {
     .unwrap();
     assert_eq!(again["linked"], false);
 }
+
+/// A write-back policy needs a linked project, and the stored value is the
+/// policy the caller named.
+#[test]
+fn forge_writeback_sets_the_policy_on_a_linked_project() {
+    use crate::application::services::forge_writeback;
+    use crate::core::{LinkState, Project, WriteBack};
+    let built = opened();
+    let Built::StepSequential(ctx) = &built else {
+        panic!("expected a step clock");
+    };
+    let mut project = Project::new("prj_beta", "beta", "beta", "/tmp", moment());
+    project.link_state = LinkState::Linked;
+    project.write_back = WriteBack::Disabled;
+    let mut txn = ctx.declared.write().unwrap();
+    txn.insert_project(&project).unwrap();
+    txn.commit().unwrap();
+
+    let set = forge_writeback::writeback_op(
+        &built,
+        json!({"project": "beta", "policy": "comment_only", "reason": "comments only"}),
+    )
+    .unwrap();
+    assert_eq!(set["project"]["write_back"], "comment_only");
+
+    let unlinked = Project::new("prj_plain", "plain", "plain", "/tmp", moment());
+    let mut txn = ctx.declared.write().unwrap();
+    txn.insert_project(&unlinked).unwrap();
+    txn.commit().unwrap();
+    let refused = forge_writeback::writeback_op(
+        &built,
+        json!({"project": "plain", "policy": "full", "reason": "too soon"}),
+    );
+    match refused {
+        Err(VogtError::NotLinked(_)) => {}
+        other => panic!("unexpected {other:?}"),
+    }
+
+    let listed = forge_writeback::writeback_list_op(&built, json!({})).unwrap();
+    assert!(listed["actions"].as_array().unwrap().is_empty());
+}
+
+/// A host outside the configured set is refused, not listed as empty.
+#[test]
+fn forge_repos_refuses_an_unconfigured_host() {
+    use crate::application::services::forge_repos;
+    let built = opened();
+    let refused = forge_repos::repos_op(&built, json!({"host": "no.such.host"}));
+    match refused {
+        Err(VogtError::InvalidRequest(message)) => {
+            assert!(message.contains("'no.such.host'"));
+            assert!(message.contains("forge_token_files"));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}

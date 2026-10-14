@@ -1,21 +1,26 @@
-//! Per-actor forge account status and unlinking. Ports the two halves of
-//! `application/services/forge_accounts.py` that never touch a token.
+//! Per-actor forge account linking, status and unlinking. Ports
+//! `application/services/forge_accounts.py`.
 //!
-//! `forge.account_link` is not here. It validates a pasted PAT against the
-//! forge before storing it, and `AppContext` carries no forge transport, so
-//! there is nothing to validate against. Status reads cleartext columns and
-//! unlink deletes the stored ciphertext; neither needs the forge.
+//! Linking validates the pasted PAT against the forge before anything is
+//! stored, through the context's forge transport. The token is encrypted at
+//! rest and never echoed; status and unlink never read it back out.
 
 use serde_json::{json, Value};
 
-use crate::application::context::{AppContext, Built};
-use crate::application::services::{context_parts, dispatch, write_context};
+use crate::adapters::forge::ForgeProvider;
+use crate::application::context::{write_of, AppContext, Built};
+use crate::application::services::{context_parts, dispatch, now_of, write_context};
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{Clock, IdFactory};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
 
+pub const FORGE_ACCOUNT_LINKED_EVENT: &str = "forge.account_linked";
 pub const FORGE_ACCOUNT_UNLINKED_EVENT: &str = "forge.account_unlinked";
+
+pub fn account_link_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, account_link, params)
+}
 
 pub fn account_status_op(built: &Built, params: Value) -> Result<Value, VogtError> {
     dispatch!(built, account_status, params)
@@ -23,6 +28,68 @@ pub fn account_status_op(built: &Built, params: Value) -> Result<Value, VogtErro
 
 pub fn account_unlink_op(built: &Built, params: Value) -> Result<Value, VogtError> {
     dispatch!(built, account_unlink, params)
+}
+
+/// Validate a pasted PAT against the forge, then store it encrypted.
+///
+/// The token is the caller's, not a file's, so the provider is built from it
+/// directly. A host with no provider, or a token the forge refuses, stores
+/// nothing. The result carries the login and the scopes, never the token.
+fn account_link<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let host = present_string(&params, "host")?;
+    let token = present_string(&params, "token")?;
+    let reason = present_string(&params, "reason")?;
+    require_supported_host(ctx, &host)?;
+    let (_, _, _, _, _, config) = context_parts(ctx);
+    let provider = crate::adapters::forge::registry::provider_for_token(
+        &host,
+        &token,
+        Some(config),
+        ctx.forge_transport(),
+    )
+    .ok_or_else(|| {
+        VogtError::InvalidRequest(format!(
+            "{} has no provider to validate a token against; \
+             configure the host under forge_token_files first",
+            crate::core::py_repr(&host)
+        ))
+    })?;
+    let (login, scopes) = provider.identity()?.ok_or_else(|| {
+        VogtError::GitHubUnavailable(format!("the forge at {host} did not accept the token"))
+    })?;
+    let cipher = crate::adapters::forge::load_cipher(config)?;
+    let encrypted = cipher.encrypt(
+        &token,
+        now_of(&ctx.clock).unix_seconds().try_into().unwrap_or(0),
+    );
+    let mut writing = write_of(ctx);
+    audited_write(&mut writing, "forge.account_link", &reason, |txn, actor| {
+        txn.upsert_forge_account(
+            &actor.id,
+            &host,
+            &login,
+            &scopes,
+            &encrypted,
+            now_of(&ctx.clock),
+        )?;
+        Ok(WriteOutcome::new(
+            json!({
+                "host": host,
+                "login": login,
+                "scopes": scopes,
+                "linked": true,
+            }),
+            "forge_account",
+            &format!("{}:{host}", actor.id),
+            json!({"host": host, "login": login}),
+            FORGE_ACCOUNT_LINKED_EVENT,
+            json!({"host": host, "login": login}),
+        ))
+    })
 }
 
 /// What the acting actor has linked. A principal who has never written has no

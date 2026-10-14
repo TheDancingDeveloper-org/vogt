@@ -425,6 +425,61 @@
    }
   },
   {
+   "operation": "forge.writeback",
+   "params": {
+    "project": "parity",
+    "policy": "full",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "forge.writeback_list",
+   "cli": ["forge", "actions"],
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "forge.actions",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "forge.repos",
+   "params": {
+    "host": "no.such.host"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "forge.account_status",
+   "cli": ["forge", "account", "status"],
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "forge.account_link",
+   "cli": ["forge", "account", "link"],
+   "params": {
+    "host": "no.such.host",
+    "token": "not-a-token",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
    "operation": "install.bootstrap",
    "http": {
     "method": "POST",
