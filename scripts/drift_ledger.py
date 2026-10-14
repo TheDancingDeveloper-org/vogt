@@ -16,6 +16,7 @@ import re
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 OWNERSHIP = REPO / "tests" / "parity" / "ownership.toml"
@@ -64,8 +65,8 @@ def _commits(base: str, tip: str) -> list[dict[str, object]]:
         "--",
         *WATCHED,
     )
-    commits: list[dict[str, object]] = []
-    current: dict[str, object] | None = None
+    commits: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
     for line in log.splitlines():
         if "\t" in line:
             sha, subject = line.split("\t", 1)
@@ -92,7 +93,7 @@ def _previous_marks() -> dict[str, str]:
 
 
 def _render(
-    commits: list[dict[str, object]], previous: dict[str, str], base: str, tip: str
+    commits: list[dict[str, Any]], previous: dict[str, str], base: str, tip: str
 ) -> str:
     chunks = [
         (item["name"], list(item["paths"]))
@@ -110,7 +111,7 @@ def _render(
     migrations: list[str] = []
     for commit in commits:
         sha = str(commit["sha"])
-        files = [str(path) for path in commit["files"]]  # type: ignore[union-attr]
+        files = [str(path) for path in commit["files"]]
         owners = sorted({_chunk_for(path, chunks) for path in files})
         mark = previous.get(sha[:7], "no")
         lines.append(

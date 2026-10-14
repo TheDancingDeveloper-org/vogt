@@ -68,15 +68,19 @@ def _operations() -> list[dict[str, object]]:
         ):
             continue
         kw = {keyword.arg: keyword.value for keyword in node.keywords}
+        route = kw["route"]
+        cli = kw["cli"]
+        if not isinstance(route, ast.Call) or not isinstance(cli, ast.Call):
+            raise SystemExit(f"{kw['name']!r} has no route or cli call")
         found.append(
             {
                 "name": ast.literal_eval(kw["name"]),
                 "summary": ast.literal_eval(kw["summary"]),
                 "scope": ast.literal_eval(kw["scope"]),
                 "mutating": ast.literal_eval(kw["mutating"]),
-                "method": ast.literal_eval(kw["route"].args[0]),
-                "path": ast.literal_eval(kw["route"].args[1]),
-                "cli": list(ast.literal_eval(kw["cli"].args[0])),
+                "method": ast.literal_eval(route.args[0]),
+                "path": ast.literal_eval(route.args[1]),
+                "cli": list(ast.literal_eval(cli.args[0])),
             }
         )
     return found
@@ -85,7 +89,10 @@ def _operations() -> list[dict[str, object]]:
 def render_operations_rs(operations: list[dict[str, object]]) -> str:
     lines = [HEADER, "pub fn build_operations() -> Vec<Operation> {\n    vec![\n"]
     for operation in operations:
-        cli = ", ".join(json.dumps(part) for part in operation["cli"])  # type: ignore[union-attr]
+        cli = operation["cli"]
+        if not isinstance(cli, list):
+            raise SystemExit(f"{operation['name']} has no cli parts")
+        cli_parts = ", ".join(json.dumps(part) for part in cli)
         lines.append(
             "        Operation::new(\n"
             f"            {json.dumps(operation['name'])},\n"
@@ -94,7 +101,7 @@ def render_operations_rs(operations: list[dict[str, object]]) -> str:
             f"            {str(operation['mutating']).lower()},\n"
             f"            HttpRoute::new(HttpMethod::{METHODS[operation['method']]}, "  # type: ignore[index]
             f"{json.dumps(operation['path'])}),\n"
-            f"            CliBinding::new(&[{cli}]),\n"
+            f"            CliBinding::new(&[{cli_parts}]),\n"
             "        ),\n"
         )
     lines.append("    ]\n}\n")

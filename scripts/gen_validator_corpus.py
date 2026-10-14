@@ -19,6 +19,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CORPUS = REPO_ROOT / "tests" / "parity" / "validator_corpus.json"
@@ -29,7 +30,7 @@ TAIL = re.compile(r" \[type=.*?\]")
 DOC_LINK = re.compile(r"\n {4}For further information visit.*")
 
 
-def base_value(prop: dict, defs: dict) -> object:
+def base_value(prop: dict[str, Any], defs: dict[str, Any]) -> object:
     if "$ref" in prop:
         return base_obj(defs.get(prop["$ref"].split("/")[-1], {}), defs)
     if "anyOf" in prop:
@@ -60,7 +61,7 @@ def base_value(prop: dict, defs: dict) -> object:
     return "x"
 
 
-def base_obj(schema: dict, defs: dict) -> dict:
+def base_obj(schema: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
     required = schema.get("required", [])
     return {
         name: base_value(field, defs)
@@ -69,10 +70,10 @@ def base_obj(schema: dict, defs: dict) -> dict:
     }
 
 
-def scalar(prop: dict, defs: dict) -> dict:
+def scalar(prop: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
     """The branch of a field that describes the value, past a null union or a ref."""
     if "$ref" in prop:
-        return defs.get(prop["$ref"].split("/")[-1], {})
+        return dict(defs.get(prop["$ref"].split("/")[-1], {}))
     if "anyOf" in prop:
         for branch in prop["anyOf"]:
             if branch.get("type") != "null":
@@ -80,7 +81,7 @@ def scalar(prop: dict, defs: dict) -> dict:
     return prop
 
 
-def probes_for(schema: dict) -> list[tuple[str, dict]]:
+def probes_for(schema: dict[str, Any]) -> list[tuple[str, Any]]:
     defs = schema.get("$defs", {})
     props = schema.get("properties", {})
     required = schema.get("required", [])
@@ -182,9 +183,13 @@ def probes_for(schema: dict) -> list[tuple[str, dict]]:
     return probes
 
 
-def verdict(operation: object, raw: dict) -> dict:
+def verdict(operation: object, raw: dict[str, Any]) -> dict[str, Any]:
     import pydantic
 
+    from vogt.registry.operation import Operation
+
+    if not isinstance(operation, Operation):
+        raise TypeError(type(operation).__name__)
     try:
         model = operation.params_model.model_validate(raw)
     except pydantic.ValidationError as exc:
@@ -204,7 +209,7 @@ def verdict(operation: object, raw: dict) -> dict:
     return {"ok": True, "dump": model.model_dump(mode="json")}
 
 
-def build() -> list[dict]:
+def build() -> list[dict[str, Any]]:
     sys.path.insert(0, str(REPO_ROOT / "src"))
     from vogt.registry.operations import build_operations
 
