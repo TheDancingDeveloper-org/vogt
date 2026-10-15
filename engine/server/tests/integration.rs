@@ -14680,20 +14680,26 @@ fn worktree_git(dir: &std::path::Path, args: &[&str]) -> String {
 /// sibling of the checkout, so the session start's fetch stays on disk.
 fn worktree_checkout(repo: &std::path::Path) {
     let origin = repo.parent().unwrap().join("origin.git");
-    worktree_git(repo.parent().unwrap(), &[
-        "init",
-        "--bare",
-        "-q",
-        "-b",
-        "main",
-        &origin.display().to_string(),
-    ]);
-    worktree_git(repo.parent().unwrap(), &[
-        "clone",
-        "-q",
-        &origin.display().to_string(),
-        &repo.display().to_string(),
-    ]);
+    worktree_git(
+        repo.parent().unwrap(),
+        &[
+            "init",
+            "--bare",
+            "-q",
+            "-b",
+            "main",
+            &origin.display().to_string(),
+        ],
+    );
+    worktree_git(
+        repo.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            &origin.display().to_string(),
+            &repo.display().to_string(),
+        ],
+    );
     worktree_git(repo, &["config", "user.email", "t@example"]);
     worktree_git(repo, &["config", "user.name", "t"]);
     std::fs::write(repo.join("f.txt"), "base\n").unwrap();
