@@ -323,11 +323,14 @@ jobs:
         working-directory: engine
         run: |
           set -euo pipefail
+          # cargo-audit 0.22 prints "cargo-audit-audit 0.22.2": its clap name
+          # is "cargo-audit" and the cargo shim prepends "cargo-", so an exact
+          # "cargo-audit 0.22.2" match never holds. Accept either form.
           got="$(cargo audit --version 2>&1 || true)"
-          if [ "$got" != "cargo-audit 0.22.2" ]; then
-            echo "cargo audit --version returned: $got" >&2
-            exit 1
-          fi
+          case "$got" in
+            "cargo-audit 0.22.2"|"cargo-audit-audit 0.22.2") ;;
+            *) echo "cargo audit --version returned: $got" >&2; exit 1 ;;
+          esac
 
           # The self-hosted runner carries a global gitconfig that injects this
           # org's credentials for github.com. RustSec/advisory-db is a different
