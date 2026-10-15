@@ -244,10 +244,8 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "forge.account_link" => Some(crate::application::services::forge_accounts::account_link_op),
         "forge.repos" => Some(crate::application::services::forge_repos::repos_op),
         "forge.writeback" => Some(crate::application::services::forge_writeback::writeback_op),
-        "forge.writeback_list" => {
-            Some(crate::application::services::forge_writeback::writeback_list_op)
-        }
-        // `forge.actions` is the same ledger read under the public name.
+        // The public name is `forge.actions`. `forge.writeback_list` is not a
+        // Python operation, so it is not an alias here.
         "forge.actions" => Some(crate::application::services::forge_writeback::writeback_list_op),
         _ => None,
     }

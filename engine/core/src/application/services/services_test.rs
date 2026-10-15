@@ -573,18 +573,19 @@ fn forge_writeback_sets_the_policy_on_a_linked_project() {
     .unwrap();
     assert_eq!(set["project"]["write_back"], "comment_only");
 
+    // An unlinked project takes the policy too. Python stores it and the
+    // consequence waits for the later link; see the dedicated test.
     let unlinked = Project::new("prj_plain", "plain", "plain", "/tmp", moment());
     let mut txn = ctx.declared.write().unwrap();
     txn.insert_project(&unlinked).unwrap();
     txn.commit().unwrap();
-    let refused = forge_writeback::writeback_op(
+    let set_unlinked = forge_writeback::writeback_op(
         &built,
         json!({"project": "plain", "policy": "full", "reason": "too soon"}),
-    );
-    match refused {
-        Err(VogtError::NotLinked(_)) => {}
-        other => panic!("unexpected {other:?}"),
-    }
+    )
+    .unwrap();
+    assert_eq!(set_unlinked["project"]["write_back"], "full");
+    assert_eq!(set_unlinked["project"]["link_state"], "unlinked");
 
     let listed = forge_writeback::writeback_list_op(&built, json!({})).unwrap();
     assert!(listed["actions"].as_array().unwrap().is_empty());
@@ -603,4 +604,227 @@ fn forge_repos_refuses_an_unconfigured_host() {
         }
         other => panic!("unexpected {other:?}"),
     }
+}
+
+/// `forge.writeback` stores the policy whether or not the project is linked,
+/// and the audit summary names the slug. Python's `set_write_back` has no
+/// linked-project check, and the parity step exits 0.
+#[test]
+fn forge_writeback_sets_the_policy_on_an_unlinked_project() {
+    use crate::application::services::forge_writeback;
+    use crate::core::Project;
+    let built = opened();
+    let Built::StepSequential(ctx) = &built else {
+        panic!("expected a step clock");
+    };
+    let project = Project::new("prj_plain", "plain", "plain", "/tmp", moment());
+    let mut txn = ctx.declared.write().unwrap();
+    txn.insert_project(&project).unwrap();
+    txn.commit().unwrap();
+
+    let set = forge_writeback::writeback_op(
+        &built,
+        json!({"project": "plain", "policy": "full", "reason": "arm it early"}),
+    )
+    .unwrap();
+    assert_eq!(set["project"]["write_back"], "full");
+
+    let events = ctx
+        .declared
+        .read()
+        .unwrap()
+        .list_events(0, 10, None)
+        .unwrap();
+    let summary = &events
+        .iter()
+        .find(|event| event.kind == "project.writeback_set")
+        .expect("the set is audited")
+        .summary;
+    assert_eq!(summary["slug"], "plain");
+    assert_eq!(summary["from"], "none");
+    assert_eq!(summary["to"], "full");
+
+    for limit in [0, 501] {
+        let refused = forge_writeback::writeback_list_op(&built, json!({"limit": limit}));
+        assert!(
+            matches!(refused, Err(VogtError::InvalidRequest(_))),
+            "limit {limit}: {refused:?}"
+        );
+    }
+    assert!(forge_writeback::writeback_list_op(&built, json!({"limit": 1})).is_ok());
+}
+
+/// Linking loads the cipher before it ever talks to the forge, and both a
+/// missing provider and a forge that names no identity are one
+/// `InvalidRequest`. The token never appears in the result or the audit.
+#[test]
+fn forge_account_link_checks_the_cipher_first_and_never_echoes_the_token() {
+    use crate::application::services::forge_accounts;
+
+    let unconfigured = match opened() {
+        Built::StepSequential(ctx) => {
+            Built::StepSequential(ctx.with_forge_transport(|_, _, _, _| {
+                panic!("the forge was called before the cipher check");
+            }))
+        }
+        other => other,
+    };
+    let refused = forge_accounts::account_link_op(
+        &unconfigured,
+        json!({"token": "ghp_secret_value", "reason": "link me"}),
+    );
+    match refused {
+        Err(VogtError::ForgeAccountsNotConfigured(_)) => {}
+        other => panic!("expected the cipher refusal first, got {other:?}"),
+    }
+    let keyed = opened_with_account_key();
+    let refused = forge_accounts::account_link_op(
+        &keyed,
+        json!({"host": "no.such.host", "token": "ghp_secret_value", "reason": "link me"}),
+    );
+    match refused {
+        Err(VogtError::InvalidRequest(message)) => {
+            assert!(message.contains("'no.such.host'"), "{message}")
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+
+    let keyed = match opened_with_account_key() {
+        Built::StepSequential(ctx) => {
+            Built::StepSequential(ctx.with_forge_transport(|url, _, _, _| {
+                if url.ends_with("/user") {
+                    (200, b"{}".to_vec(), std::collections::BTreeMap::new())
+                } else {
+                    (404, b"{}".to_vec(), std::collections::BTreeMap::new())
+                }
+            }))
+        }
+        other => other,
+    };
+    let refused = forge_accounts::account_link_op(
+        &keyed,
+        json!({"token": "ghp_secret_value", "reason": "link me"}),
+    );
+    match refused {
+        Err(VogtError::InvalidRequest(message)) => {
+            assert_eq!(
+                message,
+                "the forge did not accept this token; nothing was stored"
+            )
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+
+    let keyed = match opened_with_account_key() {
+        Built::StepSequential(ctx) => {
+            Built::StepSequential(ctx.with_forge_transport(|url, _, _, _| {
+                if url.ends_with("/user") {
+                    let mut headers = std::collections::BTreeMap::new();
+                    headers.insert("x-oauth-scopes".to_owned(), "repo".to_owned());
+                    (200, br#"{"login":"ada"}"#.to_vec(), headers)
+                } else {
+                    (200, b"{}".to_vec(), std::collections::BTreeMap::new())
+                }
+            }))
+        }
+        other => other,
+    };
+    let linked = forge_accounts::account_link_op(
+        &keyed,
+        json!({"token": "ghp_secret_value", "reason": "link me"}),
+    )
+    .unwrap();
+    assert_eq!(linked["login"], "ada");
+    assert_eq!(linked["host"], "github.com");
+    assert_eq!(linked["linked"], true);
+    let rendered = linked.to_string();
+    assert!(!rendered.contains("ghp_secret_value"), "{rendered}");
+
+    let Built::StepSequential(ctx) = &keyed else {
+        unreachable!("opened builds a step clock");
+    };
+    let events = ctx
+        .declared
+        .read()
+        .unwrap()
+        .list_events(0, 10, None)
+        .unwrap();
+    let audited = events
+        .iter()
+        .find(|event| event.kind == "forge.account_linked")
+        .expect("the link is audited");
+    let audited_text = serde_json::to_string(&audited.summary).unwrap();
+    assert!(!audited_text.contains("ghp_secret_value"), "{audited_text}");
+    let status = forge_accounts::account_status_op(&keyed, json!({})).unwrap();
+    assert!(!status.to_string().contains("ghp_secret_value"));
+    assert_eq!(status["accounts"][0]["login"], "ada");
+}
+
+/// A linked account whose ciphertext cannot be read raises. It does not fall
+/// back to the instance token while still reporting the linked login.
+#[test]
+fn forge_repos_raises_when_the_linked_token_cannot_be_decrypted() {
+    use crate::application::services::forge_repos;
+    let built = opened_with_account_key();
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened builds a step clock");
+    };
+    let actor = ctx
+        .declared
+        .read()
+        .unwrap()
+        .actor_by_identity("local:test-user")
+        .unwrap()
+        .expect("bootstrap created the principal");
+    let mut txn = ctx.declared.write().unwrap();
+    txn.upsert_forge_account(
+        &actor.id,
+        "github.com",
+        "ada",
+        "",
+        "not-a-fernet-token",
+        moment(),
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let refused = forge_repos::repos_op(&built, json!({}));
+    assert!(
+        matches!(refused, Err(VogtError::ForgeAccountsNotConfigured(_))),
+        "expected the decrypt refusal, got {refused:?}"
+    );
+}
+
+/// A data directory plus a real Fernet key file, so linking is configured.
+fn opened_with_account_key() -> Built {
+    let dir = std::env::temp_dir().join(format!("vogt-s7-{}-{}", std::process::id(), unique()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_file = dir.join("account.key");
+    std::fs::write(&key_file, "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=").unwrap();
+    let config = crate::config::VogtConfig {
+        data_dir: dir,
+        forge_account_key_file: Some(key_file),
+        ..crate::config::VogtConfig::default()
+    };
+    let built = build_context(
+        config,
+        Some(principal()),
+        Some(StepClock::new(moment())),
+        Some(SequentialIds::new(None).unwrap()),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    match &built {
+        Built::StepSequential(ctx) => {
+            ctx.declared.migrate().unwrap();
+            ctx.declared.bootstrap(&principal()).unwrap();
+            ctx.observed.migrate().unwrap();
+        }
+        _other => panic!("expected a step clock"),
+    }
+    built
 }

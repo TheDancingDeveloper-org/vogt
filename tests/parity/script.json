@@ -432,12 +432,11 @@
     "reason": "parity harness"
    },
    "expect": {
-    "exit": 1
+    "exit": 0
    }
   },
   {
-   "operation": "forge.writeback_list",
-   "cli": ["forge", "actions"],
+   "operation": "forge.actions",
    "params": {},
    "expect": {
     "exit": 0
@@ -461,7 +460,11 @@
   },
   {
    "operation": "forge.account_status",
-   "cli": ["forge", "account", "status"],
+   "cli": [
+    "forge",
+    "account",
+    "status"
+   ],
    "params": {},
    "expect": {
     "exit": 0
@@ -469,7 +472,11 @@
   },
   {
    "operation": "forge.account_link",
-   "cli": ["forge", "account", "link"],
+   "cli": [
+    "forge",
+    "account",
+    "link"
+   ],
    "params": {
     "host": "no.such.host",
     "token": "not-a-token",
@@ -483,99 +490,259 @@
    "operation": "install.bootstrap",
    "http": {
     "method": "POST",
-   "path": "/api/install/bootstrap",
-   "body": {"display_name": "Ada Lovelace"},
-   "capture": "token"
-  }
- },
- {
-  "operation": "session.list",
-  "params": {},
-  "expect": {"exit": 0},
-  "http": {"method": "GET", "path": "/api/sessions", "auth": "issued"}
- },
- {
-  "operation": "session.sweep",
-  "params": {},
-  "expect": {"exit": 0},
-  "http": {"method": "GET", "path": "/api/sessions/sweep", "auth": "issued"}
- },
- {
-  "operation": "session.log_tail",
-  "cli": ["session", "log"],
-  "params": {"id": "ses_00000000000000000000000000"},
-  "expect": {"exit": 0},
-  "http": {"method": "GET", "path": "/api/sessions/log?id=ses_00000000000000000000000000", "auth": "issued"}
- },
- {
-  "operation": "session.start",
-  "params": {"reason": "parity"},
-  "expect": {"exit": 1},
-  "http": {"method": "POST", "path": "/api/sessions", "auth": "issued", "body": {"reason": "parity"}}
- },
- {
-  "operation": "session.input",
-  "params": {"id": "ses_00000000000000000000000000", "text": "hi", "reason": "parity"},
-  "expect": {"exit": 1},
-  "http": {"method": "POST", "path": "/api/sessions/input", "auth": "issued", "body": {"id": "ses_00000000000000000000000000", "text": "hi", "reason": "parity"}}
- },
- {
-  "operation": "session.screen",
-  "params": {"id": "ses_00000000000000000000000000"},
-  "expect": {"exit": 1},
-  "http": {"method": "GET", "path": "/api/sessions/screen?id=ses_00000000000000000000000000", "auth": "issued"}
- },
- {
-  "operation": "session.wait",
-  "params": {"id": "ses_00000000000000000000000000"},
-  "expect": {"exit": 1},
-  "http": {"method": "GET", "path": "/api/sessions/wait?id=ses_00000000000000000000000000", "auth": "issued"}
- },
- {
-  "operation": "session.answer",
-  "params": {"id": "ses_00000000000000000000000000", "option": 1, "reason": "parity"},
-  "expect": {"exit": 1},
-  "http": {"method": "POST", "path": "/api/sessions/answer", "auth": "issued", "body": {"id": "ses_00000000000000000000000000", "option": 1, "reason": "parity"}}
- },
- {
-  "operation": "session.hibernate",
-  "params": {"id": "ses_00000000000000000000000000", "reason": "parity"},
-  "expect": {"exit": 1},
-  "http": {"method": "POST", "path": "/api/sessions/hibernate", "auth": "issued", "body": {"id": "ses_00000000000000000000000000", "reason": "parity"}}
- },
- {
-  "operation": "session.keep_awake",
-  "cli": ["session", "keep-awake"],
-  "params": {"id": "ses_00000000000000000000000000", "keep_awake": true, "reason": "parity"},
-  "expect": {"exit": 1},
-  "http": {"method": "POST", "path": "/api/sessions/keep-awake", "auth": "issued", "body": {"id": "ses_00000000000000000000000000", "keep_awake": true, "reason": "parity"}}
- },
- {
-  "operation": "session.set_role",
-  "cli": ["session", "set-role"],
-  "params": {"id": "ses_00000000000000000000000000", "role": "worker", "reason": "parity"},
-  "expect": {"exit": 1},
-  "http": {"method": "POST", "path": "/api/sessions/role", "auth": "issued", "body": {"id": "ses_00000000000000000000000000", "role": "worker", "reason": "parity"}}
- },
- {
-  "operation": "session.wake",
-  "params": {"id": "ses_00000000000000000000000000", "reason": "parity"},
-  "expect": {"exit": 1},
-  "http": {"method": "POST", "path": "/api/sessions/wake", "auth": "issued", "body": {"id": "ses_00000000000000000000000000", "reason": "parity"}}
- },
- {
-  "operation": "session.stop",
-  "params": {"id": "ses_00000000000000000000000000", "reason": "parity"},
-  "expect": {"exit": 1},
-  "http": {"method": "POST", "path": "/api/sessions/stop", "auth": "issued", "body": {"id": "ses_00000000000000000000000000", "reason": "parity"}}
- },
- {
-  "operation": "label.create",
+    "path": "/api/install/bootstrap",
+    "body": {
+     "display_name": "Ada Lovelace"
+    },
+    "capture": "token"
+   }
+  },
+  {
+   "operation": "session.list",
+   "params": {},
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions",
+    "auth": "issued"
+   }
+  },
+  {
+   "operation": "session.sweep",
+   "params": {},
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/sweep",
+    "auth": "issued"
+   }
+  },
+  {
+   "operation": "session.log_tail",
+   "cli": [
+    "session",
+    "log"
+   ],
+   "params": {
+    "id": "ses_00000000000000000000000000"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/log?id=ses_00000000000000000000000000",
+    "auth": "issued"
+   }
+  },
+  {
+   "operation": "session.start",
+   "params": {
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions",
+    "auth": "issued",
+    "body": {
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.input",
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "text": "hi",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/input",
+    "auth": "issued",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "text": "hi",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.screen",
+   "params": {
+    "id": "ses_00000000000000000000000000"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/screen?id=ses_00000000000000000000000000",
+    "auth": "issued"
+   }
+  },
+  {
+   "operation": "session.wait",
+   "params": {
+    "id": "ses_00000000000000000000000000"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/wait?id=ses_00000000000000000000000000",
+    "auth": "issued"
+   }
+  },
+  {
+   "operation": "session.answer",
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "option": 1,
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/answer",
+    "auth": "issued",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "option": 1,
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.hibernate",
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/hibernate",
+    "auth": "issued",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.keep_awake",
+   "cli": [
+    "session",
+    "keep-awake"
+   ],
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "keep_awake": true,
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/keep-awake",
+    "auth": "issued",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "keep_awake": true,
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.set_role",
+   "cli": [
+    "session",
+    "set-role"
+   ],
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "role": "worker",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/role",
+    "auth": "issued",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "role": "worker",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.wake",
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/wake",
+    "auth": "issued",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.stop",
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/stop",
+    "auth": "issued",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "label.create",
    "http": {
     "method": "POST",
     "path": "/api/labels",
     "auth": "issued",
-    "body": {"name": "bug", "reason": "seed"}
+    "body": {
+     "name": "bug",
+     "reason": "seed"
+    }
    }
   },
   {
@@ -584,7 +751,12 @@
     "method": "POST",
     "path": "/api/tokens",
     "auth": "issued",
-    "body": {"actor": "human:ada-lovelace", "name": "reader", "scopes": "read", "reason": "a read token"},
+    "body": {
+     "actor": "human:ada-lovelace",
+     "name": "reader",
+     "scopes": "read",
+     "reason": "a read token"
+    },
     "capture": "token"
    }
   },
@@ -594,7 +766,10 @@
     "method": "POST",
     "path": "/api/labels",
     "auth": "issued",
-    "body": {"name": "chore", "reason": "should be refused"}
+    "body": {
+     "name": "chore",
+     "reason": "should be refused"
+    }
    }
   },
   {
@@ -603,7 +778,9 @@
     "method": "POST",
     "path": "/api/auth/logout",
     "auth": "issued",
-    "body": {"reason": "done"}
+    "body": {
+     "reason": "done"
+    }
    }
   }
  ]
