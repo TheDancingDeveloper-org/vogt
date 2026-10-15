@@ -794,12 +794,12 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     config.write_text(
         'model = "gpt-6-astra"\nmodel_provider = "litellm"\n', encoding="utf-8"
     )
-    fixed = _codex_bootstrap(tmp_path, {})
-    assert fixed.returncode == 0, fixed.stderr
+    stale_run = _codex_bootstrap(tmp_path, {})
+    assert stale_run.returncode == 0, stale_run.stderr
     assert tomllib.loads(config.read_text(encoding="utf-8"))["model"] == "grok"
     config.write_text('model = "code"\nmodel_provider = "litellm"\n', encoding="utf-8")
-    chosen = _codex_bootstrap(tmp_path, {})
-    assert chosen.returncode == 0, chosen.stderr
+    group_run = _codex_bootstrap(tmp_path, {})
+    assert group_run.returncode == 0, group_run.stderr
     assert tomllib.loads(config.read_text(encoding="utf-8"))["model"] == "code"
 
     # Some other provider and model are the operator's choice.
