@@ -172,4 +172,19 @@ Every step is independently revertible. Prod only ever receives a digest that a 
 
 ## 6. Backlog
 
-The work items are created in Vogt under WI-1646, one per step, with `depends_on` relations. See the WI-1646 hand-off comment for the refs. Ownership: steps 1, 7a and the cron are operator or infra actions. The rest are code in `vogt` (GitHub) or `indexarr/vogt-estate`.
+The work items are listed below.
+
+| WI | Step | Repo / owner | Depends on |
+|---|---|---|---|
+| WI-1648 | S1 re-enable `track-main` cron | operator (Woodpecker) | — |
+| WI-1649 | S2 build once (item 3) | vogt | — |
+| WI-1650 | S3 workbench pod-base + `vogt-stack-workbench` + release.yml | vogt | WI-1649 |
+| WI-1651 | S4 thin estate Dockerfile, shadow + diff | vogt-estate | WI-1650 |
+| WI-1652 | S5 dev lane deploys thin image | vogt-estate | WI-1651 |
+| WI-1653 | S6 release lane verifies/gates workbench, thin break-glass | vogt-estate | WI-1652 |
+| WI-1654 | S7a bot user + Infisical token + OIDC identity | operator / infra | — |
+| WI-1655 | S7b `dev-trigger.yml` + resolve `--sha` guard | vogt + vogt-estate | WI-1654, WI-1648 |
+| WI-1656 | S8 bake core+stack (item 6) | vogt | WI-1649 |
+| WI-1657 | S9 remove legacy flavour | vogt-estate | WI-1653 |
+
+The trigger chain (WI-1648, WI-1654, WI-1655) is independent of the image chain and can ship first.
