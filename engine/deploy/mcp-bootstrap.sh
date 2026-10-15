@@ -947,7 +947,14 @@ while index < len(lines):
                     keep = None
             except ValueError:
                 pass
+        # The cap line was lifted out of the table, so the blank line that
+        # separated it from the next header has to come back with it. Without
+        # that, a kept cap sits flush against the following [table].
+        while out and out[-1].strip() == "":
+            out.pop()
         out.append(keep or f"tool_input_schema_max_bytes = {schema_max}\n")
+        if index < len(lines) and header_line(lines[index]):
+            out.append("\n")
         continue
     root_key = key_of(lines[index])
     if root_key in ROOT:

@@ -945,7 +945,8 @@ def test_driven_session_bundle_merges_and_raises_the_schema_cap(
     # A cap an operator set higher is not lowered, and a skills path that
     # already exists is not replaced.
     config.write_text(
-        "[mcp_servers.vogt]\ntool_input_schema_max_bytes = 900000\n",
+        "[mcp_servers.vogt]\ntool_input_schema_max_bytes = 900000\n\n"
+        '[mcp_servers.cadastre]\ncommand = "/usr/local/bin/cadastre-mcp"\n',
         encoding="utf-8",
     )
     link.unlink()
@@ -966,6 +967,9 @@ def test_driven_session_bundle_merges_and_raises_the_schema_cap(
     assert again.returncode == 0, again.stderr
     parsed = tomllib.loads(config.read_text(encoding="utf-8"))
     assert parsed["mcp_servers"]["vogt"]["tool_input_schema_max_bytes"] == 900_000
+    # A kept cap is re-appended; it still has to stand off from the next header.
+    rewritten = config.read_text(encoding="utf-8")
+    assert "tool_input_schema_max_bytes = 900000\n\n[mcp_servers.cadastre]" in rewritten
     assert link.is_dir() and not link.is_symlink()
     # No workspace skills here, so the link would have been the home one.
     assert not (tmp_path / ".agents" / "skills-unused").exists()
