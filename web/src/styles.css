@@ -987,6 +987,37 @@ textarea {
   flex: 0 1 auto;
   max-height: 220px;
 }
+/* A reader-chosen height (WI-1664). Flex no longer fills the leftover column;
+   the list inside still scrolls. The open-Files cap yields to the choice. */
+.places-rail-session-area--sized,
+.places-rail:has(.file-tree .places-section-toggle[aria-expanded="true"]) > .places-rail-session-area--sized {
+  flex: 0 0 auto;
+  max-height: none;
+}
+.session-area-resize-handle {
+  flex: 0 0 auto;
+  height: 8px;
+  margin: 2px 0 0;
+  cursor: row-resize;
+  touch-action: none;
+  border-radius: 4px;
+}
+.session-area-resize-handle:hover,
+.session-area-resize-handle:focus-visible,
+.session-area-resize-handle.dragging {
+  background: var(--accent);
+  opacity: 0.35;
+}
+.session-area-resize-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  opacity: 1;
+}
+@media (pointer: coarse) {
+  /* A hairline is not a touch target. The handle is a desk control; a coarse
+     pointer keeps the shipped flex height and the inner scroller. */
+  .session-area-resize-handle { display: none; }
+}
 .places-section-label {
   padding: 0 8px 4px;
   color: var(--fg-muted);
