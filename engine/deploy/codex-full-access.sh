@@ -19,8 +19,24 @@
 # that way either.
 set -euo pipefail
 
-runtime="${VOGT_AGENT_CLI_ROOT:-/opt/vogt/agent-clis}/codex/current/bin/codex"
+# A runtime copy must be the fork (WI-1146). The fork is what reads the
+# gitguard hook in /etc/codex/requirements.toml; stock Codex ignores the hook
+# table and would run with nothing guarding the checkout. The installer writes
+# `source` (`<repository>@<commit>`) only for a fork release, so a prefix
+# without it — an npm copy an older image flipped to — is refused rather than
+# run. When the image's tools table is readable, the repository must be the
+# fork it names.
+prefix="${VOGT_AGENT_CLI_ROOT:-/opt/vogt/agent-clis}/codex/current"
+runtime="$prefix/bin/codex"
 if [[ -x "$runtime" ]]; then
+    provenance="$(head -n 1 "$prefix/source" 2>/dev/null || true)"
+    fork="$(awk -F'\t' '$1 == "codex" && $5 == "github-release" { print $2; exit }' \
+        /usr/local/share/vogt/agent-clis.tools 2>/dev/null || true)"
+    if [[ ! "$provenance" =~ ^[^@[:space:]]+@[0-9a-f]{40}$ ]] \
+            || [[ -n "$fork" && "${provenance%@*}" != "$fork" ]]; then
+        echo "codex: refusing $runtime: it is not a Codex fork release (source '${provenance:-none}'), so the gitguard hook would not run. Pin VOGT_CODEX_SHA, or set it to 'image' and restart" >&2
+        exit 78
+    fi
     codex_real="$runtime"
 else
     codex_real=/usr/local/libexec/codex-real

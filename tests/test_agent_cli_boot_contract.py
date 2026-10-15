@@ -633,6 +633,9 @@ class ReleaseSandbox:
         )
 
     def install(self, version: str) -> subprocess.CompletedProcess[str]:
+        return self.install_tool("codex", version)
+
+    def install_tool(self, tool: str, version: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update(
             {
@@ -646,7 +649,7 @@ class ReleaseSandbox:
             }
         )
         return subprocess.run(
-            [str(INSTALL), "codex", version],
+            [str(INSTALL), tool, version],
             capture_output=True,
             text=True,
             env=env,
@@ -701,3 +704,71 @@ def test_a_short_sha_is_not_a_release_pin(release_sandbox: ReleaseSandbox) -> No
     refused = release_sandbox.install(FORK_SHA[:12])
     assert refused.returncode == 64
     assert "full commit" in refused.stderr
+
+
+def test_a_stock_npm_codex_pin_is_refused_and_a_stale_one_dropped(
+    release_sandbox: ReleaseSandbox,
+) -> None:
+    # Stock Codex has no managed hooks, so gitguard would not run under it
+    # (WI-1146). A pin of the npm row is refused without a download, and a
+    # `current` an older image left behind is removed.
+    tools = release_sandbox.share / "agent-clis.tools"
+    tools.write_text(
+        tools.read_text(encoding="utf-8")
+        + "codex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\n",
+        encoding="utf-8",
+    )
+    stale = release_sandbox.root / "codex-npm" / "0.161.0" / "bin"
+    stale.mkdir(parents=True)
+    (stale / "codex").write_text("#!/bin/sh\necho stock\n", encoding="utf-8")
+    (release_sandbox.root / "codex-npm" / "current").symlink_to("0.161.0")
+
+    refused = release_sandbox.install_tool("codex-npm", "0.161.0")
+    assert refused.returncode == 64, refused.stderr
+    assert "only the Codex fork" in refused.stderr
+    assert not (release_sandbox.root / "codex-npm" / "current").exists()
+
+    image = release_sandbox.install_tool("codex-npm", "image")
+    assert image.returncode == 0, image.stderr
+
+
+WRAPPER = REPO_ROOT / "engine" / "deploy" / "codex-full-access.sh"
+
+
+def _wrapped(root: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["VOGT_AGENT_CLI_ROOT"] = str(root)
+    return subprocess.run(
+        ["bash", str(WRAPPER), "--version"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+
+def test_the_codex_wrapper_refuses_a_runtime_copy_that_is_not_a_fork_release(
+    tmp_path: Path,
+) -> None:
+    prefix = tmp_path / "codex" / "0.161.0"
+    (prefix / "bin").mkdir(parents=True)
+    binary = prefix / "bin" / "codex"
+    binary.write_text('#!/bin/sh\necho ran "$@"\n', encoding="utf-8")
+    binary.chmod(0o755)
+    (tmp_path / "codex" / "current").symlink_to("0.161.0")
+
+    # An npm copy records no fork provenance: refused, not run.
+    refused = _wrapped(tmp_path)
+    assert refused.returncode == 78, refused.stdout
+    assert "not a Codex fork release" in refused.stderr
+    assert "ran" not in refused.stdout
+
+    # A fork release records `<repository>@<commit>` and runs, with the pin
+    # flag the wrapper always adds.
+    (prefix / "source").write_text(
+        f"https://github.com/TheDancingDeveloper-org/codex@{FORK_SHA}\n",
+        encoding="utf-8",
+    )
+    ran = _wrapped(tmp_path)
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.strip() == "ran --no-daemon --version"
