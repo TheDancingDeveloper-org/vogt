@@ -859,16 +859,17 @@ than these routes.
   fails, or a base the remote does not have, refuses the start (`400`) rather
   than falling back to the local ref. The fetch moves only that one
   remote-tracking ref, never a local branch. The fetch runs as the engine
-  process, before the session process exists (WI-1666). A GitHub `origin` is
-  fetched with `ENGINE_WORKTREE_GITHUB_TOKEN`, falling back to `GH_TOKEN` on
-  the engine process — the same token agent-auth aliases to `GH_TOKEN` inside
-  a session, not a separate engine-user credential that cannot see private
-  organisation repositories. The value is given to git only through
-  `GIT_ASKPASS` (`vogt-git-askpass`, reading `ENGINE_WORKTREE_FETCH_TOKEN` for
-  that one command) and is never put on an argument list or into an error.
-  A GitHub origin with neither variable set refuses the start (`400`) and
-  names `ENGINE_WORKTREE_GITHUB_TOKEN`. A non-GitHub origin keeps the engine
-  user's own git credentials. Every other refusal (codex policy, agent launch) is checked before the
+  process, before the session process exists (WI-1666). An `https://github.com`
+  origin (host exactly `github.com`) is fetched with
+  `ENGINE_WORKTREE_GITHUB_TOKEN`, falling back to `GH_TOKEN` on the engine
+  process — the same token agent-auth aliases to `GH_TOKEN` inside a session.
+  The value is given to git only through `GIT_ASKPASS` (`vogt-git-askpass`,
+  reading `ENGINE_WORKTREE_FETCH_TOKEN` for that one command) and is never put
+  on an argument list or into an error. An https GitHub origin with neither
+  variable set refuses the start (`400`) and names
+  `ENGINE_WORKTREE_GITHUB_TOKEN`. SSH (`git@github.com:...`), a host that only
+  contains the substring `github.com`, and every non-GitHub origin keep the
+  engine user's own git credentials and are not given the token. Every other refusal (codex policy, agent launch) is checked before the
   cut, and a start that fails after it (prompt file, PTY spawn) removes the
   worktree and its branch again, so a refused start leaves neither behind.
   Absent means the session opens in `cwd`, byte-identical to a request from
