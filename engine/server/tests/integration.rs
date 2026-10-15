@@ -13152,6 +13152,134 @@ async fn session_showing_dialog(
     }
 }
 
+/// WI-1355: a Codex MCP tool approval is a person's to answer. The fork
+/// (codex-real 0.162.0+fork.ca04973b4, PTY bytes captured off it) asks
+/// "Allow the echo MCP server to run tool …?" in its elicitation form; prod
+/// saw it with approval null, activity idle and an agent's typed prompt
+/// answering it. Replayed through a real session, the engine must report the
+/// approval, hand a wait back as needing a person, and refuse agent input —
+/// whether the title says `awaiting approval` or, as on prod, still `working`.
+#[tokio::test]
+async fn a_codex_mcp_tool_approval_needs_a_person() {
+    let (base, tmp, _guard) = wi983_front_door().await;
+    let operator = client_for(TEST_TOKEN);
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/codex-approvals/mcp-120.pty");
+    let script = tmp.path().join("replay.py");
+    std::fs::write(
+        &script,
+        r#"import os, sys, tty
+fixture, title, typed = sys.argv[1:4]
+data = open(fixture, "rb").read()
+data = data.replace(b"codex: awaiting approval", title.encode())
+fd = sys.stdin.fileno()
+tty.setraw(fd)
+os.write(sys.stdout.fileno(), data)
+while True:
+    got = os.read(fd, 64)
+    if not got:
+        break
+    with open(typed, "ab") as f:
+        f.write(got)
+"#,
+    )
+    .unwrap();
+
+    for title in ["codex: awaiting approval", "codex: working"] {
+        let typed = tmp.path().join(format!("typed-{}", title.len()));
+        let created: Value = operator
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({
+                "name": "codex-mcp",
+                "cols": 120,
+                "rows": 40,
+                "command": [
+                    "python3",
+                    script.to_string_lossy(),
+                    fixture.to_string_lossy(),
+                    title,
+                    typed.to_string_lossy(),
+                ],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // A wait comes back as soon as the dialog shows, not at its timeout.
+        let waited: Value = operator
+            .get(format!(
+                "{base}/api/sessions/{id}/wait?until=ready&timeout_s=20"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(waited["outcome"], "awaiting-approval", "{title}: {waited}");
+        let screen = &waited["screen"];
+        assert_eq!(screen["activity"], "awaiting-approval", "{title}: {screen}");
+        assert_eq!(screen["ready"], false, "{title}: {screen}");
+        let approval = &screen["approval"];
+        assert_eq!(approval["kind"], "permission", "{title}: {approval}");
+        assert_eq!(
+            approval["question"], "Allow the echo MCP server to run tool \"echo\"?",
+            "{title}: read off the screen, not the title: {approval}"
+        );
+        let labels: Vec<&str> = approval["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            ["Allow", "Allow for this session", "Always allow", "Cancel"],
+            "{title}"
+        );
+
+        // An agent's prompt that happens to start with a digit, a bare
+        // option number and Enter are each an answer to the form: refused.
+        let agent = client_for(WI983_SESSION);
+        for text in ["Gitguard test (1) run board_list", "1", "\r"] {
+            let sent = agent
+                .post(format!("{base}/api/sessions/{id}/input"))
+                .json(&json!({ "text": text, "submit": true, "person": true }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(sent.status(), StatusCode::FORBIDDEN, "{title} {text:?}");
+            let said: Value = sent.json().await.unwrap();
+            assert!(
+                said["error"].as_str().unwrap().contains("person required"),
+                "{said}"
+            );
+        }
+        let answered = agent
+            .post(format!("{base}/api/sessions/{id}/answer"))
+            .json(&json!({ "option": 1, "person": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(answered.status(), StatusCode::FORBIDDEN, "{title}");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let typed = std::fs::read(&typed).unwrap_or_default();
+        assert!(
+            !typed.iter().any(|b| matches!(b, b'1' | b'\r' | b'G')),
+            "{title}: agent keys reached the form: {typed:?}"
+        );
+        let _ = operator
+            .post(format!("{base}/api/sessions/{id}/kill"))
+            .send()
+            .await;
+    }
+}
+
 async fn wi983_front_door() -> (String, tempfile::TempDir, ServerGuard) {
     let core = stand_in_core_knowing(vec![
         (
