@@ -26,7 +26,9 @@
 #                Terraform, sshpass, pingcli, actionlint, and the Tailscale
 #                *client* (nothing joins a tailnet at build time). Estate-only
 #                pieces — the Cadastre bridge, theclawbay, and the private
-#                komodo-mcp binary — stay in the estate derivative, not here.
+#                komodo-mcp binary — stay in the estate derivative, not here. It is the last stage, so a
+#                build without `--target` produces it; `lean` and `full`
+#                are the `toolchain` stage and must be asked for by name.
 #
 # **Tagged by content, not by a moving name.** `.github/workflows/pod-base.yml`
 # tags each build `<variant>-<hash>-<week>`, where `<hash>` is a digest of this
@@ -384,7 +386,9 @@ RUN if [ "$INSTALL_FLUTTER" = "true" ]; then \
 # /home/sprooty bind mount — a --user install would be shadowed at runtime.
 # Fail the build if they don't install — silent fallback would leave the pod
 # with broken Python tooling that surfaces as cryptic command-not-found errors.
-RUN pip3 install --break-system-packages --no-cache-dir uv # ── workbench ──────────────────────────────────────────────────────────────
+RUN pip3 install --break-system-packages --no-cache-dir uv ruff pytest
+
+# ── workbench ──────────────────────────────────────────────────────────────
 #
 # Its own stage, selected with `--target workbench`. `lean` and `full` build
 # the default stage above and never see these layers or the ENV below: an ENV
@@ -392,6 +396,10 @@ RUN pip3 install --break-system-packages --no-cache-dir uv # ── workbench �
 # CHROME_EXECUTABLE at a file that does not exist and sending `uv python
 # install` at a root-owned directory that does not either.
 FROM toolchain AS workbench
+# Stage-scoped: without these, ${SPROOTY_UID} expands empty and the chown
+# below is a silent no-op, leaving /opt/uv-python root-owned.
+ARG SPROOTY_UID=1000
+ARG SPROOTY_GID=1000
 ARG TERRAFORM_VERSION=1.16.3
 ARG TERRAFORM_SHA256=093b6ae9a2228af5029c41606bc96eb583553528aad1bfe7e0b4d62fc91e25d8
 # pingcli stays on 0.8.4: the last pre-1.0 release whose `platform export`
@@ -455,7 +463,6 @@ RUN set -eu; \
     && rm -rf /var/lib/apt/lists/* \
     && command -v tailscale
 
-t/uv-python
 
 # Left as root on purpose. `engine/Dockerfile` continues from here and needs
 # to install into /usr/local before it drops to `sprooty` at the very end; a
