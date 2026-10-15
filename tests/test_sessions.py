@@ -527,28 +527,34 @@ def test_a_cwd_opens_in_an_existing_worktree(
     """WI-1671: name a worktree that already exists and start in it.
 
     The engine is handed that directory as cwd and is not asked to cut one.
-    A path that is not under Active/, is not a worktree of the project's
-    repository, or is combined with worktree=true is refused before any
-    session is started.
+    The Active/ check is the parent of the project's checkout, so a directory
+    that merely has an `Active` component elsewhere is refused, and so is the
+    shared checkout itself. A relative path, a stranger repository, a missing
+    directory, and an explicit worktree=true are refused before any session
+    is started. A symlink is accepted as the directory it points at.
     """
-    checkout = tmp_path / "vogt"
-    checkout.mkdir()
-    active = tmp_path / "Active" / "vogt-wi-7"
-    active.mkdir(parents=True)
-    stranger = tmp_path / "Active" / "other"
+    active_root = tmp_path / "Active"
+    checkout = active_root / "vogt"
+    checkout.mkdir(parents=True)
+    worktree = active_root / "vogt-wi-7"
+    worktree.mkdir()
+    linked = active_root / "vogt-link"
+    linked.symlink_to(worktree, target_is_directory=True)
+    stranger = active_root / "other"
     stranger.mkdir()
+    decoy = tmp_path / "decoy" / "Active" / "evil"
+    decoy.mkdir(parents=True)
+    common = tmp_path / "common.git"
+    other = tmp_path / "other.git"
+    seen: list[Path] = []
 
-    def fake_git(root: Path, *args: str, required: bool = False) -> str:
-        if args[:2] == ("rev-parse", "--git-common-dir"):
-            if root == active.resolve() or root == checkout.resolve():
-                return str(tmp_path / "common.git")
-            return str(tmp_path / "other.git")
-        return ""
+    def fake_git(root: Path) -> str:
+        seen.append(root)
+        if root in {worktree.resolve(), checkout.resolve()}:
+            return str(common)
+        return str(other)
 
-    monkeypatch.setattr("vogt.application.services.sessions.git_output", fake_git)
-    # The fixture project points at ROOT, which does not exist. Register one
-    # whose checkout is the fake repository so the commondir check has a
-    # tree to compare against.
+    monkeypatch.setattr("vogt.application.services.sessions._git_common_dir", fake_git)
     register_project(
         wired,
         RegisterProjectParams(name="Checkout", root_path=str(checkout), reason=WHY),
@@ -556,16 +562,32 @@ def test_a_cwd_opens_in_an_existing_worktree(
 
     result = start_session(
         wired,
-        StartSessionParams(project="checkout", cwd=str(active), reason=WHY),
+        StartSessionParams(project="checkout", cwd=str(worktree), reason=WHY),
     )
-    assert engine.last_spec["cwd"] == str(active.resolve())
+    assert engine.last_spec["cwd"] == str(worktree.resolve())
     assert "worktree" not in engine.last_spec
-    assert result.session.cwd == str(active.resolve())
+    assert result.session.cwd == str(worktree.resolve())
 
-    with pytest.raises(InvalidRequest, match="Active"):
+    linked_result = start_session(
+        wired,
+        StartSessionParams(project="checkout", cwd=str(linked), reason=WHY),
+    )
+    assert linked_result.session.cwd == str(worktree.resolve())
+
+    with pytest.raises(InvalidRequest, match="absolute"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd="Active/vogt-wi-7", reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="shared checkout"):
         start_session(
             wired,
             StartSessionParams(project="checkout", cwd=str(checkout), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="not under the workspace Active"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(decoy), reason=WHY),
         )
     with pytest.raises(InvalidRequest, match="not a git worktree"):
         start_session(
@@ -577,7 +599,7 @@ def test_a_cwd_opens_in_an_existing_worktree(
             wired,
             StartSessionParams(
                 project="checkout",
-                cwd=str(tmp_path / "Active" / "missing"),
+                cwd=str(active_root / "missing"),
                 reason=WHY,
             ),
         )
@@ -585,11 +607,29 @@ def test_a_cwd_opens_in_an_existing_worktree(
         start_session(
             wired,
             StartSessionParams(
-                project="checkout", cwd=str(active), worktree=True, reason=WHY
+                project="checkout",
+                cwd=str(worktree),
+                worktree=True,
+                reason=WHY,
             ),
         )
-    # None of the refusals reached the engine.
-    assert engine.counter == 1
+    # The implement profile sets worktree itself. A cwd still wins, and the
+    # engine is not asked to cut one.
+    purpose = start_session(
+        wired,
+        StartSessionParams(
+            project="checkout",
+            cwd=str(worktree),
+            purpose="implement",
+            reason=WHY,
+        ),
+    )
+    assert purpose.session.cwd == str(worktree.resolve())
+    assert "worktree" not in engine.last_spec
+    # The refusals never reached the engine: two accepted starts, then the
+    # purpose start.
+    assert engine.counter == 3
+    assert decoy.resolve() not in seen
 
 
 def test_the_whole_session_clock_is_unset_unless_the_project_sets_it(

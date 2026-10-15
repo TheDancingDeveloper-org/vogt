@@ -4249,11 +4249,13 @@ class StartSessionParams(Params):
             "project's registered checkout (WI-1671). Use it when a worktree "
             "already exists and `worktree=true` cannot cut a new one — a "
             "private origin the engine cannot fetch, for example. The path "
-            "must exist, must sit under the workspace's `Active/` directory, "
-            "and must be a git worktree of the same repository as the "
-            "project's checkout (the same `commondir`). Anything else is "
-            "refused, and so is combining it with `worktree=true`. Recorded "
-            "as the session's cwd."
+            "must exist, must sit under the workspace's `Active/` directory "
+            "(the parent of the project's checkout), must not be that "
+            "checkout itself, and must be a git worktree of the same "
+            "repository (the same `commondir`). Anything else is refused, "
+            "and so is combining it with an explicit `worktree=true`. A "
+            "purpose profile that would have set `worktree` does not, when "
+            "`cwd` is given. Recorded as the session's cwd."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
