@@ -206,6 +206,9 @@ block = (
     f'command = "{os.environ["CODEX_WRAPPER"]}"\n'
     f'args = ["{os.environ["CODEX_ARG"]}"]\n'
     f'env_vars = [{os.environ["CODEX_VARS"]}]\n'
+    # Read-only by construction, so pre-approved (WI-1634). Written here as
+    # well as by the driven-session bundle, or each start would drop it.
+    'default_tools_approval_mode = "approve"\n'
 )
 try:
     with open(path, encoding="utf-8") as fh:
@@ -779,6 +782,9 @@ def block(name: str, args: list[str], extra: str = "") -> str:
         f'command = "{klaudia}"\n'
         f"args = [{rendered}]\n"
         f"{extra}"
+        # Pre-approved for driven sessions (WI-1634); the bundle below
+        # would add it anyway, so writing it here keeps reruns quiet.
+        'default_tools_approval_mode = "approve"\n'
     )
 
 wanted = {
@@ -868,6 +874,22 @@ PY
 # tool_input_schema_max_bytes raised. A server an operator never registered is
 # not invented here, and a table that already carries a larger cap is not
 # lowered. A config that does not parse is left alone, like every writer above.
+#
+# The estate's trusted servers get default_tools_approval_mode = "approve"
+# (WI-1634, operator-approved 2026-10-15). A driven Codex runs `-a on-request`,
+# so every MCP call otherwise stops at a permission prompt only a person may
+# answer, and an autonomous session cannot use the estate's tools at all. The
+# fork's per-server key (codex-rs/config mcp_types.rs AppToolApproval, read by
+# requires_mcp_tool_approval_for_mode in core mcp_tool_call.rs) skips the
+# prompt for that server only; requirements.toml cannot carry it, its
+# [mcp_servers] is an identity allowlist. The list mirrors what the Claude
+# driven-session policy lets a Claude session call without a person: vogt and
+# cadastre (the session's own scoped token decides what it may write), the
+# klaudia browser and isolated sub-agent, and the three read-only forge and
+# Grafana wrappers. komodo is deliberately absent, because its deploy_stack and
+# write_stack_file mutate running stacks, and so is every server not named
+# here: those keep the person gate. A table an operator gave an explicit mode
+# keeps it, and a server nobody registered is not created.
 readonly CODEX_SCHEMA_MAX_BYTES="${CODEX_SCHEMA_MAX_BYTES:-200000}"
 
 codex_driven_session() {
@@ -915,6 +937,16 @@ TABLES = {
     "features": "memories = true\n",
 }
 SCHEMA_SERVERS = ("vogt", "cadastre")
+APPROVED_SERVERS = (
+    "vogt",
+    "cadastre",
+    "codex-subagent",
+    "browser",
+    "github-ro",
+    "forgejo-ro",
+    "grafana-ro",
+)
+APPROVAL_ROW = 'default_tools_approval_mode = "approve"\n'
 
 def key_of(row: str) -> str:
     head = row.split("#", 1)[0]
@@ -959,21 +991,33 @@ while index < len(lines):
         if index < len(lines) and header_line(lines[index]):
             out.append("\n")
         continue
-    schema = next(
-        (name for name in SCHEMA_SERVERS if stripped == f"[mcp_servers.{name}]"),
+    server = next(
+        (name for name in APPROVED_SERVERS if stripped == f"[mcp_servers.{name}]"),
         None,
     )
-    if schema is not None:
+    if server is not None:
         out.append(lines[index])
         index += 1
         present = None
+        approval = False
         while index < len(lines) and not header_line(lines[index]):
             row = lines[index]
-            if key_of(row) == "tool_input_schema_max_bytes":
+            if server in SCHEMA_SERVERS and key_of(row) == "tool_input_schema_max_bytes":
                 present = row
             else:
+                approval = approval or key_of(row) == "default_tools_approval_mode"
                 out.append(row)
             index += 1
+        while out and out[-1].strip() == "":
+            out.pop()
+        # Before the cap, which is always lifted and re-appended last: the
+        # other order would move a line on every run and rewrite the file.
+        if not approval:
+            out.append(APPROVAL_ROW)
+        if server not in SCHEMA_SERVERS:
+            if index < len(lines) and header_line(lines[index]):
+                out.append("\n")
+            continue
         keep = present
         if present is not None:
             try:

@@ -456,6 +456,22 @@ higher cap is not lowered, and a server nobody registered is not created. The
 rewrite is the same flock and atomic rename, and a config that does not parse
 is left alone.
 
+A driven Codex runs `-a on-request`, so every MCP tool call would otherwise
+stop at a permission prompt only a person may answer (WI-1634). The bundle
+therefore gives the estate's trusted servers `default_tools_approval_mode =
+"approve"`, the fork's per-server key that skips the prompt for that server
+only: `vogt`, `cadastre`, `codex-subagent`, `browser`, `github-ro`,
+`forgejo-ro` and `grafana-ro` (operator-approved 2026-10-15). This mirrors
+what the Claude driven-session policy lets a Claude session call without a
+person. `komodo` is deliberately not on the list, since its `deploy_stack` and
+`write_stack_file` change running stacks, and neither is any other server:
+those keep the person gate. A table that already names a mode keeps it, and a
+server nobody registered is not created. The read-only, browser and sub-agent
+writers emit the same row in the tables they own, so a restart does not
+rewrite them. `/etc/codex/requirements.toml` cannot carry the setting (its
+`[mcp_servers]` is an identity allowlist), and it is unchanged: gitguard
+stays pinned and the bypass posture stays person-only.
+
 Any further MCP server an agent should reach is registered by hand inside the
 session, the way the Rust LSP entry above shows.
 
