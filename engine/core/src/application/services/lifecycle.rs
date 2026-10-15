@@ -441,10 +441,9 @@ pub fn clone_instance<C: Clock + 'static, I: IdFactory + 'static>(
         ))
     })?;
     // Beside the live stores, so the final swap is a same-filesystem rename.
-    let stamp_label = format!(
-        "{}Z",
-        crate::core::to_iso(cloned_at)[..19].replace(['-', ':'], "")
-    );
+    // Microseconds, as Python's `%f` does: two clones in one second must not
+    // share a staging directory.
+    let stamp_label = staging_label(cloned_at);
     let staging = data_dir.join(format!(".clone-staging-{stamp_label}"));
     std::fs::create_dir(&staging).map_err(|err| {
         VogtError::InvalidRequest(format!(
@@ -572,6 +571,14 @@ pub fn clone_instance<C: Clock + 'static, I: IdFactory + 'static>(
 
 /// Copy the allowlisted session history, or say why nothing was copied. Never
 /// fatal: by the time this runs the stores are already in place.
+/// The staging directory's time label. Keeps the microsecond fraction so two
+/// clones in one second get different directories. Python uses `%f`.
+fn staging_label(moment: Moment) -> String {
+    let iso = crate::core::to_iso(moment);
+    let body = iso.strip_suffix("+00:00").unwrap_or(&iso);
+    format!("{}Z", body.replace(['-', ':', '.'], ""))
+}
+
 fn clone_engine_state(source: &Path, target: Option<&Path>, include: bool) -> String {
     let left_behind =
         "push subscriptions and agent tasks are never copied by a clone; this engine keeps its own";
@@ -1786,14 +1793,12 @@ mod tests {
 
     #[test]
     fn staging_names_carry_microseconds_so_one_second_does_not_collide() {
-        let clock_a = Moment::from_unix(1_700_000_000, 1_000);
-        let clock_b = Moment::from_unix(1_700_000_000, 2_000);
-        let label = |moment: Moment| {
-            let iso = crate::core::to_iso(moment);
-            let body = iso.strip_suffix("+00:00").unwrap_or(&iso);
-            format!("{}Z", body.replace(['-', ':', '.'], ""))
-        };
-        assert_ne!(label(clock_a), label(clock_b));
-        assert!(label(clock_a).contains('Z'));
+        // `staging_label` is what `clone_instance` names the staging directory
+        // with. A moment one microsecond later must not collide, and a whole
+        // second still ends in Z.
+        let earlier = Moment::from_unix(1_700_000_000, 1_000);
+        let later = Moment::from_unix(1_700_000_000, 2_000);
+        assert_ne!(staging_label(earlier), staging_label(later));
+        assert!(staging_label(Moment::from_unix(1_700_000_000, 0)).ends_with('Z'));
     }
 }
