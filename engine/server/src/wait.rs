@@ -73,7 +73,20 @@ async fn check(session: &Arc<Session>, until: WaitUntil) -> Result<Option<Outcom
     }
     match session.activity() {
         ActivityState::AwaitingApproval => Ok(Some(Outcome::AwaitingApproval)),
-        ActivityState::WaitingForInput => Ok(Some(Outcome::Ready)),
+        ActivityState::WaitingForInput => {
+            // A titled agent (Codex, Klaudia) reports `waiting-for-input` from
+            // screen glyphs before its composer accepts a submit: a resumed
+            // Codex reads that while the TUI is still redrawing, and an Enter
+            // typed then sits in the composer (WI-1669). For those, ready is
+            // the screen's own word — the `codex: ready` title, or the prompt
+            // glyph for everyone else.
+            if titled(session) {
+                let screen = screen::session_screen(Arc::clone(session), 0).await?;
+                Ok(screen.ready.then_some(Outcome::Ready))
+            } else {
+                Ok(Some(Outcome::Ready))
+            }
+        }
         ActivityState::Idle => {
             let screen = screen::session_screen(Arc::clone(session), 0).await?;
             Ok(screen.ready.then_some(Outcome::Ready))
@@ -82,14 +95,24 @@ async fn check(session: &Arc<Session>, until: WaitUntil) -> Result<Option<Outcom
     }
 }
 
-/// Whether `event` is about this session's state.
+/// Whether `event` is about this session's state. `SessionReady` counts:
+/// for a titled agent the activity can already read `idle` before the title
+/// that makes the screen `ready` lands (WI-1669), so the wait has to hear the
+/// event that announces the prompt.
 fn concerns(event: &ServerEvent, id: uuid::Uuid) -> bool {
     match event {
         ServerEvent::Activity { id: e, .. }
         | ServerEvent::SessionKilled { id: e, .. }
-        | ServerEvent::SessionBlocked { id: e, .. } => *e == id,
+        | ServerEvent::SessionBlocked { id: e, .. }
+        | ServerEvent::SessionReady { id: e } => *e == id,
         _ => false,
     }
+}
+
+/// An agent whose window title this engine reads, so its readiness is the
+/// screen's `ready` rather than the activity alone.
+fn titled(session: &Session) -> bool {
+    matches!(session.agent().as_deref(), Some("codex" | "klaudia"))
 }
 
 /// Block until `session` reaches `until` (or needs a person, or exits), or
