@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn not_ported_is_a_failure() {
         let registry = registry();
-        let operation = registry.get("session.changes").unwrap();
+        let operation = registry.get("place.metrics").unwrap();
         let error = operation.run(None, serde_json::json!({})).unwrap_err();
         assert!(
             error.message().contains("not been ported"),
