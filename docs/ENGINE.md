@@ -787,6 +787,13 @@ than these routes.
   permission prompt (`kind` `permission` or `read-outside-cwd`) is answered
   only by a person: anyone else gets `403 person required` and nothing is
   typed (WI-983, below).
+- `GET /api/sessions/changes[?since=N&ids=&limit=]` and
+  `GET /api/sessions/wait-any[?ids=&until=&cursor=&timeout_s=]` — the overseer
+  delta (WI-1246, WI-1672). `cursor` is a sequence number, or `now` to skip
+  every event already in the ring and wait only for one published after the
+  call starts. A timeout then returns that head as `next_cursor`. A numeric
+  cursor past the head is treated as the start of the ring (the sequence
+  restarts when the engine does). Requires `sessions`.
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
   only when asked) with the last N (default 8, at most 40) non-blank lines

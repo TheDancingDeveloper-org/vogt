@@ -842,6 +842,20 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
     return SessionSweepResult(rows=rows, counts=counts, swept_at=now, engine=None)
 
 
+def _starter_engine_id(view: ReadView, named: str | None) -> str | None:
+    """The engine id a `started_by_session` filter matches, or None for no filter.
+
+    The column stores the starter's engine session id. A caller may name
+    either that id or the starter's Vogt `ses_…` id.
+    """
+    if named is None:
+        return None
+    session = view.session_by_id(named) or view.session_by_engine_id(named)
+    if session is not None:
+        return session.engine_session_id
+    return named
+
+
 def _rows(
     ctx: AppContext,
     params: ListSessionsParams,
@@ -868,9 +882,11 @@ def _rows(
             if params.work_item is None
             else _resolve.work_item(view, params.work_item).id
         )
+        starter = _starter_engine_id(view, params.started_by_session)
         sessions = view.list_sessions(
             project_id=project_id,
             work_item_id=work_item_id,
+            started_by_session=starter,
             include_stopped=params.include_stopped,
             # The page is cut after the state filter, so the declared half
             # has to be the whole filtered set. One past the operation's own
@@ -901,7 +917,7 @@ def _rows(
         # An unlinked session whose process has exited is the engine's
         # leftover, not a running terminal: it is listed only when stopped
         # sessions were asked for, as a linked one Vogt stopped would be.
-        unfiltered = project_id is None and work_item_id is None
+        unfiltered = project_id is None and work_item_id is None and starter is None
         if unfiltered:
             for engine_session in live.values():
                 # A hibernated session is asleep, not stopped: listed always.

@@ -2730,6 +2730,32 @@ def test_a_vogt_started_session_is_named_by_its_engine_id(
     assert child.session.started_by_kind == "worker"
 
 
+def test_session_list_filters_by_who_started_it(wired: AppContext) -> None:
+    parent = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    child = start_session(
+        _as(wired, f"agent:session:{parent.session.id}"),
+        StartSessionParams(work_item="WI-1", reason=WHY),
+    )
+    other = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    by_engine = list_sessions(
+        wired,
+        ListSessionsParams(
+            mode="full", started_by_session=parent.session.engine_session_id
+        ),
+    )
+    by_vogt = list_sessions(
+        wired, ListSessionsParams(mode="full", started_by_session=parent.session.id)
+    )
+    assert [row.id for row in by_engine.sessions] == [child.session.id]
+    assert [row.id for row in by_vogt.sessions] == [child.session.id]
+    assert other.session.id not in {row.id for row in by_engine.sessions}
+
+
+def test_session_list_fields_accept_a_comma_separated_string() -> None:
+    params = ListSessionsParams(fields="account,model")  # type: ignore[arg-type]
+    assert params.fields == ["account", "model"]
+
+
 def test_a_purpose_outside_the_six_is_refused() -> None:
     with pytest.raises(ValidationError):
         StartSessionParams(work_item="WI-1", purpose="anything", reason=WHY)  # type: ignore[arg-type]
