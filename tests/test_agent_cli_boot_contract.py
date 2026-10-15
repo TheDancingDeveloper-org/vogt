@@ -317,6 +317,27 @@ def test_codex_acp_installs_links_and_verifies(acp_sandbox: AcpSandbox) -> None:
     assert acp_sandbox.verify().returncode == 0
 
 
+def test_image_installs_claude_code_beside_codex_acp() -> None:
+    """The baked `npm install -g` list (engine/Dockerfile, the
+    INSTALL_AI_CLIENTS block) must carry both packages at their exact pins.
+    codex-acp was added by replacing the claude-code line, so the image built
+    with the pin still set but never installed Claude Code while the smoke
+    check below still demanded it. Reading the install list catches that; the
+    smoke checks alone do not, because they only run inside an image build."""
+    dockerfile = (REPO_ROOT / "engine" / "Dockerfile").read_text(encoding="utf-8")
+    block = dockerfile.split('if [ "$INSTALL_AI_CLIENTS" = "true" ]; then', 1)[1]
+    install = block.split("npm install -g", 1)[0]
+    assert "@anthropic-ai/claude-code@${claude_code_version}" in install, (
+        "claude-code dropped out of the image install list"
+    )
+    assert "@agentclientprotocol/codex-acp@${codex_acp_version}" in install, (
+        "codex-acp is not in the image install list at its pin"
+    )
+    smoke = block.split("npm install -g", 1)[1]
+    assert "/usr/local/bin/claude --version" in smoke
+    assert "/usr/local/bin/codex-acp --version" in smoke
+
+
 def test_codex_acp_whose_version_lies_is_not_made_current(
     acp_sandbox: AcpSandbox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
