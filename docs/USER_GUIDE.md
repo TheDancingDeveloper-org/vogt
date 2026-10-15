@@ -984,6 +984,12 @@ button to point the app at a different server.
 - **Copy/paste**: long-press to select — a floating **Copy** chip appears over
   the selection; tap it to copy. To paste, use the modifier row's **Paste**
   button (iOS Safari does not raise the desktop long-press-to-paste menu).
+- **Copy/paste in the file editor**: long-press a word to select it and raise
+  the editor's edit bar — **Select all**, **Cut**, **Copy**, **Paste**. The
+  editor takes the long-press itself, so the browser's own text-selection menu
+  does not appear over code; the bar goes through the same clipboard as the
+  terminal, including the Android app's native clipboard. The soft keyboard's
+  clipboard suggestion also pastes at the cursor.
 - **Every control is a thumb's size.** On a phone, or on any touch screen, no
   button, tab, tick box or link in the navigation is smaller than 44 by 44
   pixels, and rows of them keep space between the targets rather than only
