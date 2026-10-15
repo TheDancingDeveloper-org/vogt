@@ -128,7 +128,9 @@ and `opencode` CLIs at the Renovate-pinned versions in
 `engine/agent-versions.env`, `codex` (WI-1142) from the fork release asset for
 the full commit `VOGT_CODEX_SHA` of `VOGT_CODEX_SOURCE` (tag `fork-<sha>`,
 asset `codex-<target>.tar.gz`, checked against the sha256 recorded beside the
-pin), and `klaudia` (WI-950), a Go coding agent no
+pin). The release is x86_64 only, so `VOGT_CODEX_SHA256_LINUX_ARM64` is empty
+and an arm64 image build leaves the Codex copy unset instead of failing. It
+also bakes `klaudia` (WI-950), a Go coding agent no
 registry publishes, built with the image's Go from the commit pinned there
 (`VOGT_KLAUDIA_VERSION`, a full commit id of `VOGT_KLAUDIA_SOURCE`); it is off by default for a local build and on in
 the published image. That baked copy is the baseline, and the version a
@@ -413,7 +415,7 @@ with neither set the bootstrap falls back to the front door on loopback.
 **Codex's browser and isolated sub-agent** (WI-1358). Codex has neither a
 browser nor a way to hand `spawn_agent` a working directory — that tool takes
 `message`, `output_schema`, `fork_turns` and a model, and nothing else, in the
-fork this image ships (`codex-cli 0.162.0+fork.ca04973b4`). When `klaudia` is on
+fork this image ships (`codex-cli 0.162.0+fork.86a742cdc`). When `klaudia` is on
 `PATH`, `vogt-mcp-bootstrap` writes two stdio servers into Codex's config:
 `[mcp_servers.browser]` runs `klaudia mcp browser` (WI-1137) with
 `tool_timeout_sec = 60`, and `[mcp_servers.codex-subagent]` runs

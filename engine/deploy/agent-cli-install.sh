@@ -327,7 +327,10 @@ musl_target() {
 }
 
 # The sha256 the image recorded for this tool's release member, if any.
-# VOGT_CODEX_SHA256_LINUX_AMD64 / _ARM64, named off the binary.
+# VOGT_CODEX_SHA256_LINUX_AMD64 / _ARM64, named off the binary. An empty or
+# unset value means the release does not publish that architecture (WI-1594:
+# the fork is x86_64 only), so the caller skips the member check rather than
+# treating the missing line as a mismatch.
 recorded_member_sha() {
     local binary="$1" arch var
     case "$(uname -m)" in
