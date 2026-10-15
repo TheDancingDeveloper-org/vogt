@@ -971,6 +971,19 @@ mod tests {
         assert_eq!(d.options[1].label, "Open restricted");
         assert!(mentions_approval(b"Trust this folder?"));
 
+        // The screen reported from prod named the second option "Quit"
+        // rather than "Open restricted". Detection keys on the question, so
+        // that variant is the same gate.
+        let quit = lines(
+            "Folder access\n\
+             Trust this folder?\n\
+             ❯ 1. Trust and continue\n\
+               2. Quit\n",
+        );
+        let d = detect(&quit, &[]).expect("quit variant detected");
+        assert_eq!(d.kind, "folder-trust");
+        assert_eq!(d.options[1].label, "Quit");
+
         let imports = lines(
             "Allow external CLAUDE.md file imports?\n\
              This project's CLAUDE.md imports files outside the current working directory.\n\

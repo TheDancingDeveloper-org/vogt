@@ -712,42 +712,28 @@ unsafe fn libc_flock(fd: i32, op: i32) -> i32 {
     libc::flock(fd, op)
 }
 
-/// The text with `[projects."<key>"]` trusted, or `None` when it already is
-/// or an operator set a different `trust_level`.
+/// The text with `[projects."<key>"]` trusted, or `None` when the project is
+/// already present under any TOML spelling, or the edit would not parse.
+///
+/// Presence is decided on the parsed document, not on one header spelling.
+/// A literal-string key, a dotted key or an inline `[projects]` entry is the
+/// same project, and appending a second table for it would make the file
+/// invalid — Codex would then refuse to load its config at all, and an
+/// operator's `trust_level` would be shadowed (WI-1667 review).
 fn codex_trust_edit(text: &str, key: &str) -> Option<String> {
-    let header = format!("[projects.{key:?}]");
-    let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_string).collect();
-    let mut index = 0;
-    while index < lines.len() {
-        if lines[index].trim() != header {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        index += 1;
-        let mut trust: Option<usize> = None;
-        while index < lines.len() && !lines[index].trim_start().starts_with('[') {
-            let head = lines[index].split('#').next().unwrap_or("");
-            if head.split('=').next().unwrap_or("").trim() == "trust_level" {
-                trust = Some(index);
-            }
-            index += 1;
-        }
-        match trust {
-            Some(at) => {
-                let value = lines[at].split('=').nth(1).unwrap_or("").trim();
-                if value == "\"trusted\"" {
-                    return None;
-                }
-                // An operator chose this. Do not overwrite it.
-                return None;
-            }
-            None => {
-                lines.insert(start + 1, "trust_level = \"trusted\"\n".to_string());
-                return Some(lines.concat());
-            }
-        }
+    let parsed: toml::Value = if text.trim().is_empty() {
+        toml::Value::Table(toml::Table::new())
+    } else {
+        toml::from_str(text).ok()?
+    };
+    if parsed
+        .get("projects")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|projects| projects.contains_key(key))
+    {
+        return None;
     }
+    let header = format!("[projects.{}]", toml_basic_string(key));
     let mut body = text.to_string();
     if !body.is_empty() && !body.ends_with('\n') {
         body.push('\n');
@@ -757,7 +743,38 @@ fn codex_trust_edit(text: &str, key: &str) -> Option<String> {
     }
     body.push_str(&header);
     body.push_str("\ntrust_level = \"trusted\"\n");
-    Some(body)
+    // Never rename a file that does not parse, or that did not record the
+    // trust the caller asked for.
+    let written: toml::Value = toml::from_str(&body).ok()?;
+    let trusted = written
+        .get("projects")
+        .and_then(|p| p.get(key))
+        .and_then(|entry| entry.get("trust_level"))
+        .and_then(toml::Value::as_str)
+        == Some("trusted");
+    trusted.then_some(body)
+}
+
+/// A TOML basic string for `value`, so the header key round-trips through
+/// the parser. Rust's `Debug` writes some characters as `\u{..}`, which
+/// TOML does not accept.
+fn toml_basic_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{:04X}", u32::from(c)));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -906,6 +923,31 @@ mod tests {
         // A relative path, or one that cannot be a TOML key, is not written.
         assert!(!accept_codex_project(&missing, "relative").unwrap());
         assert!(!accept_codex_project(&missing, "/w/\"quoted").unwrap());
+    }
+
+    #[test]
+    fn a_project_already_present_in_another_spelling_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Literal-string key, and an inline table: both name the same
+        // project the double-quoted header would. Appending a second table
+        // would make the file invalid.
+        for existing in [
+            "[projects.'/w/repo']\ntrust_level = \"untrusted\"\n",
+            "[projects]\n\"/w/repo\" = { trust_level = \"untrusted\" }\n",
+        ] {
+            std::fs::write(&path, existing).unwrap();
+            assert!(
+                !accept_codex_project(&path, "/w/repo").unwrap(),
+                "rewrote {existing:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
+            let parsed: toml::Value = toml::from_str(existing).unwrap();
+            assert_eq!(
+                parsed["projects"]["/w/repo"]["trust_level"].as_str(),
+                Some("untrusted")
+            );
+        }
     }
 
     #[test]
