@@ -60,12 +60,24 @@ pub fn initialize(id: &str) -> String {
     )
 }
 
+/// First visible catalog slug. Codex's built-in default (`gpt-6-astra`) is not
+/// a catalog slug, and a custom `model_provider` rejects it (WI-1638).
+pub const DEFAULT_MODEL: &str = "grok";
+
 pub fn thread_start(id: &str, thread_id: Uuid, model: Option<&str>) -> String {
-    let mut params = json!({ "threadId": thread_id.to_string(), "approvalPolicy": "on-request" });
-    if let Some(model) = model {
-        params["model"] = json!(model);
-    }
-    request(id, METHOD_THREAD_START, params)
+    let model = model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(DEFAULT_MODEL);
+    request(
+        id,
+        METHOD_THREAD_START,
+        json!({
+            "threadId": thread_id.to_string(),
+            "approvalPolicy": "on-request",
+            "model": model
+        }),
+    )
 }
 
 pub fn thread_resume(id: &str, thread_id: Uuid) -> String {
@@ -133,7 +145,7 @@ supports_websockets = false
 web_search = "disabled"
 
 model_provider = "litellm"
-model = "grok"
+model = "{DEFAULT_MODEL}"
 model_catalog_json = "vogt-model-catalog.json"
 "#
     )
@@ -393,6 +405,20 @@ fn parse_response(msg: &Value) -> CodexEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_start_without_a_model_uses_the_catalog_default() {
+        let id = Uuid::nil();
+        for omitted in [None, Some(""), Some("  ")] {
+            let v: Value = serde_json::from_str(&thread_start("start", id, omitted)).unwrap();
+            assert_eq!(v["method"], METHOD_THREAD_START);
+            assert_eq!(v["params"]["model"], DEFAULT_MODEL);
+        }
+        let named: Value = serde_json::from_str(&thread_start("start", id, Some("code"))).unwrap();
+        assert_eq!(named["params"]["model"], "code");
+        let cfg = home_config("ENGINE_CHAT_PROVIDER_KEY");
+        assert!(cfg.contains(&format!("model = \"{DEFAULT_MODEL}\"")));
+    }
 
     #[test]
     fn turn_start_names_the_chat_thread() {
