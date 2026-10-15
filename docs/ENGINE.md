@@ -172,6 +172,7 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
 | `codex` wrapper | `deploy/codex-full-access.sh` | runs Codex without its nested sandbox, because the pod is the isolation boundary | only with `INSTALL_AI_CLIENTS` |
+| Codex driven-session requirements | `deploy/driven-session-codex-requirements.toml` | the gitguard managed hook (`klaudia hook gitguard`) on `SessionStart`, `failClosed`, for a driven Codex session | only once the Codex fork (WI-1142) is what the image installs; stock `@openai/codex` has no hook table and does not read it |
 | `vogt-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`, `fetch`, `store`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
 
 Nothing in the engine itself depends on `agent-auth`: with

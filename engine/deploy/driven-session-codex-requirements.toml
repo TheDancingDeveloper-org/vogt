@@ -1,0 +1,59 @@
+# Driven-session Codex requirements (WI-1146).
+#
+# The managed hook that runs gitguard for a Vogt-driven Codex session. It is
+# the Codex side of the same posture the Claude Code settings file
+# (`driven-session-policy.json`, WI-926) gives a Claude Code session: the pod
+# is the isolation boundary, and a missing guard must stop the session rather
+# than let it start unguarded.
+#
+# What consumes it is the Codex fork (WI-1142), not stock `@openai/codex`.
+# Stock Codex has no hook table and no `requirements.toml`, so pointing this
+# file at a stock binary does nothing — the fork is what reads
+# `--requirements-file` (or `CODEX_REQUIREMENTS_PATH`) and runs the handler
+# below. The hook command itself is `klaudia hook gitguard` (WI-1136), which
+# the image installs beside the fork.
+#
+# Scope. This file names one thing: the gitguard hook, closed. It does not
+# restate Codex's approval, sandbox or permission posture. A driven session's
+# posture is decided by the launcher (`codex-full-access.sh`) and by the
+# engine's per-session permission mode, and a requirements file that also
+# pinned `allowed_sandbox_modes` or `allowed_approval_policies` would overrule
+# both — a driven session that could no longer be told its posture. A
+# deployment that wants those constraints adds them in its own layer; this
+# file stays the hook.
+#
+# The table is exactly the fork's hook schema
+# (`codex-rs/config/src/hook_config.rs`): one `command` handler, `type`
+# selecting the variant, `command` the argv it runs, `failClosed` the
+# per-handler flag that blocks the event when the command fails instead of
+# failing open. `failClosed` defaults to false, so it has to be said. It only
+# takes effect on a hook that actually runs, which a managed requirements file
+# is — an untrusted user or project hook, or a hooks feature left disabled,
+# never reaches it.
+#
+# `SessionStart` captures the checkout's baseline (`HEAD`, plus the dirty and
+# untracked paths). `PreToolUse` is where the refusal happens: the hook reads
+# the tool call and blocks `git checkout -- .`, `git reset --hard`,
+# `git stash`, `git clean -f` and `git -C <other> restore .` when they would
+# discard work the session did not create, while ordinary commits of the
+# session's own work pass. The matcher narrows it to the two tools a shell
+# command or a file write arrives through; every other tool is untouched.
+# Both say `failClosed`: a hook that errors, or `klaudia` missing from the
+# image, blocks the event instead of letting the session run unguarded.
+
+[[hooks.SessionStart]]
+matcher = ""
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "klaudia hook gitguard"
+failClosed = true
+
+[[hooks.PreToolUse]]
+matcher = "Bash|apply_patch"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "klaudia hook gitguard"
+timeout = 10
+failClosed = true
