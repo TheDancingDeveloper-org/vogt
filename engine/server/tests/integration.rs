@@ -15676,3 +15676,68 @@ async fn worktree_cleanup_waits_for_every_session_in_the_worktree() {
     assert!(linked.join("Cargo.toml").exists());
     assert!(repo.join("README").exists());
 }
+
+/// A Codex turn whose title says `working` while its screen has gone quiet
+/// stays `running` (WI-1598) — and the activity watcher must then wait for
+/// the next window, not loop straight back. On prod (v0.7.15) it looped
+/// without an await, pinning a runtime worker at 100% and starving terminal
+/// input and every request queued behind it (WI-1644). The engine here runs
+/// on a single-threaded runtime, so a spinning watcher hangs the runtime
+/// outright: the watchdog thread turns that into a failure, not a hung suite.
+#[test]
+fn a_quiet_working_codex_session_does_not_starve_the_runtime() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (base, _guard) = boot().await;
+            let tmp = tempfile::tempdir().unwrap();
+            let codex = tmp.path().join("codex");
+            std::fs::write(
+                &codex,
+                "#!/bin/sh\nprintf '\\033]0;codex: working\\007Working (0s)\\n'\nexec sleep 30\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            let client = client_for(TEST_TOKEN);
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({
+                    "name": "quiet-codex",
+                    "command": ["env", "--", codex.to_string_lossy()],
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let id = created["id"].as_str().unwrap().to_string();
+            // Several quiet windows (idle_after_ms is 200 in the test config).
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            let started = std::time::Instant::now();
+            let got: Value = client
+                .get(format!("{base}/api/sessions/{id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(got["summary"]["activity"], "running", "{got}");
+            assert!(started.elapsed() < Duration::from_secs(2));
+            let _ = client
+                .delete(format!("{base}/api/sessions/{id}"))
+                .send()
+                .await;
+        });
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the engine runtime stalled: the activity watcher is spinning");
+}
