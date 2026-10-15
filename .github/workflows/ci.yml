@@ -298,16 +298,18 @@ jobs:
       # cargo-audit is a fixed version, and compiling it from crates.io is
       # most of the audit step (build-cycle review, 2026-10-15). The binary
       # is cached by that version, so a run installs it only on a cold cache.
-      # The path is $CARGO_HOME, not ~: on these runners the job's CARGO_HOME
-      # (/root/.cargo) is not the home actions/cache expands `~` against, so a
-      # `~/.cargo` entry restores somewhere cargo never looks.
+      # The path is a literal, not `~` and not ${{ env.CARGO_HOME }}: the job's
+      # CARGO_HOME (/root/.cargo, set by rust-toolchain) is not the home
+      # actions/cache expands `~` against, and a step env var is invisible to
+      # the workflow env context, so either form restores where cargo never
+      # looks. /root/.cargo is where `cargo install` writes on these runners.
       - name: restore the cargo-audit binary
         id: cargo-audit
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled()
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ${{ env.CARGO_HOME }}/bin/cargo-audit
+          path: /root/.cargo/bin/cargo-audit
           key: cargo-audit-0.22.2-${{ runner.os }}-${{ runner.arch }}
 
       - name: install cargo-audit
