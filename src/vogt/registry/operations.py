@@ -1019,7 +1019,10 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "Open a coding session (a terminal) for a work item or a "
                 "project. With `template` (e.g. claude) it runs that agent, "
                 "and a `task` is delivered as the agent's first prompt, so it "
-                "starts working instead of opening idle. Returns both ids "
+                "starts working instead of opening idle. `cwd` opens it in an "
+                "existing worktree under the workspace Active/ directory "
+                "instead of the project's checkout; it cannot be combined "
+                "with `worktree=true`. Returns both ids "
                 "(ses_… and engine_session_id); then poll session_screen "
                 "until `ready`."
             ),

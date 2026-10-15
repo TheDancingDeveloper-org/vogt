@@ -854,6 +854,14 @@ than these routes.
   Absent means the session opens in `cwd`, byte-identical to a request from
   before the field existed. A wake returns to the worktree already cut and
   does not cut another.
+  `session.start`'s `cwd` (WI-1671) is the other way in: the caller names an
+  existing worktree and vogt-core sends it as this `cwd`, with no
+  `SessionSpec.worktree`. It must be an absolute path that exists, sit under
+  the workspace `Active/` directory, and be a git worktree of the same
+  repository as the project's registered checkout (the same git `commondir`).
+  Combining it with `worktree: true` is refused before the engine is asked,
+  because one start cannot both cut a checkout and open one that already
+  exists.
 - `POST /api/sessions/:id/conversation` `{"agent", "id", "ended"?}` ->
   `SessionSummary` (WI-962). Links the agent conversation running in the
   session, or with `ended` unlinks it while it is still the session's. See
