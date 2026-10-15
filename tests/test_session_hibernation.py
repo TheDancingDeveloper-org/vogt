@@ -69,6 +69,8 @@ class Engine:
         self.counter = 0
         #: The outcome a wait answers with for a live session.
         self.wait_outcome = "ready"
+        #: The agent a session reports, keyed by engine id. Default claude.
+        self.agent: dict[str, str] = {}
         #: Screen reads after a wake answer `idle` this many times before
         #: `running`, so a submit that did not start a turn is visible
         #: (WI-1669).
@@ -91,7 +93,10 @@ class Engine:
             "alive": not asleep,
             "cwd": ROOT,
             "created_at": "2026-10-05T00:00:00Z",
-            "conversation": {"agent": "claude", "id": engine_id},
+            "conversation": {
+                "agent": self.agent.get(engine_id, "claude"),
+                "id": engine_id,
+            },
             "keep_awake": engine_id in self.keep_awake,
             **({"role": "oversight"} if engine_id in self.oversight else {}),
             **(
@@ -366,6 +371,69 @@ def test_typing_into_a_hibernated_session_wakes_it_first(
     ]
 
 
+def _submits(engine: Engine) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in engine.sent
+        if row["path"].endswith("/input") and row["body"].get("submit")
+    ]
+
+
+def test_a_delivered_submit_is_not_pressed_again(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry exists for a swallowed Enter, not for one that landed."""
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    engine.agent[engine_id] = "codex"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.idle_reads_after_wake = 0
+    engine.sent.clear()
+
+    result = session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+    assert len(_submits(engine)) == 1
+    assert result.delivery == "delivered"
+    assert result.woke is True
+
+
+def test_a_non_codex_session_never_gets_the_retry(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude stays on one Enter even when the confirm reads stay idle.
+
+    A second Enter there can accept a dialog the screen parser missed.
+    """
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    assert engine.agent.get(engine_id, "claude") == "claude"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.idle_reads_after_wake = 2
+    engine.sent.clear()
+
+    result = session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+    assert len(_submits(engine)) == 1
+    assert result.delivery == "unconfirmed"
+    assert result.woke is True
+
+
 def test_a_submit_that_does_not_start_a_turn_is_pressed_again(
     wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -379,6 +447,7 @@ def test_a_submit_that_does_not_start_a_turn_is_pressed_again(
     monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
     monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
     ses_id, engine_id = _started(wired)
+    engine.agent[engine_id] = "codex"
     hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
     engine.idle_reads_after_wake = 2
     engine.sent.clear()
@@ -390,11 +459,9 @@ def test_a_submit_that_does_not_start_a_turn_is_pressed_again(
         ),
     )
 
-    submits = [
-        row for row in engine.sent
-        if row["path"].endswith("/input") and row["body"].get("submit")
-    ]
-    assert len(submits) == 2, "the swallowed Enter is pressed exactly once more"
+    assert len(_submits(engine)) == 2, (
+        "the swallowed Enter is pressed exactly once more"
+    )
     assert result.delivery == "delivered"
     assert result.woke is True
 
