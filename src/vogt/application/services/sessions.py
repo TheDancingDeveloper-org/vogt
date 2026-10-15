@@ -1570,15 +1570,17 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         before = "waiting-for-input"
         _send_all(engine, engine_id, params.id, writes_in_order, person=person)
         # A resumed Codex accepts the text but swallows the Enter until its
-        # composer has settled (WI-1669). The wait above asks the engine to
-        # hold until the prompt is ready; if the turn still did not start,
-        # press Enter once more.
-        if confirming and submit:
+        # composer has settled (WI-1669). Only Codex: an `unconfirmed` read
+        # also happens when a short turn finished before Vogt saw `running`,
+        # and a second Enter on Claude, Klaudia or opencode can accept a
+        # dialog or picker the screen parser missed. Stock Codex, which sets
+        # no title, is covered here and not by the engine's titled wait.
+        # Through a helper: mypy narrows `current` to None along this path,
+        # which would delete the gate and the retry with it.
+        if params.confirm and submit and _is_codex(current):
             first = _confirm_delivery(engine, engine_id, before)
             if first.delivery == "unconfirmed":
-                _send_all(
-                    engine, engine_id, params.id, [("", True)], person=person
-                )
+                _send_all(engine, engine_id, params.id, [("", True)], person=person)
 
     verdict = (
         _confirm_delivery(engine, engine_id, before)
@@ -1632,6 +1634,17 @@ _CONFIRM_PAUSE_S = 0.2
 
 def _pause(seconds: float) -> None:
     time.sleep(seconds)
+
+
+def _is_codex(session: object) -> bool:
+    """Whether a session the engine reported runs Codex.
+
+    A function so the caller cannot have the argument narrowed away: the
+    wake path reads the session before it is awake, and mypy decides that
+    binding is None by the time the retry is considered.
+    """
+    agent = getattr(session, "conversation_agent", None)
+    return agent == "codex"
 
 
 def _confirm_delivery(
