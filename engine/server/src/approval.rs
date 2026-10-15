@@ -51,7 +51,7 @@ const BORDER: &[char] = &[
 /// because a TUI may position words with cursor moves rather than spaces.
 static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
     regex::bytes::Regex::new(
-        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow|grant|send)|allow\s*(?:command|.{1,80}?to\s*run\s*tool)|press\s*\S+\s*to\s*confirm\s*or\s*\S+\s*to\s*cancel|field\s*\d+\s*/\s*\d+|needs\s*your\s*approval|approve\s*network|grant\s*these\s*permissions|send\s*input\s*to|automatically\s*den|requires\s*approval|trust\s*the\s*files|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director|\(y\)\s*es\s*/\s*\(n\)\s*o",
+        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow|grant|send)|allow\s*(?:command|.{1,80}?to\s*run\s*tool)|press\s*\S+\s*to\s*confirm\s*or\s*\S+\s*to\s*cancel|field\s*\d+\s*/\s*\d+|needs\s*your\s*approval|approve\s*network|grant\s*these\s*permissions|send\s*input\s*to|automatically\s*den|requires\s*approval|trust\s*the\s*files|trust\s*this\s*folder|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director|\(y\)\s*es\s*/\s*\(n\)\s*o",
     )
     .expect("approval prefilter compiles")
 });
@@ -60,7 +60,7 @@ static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
 /// line of the rendered screen.
 static QUESTION: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|.*\brequires approval\b.*|do you trust the files in this folder\??|.*\bis this a project you (?:created or one you )?trust\b.*\??|allow external claude\.md(?: file)? imports\??)$",
+        r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|.*\brequires approval\b.*|do you trust the files in this folder\??|trust this folder\??|.*\bis this a project you (?:created or one you )?trust\b.*\??|allow external claude\.md(?: file)? imports\??)$",
     )
     .expect("approval question regex compiles")
 });
@@ -948,6 +948,28 @@ mod tests {
         assert_eq!(d.options.len(), 2);
         assert!(d.options[0].selected && !d.options[1].selected);
         assert_eq!(d.options[1].label, "No, exit");
+
+        // WI-1667: Codex's folder-trust gate (codex-cli 0.162, captured from
+        // the binary's TUI strings). The question is "Trust this folder?",
+        // the first option is preselected, and Enter alone chooses it —
+        // typing "1" and Enter quits the session. It is a startup gate, so
+        // session_answer can move the highlight and the change feed sees it.
+        let codex_trust = lines(
+            "Folder access\n\
+             Trust this folder?\n\
+             Codex can read, edit, and run files here, subject to your permission settings.\n\
+             \n\
+             ❯ 1. Trust and continue\n\
+               2. Open restricted\n",
+        );
+        let d = detect(&codex_trust, &[]).expect("codex trust gate detected");
+        assert_eq!(d.kind, "folder-trust");
+        assert_eq!(d.question, "Trust this folder?");
+        assert_eq!(d.options.len(), 2);
+        assert!(d.options[0].selected && !d.options[1].selected);
+        assert_eq!(d.options[0].label, "Trust and continue");
+        assert_eq!(d.options[1].label, "Open restricted");
+        assert!(mentions_approval(b"Trust this folder?"));
 
         let imports = lines(
             "Allow external CLAUDE.md file imports?\n\

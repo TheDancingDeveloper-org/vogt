@@ -1747,7 +1747,16 @@ warning and the rest are kept.
   then `projects/` in the engine's own `CLAUDE_CONFIG_DIR` and in every listed
   account, so a session on another login is still found.
 - Folder-trust pre-acceptance writes to the session's own config directory
-  (above). Create a profile with `claude-profile prepare <name>`: it makes the
+  (above). Codex is pre-trusted the same way (WI-1667): before a Codex
+  session starts, the engine records `trust_level = "trusted"` for that
+  session's cwd under `[projects."<cwd>"]` in `$CODEX_HOME/config.toml`
+  (`~/.codex/config.toml` when `CODEX_HOME` is unset). The rewrite holds the
+  same lock the MCP bootstrap uses, leaves a config that does not parse
+  untouched, and does not overwrite a `trust_level` an operator already
+  set. `ENGINE_AGENT_QUIET_ONBOARDING=0` skips it, as it skips Claude's.
+  Codex's "Trust this folder?" screen is also a startup gate
+  (`approval.kind` `folder-trust`), so a session that still reaches it can
+  be answered with `session_answer`. Create a profile with `claude-profile prepare <name>`: it makes the
   directory, links the main account's settings, skills and agents in, sets the
   auto-mode flag, and registers the MCP servers there by running
   `vogt-mcp-bootstrap` with `CLAUDE_CONFIG_DIR` set. Then log in once with
