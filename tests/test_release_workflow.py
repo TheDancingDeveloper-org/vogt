@@ -180,7 +180,7 @@ def test_core_and_stack_are_built_once_and_tagged_after_smoke() -> None:
     # metadata-action labels are newline-separated. Splitting them on comma
     # keeps only the first line.
     assert "IFS=','" not in stack
-    assert 'read -r pair' in stack
+    assert "read -r pair" in stack
     assert "mode=min" in bake
     # The retention workflow already prunes the untagged orphan a failed
     # smoke leaves. vogt and vogt-stack are in the package list it sweeps.
