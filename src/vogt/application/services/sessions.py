@@ -131,6 +131,7 @@ from vogt.core.entities import (
     Actor,
     AgentPolicy,
     CodingSession,
+    Project,
     Token,
     WorkItem,
     WorkOverlay,
@@ -142,6 +143,7 @@ from vogt.errors import (
     EngineOnly,
     InvalidRequest,
     NotFound,
+    PolicyRefused,
     RoleRefused,
     VogtError,
 )
@@ -250,6 +252,10 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # role nor a permission posture, so naming a purpose can never raise a
     # start past what the caller could ask for directly (WI-1323).
     params, overrides, read_only = _resolve_purpose(ctx, params)
+    # After the profile fills the model, before anything reaches the engine:
+    # a project's review policy is a rule, and a start that would run a model
+    # it forbids is refused rather than spawned (WI-1590).
+    _refuse_forbidden_model(ctx, params)
     started_by_session, started_by_kind = _started_by(ctx, engine)
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
@@ -3550,6 +3556,53 @@ def _resolve_purpose(
     filled = {field: value for field, value in supplied.items() if field not in given}
     overrides = tuple(field for field in _PROFILE_FIELDS if field in given)
     return params.model_copy(update=filled), overrides, profile.read_only
+
+
+def _refuse_forbidden_model(ctx: AppContext, params: StartSessionParams) -> None:
+    """Refuse a start whose model the subject's project forbids (WI-1590).
+
+    `agent_policy.review.never_models` is documented as a hard rule and was
+    only ever written into the brief as text, so a dispatch profile could
+    assign exactly the model the project forbids and the session still
+    spawned. The model judged is the one the start will actually run — the
+    profile's, unless the caller named one — and the comparison is on the
+    model id, not the display name. A start that names no model has nothing
+    to judge, and a project with no review policy has nothing to refuse
+    against.
+    """
+    if params.model is None:
+        return
+    with ctx.declared.read() as view:
+        project = _project_of(view, params)
+        if project is None or project.agent_policy is None:
+            return
+        review = project.agent_policy.review
+        if review is None:
+            return
+        forbidden = review.never_models
+    if params.model not in forbidden:
+        return
+    where = f"project {project.slug!r}"
+    msg = (
+        f"model {params.model!r} is on {where}'s review policy never_models, "
+        "so a session may not start on it"
+    )
+    raise PolicyRefused(msg)
+
+
+def _project_of(view: ReadView, params: StartSessionParams) -> Project | None:
+    """The project a start is about, before its checkout is resolved.
+
+    A work item's project is the one whose policy applies; a start that names
+    a project directly is about that project; a start that names neither has
+    no subject yet and so no policy to apply.
+    """
+    if params.work_item is not None:
+        project_id = _resolve.work_item(view, params.work_item).project_id
+        return view.project_by_id(project_id) if project_id is not None else None
+    if params.project is not None:
+        return _resolve.project(view, params.project)
+    return None
 
 
 def _started_by(
