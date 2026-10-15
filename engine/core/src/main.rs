@@ -22,6 +22,8 @@ mod merge;
 mod observability;
 #[allow(dead_code)] // Consumed by the HTTP, CLI and MCP adapters (P2.3–P2.5).
 mod registry;
+#[allow(dead_code)]
+mod scripts;
 mod storage;
 
 /// The product version. Nothing sets `VOGT_VERSION` today, so this resolves to
@@ -178,6 +180,12 @@ fn main() -> ExitCode {
     // flags. clap accepts the same three: --read-only, --no-schedule and
     // --tls-cert. A deployment that passes them must boot. A unique prefix of
     // `--help` counts, because argparse treats `--he` and `--h` as `--help`.
+    // The ported product scripts (WI-1079) are not registry operations, so the
+    // generated CLI must not answer them. They are dispatched here, before the
+    // registry fallback, and they read the checkout rather than a data dir.
+    if let Some(code) = scripts_command(&argv) {
+        return code;
+    }
     let help = argv.iter().any(|arg| is_help_flag(arg));
     let command = command_word(&argv);
     if matches!(command, Some("init" | "serve")) && global_after_command(&argv) {
@@ -274,6 +282,40 @@ fn main() -> ExitCode {
 /// has to agree or `vogt --data X init` falls through to the generated CLI and
 /// never creates `X`. A flag this binary does not know is left for whichever
 /// parser owns the command, so this only steps over the globals both parsers share.
+/// The three ported scripts. `None` means the argv is some other command.
+fn scripts_command(argv: &[String]) -> Option<ExitCode> {
+    let word = command_word(argv)?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let result = match word {
+        "check-product-version" => {
+            let expected = argv
+                .iter()
+                .rev()
+                .find(|arg| !arg.starts_with('-') && arg.as_str() != word)
+                .map(String::as_str);
+            scripts::check_product_version(&root, expected)
+        }
+        "sanitise-transcript" => {
+            let rest: Vec<String> = argv
+                .iter()
+                .skip_while(|arg| arg.as_str() != word)
+                .skip(1)
+                .cloned()
+                .collect();
+            scripts::sanitise_transcript(&rest)
+        }
+        "check-docs" => scripts::check_docs(&root),
+        _ => return None,
+    };
+    Some(match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(problem) => {
+            eprintln!("{problem}");
+            ExitCode::from(1)
+        }
+    })
+}
+
 fn command_word(argv: &[String]) -> Option<&str> {
     let mut index = 0usize;
     while index < argv.len() {
