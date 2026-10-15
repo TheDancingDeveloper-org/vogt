@@ -374,8 +374,11 @@ PY
 # tool_mode omitted, and points model_catalog_json at it. Listed, in order:
 # grok, code, small, reasoning, vision, the OpenRouter groups that answer
 # (or-deepseek-flash, or-gemini-flash, or-glm-5-3 — not or-deepseek, which
-# LiteLLM blocks), the local qwen and gpt-oss groups, and the DLab models
-# whose plan actually serves them. Priority is the index in that order,
+# LiteLLM blocks), and the DLab models whose plan actually serves them.
+# qwen3-coder, qwen3-8-27b and gpt-oss-120b are not listed: live probes
+# (WI-1147, cmt_01M4YZWG8B7E9YE5Y8FNJ7H2GH) showed they fail inside LiteLLM
+# (408 / hang). Re-adding them is WI-1631. Priority is the index in that
+# order,
 # because the fork sorts ascending and defaults to the first visible model,
 # so grok stays the default. premium is hidden from the picker. Not listed,
 # because a completion does not succeed: bedrock (no such model on the
@@ -409,6 +412,9 @@ path = os.environ["CODEX_CONFIG"]
 # Groups a chat completion with the session key actually answered (WI-1592).
 # or-deepseek is blocked at the router and is not here. Bedrock is not a
 # model on this router. DLab models that 400/401/503 are not here either.
+# qwen3-coder, qwen3-8-27b and gpt-oss-120b are not here either: they fail
+# inside LiteLLM (408 / hang, WI-1147 cmt_01M4YZWG8B7E9YE5Y8FNJ7H2GH).
+# Re-adding them is WI-1631.
 ROUTER_GROUPS = (
     "grok",
     "code",
@@ -418,9 +424,6 @@ ROUTER_GROUPS = (
     "or-deepseek-flash",
     "or-gemini-flash",
     "or-glm-5-3",
-    "qwen3-coder",
-    "qwen3-8-27b",
-    "gpt-oss-120b",
     "dlab-deepseek-v4-pro",
     "dlab-deepseek-v4-1-flash",
     "dlab-grok-4-5",
@@ -496,7 +499,6 @@ LITELLM = (
     "requires_openai_auth = false\n"
     "supports_websockets = false\n"
     'env_key = "HOMELAB_LITELLM_SESSION_KEY"\n'
-    "web_search = \"disabled\"\n"
 )
 CLAWBAY = (
     "[model_providers.theclawbay]\n"
