@@ -135,9 +135,11 @@ the published image. That baked copy is the baseline, and the version a
 running pod uses can be moved without a rebuild by the runtime pin described
 in [`DEPLOYMENT.md`](DEPLOYMENT.md) §3 (`VOGT_CLAUDE_CODE_VERSION` and
 friends, applied by `vogt-agent-cli-install` at container start). Stock npm
-Codex stays selectable for rollback: `VOGT_CODEX_VERSION` still names
-`@openai/codex`, and the `codex-npm` row (kind `npm`) installs it into the
-volume when that pin is set. Codex's row is kind `github-release`: a runtime
+Codex is not a runtime option (WI-1146): it has no managed hooks, so the
+gitguard hook would not run under it. `VOGT_CODEX_VERSION` still names
+`@openai/codex` in the `codex-npm` row (kind `npm`), but the installer refuses
+a pin of it (exit 64) and drops any `current` an older image left, and the
+wrapper refuses a runtime copy whose prefix has no fork `source` line. Codex's row is kind `github-release`: a runtime
 `VOGT_CODEX_SHA` is another full commit, downloaded the same way and checked
 against the release's `SHA256SUMS` before `current` moves. The wrapper runs
 the binary with `--no-daemon`, and bootstrap writes
@@ -184,7 +186,7 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-klaudia-mcp` | `deploy/klaudia-mcp.sh` | `set [-e KEY=VALUE]…`/`remove` a stdio server in Klaudia's `.mcp.json` (`~/.klaudia`, or `KLAUDIA_CONFIG_DIR`), which Klaudia has no `mcp` command to write; `vogt-mcp-bootstrap` uses it, and a derivative image's bootstrap may (§4) | only with `klaudia` present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
-| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. Stock Codex reads `/etc/codex/requirements.toml` with no flag; the image copies `deploy/driven-session-codex-requirements.toml` there and to `/usr/local/share/vogt/`. On stock Codex 0.160.0 that file is comments only: the gitguard hook table and destructive-git prefix rules are not a shape that has been shown to load (WI-1146) | only with `INSTALL_AI_CLIENTS` |
+| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. The fork reads `/etc/codex/requirements.toml` with no flag (TUI, `exec` and app-server alike); the image copies `deploy/driven-session-codex-requirements.toml` there, root-owned `0644` in a root-owned `0755` directory, and a reference copy to `/usr/local/share/vogt/`. That file pins `[features] hooks = true` and runs `klaudia hook gitguard` fail-closed on `SessionStart` (baseline capture) and `PreToolUse` (matcher `Bash`, `shell`, `exec_command`, `write_stdin`, `apply_patch`; timeout 30 s), so a hook that fails, or a session with no baseline, blocks the tool call (WI-1146, WI-1356). A runtime copy under `codex/current` runs only when its prefix records a fork release `source`; anything else exits 78 rather than run without the hook | only with `INSTALL_AI_CLIENTS` |
 | `vogt-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`, `fetch`, `store`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
 
 Nothing in the engine itself depends on `agent-auth`: with
@@ -1525,23 +1527,34 @@ checks decide what it can finish on its own (WI-926; the design is
     else. A person's grant only, as for Claude Code.
   `--approve-for-me` is not used: it hard-wires workspace-write. Default
   and accept-edits use sandbox `danger-full-access` because `bwrap` does
-  not work in the pod. Stock Codex reads `/etc/codex/requirements.toml`
-  itself; the engine does not pass a requirements flag. The image copies
-  `engine/deploy/driven-session-codex-requirements.toml` to that path and
-  to `/usr/local/share/vogt/driven-session-codex-requirements.toml`.
-  `ENGINE_AGENT_CODEX_POLICY` names a deployment's own file (the engine
-  checks that the named path exists, is non-empty and wires the gitguard
-  hook, then still lets Codex load `/etc/codex/requirements.toml` — a
-  deployment that points elsewhere has to put the file where Codex reads
-  it). Empty tries the image path, then `/etc/codex/requirements.toml`; if
-  neither exists the session starts with no policy. `off` is the only way a
-  deployment that has the file starts Codex without that check. A path that
-  is missing, empty, unreadable, or does not wire the hook is `400`, and the
-  session does not fall through to bypass. The shipped file (WI-1356) wires
+  not work in the pod. The fork reads `/etc/codex/requirements.toml` itself,
+  and only that path: the TUI, `exec` and app-server (quick chat) all load it
+  through one config builder, and the engine does not pass a requirements
+  flag. The image copies `engine/deploy/driven-session-codex-requirements.toml`
+  to that path (root-owned, `0644`, in a root-owned `0755` `/etc/codex`) and
+  a reference copy to
+  `/usr/local/share/vogt/driven-session-codex-requirements.toml`. The engine
+  judges the file Codex loads (WI-1146): `/etc/codex/requirements.toml` must
+  exist, be non-empty and wire the gitguard hook, and it and its directory
+  must be owned by root and not group- or world-writable, or a session could
+  rewrite it. `ENGINE_AGENT_CODEX_POLICY` names a deployment's own file; it is
+  checked the same way, and so is `/etc/codex/requirements.toml`, which a
+  deployment that points elsewhere still has to install. Empty checks
+  `/etc/codex/requirements.toml`; the image copy present without it is a
+  refusal, and neither present means the session starts with no policy (a
+  checkout, or a pod built before the file existed). The check runs once, at
+  engine start. `off` is the only way a deployment that has the file starts
+  Codex without that check. A failing check is `400` on every Codex launch,
+  and the session does not fall through to bypass. The shipped file (WI-1356) wires
   the gitguard managed hook for the fork: `[[hooks.SessionStart]]` and
   `[[hooks.PreToolUse]]` (matcher `Bash`, `shell`, `exec_command`,
   `write_stdin`, `apply_patch`) run `klaudia hook gitguard` with
   `failClosed = true` (WI-1129), so a hook that fails blocks the tool call.
+  On the fork `failClosed` acts only on `PreToolUse`: a `SessionStart` hook
+  that fails lets the session start with no baseline. That is still safe,
+  because gitguard's `PreToolUse` refuses every `Bash` and `apply_patch` call
+  for a session it holds no baseline for, so the session can run nothing
+  until a baseline exists.
   The file also pins `[features] hooks = true`: the fork runs managed hooks
   only while that feature is on, and the pin beats `-c features.hooks=false`,
   `--disable hooks` and any `[features]` in `$CODEX_HOME` or a project

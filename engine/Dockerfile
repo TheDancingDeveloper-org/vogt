@@ -372,13 +372,19 @@ COPY engine/deploy/driven-session-settings.json /usr/local/share/vogt/driven-ses
 # Its opencode half (WI-932), given as OPENCODE_CONFIG_CONTENT; replaced with
 # ENGINE_AGENT_OPENCODE_CONFIG.
 COPY engine/deploy/driven-session-opencode.json /usr/local/share/vogt/driven-session-opencode.json
-# Codex requirements (WI-1143, WI-1146). Stock Codex reads
-# /etc/codex/requirements.toml with no flag; the image copy is what
-# ENGINE_AGENT_CODEX_POLICY resolves to when unset. The file wires the
-# gitguard managed hook fail-closed for the Codex fork (WI-1356) — see the
-# file. Do not add a flag Codex does not have.
+# Codex requirements (WI-1143, WI-1146). The Codex fork reads
+# /etc/codex/requirements.toml and no other path — the TUI, `exec` and
+# app-server (quick chat) all load it through the same config builder — and
+# the engine checks that file before a Codex launch. The share copy is a
+# reference. The file wires the gitguard managed hook fail-closed and pins
+# the hooks feature on (WI-1356) — see the file. It and /etc/codex are
+# root-owned and not writable by the session user, which the engine also
+# checks: a session that could rewrite them could drop the hook. Do not add a
+# flag Codex does not have.
 COPY engine/deploy/driven-session-codex-requirements.toml /usr/local/share/vogt/driven-session-codex-requirements.toml
-COPY engine/deploy/driven-session-codex-requirements.toml /etc/codex/requirements.toml
+COPY --chown=root:root --chmod=0644 engine/deploy/driven-session-codex-requirements.toml /etc/codex/requirements.toml
+RUN chown root:root /etc/codex && chmod 0755 /etc/codex \
+    && test "$(stat -c '%u %a' /etc/codex /etc/codex/requirements.toml)" = "$(printf '0 755\n0 644')"
 # The pin below is the *baked baseline*. A deployment may name a different
 # version per tool at runtime (`VOGT_CLAUDE_CODE_VERSION` and friends in the
 # container's environment; `agent-clis.tools`, written below, is the
@@ -443,8 +449,9 @@ RUN set -eu; \
 # `fork-<sha>` and the asset is `codex-<target>.tar.gz`; the recorded sha256 is
 # of the `codex` member inside it (the same one a runtime pin checks against
 # SHA256SUMS), so a CODEX_SHA that is not the pin has nothing to be checked
-# against and is refused. Stock npm Codex stays selectable: pin
-# VOGT_CODEX_VERSION at runtime and the `codex-npm` row installs it.
+# against and is refused. Stock npm Codex is not a runtime option (WI-1146):
+# it has no managed hooks, so the installer refuses a `codex-npm` pin and the
+# wrapper refuses a runtime copy that is not a fork release.
 RUN set -eu; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
         . /usr/local/share/vogt/agent-versions.env; \

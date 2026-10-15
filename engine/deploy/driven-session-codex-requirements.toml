@@ -1,9 +1,10 @@
 # Driven-session Codex requirements (WI-1143, WI-1146, WI-1356).
 #
-# Codex reads this path (`/etc/codex/requirements.toml`) with no flag. The
-# engine does not pass one: it checks that the named policy file exists, is
-# non-empty and wires the gitguard hook below, then lets Codex load this path
-# itself (`sessions.rs`, `codex_policy_refusal`).
+# Codex reads this path (`/etc/codex/requirements.toml`) with no flag, and no
+# other: the TUI, `exec` and app-server all load it. The engine does not pass
+# one: it checks that this installed file is non-empty, wires the gitguard
+# hook below, and is root-owned and not writable by the session user, then
+# lets Codex load it (`claude_config.rs`, `codex_policy_from`).
 #
 # Shape: the Codex fork (fork-ca04973b) parses `[hooks]` here as
 # `ManagedHooksRequirementsToml` — the event tables flattened under `hooks`,
@@ -13,7 +14,12 @@
 # trusted without a hash and always enabled.
 #
 # `failClosed = true` (fork WI-1129) makes a hook that crashes, times out or
-# cannot be started block the tool call instead of letting it run.
+# cannot be started block the tool call instead of letting it run. The fork
+# enforces it on PreToolUse only; a SessionStart hook that fails still lets
+# the session start, with no baseline. gitguard's PreToolUse then refuses
+# every Bash and apply_patch call for that session ("no baseline"), so the
+# safe outcome holds there too. The SessionStart flag is kept for a fork that
+# honours it.
 # `klaudia hook gitguard` (WI-1136) captures the dirty working tree on
 # SessionStart and refuses, on PreToolUse, a shell command or patch that would
 # discard it (stash, checkout --, restore, clean, reset --hard, ...).
