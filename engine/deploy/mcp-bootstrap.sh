@@ -201,15 +201,16 @@ import os, sys, tempfile
 path = os.environ["CODEX_CONFIG"]
 name = os.environ["CODEX_SERVER"]
 header = f"[mcp_servers.{name}]"
-block = (
-    f"{header}\n"
-    f'command = "{os.environ["CODEX_WRAPPER"]}"\n'
-    f'args = ["{os.environ["CODEX_ARG"]}"]\n'
-    f'env_vars = [{os.environ["CODEX_VARS"]}]\n'
-    # Read-only by construction, so pre-approved (WI-1634). Written here as
-    # well as by the driven-session bundle, or each start would drop it.
-    'default_tools_approval_mode = "approve"\n'
-)
+
+def approval_row(source: str) -> str:
+    # This writer replaces its own table whole, so an operator's explicit mode
+    # has to be read first and carried into the new block (WI-1634). Without
+    # that, every start would turn a "prompt" back into "approve".
+    for row in source.splitlines():
+        head = row.split("#", 1)[0]
+        if head.split("=", 1)[0].strip() == "default_tools_approval_mode":
+            return row if row.endswith("\n") else row + "\n"
+    return 'default_tools_approval_mode = "approve"\n'
 try:
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
@@ -232,17 +233,31 @@ if text.strip():
 
 lines = text.splitlines(keepends=True)
 kept: list[str] = []
+existing = ""
 index = 0
 while index < len(lines):
     stripped = lines[index].strip()
     if stripped == header or stripped.startswith(header + "."):
         index += 1
         while index < len(lines) and not lines[index].lstrip().startswith("["):
+            if stripped == header:
+                existing += lines[index]
             index += 1
         continue
     kept.append(lines[index])
     index += 1
 
+# Read-only by construction, so pre-approved (WI-1634). Written here as well
+# as by the driven-session bundle, or each start would drop it. The key lives
+# in the session's own config.toml, which the session can edit, so it is a
+# convenience for autonomous work and not a security boundary.
+block = (
+    f"{header}\n"
+    f'command = "{os.environ["CODEX_WRAPPER"]}"\n'
+    f'args = ["{os.environ["CODEX_ARG"]}"]\n'
+    f'env_vars = [{os.environ["CODEX_VARS"]}]\n'
+    f"{approval_row(existing)}"
+)
 body = "".join(kept).rstrip("\n")
 new = f"{body}\n\n{block}" if body else block
 if new == text:
@@ -775,16 +790,27 @@ klaudia = os.environ["CODEX_KLAUDIA"]
 real = os.environ["CODEX_REAL"]
 root = os.environ["CODEX_ROOT"]
 
-def block(name: str, args: list[str], extra: str = "") -> str:
+def approval_row(source: str) -> str:
+    # The table is replaced whole, so carry an operator's explicit mode
+    # (WI-1634) rather than resetting it to "approve" on the next start.
+    for row in source.splitlines():
+        head = row.split("#", 1)[0]
+        if head.split("=", 1)[0].strip() == "default_tools_approval_mode":
+            return row if row.endswith("\n") else row + "\n"
+    return 'default_tools_approval_mode = "approve"\n'
+
+def block(name: str, args: list[str], extra: str = "", mode: str = "") -> str:
     rendered = ", ".join(f'"{arg}"' for arg in args)
+    # Pre-approved for driven sessions (WI-1634); the bundle below would add
+    # it anyway, so writing it here keeps reruns quiet. The key lives in the
+    # session's own config.toml, which the session can edit, so it is a
+    # convenience for autonomous work and not a security boundary.
     return (
         f"[mcp_servers.{name}]\n"
         f'command = "{klaudia}"\n'
         f"args = [{rendered}]\n"
         f"{extra}"
-        # Pre-approved for driven sessions (WI-1634); the bundle below
-        # would add it anyway, so writing it here keeps reruns quiet.
-        'default_tools_approval_mode = "approve"\n'
+        f"{mode or 'default_tools_approval_mode = "approve"\n'}"
     )
 
 wanted = {
@@ -817,6 +843,7 @@ if text.strip():
 
 lines = text.splitlines(keepends=True)
 kept: list[str] = []
+existing: dict[str, str] = {}
 index = 0
 while index < len(lines):
     stripped = lines[index].strip()
@@ -828,10 +855,18 @@ while index < len(lines):
     if header is not None:
         index += 1
         while index < len(lines) and not lines[index].lstrip().startswith("["):
+            if stripped == f"[mcp_servers.{header}]":
+                existing[header] = existing.get(header, "") + lines[index]
             index += 1
         continue
     kept.append(lines[index])
     index += 1
+
+for name, mode in existing.items():
+    current = wanted[name]
+    wanted[name] = current.replace(
+        'default_tools_approval_mode = "approve"\n', approval_row(mode), 1
+    )
 
 body = "".join(kept).rstrip("\n")
 addition = "\n\n".join(wanted[name] for name in ("browser", "codex-subagent"))
@@ -889,7 +924,10 @@ PY
 # Grafana wrappers. komodo is deliberately absent, because its deploy_stack and
 # write_stack_file mutate running stacks, and so is every server not named
 # here: those keep the person gate. A table an operator gave an explicit mode
-# keeps it, and a server nobody registered is not created.
+# keeps it, and a server nobody registered is not created. The key lives in the
+# session's own ~/.codex/config.toml, which the session can edit, so it is a
+# convenience for autonomous work and not a security boundary; the engine's
+# person gate (WI-1355) is the boundary.
 readonly CODEX_SCHEMA_MAX_BYTES="${CODEX_SCHEMA_MAX_BYTES:-200000}"
 
 codex_driven_session() {

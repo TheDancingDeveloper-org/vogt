@@ -468,7 +468,11 @@ person. `komodo` is deliberately not on the list, since its `deploy_stack` and
 those keep the person gate. A table that already names a mode keeps it, and a
 server nobody registered is not created. The read-only, browser and sub-agent
 writers emit the same row in the tables they own, so a restart does not
-rewrite them. `/etc/codex/requirements.toml` cannot carry the setting (its
+rewrite them, and they carry over a mode an operator already set there. The
+key lives in the session's own `~/.codex/config.toml`, which the session can
+edit, so it is a convenience for autonomous work and not a security boundary;
+the engine's person gate (WI-1355) is the boundary.
+`/etc/codex/requirements.toml` cannot carry the setting (its
 `[mcp_servers]` is an identity allowlist), and it is unchanged: gitguard
 stays pinned and the bypass posture stays person-only.
 
