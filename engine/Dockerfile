@@ -352,6 +352,7 @@ RUN set -eu; \
 ARG INSTALL_AI_CLIENTS
 ARG CODEX_VERSION
 ARG CODEX_SHA
+ARG CODEX_ACP_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG OPENCODE_VERSION
 ARG KLAUDIA_VERSION
@@ -416,19 +417,20 @@ ENV PATH=/opt/vogt/agent-clis/bin:$PATH
 RUN set -eu; \
     . /usr/local/share/vogt/agent-versions.env; \
     codex_sha="${CODEX_SHA:-${VOGT_CODEX_SHA}}"; \
+    codex_acp_version="${CODEX_ACP_VERSION:-${VOGT_CODEX_ACP_VERSION}}"; \
     claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
     opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
     go_version="$(go version | sed -n 's/^go version go\([^ ]*\) .*/\1/p')"; \
     klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
-    printf 'codex=%s\nclaude-code=%s\nopencode=%s\ngo=%s\nklaudia=%s\n' \
-        "$codex_sha" "$claude_code_version" "$opencode_version" "$go_version" "$klaudia_version" \
+    printf 'codex=%s\ncodex-acp=%s\nclaude-code=%s\nopencode=%s\ngo=%s\nklaudia=%s\n' \
+        "$codex_sha" "$codex_acp_version" "$claude_code_version" "$opencode_version" "$go_version" "$klaudia_version" \
         > /usr/local/share/vogt/agent-versions.resolved; \
-    printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
+    printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-acp\t@agentclientprotocol/codex-acp\tcodex-acp\tVOGT_CODEX_ACP_VERSION\tnpm\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
         "$VOGT_CODEX_SOURCE" "$VOGT_KLAUDIA_SOURCE" \
         > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        pkgs="$pkgs @anthropic-ai/claude-code@${claude_code_version}"; \
+        pkgs="$pkgs @agentclientprotocol/codex-acp@${codex_acp_version}"; \
         pkgs="$pkgs opencode-ai@${opencode_version}"; \
         # The pod base's unpinned copy (its `curl | bash` installer) is
         # replaced by the pinned package; npm refuses to overwrite a file it
@@ -443,6 +445,8 @@ RUN set -eu; \
         || { echo "claude is not $claude_code_version — a stub install" >&2; exit 1; } \
         && /usr/local/bin/opencode --version | grep -qF "$opencode_version" \
         || { echo "opencode is not $opencode_version — the platform binary did not install" >&2; exit 1; } \
+        && /usr/local/bin/codex-acp --version | grep -qF "$codex_acp_version" \
+        || { echo "codex-acp is not $codex_acp_version — a stub install" >&2; exit 1; } \
         && install -d /usr/local/libexec; \
     fi
 # Codex (WI-1142) is the fork's release asset, not the npm package. The tag is

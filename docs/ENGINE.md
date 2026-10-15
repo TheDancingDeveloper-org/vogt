@@ -130,10 +130,16 @@ the full commit `VOGT_CODEX_SHA` of `VOGT_CODEX_SOURCE` (tag `fork-<sha>`,
 asset `codex-<target>.tar.gz`, checked against the sha256 recorded beside the
 pin). The release is x86_64 only, so `VOGT_CODEX_SHA256_LINUX_ARM64` is empty
 and an arm64 image build leaves the Codex copy unset instead of failing. It
-also bakes `klaudia` (WI-950), a Go coding agent no
+also bakes `codex-acp` (WI-1595), the upstream `@agentclientprotocol/codex-acp`
+adapter pinned there as `VOGT_CODEX_ACP_VERSION`, and `klaudia` (WI-950), a Go coding agent no
 registry publishes, built with the image's Go from the commit pinned there
 (`VOGT_KLAUDIA_VERSION`, a full commit id of `VOGT_KLAUDIA_SOURCE`); it is off by default for a local build and on in
-the published image. That baked copy is the baseline, and the version a
+the published image. The adapter is not a Codex of its own: it starts
+`codex app-server` and translates ACP into it, and the entrypoint exports
+`CODEX_PATH` at the baked fork binary (the runtime pin's `codex/current` when
+one is flipped, else `/usr/local/libexec/codex-real`) so it never falls back to
+the older `@openai/codex` its package bundles. An explicit `CODEX_PATH` wins.
+That baked copy is the baseline, and the version a
 running pod uses can be moved without a rebuild by the runtime pin described
 in [`DEPLOYMENT.md`](DEPLOYMENT.md) §3 (`VOGT_CLAUDE_CODE_VERSION` and
 friends, applied by `vogt-agent-cli-install` at container start). Stock npm
