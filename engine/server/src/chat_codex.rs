@@ -142,18 +142,20 @@ pub fn app_server_argv(binary: &str) -> Vec<String> {
 /// session key.
 pub fn home_config(env_key: &str) -> String {
     format!(
-        r#"[model_providers.litellm]
+        // Root keys come before the first table: a key after
+        // `[model_providers.litellm]` belongs to that table, and Codex then
+        // ignores it and starts on its own OpenAI default (WI-1640).
+        r#"model_provider = "litellm"
+model = "{DEFAULT_MODEL}"
+model_catalog_json = "vogt-model-catalog.json"
+
+[model_providers.litellm]
 name = "litellm"
 base_url = "{LITELLM_BASE}"
 wire_api = "chat"
 env_key = "{env_key}"
 requires_openai_auth = false
 supports_websockets = false
-web_search = "disabled"
-
-model_provider = "litellm"
-model = "{DEFAULT_MODEL}"
-model_catalog_json = "vogt-model-catalog.json"
 "#
     )
 }
@@ -547,6 +549,21 @@ mod tests {
         assert!(cfg.contains("env_key = \"ENGINE_CHAT_PROVIDER_KEY\""));
         assert!(cfg.contains(LITELLM_BASE));
         assert!(!cfg.contains("HOMELAB_LITELLM_SESSION_KEY"));
+        // The provider, model and catalog are root keys, not part of the
+        // provider table (WI-1640).
+        let root: toml::Table = cfg.parse().unwrap();
+        assert_eq!(root["model_provider"].as_str(), Some("litellm"));
+        assert_eq!(root["model"].as_str(), Some(DEFAULT_MODEL));
+        assert_eq!(
+            root["model_catalog_json"].as_str(),
+            Some("vogt-model-catalog.json")
+        );
+        let litellm = root["model_providers"]["litellm"].as_table().unwrap();
+        assert!(!litellm.contains_key("model"));
+        assert_eq!(
+            litellm["env_key"].as_str(),
+            Some("ENGINE_CHAT_PROVIDER_KEY")
+        );
         let catalog: Value = serde_json::from_str(&model_catalog()).unwrap();
         let models = catalog["models"].as_array().unwrap();
         let mut sorted = models.clone();

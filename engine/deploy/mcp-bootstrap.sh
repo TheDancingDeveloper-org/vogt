@@ -615,8 +615,14 @@ def _set_root(key: str, value: str, when: set[str | None]) -> None:
 
 # Switch the default only when it is unset or already one of ours.
 _set_root("model_provider", "litellm", {None, "litellm", "theclawbay"})
+# Under the router, a model the catalog does not list cannot be served: a
+# leftover theclawbay default such as gpt-6-astra makes every model-less
+# `codex exec` (the codex-subagent child among them) fail (WI-1640). So the
+# default moves to grok unless it already names a catalog group.
 if _root_value("model_provider") == "litellm":
-    _set_root("model", "grok", {None, "grok", "grok-4.7"})
+    _model = _root_value("model")
+    if _model not in ROUTER_GROUPS:
+        _set_root("model", "grok", {_model})
 # Point at the catalog this writer owns. A path an operator chose stays.
 _set_root("model_catalog_json", catalog_path, {None, catalog_path})
 
