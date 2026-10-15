@@ -816,13 +816,19 @@ than these routes.
   or already exists, when the sibling directory already exists, or together
   with `resume` (a resumed conversation would move `cwd` off the checkout).
   Before the cut the engine fetches `base_ref` from `origin` and cuts from
-  `origin/<base_ref>` (WI-1630): the checkout's own local ref of that name is
+  `origin/<base>` (WI-1630): the checkout's own local ref of that name is
   the shared checkout's and lags the remote, so cutting from it starts the
-  session on stale code. A fetch that fails, or a base the remote does not
-  have, refuses the start (`400`) rather than falling back to the local ref.
-  A `base_ref` that already names the remote (`origin/main`) is fetched and
-  used as given. The fetch moves only that one remote-tracking ref, never a
-  local branch. Every other refusal (codex policy, agent launch) is checked before the
+  session on stale code. A slash in the name is a branch
+  (`integrate/vogt-next`), not a refusal. A `base_ref` that already names the
+  remote (`origin/main`, `origin/integrate/vogt-next`) has that one `origin/`
+  prefix stripped and is fetched the same way, so both forms cut from the
+  same remote-tracking ref. A name that is not a branch ref after that strip
+  (`origin/`, `integrate//next`) is refused as not a ref name. A fetch that
+  fails, or a base the remote does not have, refuses the start (`400`) rather
+  than falling back to the local ref. The fetch moves only that one
+  remote-tracking ref, never a local branch. The fetch runs as the engine
+  process, before the session process exists, so a private origin is reached
+  with the engine user's credentials rather than the session account's. Every other refusal (codex policy, agent launch) is checked before the
   cut, and a start that fails after it (prompt file, PTY spawn) removes the
   worktree and its branch again, so a refused start leaves neither behind.
   Absent means the session opens in `cwd`, byte-identical to a request from
