@@ -588,11 +588,30 @@ impl OperationRegistry {
     }
 
     /// Every mutating operation must take a required reason.
+    ///
+    /// Python also refuses a *defaulted* reason, because a default explains
+    /// nothing. That case cannot be expressed with `reason_required` alone —
+    /// a missing field and an optional one look the same — so it is read
+    /// from the recorded schema: a mutating operation whose `reason` property
+    /// is absent from `required` is the optional-reason shape.
     fn validate_reasons(&self) -> Result<(), RegistryError> {
+        let schemas = parsed_schemas();
         for operation in &self.operations {
-            if operation.mutating && !operation.reason_required {
+            if !operation.mutating {
+                continue;
+            }
+            if !operation.reason_required {
                 return Err(RegistryError(format!(
                     "{} is mutating but its parameters have no reason field",
+                    operation.name
+                )));
+            }
+            let Some((params, _)) = schemas.get(operation.name) else {
+                continue;
+            };
+            if !reason_is_required(params) {
+                return Err(RegistryError(format!(
+                    "{} has an optional reason; a defaulted reason explains nothing",
                     operation.name
                 )));
             }
@@ -670,6 +689,16 @@ pub struct OperationManifest {
     /// emits the field for every operation rather than omitting it.
     pub exclusion: Option<&'static str>,
     pub exclusion_reason: Option<&'static str>,
+}
+
+/// A schema requires `reason` when the property is listed in `required`.
+/// Absent `required`, or a `reason` that only has a default, is optional —
+/// the shape a defaulted reason takes, which explains nothing.
+fn reason_is_required(params: &serde_json::Value) -> bool {
+    params
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("reason")))
 }
 
 fn exclusion_of(name: &str) -> Option<(&'static str, &'static str)> {
@@ -793,7 +822,44 @@ mod tests {
             .unwrap();
         work_create.reason_required = false;
         let error = OperationRegistry::new(operations).unwrap_err();
+        assert!(error.0.contains("no reason field"), "{}", error.0);
         assert!(error.0.contains("work.create"), "{}", error.0);
+    }
+
+    #[test]
+    fn a_defaulted_reason_is_rejected() {
+        // An operation that claims a reason, but whose recorded schema leaves
+        // `reason` off `required`, is the optional-reason shape Python refuses.
+        // The schema table is a process-wide static, so the probe uses an
+        // operation name that is not in it and is checked through the same
+        // predicate by substituting a schema that omits `reason` from
+        // `required`.
+        let optional = serde_json::json!({
+            "type": "object",
+            "properties": {"reason": {"type": "string", "default": "because"}},
+            "required": []
+        });
+        assert!(
+            !reason_is_required(&optional),
+            "a defaulted reason is not required"
+        );
+        assert!(reason_is_required(
+            &serde_json::json!({"required": ["reason"]})
+        ));
+        // And the shipped set has no such operation: every mutating schema
+        // lists `reason` in `required`.
+        let schemas = parsed_schemas();
+        for operation in registry().iter() {
+            if !operation.mutating {
+                continue;
+            }
+            let shipped = reason_is_required(&schemas[operation.name].0);
+            assert!(
+                shipped,
+                "{} is mutating but its schema does not require reason",
+                operation.name
+            );
+        }
     }
 
     #[test]
@@ -888,8 +954,9 @@ mod tests {
         // dump. Compared with no normaliser, so a drift in any field fails.
         // The golden is unkeyed (tests/parity/golden/registry.json, not under
         // golden/<sha>/) on purpose: it describes the registry, which changes
-        // with the operation set rather than with the parity script, and
-        // `gen_registry.py --check` re-records it from the live Python.
+        // with the operation set rather than with the parity script.
+        // `gen_registry.py --check` diffs it, and `schemas.rs`, against a
+        // fresh recording from the live Python.
         let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/golden/registry.json");
         let golden: serde_json::Value =
