@@ -2575,9 +2575,13 @@ CLI, run without a terminal. The default agent is Klaudia, driven over its
 stream-json protocol (msp-klaudia `docs/embedding.md`): each message is a
 `user` line on its stdin, and its replies, tool calls and the `result` that
 ends a turn come back on stdout. `ENGINE_CHAT_DRIVER=codex` (WI-1148) uses
-the Codex app-server instead: JSON-RPC lines (`initialize`, then
-`thread/start` or `thread/resume` with the chat id as `threadId`, then
-`turn/start`). Codex approvals arrive as JSON-RPC requests and are answered
+the Codex app-server instead: JSON-RPC lines (`initialize` declaring
+`capabilities.experimentalApi`, and only once that answers, `thread/start` or
+`thread/resume` with the chat id as `threadId`, then `turn/start`). A
+caller-chosen thread id is behind that capability on the fork (WI-1126); sent
+without it, `thread/start` is rejected and the following `turn/start` answers
+`thread not found`. That refusal, and a refused `initialize`, are recorded as a
+retryable error on the chat. Codex approvals arrive as JSON-RPC requests and are answered
 on stdin; they do not use the Klaudia hook gate. A Codex chat writes a
 per-chat `CODEX_HOME` under `state_dir/chats/<id>/codex-home` (that process
 only; `CODEX_HOME` is not on the shared allowlist). Promotion of a Codex chat

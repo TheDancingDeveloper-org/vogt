@@ -49,13 +49,20 @@ pub fn response_err(id: &str, message: &str) -> String {
 }
 
 /// `initialize` with the thread id the fork accepts on `thread/start` (WI-1126).
+///
+/// A caller-chosen `threadId` is an experimental field on the fork
+/// (`thread/start.threadId requires experimentalApi capability`,
+/// `app-server-protocol/src/experimental_api.rs`). The capability is the
+/// `experimentalApi` boolean on `InitializeParams.capabilities`
+/// (`schema/json/v1/InitializeParams.json`). Without it the fork rejects
+/// `thread/start` and the following `turn/start` answers `thread not found`.
 pub fn initialize(id: &str) -> String {
     request(
         id,
         METHOD_INITIALIZE,
         json!({
             "clientInfo": { "name": "vogt-engine", "version": "0" },
-            "capabilities": {}
+            "capabilities": { "experimentalApi": true }
         }),
     )
 }
@@ -221,10 +228,17 @@ pub fn model_catalog() -> String {
 /// What one server line means for the chat transcript.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodexEvent {
-    /// The handshake answered; the thread may be started or resumed.
+    /// `initialize` answered and the thread may be started or resumed.
     Initialized,
+    /// `initialize` was refused. The thread request must not be sent: the
+    /// fork would reject `threadId` and the next turn would say the thread
+    /// was never created.
+    InitializeFailed(String),
     /// `thread/start` or `thread/resume` answered.
     ThreadReady,
+    /// `thread/start` or `thread/resume` was refused. A later `turn/start`
+    /// would answer `thread not found`; the chat records this instead.
+    ThreadFailed(String),
     /// Assistant text.
     Assistant(String),
     /// A tool the agent is about to run.
@@ -372,6 +386,15 @@ fn parse_response(msg: &Value) -> CodexEvent {
                 error: Some(message.to_string()),
             };
         }
+        // `thread/start` and `thread/resume` share the `start`/`resume` ids the
+        // handshake sends. Their refusal means the thread was never created, so
+        // the follow-on `turn/start` (`thread not found`) is the same failure.
+        if id == "start" || id == "resume" {
+            return CodexEvent::ThreadFailed(message.to_string());
+        }
+        if id == "init" {
+            return CodexEvent::InitializeFailed(message.to_string());
+        }
         return CodexEvent::Notice(message.to_string());
     }
     let result = msg.get("result").cloned().unwrap_or(Value::Null);
@@ -393,6 +416,51 @@ fn parse_response(msg: &Value) -> CodexEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_declares_experimental_api_before_the_thread() {
+        // Recorded from the fork's app-server (WI-1632). Without
+        // capabilities.experimentalApi, thread/start.threadId is rejected with
+        // "thread/start.threadId requires experimentalApi capability" and the
+        // turn that follows answers "thread not found".
+        let id = Uuid::nil();
+        let init: Value = serde_json::from_str(&initialize("init")).unwrap();
+        assert_eq!(init["method"], "initialize");
+        assert_eq!(init["params"]["capabilities"]["experimentalApi"], true);
+
+        let start: Value = serde_json::from_str(&thread_start("start", id, Some("grok"))).unwrap();
+        assert_eq!(start["method"], "thread/start");
+        assert_eq!(start["params"]["threadId"], id.to_string());
+
+        let initialized = r#"{"jsonrpc":"2.0","id":"init","result":{"userAgent":"0.153.4-vogt.1","capabilities":{"experimentalApi":true}}}"#;
+        assert_eq!(parse_line(initialized), CodexEvent::Initialized);
+
+        let ready =
+            format!(r#"{{"jsonrpc":"2.0","id":"start","result":{{"thread":{{"id":"{id}"}}}}}}"#);
+        assert_eq!(parse_line(&ready), CodexEvent::ThreadReady);
+
+        let rejected = r#"{"jsonrpc":"2.0","id":"start","error":{"code":-32600,"message":"thread/start.threadId requires experimentalApi capability"}}"#;
+        assert_eq!(
+            parse_line(rejected),
+            CodexEvent::ThreadFailed(
+                "thread/start.threadId requires experimentalApi capability".into()
+            )
+        );
+        let missing = format!(
+            r#"{{"jsonrpc":"2.0","id":"turn-1","error":{{"code":-32600,"message":"thread not found: {id}"}}}}"#
+        );
+        assert_eq!(
+            parse_line(&missing),
+            CodexEvent::TurnEnd {
+                error: Some(format!("thread not found: {id}"))
+            }
+        );
+        let handshake = r#"{"jsonrpc":"2.0","id":"init","error":{"message":"initialize refused"}}"#;
+        assert_eq!(
+            parse_line(handshake),
+            CodexEvent::InitializeFailed("initialize refused".into())
+        );
+    }
 
     #[test]
     fn turn_start_names_the_chat_thread() {
