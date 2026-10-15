@@ -428,6 +428,24 @@ sub-agent, so nothing is registered for them. A fork change that adds a
 working directory to `spawn_agent` is what would retire the sub-agent server;
 it is not something this repository can do.
 
+**Codex's driven-session bundle** (WI-1149). The same bootstrap writes the keys
+a session the engine starts needs and an interactive CLI does not.
+`project_doc_fallback_filenames = ["CLAUDE.md"]` at the root, so a checkout
+whose only instructions file is `CLAUDE.md` is still read. `project_doc_mode =
+"all"` and the claude-compat instructions provider belong to the fork
+(WI-1131, WI-1132), and `[skills] extra_roots` likewise (WI-1133); until that
+key exists, `~/.agents/skills` is symlinked to the workspace `.claude/skills`
+when that directory exists and otherwise to `~/.claude/skills`, and only when
+nothing is already at that path. `[tui]` gets `animations = false` and
+`terminal_title = ["agent-state"]`, and `[features]` gains `memories = true`
+beside the `daemon_auto_start = false` the daemon writer forces. `[mcp_servers.vogt]`
+and `[mcp_servers.cadastre]`, when present, get `tool_input_schema_max_bytes`
+raised to 200000 (`CODEX_SCHEMA_MAX_BYTES` overrides it) because both servers
+publish schemas past Codex's 5,000 byte default; a table that already sets a
+higher cap is not lowered, and a server nobody registered is not created. The
+rewrite is the same flock and atomic rename, and a config that does not parse
+is left alone.
+
 Any further MCP server an agent should reach is registered by hand inside the
 session, the way the Rust LSP entry above shows.
 

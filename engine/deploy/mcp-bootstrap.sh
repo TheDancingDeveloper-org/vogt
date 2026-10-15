@@ -314,7 +314,13 @@ while index < len(lines):
                 out.append(row)
             index += 1
         if not found_key:
+            while out and out[-1].strip() == "":
+                out.pop()
             out.append("daemon_auto_start = false\n")
+        if index < len(lines) and lines[index].lstrip().startswith("["):
+            while out and out[-1].strip() == "":
+                out.pop()
+            out.append("\n")
         continue
     out.append(lines[index])
     index += 1
@@ -807,6 +813,200 @@ PY
     ) 9>"$lockdir/.config.toml.lock"
 }
 
+# The driven-session bundle (WI-1149). A Codex the engine starts is not an
+# operator's interactive CLI, so the config it reads is shaped for that:
+#
+#   - project_doc_fallback_filenames = ["CLAUDE.md"], so a checkout that only
+#     carries CLAUDE.md still has instructions. project_doc_mode = "all" and the
+#     claude-compat provider are the fork's job (WI-1131, WI-1132), not this one.
+#   - [tui] animations = false and terminal_title = ["agent-state"]: a driven
+#     session's title is state the engine reads, and animation bytes are noise.
+#   - [features] memories = true, beside the daemon_auto_start key the other
+#     writer forces off.
+#
+# Skills are a symlink, not a config key. [skills] extra_roots is the fork's
+# (WI-1133); until then ~/.agents/skills points at the workspace .claude/skills
+# when that directory exists, and otherwise at ~/.claude/skills. An existing
+# directory or symlink is left where it is.
+#
+# vogt and cadastre publish tool schemas larger than Codex's 5,000 byte default,
+# so a table this script can see for either server gets
+# tool_input_schema_max_bytes raised. A server an operator never registered is
+# not invented here, and a table that already carries a larger cap is not
+# lowered. A config that does not parse is left alone, like every writer above.
+readonly CODEX_SCHEMA_MAX_BYTES="${CODEX_SCHEMA_MAX_BYTES:-200000}"
+
+codex_driven_session() {
+    local config="$1" lockdir skills
+    lockdir="$(dirname "$config")"
+    mkdir -p "$lockdir"
+    skills="${CODEX_SKILLS_LINK:-$HOME/.agents/skills}"
+    if [[ -d "$PWD/.claude/skills" ]]; then
+        _codex_link_skills "$skills" "$PWD/.claude/skills"
+    elif [[ -d "$HOME/.claude/skills" ]]; then
+        _codex_link_skills "$skills" "$HOME/.claude/skills"
+    fi
+    (
+        flock 9
+        CODEX_CONFIG="$config" CODEX_SCHEMA_MAX="$CODEX_SCHEMA_MAX_BYTES" python3 - <<'PY'
+import os, sys, tempfile
+
+path = os.environ["CODEX_CONFIG"]
+schema_max = int(os.environ["CODEX_SCHEMA_MAX"])
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+if text.strip():
+    try:
+        import tomllib
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+ROOT = {
+    "project_doc_fallback_filenames": 'project_doc_fallback_filenames = ["CLAUDE.md"]\n',
+}
+TABLES = {
+    "tui": 'animations = false\nterminal_title = ["agent-state"]\n',
+    "features": "memories = true\n",
+}
+SCHEMA_SERVERS = ("vogt", "cadastre")
+
+def key_of(row: str) -> str:
+    head = row.split("#", 1)[0]
+    return head.split("=", 1)[0].strip() if "=" in head else ""
+
+def render(rows: list[str]) -> str:
+    body = "".join(rows).rstrip("\n")
+    return f"{body}\n" if body else ""
+
+def header_line(row: str) -> bool:
+    # A value such as terminal_title = ["agent-state"] is not a table header.
+    text_row = row.lstrip()
+    return text_row.startswith("[") and '"' not in text_row.split("]", 1)[0]
+
+lines = text.splitlines(keepends=True)
+out: list[str] = []
+index = 0
+seen_tables: set[str] = set()
+seen_root: set[str] = set()
+while index < len(lines):
+    stripped = lines[index].strip()
+    table = next((name for name in TABLES if stripped.lstrip() == f"[{name}]"), None)
+    if table is not None:
+        seen_tables.add(table)
+        wanted = {
+            row.split("=", 1)[0].strip(): row
+            for row in TABLES[table].splitlines(keepends=True)
+        }
+        out.append(lines[index])
+        index += 1
+        while index < len(lines) and not header_line(lines[index]):
+            row = lines[index]
+            key = key_of(row)
+            if key in wanted:
+                out.append(wanted.pop(key))
+            else:
+                out.append(row)
+            index += 1
+        while out and out[-1].strip() == "":
+            out.pop()
+        out.extend(wanted.values())
+        if index < len(lines) and header_line(lines[index]):
+            out.append("\n")
+        continue
+    schema = next(
+        (name for name in SCHEMA_SERVERS if stripped == f"[mcp_servers.{name}]"),
+        None,
+    )
+    if schema is not None:
+        out.append(lines[index])
+        index += 1
+        present = None
+        while index < len(lines) and not header_line(lines[index]):
+            row = lines[index]
+            if key_of(row) == "tool_input_schema_max_bytes":
+                present = row
+            else:
+                out.append(row)
+            index += 1
+        keep = present
+        if present is not None:
+            try:
+                if int(present.split("=", 1)[1].strip()) < schema_max:
+                    keep = None
+            except ValueError:
+                pass
+        out.append(keep or f"tool_input_schema_max_bytes = {schema_max}\n")
+        continue
+    root_key = key_of(lines[index])
+    if root_key in ROOT:
+        seen_root.add(root_key)
+        out.append(ROOT[root_key])
+        index += 1
+        continue
+    out.append(lines[index])
+    index += 1
+
+missing_root = [row for key, row in ROOT.items() if key not in seen_root]
+if missing_root:
+    split_at = next(
+        (i for i, row in enumerate(out) if header_line(row)),
+        len(out),
+    )
+    out[split_at:split_at] = missing_root
+
+missing_tables = [
+    f"[{name}]\n{TABLES[name]}" for name in TABLES if name not in seen_tables
+]
+if missing_tables:
+    split_at = next(
+        (i for i, row in enumerate(out) if header_line(row)),
+        len(out),
+    )
+    head = render(out[:split_at])
+    tail = render(out[split_at:])
+    parts = [part.rstrip("\n") for part in (head, *missing_tables, tail) if part.strip()]
+    new = "\n\n".join(parts) + "\n"
+else:
+    new = render(out)
+
+if new == text:
+    sys.exit(0)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
+# Point the skills link at target, but only when nothing is there yet. A
+# directory or a symlink an operator already made is theirs.
+_codex_link_skills() {
+    local link="$1" target="$2"
+    [[ -e "$link" || -L "$link" ]] && return 0
+    mkdir -p "$(dirname "$link")"
+    ln -s "$target" "$link" 2>/dev/null || true
+}
+
 # Vogt registrations are best-effort: a failure here must not cost an agent its
 # git/gh credentials.
 install_vogt_bridge
@@ -821,6 +1021,8 @@ if command -v codex >/dev/null 2>&1; then
         || printf 'mcp-bootstrap: could not write the Codex LiteLLM provider\n' >&2
     codex_klaudia_tools "${CODEX_HOME:-$HOME/.codex}/config.toml" \
         || printf 'mcp-bootstrap: could not register the Codex browser and sub-agent\n' >&2
+    codex_driven_session "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        || printf 'mcp-bootstrap: could not write the Codex driven-session bundle\n' >&2
 fi
 install_readonly_servers
 
