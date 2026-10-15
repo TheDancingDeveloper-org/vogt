@@ -47,6 +47,12 @@ pub fn python_json_dumps_indent(payload: &Value, indent: usize) -> String {
     render_python_json(payload, false, false, indent)
 }
 
+/// Compact `json.dumps` with sorted keys and no spaces: the form board tokens
+/// and content digests are computed over.
+pub fn render_python_json_compact(payload: &Value) -> String {
+    render_python_json(payload, false, true, 0)
+}
+
 fn render_python_json(value: &Value, spaced: bool, sort_keys: bool, indent: usize) -> String {
     let mut out = String::new();
     write_python_json(&mut out, value, spaced, sort_keys, indent, 0);

@@ -834,13 +834,24 @@ fn get_work<C: Clock, I: IdFactory>(
         .or_else(|| params.get("id"))
         .and_then(Value::as_str)
         .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
+    let limit = params
+        .get("comment_limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(200);
+    let newest = params.get("comment_order").and_then(Value::as_str) == Some("newest");
+    let summary = params.get("mode").and_then(Value::as_str) == Some("summary");
     let view = ctx.declared.read()?;
-    let item = upstream::resolve_work_ref(ctx, &view, reference)?;
-    let comments = if item.id.is_empty() {
-        Vec::new()
+    let mut item = upstream::resolve_work_ref(ctx, &view, reference)?;
+    let native = view.work_item_by_ref(reference)?.is_some();
+    let mut comments = if native && limit > 0 && !item.id.is_empty() {
+        view.comments_for(&item.id, limit, newest)?
     } else {
-        view.comments_for(&item.id, 200)?
+        Vec::new()
     };
+    if summary {
+        item.body.clear();
+        comments.clear();
+    }
     let sessions = sessions_for(ctx, &view, &item)?;
     let branches = crate::application::git_story::branch_views_for(ctx, &view, &item)?;
     let git = crate::application::git_story::git_story_for(ctx, &item, &branches)?;
@@ -905,8 +916,11 @@ const WORK_BRANCH_BOUND: &str = "work.branch_bound";
 const WORK_ADOPT: &str = "work.adopt";
 const WORK_ADOPTED: &str = "work.adopted";
 
-/// Append a comment to a native item. An upstream item is the forge
-/// write-through, which is not ported and stores nothing.
+/// Append a comment to a native item. `kind` is `note` or `handoff`; a
+/// hand-off stores its structured fields. The write-back record is written
+/// in the same transaction (`writeback.attempt`), outcome `skipped` while no
+/// forge provider is wired. An upstream item is the write-through and stores
+/// nothing.
 fn comment_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
@@ -917,6 +931,27 @@ where
     let body = text_of(&params, "body")
         .ok_or_else(|| VogtError::InvalidRequest("body is required".into()))?;
     let reason = text_of(&params, "reason").unwrap_or_default();
+    let kind = text_of(&params, "kind").unwrap_or_else(|| "note".to_string());
+    if kind != "note" && kind != "handoff" {
+        return Err(VogtError::InvalidRequest(format!(
+            "unknown comment kind {}",
+            crate::core::py_repr(&kind)
+        )));
+    }
+    if kind == "note"
+        && params
+            .get("handoff")
+            .map(|value| !value.is_null())
+            .unwrap_or(false)
+    {
+        return Err(VogtError::InvalidRequest(
+            "handoff fields belong on a handoff comment".into(),
+        ));
+    }
+    let handoff = params
+        .get("handoff")
+        .filter(|value| !value.is_null())
+        .cloned();
     let view = ctx.declared.read()?;
     upstream::resolve_work_ref(ctx, &view, &reference)?;
     if view.work_item_by_ref(&reference)?.is_none() {
@@ -929,32 +964,58 @@ where
     let mut writing = crate::application::context::write_of(ctx);
     let clock = std::sync::Arc::clone(writing.clock());
     let ids = std::sync::Arc::clone(writing.ids());
-    let stored = audited_write(&mut writing, WORK_COMMENT, &reason, move |txn, actor| {
-        let item = resolve::work_item(txn, &reference)?;
-        let now = super::now_of(&clock);
-        let comment = Comment {
-            id: super::next_id(&ids, "cmt"),
-            work_item_id: item.id.clone(),
-            actor_id: actor.id.clone(),
-            actor_display_name: actor.display_name.clone(),
-            body: body.clone(),
-            created_at: now,
-        };
-        txn.insert_comment(&comment)?;
-        let payload = serde_json::to_value(&comment).unwrap_or(Value::Null);
-        Ok(WriteOutcome::new(
-            comment,
-            "work_item",
-            &item.id,
-            payload,
-            WORK_COMMENTED,
-            json!({"ref": item.reference}),
-        ))
-    })?;
-    record_skipped(ctx, None, None, "comment", &reason)?;
+    let clock_for_record = std::sync::Arc::clone(&clock);
+    let ids_for_record = std::sync::Arc::clone(&ids);
+    let reason_for_record = reason.clone();
+    let (stored, outcome) =
+        audited_write(&mut writing, WORK_COMMENT, &reason, move |txn, actor| {
+            let item = resolve::work_item(txn, &reference)?;
+            let now = super::now_of(&clock);
+            let comment = Comment {
+                id: super::next_id(&ids, "cmt"),
+                work_item_id: item.id.clone(),
+                actor_id: actor.id.clone(),
+                actor_display_name: actor.display_name.clone(),
+                body: body.clone(),
+                created_at: now,
+                kind: kind.clone(),
+                handoff: handoff.clone(),
+            };
+            txn.insert_comment(&comment)?;
+            let project = item
+                .project_id
+                .as_deref()
+                .map(|id| txn.project_by_id(id))
+                .transpose()?
+                .flatten();
+            let links = txn.work_links_for_subjects_by_item(&item.id)?;
+            let subject = links.keys().next().cloned();
+            let record = skipped_writeback(
+                txn,
+                &ids_for_record,
+                &clock_for_record,
+                &actor.id,
+                crate::core::WriteBackAction::Comment,
+                project.as_ref(),
+                Some(&item.id),
+                subject.as_deref(),
+                &reason_for_record,
+            )?;
+            let outcome = record.outcome.to_string();
+            let comment_id = comment.id.clone();
+            let payload = serde_json::to_value(&comment).unwrap_or(Value::Null);
+            Ok(WriteOutcome::new(
+                (comment, outcome),
+                "comment",
+                &comment_id,
+                payload,
+                WORK_COMMENTED,
+                json!({"ref": item.reference, "comment_id": comment_id}),
+            ))
+        })?;
     Ok(json!({
         "comment": stored,
-        "write_back": {"action": "comment", "outcome": "skipped"},
+        "write_back": outcome,
     }))
 }
 
@@ -990,28 +1051,52 @@ where
                 VogtError::InvalidRequest(format!("no path from {} to {to_state}", item.state))
             })?
     } else {
+        workflow.check(&item.state, &to_state)?;
         vec![item.state.clone(), to_state.clone()]
     };
-    if path.len() < 2 {
-        workflow.check(&item.state, &to_state)?;
+    if path.len() >= 2 && crate::core::TERMINAL_STATES.contains(&path.last().unwrap().as_str()) {
+        let blockers = view.unfinished_blockers(&item.id, crate::core::TERMINAL_STATES)?;
+        if !blockers.is_empty() {
+            let names = blockers
+                .iter()
+                .map(|blocker| format!("{} ({})", blocker.r#ref, blocker.state))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(crate::core::transition_rejected(
+                "transition.blocked",
+                &format!(
+                    "{} is blocked by unfinished dependencies: {names}",
+                    item.reference
+                ),
+            ));
+        }
     }
+    let hops = path.len().saturating_sub(1);
     drop(view);
-    let mut walked = Vec::new();
     let mut current = item;
-    for window in path.windows(2) {
+    for (number, window) in path.windows(2).enumerate() {
         let from = window[0].clone();
         let to = window[1].clone();
-        let walked_from = from.clone();
-        let walked_to = to.clone();
+        let hop_reason = if walk {
+            format!("{reason} (walk {}/{hops}: {from} -> {to})", number + 1)
+        } else {
+            reason.clone()
+        };
         let mut writing = crate::application::context::write_of(ctx);
         let clock = std::sync::Arc::clone(writing.clock());
+        let ids = std::sync::Arc::clone(writing.ids());
         let id = current.id.clone();
         let reference = current.reference.clone();
+        let entering = crate::core::TERMINAL_STATES.contains(&to.as_str())
+            && !crate::core::TERMINAL_STATES.contains(&from.as_str());
+        let leaving = crate::core::TERMINAL_STATES.contains(&from.as_str())
+            && !crate::core::TERMINAL_STATES.contains(&to.as_str());
+        let hop_for_record = hop_reason.clone();
         current = audited_write(
             &mut writing,
             WORK_TRANSITION,
-            &reason,
-            move |txn, _actor| {
+            &hop_reason,
+            move |txn, actor| {
                 let fresh = txn
                     .work_item_by_id(&id)?
                     .ok_or_else(|| VogtError::NotFound(format!("no work item {reference}")))?;
@@ -1044,6 +1129,42 @@ where
                 let updated = txn
                     .work_item_by_id(&fresh.id)?
                     .ok_or_else(|| VogtError::NotFound(format!("no work item {reference}")))?;
+                let project = updated
+                    .project_id
+                    .as_deref()
+                    .map(|id| txn.project_by_id(id))
+                    .transpose()?
+                    .flatten();
+                let action = if entering {
+                    Some(crate::core::WriteBackAction::Close)
+                } else if leaving {
+                    Some(crate::core::WriteBackAction::Reopen)
+                } else {
+                    None
+                };
+                if let Some(action) = action {
+                    let subject = linked_subject(txn, &updated.id)?;
+                    skipped_writeback(
+                        txn,
+                        &ids,
+                        &clock,
+                        &actor.id,
+                        action,
+                        project.as_ref(),
+                        Some(&updated.id),
+                        subject.as_deref(),
+                        &hop_for_record,
+                    )?;
+                }
+                let mut summary = serde_json::Map::new();
+                summary.insert("ref".into(), json!(reference));
+                summary.insert("from".into(), json!(from));
+                summary.insert("to".into(), json!(to));
+                summary.insert("kind".into(), json!(updated.kind.to_string()));
+                summary.insert("labels".into(), json!(updated.labels));
+                if let Some(project) = project.as_ref() {
+                    summary.insert("project".into(), json!(project.slug));
+                }
                 let payload = serde_json::to_value(&updated).unwrap_or(Value::Null);
                 Ok(WriteOutcome::new(
                     updated,
@@ -1051,33 +1172,25 @@ where
                     &fresh.id,
                     payload,
                     WORK_TRANSITIONED,
-                    json!({"ref": reference, "from": from, "to": to}),
+                    Value::Object(summary),
                 ))
             },
         )?;
-        walked.push(json!({"from": walked_from, "to": walked_to}));
     }
-    record_skipped(
-        ctx,
-        current.project_id.as_deref(),
-        Some(&current.id),
-        "close",
-        &reason,
-    )?;
     Ok(json!({
         "item": current,
         "comments": [],
         "sessions": [],
         "branches": [],
         "git": null,
-        "walked": walked,
+        "walked": if walk { path } else { Vec::<String>::new() },
         "live_sessions": [],
-        "write_back": {"action": "close", "outcome": "skipped"},
     }))
 }
 
-/// Record a relation between two native items. `depends_on` and `duplicate_of`
-/// refuse a cycle. An upstream target is not a declared row and is not found.
+/// Record a relation between two declared items. `implemented_by` is observed
+/// only and refused. A duplicate edge is a conflict. An upstream ref is
+/// refused as an invalid request, not a not-found.
 fn relate_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
@@ -1090,6 +1203,14 @@ where
         .ok_or_else(|| VogtError::InvalidRequest("target is required".into()))?;
     let kind_text = text_of(&params, "kind").unwrap_or_else(|| "relates_to".to_string());
     let reason = text_of(&params, "reason").unwrap_or_default();
+    if !matches!(
+        kind_text.as_str(),
+        "depends_on" | "relates_to" | "duplicate_of" | "parent_of"
+    ) {
+        return Err(VogtError::InvalidRequest(format!(
+            "{kind_text} is not a declarable relation; implemented_by is observed from the forge"
+        )));
+    }
     let kind: crate::core::RelationKind = kind_text.parse().map_err(|_| {
         VogtError::InvalidRequest(format!(
             "unknown relation kind {}",
@@ -1099,12 +1220,22 @@ where
     let mut writing = crate::application::context::write_of(ctx);
     let clock = std::sync::Arc::clone(writing.clock());
     let stored = audited_write(&mut writing, WORK_RELATE, &reason, move |txn, _actor| {
-        let item = resolve::work_item(txn, &reference)?;
-        let other = resolve::work_item(txn, &related)?;
+        let item = declared_only(ctx, txn, &reference)?;
+        let other = declared_only(ctx, txn, &related)?;
         if item.id == other.id {
             return Err(VogtError::InvalidRequest(
-                "an item cannot relate to itself".to_string(),
+                "an item cannot relate to itself".into(),
             ));
+        }
+        if item
+            .relations
+            .iter()
+            .any(|edge| edge.kind == kind && edge.related_id == other.id)
+        {
+            return Err(VogtError::Conflict(format!(
+                "{} already {kind_text} {}",
+                item.reference, other.reference
+            )));
         }
         if matches!(
             kind,
@@ -1116,34 +1247,28 @@ where
                 item.reference, other.reference
             )));
         }
-        let now = super::now_of(&clock);
-        txn.insert_relation(&item.id, &other.id, kind, now)?;
+        txn.insert_relation(&item.id, &other.id, kind, super::now_of(&clock))?;
         let updated = txn
             .work_item_by_id(&item.id)?
             .ok_or_else(|| VogtError::NotFound(format!("no work item {}", item.reference)))?;
-        let payload = serde_json::to_value(&updated).unwrap_or(Value::Null);
+        let edge = json!({"ref": item.reference, "kind": kind_text, "target": other.reference});
         Ok(WriteOutcome::new(
-            payload.clone(),
+            updated,
             "work_item",
             &item.id,
-            payload,
+            edge.clone(),
             WORK_RELATED,
-            json!({"ref": item.reference, "related": other.reference, "kind": kind_text}),
+            edge,
         ))
     })?;
     Ok(json!({
-        "item": stored,
-        "comments": [],
-        "sessions": [],
-        "branches": [],
-        "git": null,
-        "walked": [],
-        "live_sessions": [],
+        "item": stored, "comments": [], "sessions": [], "branches": [],
+        "git": null, "walked": [], "live_sessions": [],
     }))
 }
 
-/// Drop one relation. A relation that was never recorded is a no-op that still
-/// returns the item.
+/// Drop one declared relation. An edge that is not there is an invalid
+/// request, and an upstream ref is refused rather than reported missing.
 fn unrelate_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
@@ -1164,30 +1289,31 @@ where
     })?;
     let mut writing = crate::application::context::write_of(ctx);
     let stored = audited_write(&mut writing, WORK_UNRELATE, &reason, move |txn, _actor| {
-        let item = resolve::work_item(txn, &reference)?;
-        let other = resolve::work_item(txn, &related)?;
-        txn.delete_relation(&item.id, &other.id, kind)?;
+        let item = declared_only(ctx, txn, &reference)?;
+        let other = declared_only(ctx, txn, &related)?;
+        let removed = txn.delete_relation(&item.id, &other.id, kind)?;
+        if !removed {
+            return Err(VogtError::InvalidRequest(format!(
+                "{} does not {kind_text} {}",
+                item.reference, other.reference
+            )));
+        }
         let updated = txn
             .work_item_by_id(&item.id)?
             .ok_or_else(|| VogtError::NotFound(format!("no work item {}", item.reference)))?;
-        let payload = serde_json::to_value(&updated).unwrap_or(Value::Null);
+        let edge = json!({"ref": item.reference, "kind": kind_text, "target": other.reference});
         Ok(WriteOutcome::new(
-            payload.clone(),
+            updated,
             "work_item",
             &item.id,
-            payload,
+            edge.clone(),
             WORK_UNRELATED,
-            json!({"ref": item.reference, "related": other.reference, "kind": kind_text}),
+            edge,
         ))
     })?;
     Ok(json!({
-        "item": stored,
-        "comments": [],
-        "sessions": [],
-        "branches": [],
-        "git": null,
-        "walked": [],
-        "live_sessions": [],
+        "item": stored, "comments": [], "sessions": [], "branches": [],
+        "git": null, "walked": [], "live_sessions": [],
     }))
 }
 
@@ -1230,18 +1356,17 @@ where
     let given = text_of(&params, "branch");
     let reason = text_of(&params, "reason").unwrap_or_default();
     let view = ctx.declared.read()?;
-    upstream::resolve_work_ref(ctx, &view, &reference)?;
-    if view.work_item_by_ref(&reference)?.is_none() {
-        return Err(VogtError::UpstreamWriteFailed(format!(
-            "work.bind_branch of {} is an upstream item, and the write-through is not ported — nothing was stored locally",
-            crate::core::py_repr(&reference),
-        )));
-    }
-    let item = resolve::work_item(&view, &reference)?;
+    let item = upstream::resolve_work_ref(ctx, &view, &reference)?;
     drop(view);
-    let branch = given.unwrap_or_else(|| {
-        crate::branches::default_branch_name(&item.reference, &ctx.config.branch_binding_template)
-    });
+    let branch = given
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| {
+            crate::branches::default_branch_name(
+                &item.reference,
+                &ctx.config.branch_binding_template,
+            )
+        });
     let mut writing = crate::application::context::write_of(ctx);
     let clock = std::sync::Arc::clone(writing.clock());
     let stored = audited_write(&mut writing, WORK_BIND, &reason, move |txn, _actor| {
@@ -1271,8 +1396,9 @@ where
             txn.upsert_work_overlay(&overlay)?;
         }
         let payload = serde_json::to_value(&overlay).unwrap_or(Value::Null);
+        let updated = resolve::work_item(txn, &fresh.reference)?;
         Ok(WriteOutcome::new(
-            json!({"ref": fresh.reference, "branch": branch}),
+            updated,
             "work_item",
             &fresh.id,
             payload,
@@ -1280,7 +1406,10 @@ where
             json!({"ref": fresh.reference, "branch": branch}),
         ))
     })?;
-    Ok(stored)
+    Ok(json!({
+        "item": stored, "comments": [], "sessions": [], "branches": [],
+        "git": null, "walked": [], "live_sessions": [],
+    }))
 }
 
 /// Promote one observed subject into a native work item and record the link.
@@ -1431,6 +1560,111 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn skipped_writeback(
+    txn: &mut dyn WriteTxn,
+    ids: &std::sync::Arc<std::sync::Mutex<impl IdFactory>>,
+    clock: &std::sync::Arc<std::sync::Mutex<impl Clock>>,
+    actor_id: &str,
+    action: crate::core::WriteBackAction,
+    project: Option<&Project>,
+    work_item_id: Option<&str>,
+    subject_key: Option<&str>,
+    reason: &str,
+) -> Result<WriteBackRecord, VogtError> {
+    let policy = project
+        .map(|project| project.write_back.to_string())
+        .unwrap_or_else(|| "none".into());
+    let permitted = matches!(
+        (policy.as_str(), action),
+        ("full", _) | ("comment_only", crate::core::WriteBackAction::Comment)
+    );
+    let detail = if !permitted {
+        if policy == "none" {
+            "write-back is off for this project".to_string()
+        } else {
+            format!("policy is {policy:?}; {} is not permitted", action)
+        }
+    } else if subject_key.is_none() && action != crate::core::WriteBackAction::Create {
+        "this item is not linked to a forge object".to_string()
+    } else {
+        "no forge is configured to write to for this project".to_string()
+    };
+    let record = WriteBackRecord {
+        id: super::next_id(ids, "wbk"),
+        at: super::now_of(clock),
+        project_id: project.map(|project| project.id.clone()),
+        work_item_id: work_item_id.map(str::to_string),
+        actor_id: actor_id.to_string(),
+        action,
+        subject_key: subject_key.map(str::to_string),
+        policy,
+        outcome: crate::core::WriteBackOutcome::Skipped,
+        reason: reason.to_string(),
+        detail: Some(detail),
+        source_url: None,
+    };
+    txn.insert_writeback(&record)?;
+    Ok(record)
+}
+
+fn linked_subject(txn: &impl ReadView, item_id: &str) -> Result<Option<String>, VogtError> {
+    Ok(txn
+        .work_links_for_subjects_by_item(item_id)?
+        .into_keys()
+        .next())
+}
+
+/// A ref that must name a declared row. An upstream-truth item is refused
+/// with the reason named, rather than a bare not-found.
+fn declared_only<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    view: &impl ReadView,
+    reference: &str,
+) -> Result<WorkItem, VogtError> {
+    match resolve::work_item(view, reference) {
+        Ok(item) => Ok(item),
+        Err(VogtError::NotFound(_)) => {
+            if upstream::resolve_upstream(ctx, view, reference)?.is_some() {
+                Err(VogtError::InvalidRequest(format!(
+                    "{reference} is an upstream-truth item; relations between upstream issues are not supported in v1 of the upstream-truth model — relate them on the forge"
+                )))
+            } else {
+                Err(VogtError::NotFound(format!("no work item {reference}")))
+            }
+        }
+        Err(other) => Err(other),
+    }
+}
+
+fn board_fingerprint(params: &Value) -> String {
+    let mut body = serde_json::Map::new();
+    for key in ["project", "assignee", "initiative", "label"] {
+        body.insert(key.into(), params.get(key).cloned().unwrap_or(Value::Null));
+    }
+    for key in ["kinds", "states", "priorities"] {
+        let mut values = strings(params.get(key));
+        values.sort();
+        body.insert(key.into(), json!(values));
+    }
+    body.insert(
+        "lane_mode".into(),
+        json!(params
+            .get("lane_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("none")),
+    );
+    crate::decisions::digest_of(&Value::Object(body))
+}
+
+fn board_token(value: &Value) -> String {
+    use base64::Engine;
+    // `json.dumps(..., sort_keys=True, separators=(",", ":"))`, then urlsafe
+    // base64 with the padding stripped. Not the spaced form the stores use.
+    let raw = crate::decisions::render_python_json_compact(value);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())
+}
+
 fn text_of(params: &Value, key: &str) -> Option<String> {
     params.get(key).and_then(Value::as_str).map(str::to_string)
 }
@@ -1488,6 +1722,15 @@ fn list_board<C: Clock, I: IdFactory>(
                     })
                 })
                 .collect();
+            let snapshot_at = super::now_of(&ctx.clock);
+            let revision = view.current_revision()?;
+            let snapshot = board_token(&json!({
+                "kind": "snapshot",
+                "fingerprint": board_fingerprint(&params),
+                "revision": revision,
+                "snapshot_at": snapshot_at.to_iso(),
+                "high_water": Value::Null,
+            }));
             return Ok(json!({
                 "cells": empty,
                 "column_totals": {},
@@ -1497,9 +1740,9 @@ fn list_board<C: Clock, I: IdFactory>(
                 "declared_total": 0,
                 "link_state": "unlinked",
                 "excluded_unlinked": pending,
-                "snapshot": null,
-                "snapshot_at": super::now_of(&ctx.clock),
-                "revision": view.current_revision()?,
+                "snapshot": snapshot,
+                "snapshot_at": snapshot_at,
+                "revision": revision,
             }));
         }
     }
@@ -1562,6 +1805,14 @@ fn list_board<C: Clock, I: IdFactory>(
             })
         })
         .collect();
+    let snapshot_at = super::now_of(&ctx.clock);
+    let snapshot = board_token(&json!({
+        "kind": "snapshot",
+        "fingerprint": board_fingerprint(&params),
+        "revision": revision,
+        "snapshot_at": snapshot_at.to_iso(),
+        "high_water": high_water.as_ref().map(|(moment, reference)| json!([moment.to_iso(), reference])),
+    }));
     Ok(json!({
         "cells": rendered,
         "column_totals": column_totals,
@@ -1571,8 +1822,8 @@ fn list_board<C: Clock, I: IdFactory>(
         "declared_total": total,
         "link_state": project.as_ref().map(|_| "linked"),
         "excluded_unlinked": 0,
-        "snapshot": null,
-        "snapshot_at": super::now_of(&ctx.clock),
+        "snapshot": snapshot,
+        "snapshot_at": snapshot_at,
         "revision": revision,
     }))
 }
@@ -1844,7 +2095,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(commented["comment"]["body"], "noted");
-        assert_eq!(commented["write_back"]["outcome"], "skipped");
+        assert_eq!(commented["write_back"], "skipped");
+        assert_eq!(commented["comment"]["kind"], "note");
         let fetched = get_work(ctx, json!({"ref": "WI-1"})).unwrap();
         assert_eq!(fetched["comments"][0]["body"], "noted");
         assert_eq!(fetched["item"]["ref"], "WI-1");
@@ -1872,7 +2124,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(walked["item"]["state"], "review");
-        assert_eq!(walked["walked"].as_array().unwrap().len(), 2);
+        assert_eq!(walked["walked"].as_array().unwrap().len(), 3);
         relate_work(
             ctx,
             json!({"ref": "WI-1", "related": "WI-2", "kind": "depends_on", "reason": "test"}),
@@ -1908,7 +2160,7 @@ mod tests {
             json!({"ref": "WI-1", "branch": "feat", "reason": "test"}),
         )
         .unwrap();
-        assert_eq!(bound["branch"], "feat");
+        assert_eq!(bound["item"]["ref"], "WI-1");
         bind_branch(
             ctx,
             json!({"ref": "WI-1", "branch": "feat", "reason": "test"}),
