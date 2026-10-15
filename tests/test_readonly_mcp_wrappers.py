@@ -658,7 +658,11 @@ def test_daemon_flag_merges_into_an_existing_features_table(tmp_path: Path) -> N
     proc = _codex_bootstrap(tmp_path, {})
     assert proc.returncode == 0, proc.stderr
     parsed = tomllib.loads(config.read_text(encoding="utf-8"))
-    assert parsed["features"] == {"approvals": True, "daemon_auto_start": False}
+    assert parsed["features"] == {
+        "approvals": True,
+        "daemon_auto_start": False,
+        "memories": True,
+    }
     assert parsed["other"] == {"kept": True}
     assert "mcp_servers" not in parsed
 
@@ -670,7 +674,11 @@ def test_daemon_flag_merges_into_an_existing_features_table(tmp_path: Path) -> N
     again = _codex_bootstrap(tmp_path, {})
     assert again.returncode == 0, again.stderr
     parsed = tomllib.loads(config.read_text(encoding="utf-8"))
-    assert parsed["features"] == {"approvals": True, "daemon_auto_start": False}
+    assert parsed["features"] == {
+        "approvals": True,
+        "daemon_auto_start": False,
+        "memories": True,
+    }
     assert parsed["daemon_auto_start"] is True
 
     # Already off: the LiteLLM provider was written by the run above, and a
@@ -855,3 +863,109 @@ def test_codex_gets_the_browser_and_the_isolated_subagent(tmp_path: Path) -> Non
     parsed = tomllib.loads(config.read_text(encoding="utf-8"))
     assert "mcp_servers" not in parsed
     assert parsed["other"] == {"kept": True}
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_driven_session_bundle_merges_and_raises_the_schema_cap(
+    tmp_path: Path,
+) -> None:
+    """WI-1149: a driven Codex reads CLAUDE.md, titles itself by agent state,
+    remembers, and accepts the vogt and cadastre tool schemas."""
+    import tomllib
+
+    workspace = tmp_path / "workspace"
+    (workspace / ".claude" / "skills").mkdir(parents=True)
+    (tmp_path / ".claude" / "skills").mkdir(parents=True)
+
+    config = tmp_path / "codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        'model = "grok"\n\n'
+        "[features]\ndaemon_auto_start = false\n\n"
+        '[tui]\nstatus_line = ["model"]\n\n'
+        '[mcp_servers.vogt]\ncommand = "/usr/local/bin/vogt-mcp"\n'
+        "tool_input_schema_max_bytes = 1000\n\n"
+        '[mcp_servers.cadastre]\ncommand = "/usr/local/bin/cadastre-mcp"\n\n'
+        '[mcp_servers.other]\ncommand = "/bin/other"\n',
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "VOGT_SRC": str(tmp_path / "absent"),
+        },
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # No `codex` on PATH: the bundle is for a client that is present.
+    assert "driven-session" not in proc.stderr
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "codex"
+    shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    shim.chmod(0o755)
+    proc = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "VOGT_SRC": str(tmp_path / "absent"),
+        },
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["project_doc_fallback_filenames"] == ["CLAUDE.md"]
+    assert parsed["features"]["memories"] is True
+    assert parsed["features"]["daemon_auto_start"] is False
+    assert parsed["tui"]["animations"] is False
+    assert parsed["tui"]["terminal_title"] == ["agent-state"]
+    assert parsed["tui"]["status_line"] == ["model"]
+    assert parsed["mcp_servers"]["vogt"]["tool_input_schema_max_bytes"] == 200_000
+    assert parsed["mcp_servers"]["cadastre"]["tool_input_schema_max_bytes"] == 200_000
+    assert "tool_input_schema_max_bytes" not in parsed["mcp_servers"]["other"]
+    link = tmp_path / ".agents" / "skills"
+    assert link.is_symlink()
+    assert os.path.realpath(link) == os.path.realpath(workspace / ".claude" / "skills")
+
+    # A cap an operator set higher is not lowered, and a skills path that
+    # already exists is not replaced.
+    config.write_text(
+        "[mcp_servers.vogt]\ntool_input_schema_max_bytes = 900000\n",
+        encoding="utf-8",
+    )
+    link.unlink()
+    link.mkdir()
+    again = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "VOGT_SRC": str(tmp_path / "absent"),
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert again.returncode == 0, again.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["mcp_servers"]["vogt"]["tool_input_schema_max_bytes"] == 900_000
+    assert link.is_dir() and not link.is_symlink()
+    # No workspace skills here, so the link would have been the home one.
+    assert not (tmp_path / ".agents" / "skills-unused").exists()
