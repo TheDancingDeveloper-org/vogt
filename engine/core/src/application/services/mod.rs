@@ -11,6 +11,7 @@
 //! over the clock and the id factory.
 
 pub mod auth;
+pub mod bootstrap;
 pub mod forge_accounts;
 pub mod freshness;
 pub mod history;
