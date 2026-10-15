@@ -591,6 +591,12 @@ struct Proc {
     stdin: mpsc::UnboundedSender<String>,
     gate_token: String,
     pid: Option<u32>,
+    /// The codex driver's thread is started (or resumed). Until it is, a
+    /// `turn/start` names a thread the app-server does not have and fails
+    /// with `thread not found`, so turns wait in `held` (WI-1641). Always
+    /// true for the stream-json driver.
+    thread_ready: bool,
+    held: Vec<String>,
 }
 
 #[derive(Default)]
@@ -1028,7 +1034,17 @@ impl ChatRuntime {
             }
             live.last_activity = Some(Instant::now());
         }
-        if stdin.send(line).is_err() {
+        let line = {
+            let mut live = handle.live.lock();
+            match live.proc.as_mut() {
+                Some(proc) if !proc.thread_ready => {
+                    proc.held.push(line);
+                    None
+                }
+                _ => Some(line),
+            }
+        };
+        if line.is_some_and(|line| stdin.send(line).is_err()) {
             handle.live.lock().turns = 0;
             self.note(
                 id,
@@ -1609,6 +1625,8 @@ impl ChatRuntime {
                 stdin: tx.clone(),
                 gate_token,
                 pid,
+                thread_ready: !codex,
+                held: Vec::new(),
             });
             live.creator = record.creator.clone();
             live.last_activity = Some(Instant::now());
@@ -2115,6 +2133,15 @@ impl ChatRuntime {
                 self.changed(id).await;
             }
             CodexEvent::ThreadReady => {
+                {
+                    let mut live = handle.live.lock();
+                    if let Some(proc) = live.proc.as_mut() {
+                        proc.thread_ready = true;
+                        for line in std::mem::take(&mut proc.held) {
+                            let _ = proc.stdin.send(line);
+                        }
+                    }
+                }
                 if let Ok(mut record) = self.record(id).await {
                     if !record.started {
                         record.started = true;
@@ -2123,6 +2150,16 @@ impl ChatRuntime {
                 }
             }
             CodexEvent::ThreadFailed(text) => {
+                {
+                    // The held turns can never run on this process.
+                    let mut live = handle.live.lock();
+                    if let Some(proc) = live.proc.as_mut() {
+                        if !std::mem::take(&mut proc.held).is_empty() {
+                            live.turns = 0;
+                            live.turn_started = None;
+                        }
+                    }
+                }
                 self.note(id, "error", text, true).await;
                 self.changed(id).await;
             }
