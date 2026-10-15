@@ -171,6 +171,15 @@ def test_core_and_stack_are_built_once_and_tagged_after_smoke() -> None:
     assert 'target "stack"' in bake and 'target "gitguard"' in bake
     assert "push-by-digest=true" in bake
     assert 'target     = "codex-gitguard-e2e"' in bake
+    # The bake's cache ref is a variable. The job must set it, or cache-from
+    # and cache-to are an empty registry ref and the stack cache is lost.
+    assert "CACHE_REF:" in stack
+    assert ":stack-${{ github.ref_name }}" in stack
+    # metadata-action labels are newline-separated. Splitting them on comma
+    # keeps only the first line.
+    assert "IFS=','" not in stack
+    assert 'read -r pair' in stack
+    assert "mode=min" in bake
     # The retention workflow already prunes the untagged orphan a failed
     # smoke leaves. vogt and vogt-stack are in the package list it sweeps.
     retention = (WORKFLOWS / "ghcr-retention.yml").read_text(encoding="utf-8")

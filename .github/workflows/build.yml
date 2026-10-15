@@ -689,7 +689,12 @@ jobs:
           CORE_IMAGE: ${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
           VOGT_SOURCE_REF: ${{ github.ref_name }}
           VOGT_SOURCE_SHA: ${{ github.sha }}
+          # metadata-action's `labels` output is newline-separated key=value
+          # (no sep-labels). Do not split it on commas.
           LABELS: ${{ steps.meta.outputs.labels }}
+          # The bake file's CACHE_REF. Without this, cache-from and cache-to
+          # are an empty ref and the stack layer cache is lost.
+          CACHE_REF: ${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
           META_FILE: ${{ runner.temp }}/stack-bake-meta.json
           E2E_DIR: ${{ runner.temp }}/codex-gitguard-e2e
         run: |
@@ -704,16 +709,11 @@ jobs:
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
             --set "*.args.VOGT_PRODUCT_VERSION=0.7.16"
           )
-          # metadata-action emits comma-separated key=value labels. A label
-          # value here is a source url, a revision or a timestamp, none of
-          # which contain a comma, so splitting on comma is the format.
-          if [ -n "$LABELS" ]; then
-            IFS=',' read -ra pairs <<< "$LABELS"
-            for pair in "${pairs[@]}"; do
-              [ -n "$pair" ] || continue
-              args+=(--set "stack.labels.${pair%%=*}=${pair#*=}")
-            done
-          fi
+          # One label per line. A value is a url, a revision or a timestamp.
+          while IFS= read -r pair || [ -n "$pair" ]; do
+            [ -n "$pair" ] || continue
+            args+=(--set "stack.labels.${pair%%=*}=${pair#*=}")
+          done <<< "$LABELS"
           docker buildx bake "${args[@]}" stack gitguard
           python3 - "$META_FILE" <<'PY'
           import json, os, sys
