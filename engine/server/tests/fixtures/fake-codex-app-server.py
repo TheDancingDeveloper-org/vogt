@@ -14,13 +14,13 @@ lock = threading.Lock()
 threads: set[str] = set()
 
 
-def send(msg: dict) -> None:
+def send(msg: dict[str, object]) -> None:
     with lock:
         sys.stdout.write(json.dumps(msg) + "\n")
         sys.stdout.flush()
 
 
-def start_thread(rid: object, params: dict) -> None:
+def start_thread(rid: object, params: dict[str, object]) -> None:
     time.sleep(0.3)
     thread_id = params.get("threadId", "t")
     threads.add(thread_id)
