@@ -69,6 +69,11 @@ class Engine:
         self.counter = 0
         #: The outcome a wait answers with for a live session.
         self.wait_outcome = "ready"
+        #: Screen reads after a wake answer `idle` this many times before
+        #: `running`, so a submit that did not start a turn is visible
+        #: (WI-1669).
+        self.idle_reads_after_wake = 0
+        self._idle_reads_left = 0
         #: When set, a hibernate is refused (409) with this reason.
         self.refuse_hibernate: str | None = None
         #: When set, a wake is refused (409) with this reason and the session
@@ -154,6 +159,7 @@ class Engine:
                 return 409, json.dumps({"error": self.refuse_wake}).encode()
             self.hibernated.discard(engine_id)
             self.live.add(engine_id)
+            self._idle_reads_left = self.idle_reads_after_wake
             return 200, json.dumps(self.summary(engine_id)).encode()
         if method == "POST" and verb == "keep-awake":
             if payload.get("keep_awake"):
@@ -175,6 +181,13 @@ class Engine:
                 return conflict[0], conflict[1].encode()
             return 200, b'{"ok":true}'
         if method == "GET" and verb == "screen":
+            if not asleep and self._idle_reads_left > 0:
+                self._idle_reads_left -= 1
+                activity = "idle"
+            elif asleep:
+                activity = "hibernated"
+            else:
+                activity = "running"
             return 200, json.dumps(
                 {
                     "id": engine_id,
@@ -182,7 +195,7 @@ class Engine:
                     "rows": 2,
                     "lines": HIBERNATED_SCREEN if asleep else ["> ", ""],
                     "cursor": {"row": 0, "col": 2},
-                    "activity": "hibernated" if asleep else "idle",
+                    "activity": activity,
                     "alive": not asleep,
                     "ready": not asleep,
                 }
@@ -351,6 +364,39 @@ def test_typing_into_a_hibernated_session_wakes_it_first(
         "POST input",
         "GET ",  # the digest row reads the session once more
     ]
+
+
+def test_a_submit_that_does_not_start_a_turn_is_pressed_again(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed Codex takes the text and swallows the Enter (WI-1669).
+
+    The first submit leaves the session idle, so the input path presses Enter
+    once more, and that one starts the turn.
+    """
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.idle_reads_after_wake = 2
+    engine.sent.clear()
+
+    result = session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+    submits = [
+        row for row in engine.sent
+        if row["path"].endswith("/input") and row["body"].get("submit")
+    ]
+    assert len(submits) == 2, "the swallowed Enter is pressed exactly once more"
+    assert result.delivery == "delivered"
+    assert result.woke is True
 
 
 def test_a_woken_session_that_is_not_ready_is_not_typed_into(

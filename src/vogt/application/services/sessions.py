@@ -1569,6 +1569,16 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         # Freshly woken and at its prompt: nothing was running.
         before = "waiting-for-input"
         _send_all(engine, engine_id, params.id, writes_in_order, person=person)
+        # A resumed Codex accepts the text but swallows the Enter until its
+        # composer has settled (WI-1669). The wait above asks the engine to
+        # hold until the prompt is ready; if the turn still did not start,
+        # press Enter once more.
+        if confirming and submit:
+            first = _confirm_delivery(engine, engine_id, before)
+            if first.delivery == "unconfirmed":
+                _send_all(
+                    engine, engine_id, params.id, [("", True)], person=person
+                )
 
     verdict = (
         _confirm_delivery(engine, engine_id, before)
