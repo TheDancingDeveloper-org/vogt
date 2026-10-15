@@ -540,7 +540,7 @@ pub fn export_instance<C: Clock, I: IdFactory>(
     }
     let mut comments = Vec::new();
     for item in &items {
-        comments.extend(view.comments_for(&item.id, 100_000)?);
+        comments.extend(view.comments_for(&item.id, 100_000, false)?);
     }
     if project_slug.is_some() {
         let initiative_ids: std::collections::BTreeSet<&str> = items

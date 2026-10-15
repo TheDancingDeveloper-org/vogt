@@ -1653,6 +1653,15 @@ pub struct Comment {
     pub actor_display_name: String,
     pub body: String,
     pub created_at: Moment,
+    /// `note` or `handoff`. A hand-off carries `handoff`; a note does not.
+    #[serde(default = "note_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub handoff: Option<serde_json::Value>,
+}
+
+fn note_kind() -> String {
+    "note".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
