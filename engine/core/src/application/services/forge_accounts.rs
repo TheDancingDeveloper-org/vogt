@@ -40,11 +40,24 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let host = present_string(&params, "host")?;
+    // ForgeAccountLinkParams.host defaults to github.com. Only a missing
+    // value takes the default; "" still reaches the host check.
+    let host = match params.get("host") {
+        None | Some(Value::Null) => "github.com".to_owned(),
+        Some(Value::String(text)) => text.clone(),
+        Some(_) => {
+            return Err(VogtError::InvalidRequest(
+                "host must be a string".to_owned(),
+            ))
+        }
+    };
     let token = present_string(&params, "token")?;
     let reason = present_string(&params, "reason")?;
-    require_supported_host(ctx, &host)?;
     let (_, _, _, _, _, config) = context_parts(ctx);
+    // The cipher comes first. An unconfigured instance refuses before a
+    // pasted token is ever handed to the forge (forge_accounts.py).
+    let cipher = crate::adapters::forge::load_cipher(config)?;
+    require_supported_host(ctx, &host)?;
     let provider = crate::adapters::forge::registry::provider_for_token(
         &host,
         &token,
@@ -58,10 +71,15 @@ where
             crate::core::py_repr(&host)
         ))
     })?;
+    // Python maps both "no provider" (already refused above) and "the forge
+    // did not name an identity" to one InvalidRequest. A transport error
+    // from identity() stays a GitHubUnavailable, which is what the client
+    // raises when the forge is unreachable.
     let (login, scopes) = provider.identity()?.ok_or_else(|| {
-        VogtError::GitHubUnavailable(format!("the forge at {host} did not accept the token"))
+        VogtError::InvalidRequest(
+            "the forge did not accept this token; nothing was stored".to_owned(),
+        )
     })?;
-    let cipher = crate::adapters::forge::load_cipher(config)?;
     let encrypted = cipher.encrypt(
         &token,
         now_of(&ctx.clock).unix_seconds().try_into().unwrap_or(0),

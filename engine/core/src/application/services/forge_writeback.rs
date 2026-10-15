@@ -1,4 +1,4 @@
-//! `forge.writeback` and `forge.writeback_list`. Ports `writeback.py`'s
+//! `forge.writeback` and `forge.actions`. Ports `writeback.py`'s
 //! `set_write_back` and `list_write_backs`.
 //!
 //! The policy is a fact a person sets; nothing enforces it. The consequence
@@ -14,7 +14,7 @@ use crate::core::{Clock, IdFactory, WriteBack};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ProjectUpdate, ReadView, WriteTxn};
 
-pub const FORGE_WRITEBACK_SET_EVENT: &str = "forge.writeback_set";
+pub const FORGE_WRITEBACK_SET_EVENT: &str = "project.writeback_set";
 
 pub fn writeback_op(built: &Built, params: Value) -> Result<Value, VogtError> {
     dispatch!(built, set_write_back, params)
@@ -40,13 +40,12 @@ where
         .map_err(|_| VogtError::InvalidRequest(format!("write-back policy {policy:?}")))?;
     let (declared, _, _, _, _, _) = context_parts(ctx);
     let project = resolve_project(&declared.read()?, &slug)?;
-    if project.link_state.to_string() != "linked" {
-        return Err(VogtError::NotLinked(format!(
-            "project {slug:?} is not forge-linked; link it before setting a \
-             write-back policy"
-        )));
-    }
+    // Python's set_write_back does not require the project to be linked.
+    // A policy on an unlinked project is stored and simply has nothing to do
+    // until a later link; refusing here made the parity step exit 1 where
+    // Python exits 0.
     let previous = project.write_back.to_string();
+    let project_slug = project.slug.clone();
     let id = project.id.clone();
     let mut writing = write_of(ctx);
     let updated = audited_write(&mut writing, "forge.writeback", &reason, |txn, _actor| {
@@ -67,7 +66,7 @@ where
             &id,
             json!({"write_back": policy}),
             FORGE_WRITEBACK_SET_EVENT,
-            json!({"from": previous, "to": policy}),
+            json!({"slug": project_slug, "from": previous, "to": policy}),
         ))
     })?;
     Ok(updated)
@@ -90,13 +89,23 @@ where
     }
     let limit = match params.get("limit") {
         None | Some(Value::Null) => 100,
-        Some(Value::Number(number)) => number.as_i64().unwrap_or(100),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .ok_or_else(|| VogtError::InvalidRequest("limit must be an integer".to_owned()))?,
         Some(_) => {
             return Err(VogtError::InvalidRequest(
                 "limit must be a number".to_owned(),
             ))
         }
     };
+    // WriteBackListParams.limit is ge=1, le=500. The bounds live in the model
+    // in Python; here the service enforces them so an out-of-range page is
+    // the same refusal.
+    if !(1..=500).contains(&limit) {
+        return Err(VogtError::InvalidRequest(format!(
+            "limit must be between 1 and 500, not {limit}"
+        )));
+    }
     let (declared, _, _, _, _, _) = context_parts(ctx);
     let records = declared
         .read()?

@@ -11,7 +11,7 @@
 //! construction — there is no delete, force, or replace.
 
 mod accounts;
-pub use accounts::{load_cipher, ForgeAccountCipher};
+pub use accounts::{account_linking_enabled, load_cipher, ForgeAccountCipher};
 mod actors;
 mod collectors;
 pub use collectors::glob_match;

@@ -47,30 +47,33 @@ where
             py_repr(&host)
         )));
     }
+    // Linking that is not configured pays nothing: no actor lookup, and the
+    // file token is the whole answer. A configured cipher that cannot decrypt
+    // the stored PAT raises, as Python's `_reader_provider` does — falling
+    // back to the instance token while reporting the linked login would list
+    // one person's repositories under another's name.
+    let linking = crate::adapters::forge::account_linking_enabled(config);
     let view = declared.read()?;
-    let actor = view.actor_by_identity(&principal.identity_ref)?;
-    let linked = match &actor {
-        Some(actor) => view.forge_account(&actor.id, &host)?,
-        None => None,
-    };
-    let provider = match &linked {
-        Some(_) => {
-            let ciphertext = actor
-                .as_ref()
-                .and_then(|actor| view.forge_account_secret(&actor.id, &host).ok().flatten());
-            let token = ciphertext.and_then(|stored| {
-                crate::adapters::forge::load_cipher(config)
-                    .ok()
-                    .and_then(|cipher| cipher.decrypt(&stored).ok())
-            });
-            match token {
-                Some(token) => {
-                    provider_for_token(&host, &token, Some(config), ctx.forge_transport())
-                }
-                None => provider_for_host(&host, config, ctx.forge_transport())?,
-            }
+    let mut linked_login: Option<String> = None;
+    let provider = if linking {
+        let actor = view.actor_by_identity(&principal.identity_ref)?;
+        let account = match &actor {
+            Some(actor) => view.forge_account(&actor.id, &host)?,
+            None => None,
+        };
+        let secret = match &actor {
+            Some(actor) => view.forge_account_secret(&actor.id, &host)?,
+            None => None,
+        };
+        if let (Some(account), Some(secret)) = (account, secret) {
+            let pat = crate::adapters::forge::load_cipher(config)?.decrypt(&secret)?;
+            linked_login = Some(account.login);
+            provider_for_token(&host, &pat, Some(config), ctx.forge_transport())
+        } else {
+            provider_for_host(&host, config, ctx.forge_transport())?
         }
-        None => provider_for_host(&host, config, ctx.forge_transport())?,
+    } else {
+        provider_for_host(&host, config, ctx.forge_transport())?
     };
     let Some(provider) = provider else {
         return Ok(json!({
@@ -82,7 +85,7 @@ where
         }));
     };
     let repos = provider.list_repos()?;
-    let registered = registered_keys(&view)?;
+    let registered = registered_keys(&view, config)?;
     Ok(json!({
         "repos": repos
             .iter()
@@ -97,7 +100,7 @@ where
                 ),
             }))
             .collect::<Vec<_>>(),
-        "login": linked.as_ref().map(|account| &account.login),
+        "login": linked_login,
         "detail": Value::Null,
     }))
 }
@@ -106,21 +109,21 @@ where
 ///
 /// Matching on the web URL would miss a project registered with a trailing
 /// `.git` or a different scheme, so the key is the same triple Python uses.
-fn registered_keys(view: &impl ReadView) -> Result<std::collections::BTreeSet<String>, VogtError> {
+fn registered_keys(
+    view: &impl ReadView,
+    config: &crate::config::VogtConfig,
+) -> Result<std::collections::BTreeSet<String>, VogtError> {
+    // Python's `_registered_keys` parses each URL through `identity_for`, so
+    // the ssh and scp spellings of one repository collapse to the same key
+    // as its https URL.
     Ok(view
-        .list_projects(10_000, 0)?
+        .list_projects(100_000, 0)?
         .into_iter()
         .filter_map(|project| project.repo_url)
-        .filter_map(|url| forge_key(&url))
+        .filter_map(|url| {
+            crate::adapters::forge::registry::identity_for(Some(&url), config, None).map(
+                |(_, repo)| format!("{}/{}/{}", repo.host, repo.owner, repo.repo).to_lowercase(),
+            )
+        })
         .collect())
-}
-
-fn forge_key(url: &str) -> Option<String> {
-    let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
-    let without_scheme = trimmed.split_once("://").map(|(_, rest)| rest)?;
-    let parts: Vec<&str> = without_scheme.split('/').collect();
-    if parts.len() < 3 {
-        return None;
-    }
-    Some(format!("{}/{}/{}", parts[0], parts[1], parts[2]).to_lowercase())
 }
