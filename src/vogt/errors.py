@@ -73,15 +73,17 @@ class PersonRequired(VogtError):
 
 
 class PolicyRefused(VogtError):
-    """A start would put a model the project's review policy forbids on a
-    session (WI-1590).
+    """A start's model is one the project, or the template, will not run
+    (WI-1590).
 
-    A project's `agent_policy.review.never_models` is a hard rule, not
-    guidance: a session whose model is on it is refused before the engine
-    spawns anything, whether the model came from the purpose's dispatch
-    profile or from the caller naming it. A start with no model at all is not
-    refused — there is nothing to judge — and a project with no `review`
-    policy has nothing to refuse against.
+    A project's `agent_policy.review.never_models` is a hard rule, and so are
+    its `forbidden_text` patterns when the model id matches one: a session
+    whose model hits either is refused before the engine spawns anything,
+    whether the model came from the purpose's dispatch profile or from the
+    caller naming it. A template that resolves to Claude Code is refused the
+    same way when its model is not one Claude Code speaks. A start with no
+    model at all is not refused — there is nothing to judge — and a project
+    with no policy has nothing of its own to refuse against.
     """
 
     code = "policy_refused"
