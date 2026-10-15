@@ -16,12 +16,21 @@ import pytest
 
 from vogt.application.context import build_context
 from vogt.application.models import (
+    ContractInapplicableParams,
     CreateActorParams,
     InitParams,
+    RegisterProjectParams,
     RegistryDumpParams,
     ServeParams,
 )
-from vogt.application.services import create_actor, init_instance, registry_dump, serve
+from vogt.application.services import (
+    contract_inapplicable,
+    create_actor,
+    init_instance,
+    register_project,
+    registry_dump,
+    serve,
+)
 from vogt.application.test_hooks import (
     CLOCK_ENV,
     IDS_ENV,
@@ -34,6 +43,7 @@ from vogt.config import VogtConfig
 from vogt.core.clock import utc_now
 from vogt.core.ids import new_id
 from vogt.errors import InvalidRequest
+from vogt.storage.observed_types import PendingObservation
 from vogt.storage.sqlite.observed import SqliteObservedStore
 
 WHY = "hook test"
@@ -109,6 +119,63 @@ def test_the_observed_store_mints_ids_from_the_context_factory(
     ctx = build_context(config=config)
     assert isinstance(ctx.observed, SqliteObservedStore)
     assert ctx.observed._id_factory is ctx.id_factory
+
+
+def test_sequential_hooks_mint_deterministic_observed_and_exemption_ids(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """obs_/swp_ and cex_ come from the shared factory, so two fresh instances
+    given the same script mint the same ones."""
+    monkeypatch.setenv(IDS_ENV, "sequential")
+
+    def run(name: str) -> tuple[str, str, str]:
+        root = tmp_path_factory.mktemp(name)
+        (root / "repo").mkdir()
+        ctx = build_context(config=_config(root / "data"))
+        init_instance(ctx, InitParams())
+        register_project(
+            ctx,
+            RegisterProjectParams(
+                name="Hooks", root_path=str(root / "repo"), reason=WHY
+            ),
+        )
+        contract_inapplicable(
+            ctx,
+            ContractInapplicableParams(
+                project="hooks",
+                rule="required_dir",
+                target="src",
+                reason="a workspace has no root src/",
+            ),
+        )
+        with ctx.declared.read() as view:
+            project = view.project_by_slug("hooks")
+            assert project is not None
+            exemptions = view.contract_exemptions(project.id)
+        sweep = ctx.observed.begin_sweep(
+            collector="hooks", scope=["hooks"], at=ctx.clock()
+        )
+        ctx.observed.append(
+            sweep.id,
+            [
+                PendingObservation(
+                    kind="marker",
+                    subject_key="marker:hooks",
+                    payload={"name": "hooks"},
+                    content_digest="digest",
+                )
+            ],
+            at=ctx.clock(),
+        )
+        observations = ctx.observed.list_observations(kind="marker")
+        return exemptions[0].id, sweep.id, observations[0].id
+
+    first = run("one")
+    assert first == run("two")
+    exemption_id, sweep_id, observation_id = first
+    assert exemption_id.startswith("cex_")
+    assert sweep_id.startswith("swp_")
+    assert observation_id.startswith("obs_")
 
 
 def test_a_bad_hook_value_refuses_to_start(monkeypatch: pytest.MonkeyPatch) -> None:

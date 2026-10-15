@@ -131,6 +131,7 @@ from vogt.core.entities import (
     Actor,
     AgentPolicy,
     CodingSession,
+    Project,
     Token,
     WorkItem,
     WorkOverlay,
@@ -142,6 +143,7 @@ from vogt.errors import (
     EngineOnly,
     InvalidRequest,
     NotFound,
+    PolicyRefused,
     RoleRefused,
     VogtError,
 )
@@ -250,6 +252,10 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # role nor a permission posture, so naming a purpose can never raise a
     # start past what the caller could ask for directly (WI-1323).
     params, overrides, read_only = _resolve_purpose(ctx, params)
+    # After the profile fills the model, before anything reaches the engine:
+    # a project's review policy is a rule, and a start that would run a model
+    # it forbids is refused rather than spawned (WI-1590).
+    _refuse_forbidden_model(ctx, params)
     started_by_session, started_by_kind = _started_by(ctx, engine)
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
@@ -2570,7 +2576,12 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
-    person = _answers_as_person(ctx)
+    # A person, or an oversight session: autonomous fleets have no person at
+    # the prompt, and the overseer is the driver that answers for them. The
+    # audit line records which one answered.
+    by_person = _answers_as_person(ctx)
+    by_oversight = not by_person and _is_oversight_caller(ctx, engine)
+    person = by_person or by_oversight
     answered = engine.answer_session(
         engine_id,
         option=params.option,
@@ -2608,7 +2619,8 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
             "option": option.number,
             "label": option.label[:200],
             "dismissed": dismissed,
-            "person": person,
+            "person": by_person,
+            "oversight": by_oversight,
         },
         event_kind=SESSION_ANSWERED_EVENT,
     )
@@ -2634,6 +2646,11 @@ def _may_force_wake(ctx: AppContext, engine: EngineClient) -> bool:
     engine has marked `oversight`, may use it. Any other agent is refused."""
     if _answers_as_person(ctx):
         return True
+    return _is_oversight_caller(ctx, engine)
+
+
+def _is_oversight_caller(ctx: AppContext, engine: EngineClient) -> bool:
+    """Whether the caller is a session the engine has marked `oversight`."""
     caller_id = _caller_engine_session_id(ctx)
     if caller_id is None:
         return False
@@ -3550,6 +3567,126 @@ def _resolve_purpose(
     filled = {field: value for field, value in supplied.items() if field not in given}
     overrides = tuple(field for field in _PROFILE_FIELDS if field in given)
     return params.model_copy(update=filled), overrides, profile.read_only
+
+
+#: Model ids Claude Code itself accepts. Anything else on the `claude`
+#: template is a non-Anthropic id handed to Claude Code, which the engine
+#: would pass through as `claude --model <id>` and start anyway (WI-1590).
+#: `opus`, `sonnet`, `haiku` and `fable` are the aliases Claude Code resolves
+#: itself; a full id is `claude-…`.
+_CLAUDE_MODEL = re.compile(r"^(claude-.+|opus|sonnet|haiku|fable)$")
+
+
+def _resolved_template_tag(template: str | None) -> str | None:
+    """The agent a template name means, after the engine's alias and tag rules.
+
+    The engine matches a template by name first and, failing that, by tag
+    (`resolve_template_in`), so `claude` reaches the template tagged `claude`
+    and `Claude Code (protected)` is the same template by name. The core never
+    sees the deployment's template list, so the resolution mirrored here is
+    the built-in set those names come from: a name or tag of `claude`,
+    `codex`, `opencode` or `klaudia`, compared case-insensitively the way the
+    engine compares them. A name that names none of them is not an agent
+    template and is returned as given, lower-cased, so a deployment's own
+    template still has a stable id to judge.
+    """
+    if template is None:
+        return None
+    folded = template.strip().lower()
+    for agent in ("claude", "codex", "opencode", "klaudia"):
+        if folded == agent or folded.endswith(f"({agent})"):
+            return agent
+    # The built-in template's own name, "Claude Code (protected)": the engine
+    # matches a template by its full name before it tries a tag.
+    if folded.startswith("claude code"):
+        return "claude"
+    return folded
+
+
+def _model_matches_forbidden_text(model: str, patterns: list[str]) -> str | None:
+    """The first `forbidden_text` pattern the model id matches, or None.
+
+    The same patterns the engine applies to a command, matched here against
+    the model id the start will actually run. A pattern that does not compile
+    is skipped rather than refusing every start: the write path already
+    refuses one, and a project stored before that rule must still be readable.
+    """
+    for pattern in patterns:
+        try:
+            if re.search(pattern, model):
+                return pattern
+        except re.error:
+            continue
+    return None
+
+
+def _refuse_forbidden_model(ctx: AppContext, params: StartSessionParams) -> None:
+    """Refuse a start whose model the subject's project forbids (WI-1590).
+
+    `agent_policy.review.never_models` is documented as a hard rule and was
+    only ever written into the brief as text, so a dispatch profile could
+    assign exactly the model the project forbids and the session still
+    spawned. The model judged is the one the start will actually run — the
+    profile's, unless the caller named one — and the comparison is on the
+    model id, not the display name.
+
+    Two more rules on the same model. The project's `forbidden_text` patterns
+    are matched against it, so a project that forbids `(?i)grok` refuses
+    `grok-4.7` even when `never_models` does not list it. And a template that
+    resolves to Claude Code is refused with a model id Claude Code does not
+    speak: the engine would otherwise launch `claude --model grok-4.7`.
+
+    A start that names no model has nothing to judge. A project with no
+    policy still has the Claude Code check, which does not depend on one.
+    """
+    template = _resolved_template_tag(params.template)
+    not_claude = params.model is None or _CLAUDE_MODEL.match(params.model) is None
+    if template == "claude" and params.model is not None and not_claude:
+        msg = (
+            f"template 'claude' runs Claude Code, which does not take model "
+            f"{params.model!r}; name a claude model (claude-*, opus, sonnet, "
+            "haiku, fable) or a different template"
+        )
+        raise PolicyRefused(msg)
+    if params.model is None:
+        return
+    with ctx.declared.read() as view:
+        project = _project_of(view, params)
+        if project is None or project.agent_policy is None:
+            return
+        policy = project.agent_policy
+        review = policy.review
+        forbidden = [] if review is None else review.never_models
+        patterns = list(policy.forbidden_text)
+    where = f"project {project.slug!r}"
+    if params.model in forbidden:
+        msg = (
+            f"model {params.model!r} is on {where}'s review policy never_models, "
+            "so a session may not start on it"
+        )
+        raise PolicyRefused(msg)
+    matched = _model_matches_forbidden_text(params.model, patterns)
+    if matched is not None:
+        msg = (
+            f"model {params.model!r} matches {where}'s forbidden_text pattern "
+            f"{matched!r}, so a session may not start on it"
+        )
+        raise PolicyRefused(msg)
+
+
+def _project_of(view: ReadView, params: StartSessionParams) -> Project | None:
+    """The project a start is about, before its checkout is resolved.
+
+    A work item's project is the one whose policy applies; a start that names
+    a project directly is about that project; a start that names neither has
+    no subject yet and so no policy to apply.
+    """
+    if params.work_item is not None:
+        project_id = _resolve.work_item(view, params.work_item).project_id
+        return view.project_by_id(project_id) if project_id is not None else None
+    if params.project is not None:
+        return _resolve.project(view, params.project)
+    return None
 
 
 def _started_by(

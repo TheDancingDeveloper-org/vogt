@@ -201,12 +201,16 @@ import os, sys, tempfile
 path = os.environ["CODEX_CONFIG"]
 name = os.environ["CODEX_SERVER"]
 header = f"[mcp_servers.{name}]"
-block = (
-    f"{header}\n"
-    f'command = "{os.environ["CODEX_WRAPPER"]}"\n'
-    f'args = ["{os.environ["CODEX_ARG"]}"]\n'
-    f'env_vars = [{os.environ["CODEX_VARS"]}]\n'
-)
+
+def approval_row(source: str) -> str:
+    # This writer replaces its own table whole, so an operator's explicit mode
+    # has to be read first and carried into the new block (WI-1634). Without
+    # that, every start would turn a "prompt" back into "approve".
+    for row in source.splitlines():
+        head = row.split("#", 1)[0]
+        if head.split("=", 1)[0].strip() == "default_tools_approval_mode":
+            return row if row.endswith("\n") else row + "\n"
+    return 'default_tools_approval_mode = "approve"\n'
 try:
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
@@ -229,17 +233,31 @@ if text.strip():
 
 lines = text.splitlines(keepends=True)
 kept: list[str] = []
+existing = ""
 index = 0
 while index < len(lines):
     stripped = lines[index].strip()
     if stripped == header or stripped.startswith(header + "."):
         index += 1
         while index < len(lines) and not lines[index].lstrip().startswith("["):
+            if stripped == header:
+                existing += lines[index]
             index += 1
         continue
     kept.append(lines[index])
     index += 1
 
+# Read-only by construction, so pre-approved (WI-1634). Written here as well
+# as by the driven-session bundle, or each start would drop it. The key lives
+# in the session's own config.toml, which the session can edit, so it is a
+# convenience for autonomous work and not a security boundary.
+block = (
+    f"{header}\n"
+    f'command = "{os.environ["CODEX_WRAPPER"]}"\n'
+    f'args = ["{os.environ["CODEX_ARG"]}"]\n'
+    f'env_vars = [{os.environ["CODEX_VARS"]}]\n'
+    f"{approval_row(existing)}"
+)
 body = "".join(kept).rstrip("\n")
 new = f"{body}\n\n{block}" if body else block
 if new == text:
@@ -314,7 +332,13 @@ while index < len(lines):
                 out.append(row)
             index += 1
         if not found_key:
+            while out and out[-1].strip() == "":
+                out.pop()
             out.append("daemon_auto_start = false\n")
+        if index < len(lines) and lines[index].lstrip().startswith("["):
+            while out and out[-1].strip() == "":
+                out.pop()
+            out.append("\n")
         continue
     out.append(lines[index])
     index += 1
@@ -363,12 +387,21 @@ PY
 #
 # The router's groups have no entry in Codex's bundled catalog, and the
 # fallback metadata offers no apply_patch tool and does not turn code mode off.
-# Alongside the provider this writes a catalog of those groups (apply_patch
-# freeform, tool_mode omitted) and points model_catalog_json at it. The groups
-# are the router's own — grok, code, small, reasoning, vision, premium — and
-# nothing else (no DLab community or free models). Priority is the index in
-# that order, because the fork sorts ascending and defaults to the first
-# visible model, so grok stays the default. premium is hidden from the picker.
+# Alongside the provider this writes a catalog of the groups that answered a
+# chat completion with the session key (WI-1592), apply_patch freeform and
+# tool_mode omitted, and points model_catalog_json at it. Listed, in order:
+# grok, code, small, reasoning, vision, the OpenRouter groups that answer
+# (or-deepseek-flash, or-gemini-flash, or-glm-5-3 — not or-deepseek, which
+# LiteLLM blocks), and the DLab models whose plan actually serves them.
+# qwen3-coder, qwen3-8-27b and gpt-oss-120b are not listed: live probes
+# (WI-1147, cmt_01M4YZWG8B7E9YE5Y8FNJ7H2GH) showed they fail inside LiteLLM
+# (408 / hang). Re-adding them is WI-1631. Priority is the index in that
+# order,
+# because the fork sorts ascending and defaults to the first visible model,
+# so grok stays the default. premium is hidden from the picker. Not listed,
+# because a completion does not succeed: bedrock (no such model on the
+# router), the DLab Gemini preview and Claude Haiku (plan / availability
+# errors), and the DLab free gpt-6 aliases (auth error).
 # absent or when it already names the file this writer owns; an operator's
 # catalog is left alone. Top-level model and model_provider are set only when
 # absent or when they already name this bundle (litellm, or theclawbay as the
@@ -394,7 +427,33 @@ path = os.environ["CODEX_CONFIG"]
 # ascending and marks the first visible model as the default, so priority is
 # the index in router order and grok stays first. premium is the router's
 # opt-in group, so its visibility is "hide": choosable by name, not in the picker.
-ROUTER_GROUPS = ("grok", "code", "small", "reasoning", "vision", "premium")
+# Groups a chat completion with the session key actually answered (WI-1592).
+# or-deepseek is blocked at the router and is not here. Bedrock is not a
+# model on this router. DLab models that 400/401/503 are not here either.
+# qwen3-coder, qwen3-8-27b and gpt-oss-120b are not here either: they fail
+# inside LiteLLM (408 / hang, WI-1147 cmt_01M4YZWG8B7E9YE5Y8FNJ7H2GH).
+# Re-adding them is WI-1631.
+ROUTER_GROUPS = (
+    "grok",
+    "code",
+    "small",
+    "reasoning",
+    "vision",
+    "or-deepseek-flash",
+    "or-gemini-flash",
+    "or-glm-5-3",
+    "dlab-deepseek-v4-pro",
+    "dlab-deepseek-v4-1-flash",
+    "dlab-grok-4-5",
+    "dlab-grok-4-6",
+    "dlab-grok-4-7",
+    "dlab-gemini-3-8-flash",
+    "dlab-glm-5-3",
+    "dlab-glm-5-3-flash",
+    "dlab-glm-5-3-flashx",
+    "dlab-kimi-k3",
+    "premium",
+)
 
 def _catalog_model(priority: int, slug: str) -> dict[str, object]:
     return {
@@ -458,7 +517,6 @@ LITELLM = (
     "requires_openai_auth = false\n"
     "supports_websockets = false\n"
     'env_key = "HOMELAB_LITELLM_SESSION_KEY"\n'
-    "web_search = \"disabled\"\n"
 )
 CLAWBAY = (
     "[model_providers.theclawbay]\n"
@@ -557,8 +615,14 @@ def _set_root(key: str, value: str, when: set[str | None]) -> None:
 
 # Switch the default only when it is unset or already one of ours.
 _set_root("model_provider", "litellm", {None, "litellm", "theclawbay"})
+# Under the router, a model the catalog does not list cannot be served: a
+# leftover theclawbay default such as gpt-6-astra makes every model-less
+# `codex exec` (the codex-subagent child among them) fail (WI-1640). So the
+# default moves to grok unless it already names a catalog group.
 if _root_value("model_provider") == "litellm":
-    _set_root("model", "grok", {None, "grok", "grok-4.7"})
+    _model = _root_value("model")
+    if _model not in ROUTER_GROUPS:
+        _set_root("model", "grok", {_model})
 # Point at the catalog this writer owns. A path an operator chose stays.
 _set_root("model_catalog_json", catalog_path, {None, catalog_path})
 
@@ -732,20 +796,40 @@ klaudia = os.environ["CODEX_KLAUDIA"]
 real = os.environ["CODEX_REAL"]
 root = os.environ["CODEX_ROOT"]
 
-def block(name: str, args: list[str], extra: str = "") -> str:
+def approval_row(source: str) -> str:
+    # The table is replaced whole, so carry an operator's explicit mode
+    # (WI-1634) rather than resetting it to "approve" on the next start.
+    for row in source.splitlines():
+        head = row.split("#", 1)[0]
+        if head.split("=", 1)[0].strip() == "default_tools_approval_mode":
+            return row if row.endswith("\n") else row + "\n"
+    return 'default_tools_approval_mode = "approve"\n'
+
+def block(name: str, args: list[str], extra: str = "", mode: str = "") -> str:
     rendered = ", ".join(f'"{arg}"' for arg in args)
+    # Pre-approved for driven sessions (WI-1634); the bundle below would add
+    # it anyway, so writing it here keeps reruns quiet. The key lives in the
+    # session's own config.toml, which the session can edit, so it is a
+    # convenience for autonomous work and not a security boundary.
     return (
         f"[mcp_servers.{name}]\n"
         f'command = "{klaudia}"\n'
         f"args = [{rendered}]\n"
         f"{extra}"
+        f"{mode or 'default_tools_approval_mode = "approve"\n'}"
     )
 
 wanted = {
     "browser": block("browser", ["mcp", "browser"], "tool_timeout_sec = 60\n"),
+    # Codex starts a stdio server with a cleared environment (HOME, PATH and a
+    # few more) plus the names in env_vars. The child `codex exec` the
+    # sub-agent spawns authenticates to the same provider, whose env_key is
+    # HOMELAB_LITELLM_SESSION_KEY, so that name is passed through by name; the
+    # value never lands in the file (WI-1639).
     "codex-subagent": block(
         "codex-subagent",
         ["mcp", "codex-subagent", "--codex", real, "--root", root],
+        'env_vars = ["HOMELAB_LITELLM_SESSION_KEY"]\n',
     ),
 }
 
@@ -771,6 +855,7 @@ if text.strip():
 
 lines = text.splitlines(keepends=True)
 kept: list[str] = []
+existing: dict[str, str] = {}
 index = 0
 while index < len(lines):
     stripped = lines[index].strip()
@@ -782,10 +867,18 @@ while index < len(lines):
     if header is not None:
         index += 1
         while index < len(lines) and not lines[index].lstrip().startswith("["):
+            if stripped == f"[mcp_servers.{header}]":
+                existing[header] = existing.get(header, "") + lines[index]
             index += 1
         continue
     kept.append(lines[index])
     index += 1
+
+for name, mode in existing.items():
+    current = wanted[name]
+    wanted[name] = current.replace(
+        'default_tools_approval_mode = "approve"\n', approval_row(mode), 1
+    )
 
 body = "".join(kept).rstrip("\n")
 addition = "\n\n".join(wanted[name] for name in ("browser", "codex-subagent"))
@@ -807,6 +900,248 @@ PY
     ) 9>"$lockdir/.config.toml.lock"
 }
 
+# The driven-session bundle (WI-1149). A Codex the engine starts is not an
+# operator's interactive CLI, so the config it reads is shaped for that:
+#
+#   - project_doc_fallback_filenames = ["CLAUDE.md"], so a checkout that only
+#     carries CLAUDE.md still has instructions. project_doc_mode = "all" and the
+#     claude-compat provider are the fork's job (WI-1131, WI-1132), not this one.
+#   - [tui] animations = false and terminal_title = ["agent-state"]: a driven
+#     session's title is state the engine reads, and animation bytes are noise.
+#   - [features] memories = true, beside the daemon_auto_start key the other
+#     writer forces off.
+#
+# Skills are a symlink, not a config key. [skills] extra_roots is the fork's
+# (WI-1133); until then ~/.agents/skills points at the workspace .claude/skills
+# when that directory exists, and otherwise at ~/.claude/skills. An existing
+# directory or symlink is left where it is.
+#
+# vogt and cadastre publish tool schemas larger than Codex's 5,000 byte default,
+# so a table this script can see for either server gets
+# tool_input_schema_max_bytes raised. A server an operator never registered is
+# not invented here, and a table that already carries a larger cap is not
+# lowered. A config that does not parse is left alone, like every writer above.
+#
+# The estate's trusted servers get default_tools_approval_mode = "approve"
+# (WI-1634, operator-approved 2026-10-15). A driven Codex runs `-a on-request`,
+# so every MCP call otherwise stops at a permission prompt only a person may
+# answer, and an autonomous session cannot use the estate's tools at all. The
+# fork's per-server key (codex-rs/config mcp_types.rs AppToolApproval, read by
+# requires_mcp_tool_approval_for_mode in core mcp_tool_call.rs) skips the
+# prompt for that server only; requirements.toml cannot carry it, its
+# [mcp_servers] is an identity allowlist. The list mirrors what the Claude
+# driven-session policy lets a Claude session call without a person: vogt and
+# cadastre (the session's own scoped token decides what it may write), the
+# klaudia browser and isolated sub-agent, and the three read-only forge and
+# Grafana wrappers. komodo is deliberately absent, because its deploy_stack and
+# write_stack_file mutate running stacks, and so is every server not named
+# here: those keep the person gate. A table an operator gave an explicit mode
+# keeps it, and a server nobody registered is not created. The key lives in the
+# session's own ~/.codex/config.toml, which the session can edit, so it is a
+# convenience for autonomous work and not a security boundary; the engine's
+# person gate (WI-1355) is the boundary.
+readonly CODEX_SCHEMA_MAX_BYTES="${CODEX_SCHEMA_MAX_BYTES:-200000}"
+
+codex_driven_session() {
+    local config="$1" lockdir skills
+    lockdir="$(dirname "$config")"
+    mkdir -p "$lockdir"
+    skills="${CODEX_SKILLS_LINK:-$HOME/.agents/skills}"
+    if [[ -d "$PWD/.claude/skills" ]]; then
+        _codex_link_skills "$skills" "$PWD/.claude/skills"
+    elif [[ -d "$HOME/.claude/skills" ]]; then
+        _codex_link_skills "$skills" "$HOME/.claude/skills"
+    fi
+    (
+        flock 9
+        CODEX_CONFIG="$config" CODEX_SCHEMA_MAX="$CODEX_SCHEMA_MAX_BYTES" python3 - <<'PY'
+import os, sys, tempfile
+
+path = os.environ["CODEX_CONFIG"]
+schema_max = int(os.environ["CODEX_SCHEMA_MAX"])
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+if text.strip():
+    try:
+        import tomllib
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+ROOT = {
+    "project_doc_fallback_filenames": 'project_doc_fallback_filenames = ["CLAUDE.md"]\n',
+}
+TABLES = {
+    "tui": 'animations = false\nterminal_title = ["agent-state"]\n',
+    "features": "memories = true\n",
+}
+SCHEMA_SERVERS = ("vogt", "cadastre")
+APPROVED_SERVERS = (
+    "vogt",
+    "cadastre",
+    "codex-subagent",
+    "browser",
+    "github-ro",
+    "forgejo-ro",
+    "grafana-ro",
+)
+APPROVAL_ROW = 'default_tools_approval_mode = "approve"\n'
+
+def key_of(row: str) -> str:
+    head = row.split("#", 1)[0]
+    return head.split("=", 1)[0].strip() if "=" in head else ""
+
+def render(rows: list[str]) -> str:
+    body = "".join(rows).rstrip("\n")
+    return f"{body}\n" if body else ""
+
+def header_line(row: str) -> bool:
+    # A value such as terminal_title = ["agent-state"] is not a table header.
+    text_row = row.lstrip()
+    return text_row.startswith("[") and '"' not in text_row.split("]", 1)[0]
+
+lines = text.splitlines(keepends=True)
+out: list[str] = []
+index = 0
+seen_tables: set[str] = set()
+seen_root: set[str] = set()
+while index < len(lines):
+    stripped = lines[index].strip()
+    table = next((name for name in TABLES if stripped.lstrip() == f"[{name}]"), None)
+    if table is not None:
+        seen_tables.add(table)
+        wanted = {
+            row.split("=", 1)[0].strip(): row
+            for row in TABLES[table].splitlines(keepends=True)
+        }
+        out.append(lines[index])
+        index += 1
+        while index < len(lines) and not header_line(lines[index]):
+            row = lines[index]
+            key = key_of(row)
+            if key in wanted:
+                out.append(wanted.pop(key))
+            else:
+                out.append(row)
+            index += 1
+        while out and out[-1].strip() == "":
+            out.pop()
+        out.extend(wanted.values())
+        if index < len(lines) and header_line(lines[index]):
+            out.append("\n")
+        continue
+    server = next(
+        (name for name in APPROVED_SERVERS if stripped == f"[mcp_servers.{name}]"),
+        None,
+    )
+    if server is not None:
+        out.append(lines[index])
+        index += 1
+        present = None
+        approval = False
+        while index < len(lines) and not header_line(lines[index]):
+            row = lines[index]
+            if server in SCHEMA_SERVERS and key_of(row) == "tool_input_schema_max_bytes":
+                present = row
+            else:
+                approval = approval or key_of(row) == "default_tools_approval_mode"
+                out.append(row)
+            index += 1
+        while out and out[-1].strip() == "":
+            out.pop()
+        # Before the cap, which is always lifted and re-appended last: the
+        # other order would move a line on every run and rewrite the file.
+        if not approval:
+            out.append(APPROVAL_ROW)
+        if server not in SCHEMA_SERVERS:
+            if index < len(lines) and header_line(lines[index]):
+                out.append("\n")
+            continue
+        keep = present
+        if present is not None:
+            try:
+                if int(present.split("=", 1)[1].strip()) < schema_max:
+                    keep = None
+            except ValueError:
+                pass
+        # The cap line was lifted out of the table, so the blank line that
+        # separated it from the next header has to come back with it. Without
+        # that, a kept cap sits flush against the following [table].
+        while out and out[-1].strip() == "":
+            out.pop()
+        out.append(keep or f"tool_input_schema_max_bytes = {schema_max}\n")
+        if index < len(lines) and header_line(lines[index]):
+            out.append("\n")
+        continue
+    root_key = key_of(lines[index])
+    if root_key in ROOT:
+        seen_root.add(root_key)
+        out.append(ROOT[root_key])
+        index += 1
+        continue
+    out.append(lines[index])
+    index += 1
+
+missing_root = [row for key, row in ROOT.items() if key not in seen_root]
+if missing_root:
+    split_at = next(
+        (i for i, row in enumerate(out) if header_line(row)),
+        len(out),
+    )
+    out[split_at:split_at] = missing_root
+
+missing_tables = [
+    f"[{name}]\n{TABLES[name]}" for name in TABLES if name not in seen_tables
+]
+if missing_tables:
+    split_at = next(
+        (i for i, row in enumerate(out) if header_line(row)),
+        len(out),
+    )
+    head = render(out[:split_at])
+    tail = render(out[split_at:])
+    parts = [part.rstrip("\n") for part in (head, *missing_tables, tail) if part.strip()]
+    new = "\n\n".join(parts) + "\n"
+else:
+    new = render(out)
+
+if new == text:
+    sys.exit(0)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
+# Point the skills link at target, but only when nothing is there yet. A
+# directory or a symlink an operator already made is theirs.
+_codex_link_skills() {
+    local link="$1" target="$2"
+    [[ -e "$link" || -L "$link" ]] && return 0
+    mkdir -p "$(dirname "$link")"
+    ln -s "$target" "$link" 2>/dev/null || true
+}
+
 # Vogt registrations are best-effort: a failure here must not cost an agent its
 # git/gh credentials.
 install_vogt_bridge
@@ -821,6 +1156,8 @@ if command -v codex >/dev/null 2>&1; then
         || printf 'mcp-bootstrap: could not write the Codex LiteLLM provider\n' >&2
     codex_klaudia_tools "${CODEX_HOME:-$HOME/.codex}/config.toml" \
         || printf 'mcp-bootstrap: could not register the Codex browser and sub-agent\n' >&2
+    codex_driven_session "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        || printf 'mcp-bootstrap: could not write the Codex driven-session bundle\n' >&2
 fi
 install_readonly_servers
 

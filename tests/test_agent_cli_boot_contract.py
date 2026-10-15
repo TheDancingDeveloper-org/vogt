@@ -231,6 +231,138 @@ def test_the_strict_shadow_policy_still_refuses_and_warn_still_acknowledges(
     assert stray.exists(), "warn leaves the deliberate override in place"
 
 
+# --- The ACP adapter (WI-1595): an ordinary npm row whose binary is `codex-acp`.
+#
+# Unlike `codex` it *does* get a PATH-first link (the codex exception exists
+# only because `/usr/local/bin/codex` is the full-access wrapper), and its
+# smoke check is the same one the image build runs: `--version` must name the
+# pinned version, so a stub install is refused rather than flipped current.
+
+ACP_PINNED = "2.2.2"
+
+
+class AcpSandbox(Sandbox):
+    """A `codex-acp` row served by the same offline npm shim, at ACP_PINNED."""
+
+    def __init__(self, base: Path) -> None:
+        super().__init__(base)
+        (self.share / "agent-versions.resolved").write_text(
+            "codex-acp=0.0.1\n", encoding="utf-8"
+        )
+        (self.share / "agent-clis.tools").write_text(
+            "codex-acp\t@agentclientprotocol/codex-acp\tcodex-acp\tVOGT_CODEX_ACP_VERSION\tnpm\n",
+            encoding="utf-8",
+        )
+        pkg = base / "acp-pkg"
+        (pkg / "bin").mkdir(parents=True)
+        (pkg / "package.json").write_text(
+            f'{{"name":"@agentclientprotocol/codex-acp","version":"{ACP_PINNED}",'
+            '"bin":{"codex-acp":"bin/codex-acp"}}',
+            encoding="utf-8",
+        )
+        binary = pkg / "bin" / "codex-acp"
+        binary.write_text(f"#!/bin/sh\necho {ACP_PINNED}\n", encoding="utf-8")
+        binary.chmod(0o755)
+        subprocess.run(
+            ["npm", "pack", "--silent"], cwd=pkg, check=True, capture_output=True
+        )
+        tarball = next(pkg.glob("*.tgz"))
+        real = shutil.which("npm")
+        assert real is not None
+        (self.shim / "npm").write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = install ] && [ "$2" = -g ]; then\n'
+            f'  case "$5" in @agentclientprotocol/codex-acp@{ACP_PINNED}) '
+            f'exec "{real}" install -g --prefix "$4" "{tarball}" ;; '
+            '*) echo "no such package $5" >&2; exit 1 ;; esac\n'
+            "fi\n"
+            f'exec "{real}" "$@"\n',
+            encoding="utf-8",
+        )
+
+    def install(self, version: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(INSTALL), "codex-acp", version],
+            env=self.env(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def current(self) -> str:
+        link = self.root / "codex-acp" / "current"
+        return str(link.readlink()) if link.is_symlink() else ""
+
+
+@pytest.fixture
+def acp_sandbox(tmp_path: Path) -> AcpSandbox:
+    return AcpSandbox(tmp_path)
+
+
+def test_codex_acp_installs_links_and_verifies(acp_sandbox: AcpSandbox) -> None:
+    """The pin the image carries: an exact version, a `current` symlink, and a
+    PATH-first `bin/codex-acp` whose `--version` is the version asked for."""
+    done = acp_sandbox.install(ACP_PINNED)
+    assert done.returncode == 0, done.stderr
+    assert acp_sandbox.manifest() == f"codex-acp={ACP_PINNED}\n"
+    assert acp_sandbox.current() == ACP_PINNED
+    link = acp_sandbox.root / "bin" / "codex-acp"
+    assert link.is_symlink(), "codex-acp is not the codex wrapper; it gets a link"
+    assert (
+        subprocess.run(
+            [str(link), "--version"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        == ACP_PINNED
+    )
+    assert acp_sandbox.verify().returncode == 0
+
+
+def test_image_installs_claude_code_beside_codex_acp() -> None:
+    """The baked `npm install -g` list (engine/Dockerfile, the
+    INSTALL_AI_CLIENTS block) must carry both packages at their exact pins.
+    codex-acp was added by replacing the claude-code line, so the image built
+    with the pin still set but never installed Claude Code while the smoke
+    check below still demanded it. Reading the install list catches that; the
+    smoke checks alone do not, because they only run inside an image build."""
+    dockerfile = (REPO_ROOT / "engine" / "Dockerfile").read_text(encoding="utf-8")
+    block = dockerfile.split('if [ "$INSTALL_AI_CLIENTS" = "true" ]; then', 1)[1]
+    install = block.split("npm install -g", 1)[0]
+    assert "@anthropic-ai/claude-code@${claude_code_version}" in install, (
+        "claude-code dropped out of the image install list"
+    )
+    assert "@agentclientprotocol/codex-acp@${codex_acp_version}" in install, (
+        "codex-acp is not in the image install list at its pin"
+    )
+    smoke = block.split("npm install -g", 1)[1]
+    assert "/usr/local/bin/claude --version" in smoke
+    assert "/usr/local/bin/codex-acp --version" in smoke
+
+
+def test_codex_acp_whose_version_lies_is_not_made_current(
+    acp_sandbox: AcpSandbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A package that installs cleanly but whose `--version` names something
+    else — the stub shape that held the claude pin — must not flip `current`.
+    The shim is swapped for one that writes exactly such a binary."""
+    real = shutil.which("npm")
+    assert real is not None
+    (acp_sandbox.shim / "npm").write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = install ] && [ "$2" = -g ]; then\n'
+        '  mkdir -p "$4/bin"\n'
+        "  printf '#!/bin/sh\\necho 0.0.0\\n' > \"$4/bin/codex-acp\"\n"
+        '  chmod 755 "$4/bin/codex-acp"\n'
+        "  exit 0\n"
+        "fi\n"
+        f'exec "{real}" "$@"\n',
+        encoding="utf-8",
+    )
+    failed = acp_sandbox.install(ACP_PINNED)
+    assert failed.returncode == 1
+    assert "not 2.2.2" in failed.stderr
+    assert acp_sandbox.current() == ""
+
+
 # --- The Go toolchain (WI-951): a `go-dist` row, fetched from a release mirror.
 
 GO_BAKED = "1.26.8"
@@ -633,6 +765,9 @@ class ReleaseSandbox:
         )
 
     def install(self, version: str) -> subprocess.CompletedProcess[str]:
+        return self.install_tool("codex", version)
+
+    def install_tool(self, tool: str, version: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update(
             {
@@ -646,7 +781,7 @@ class ReleaseSandbox:
             }
         )
         return subprocess.run(
-            [str(INSTALL), "codex", version],
+            [str(INSTALL), tool, version],
             capture_output=True,
             text=True,
             env=env,
@@ -701,3 +836,108 @@ def test_a_short_sha_is_not_a_release_pin(release_sandbox: ReleaseSandbox) -> No
     refused = release_sandbox.install(FORK_SHA[:12])
     assert refused.returncode == 64
     assert "full commit" in refused.stderr
+
+
+def test_a_stock_npm_codex_pin_is_refused_and_a_stale_one_dropped(
+    release_sandbox: ReleaseSandbox,
+) -> None:
+    # Stock Codex has no managed hooks, so gitguard would not run under it
+    # (WI-1146). A pin of the npm row is refused without a download, and a
+    # `current` an older image left behind is removed.
+    tools = release_sandbox.share / "agent-clis.tools"
+    tools.write_text(
+        tools.read_text(encoding="utf-8")
+        + "codex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\n",
+        encoding="utf-8",
+    )
+    stale = release_sandbox.root / "codex-npm" / "0.161.0" / "bin"
+    stale.mkdir(parents=True)
+    (stale / "codex").write_text("#!/bin/sh\necho stock\n", encoding="utf-8")
+    (release_sandbox.root / "codex-npm" / "current").symlink_to("0.161.0")
+
+    refused = release_sandbox.install_tool("codex-npm", "0.161.0")
+    assert refused.returncode == 64, refused.stderr
+    assert "only the Codex fork" in refused.stderr
+    assert not (release_sandbox.root / "codex-npm" / "current").exists()
+
+    image = release_sandbox.install_tool("codex-npm", "image")
+    assert image.returncode == 0, image.stderr
+
+
+WRAPPER = REPO_ROOT / "engine" / "deploy" / "codex-full-access.sh"
+
+
+def _wrapped(root: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["VOGT_AGENT_CLI_ROOT"] = str(root)
+    return subprocess.run(
+        ["bash", str(WRAPPER), "--version"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+
+def test_the_codex_wrapper_refuses_a_runtime_copy_that_is_not_a_fork_release(
+    tmp_path: Path,
+) -> None:
+    prefix = tmp_path / "codex" / "0.161.0"
+    (prefix / "bin").mkdir(parents=True)
+    binary = prefix / "bin" / "codex"
+    binary.write_text('#!/bin/sh\necho ran "$@"\n', encoding="utf-8")
+    binary.chmod(0o755)
+    (tmp_path / "codex" / "current").symlink_to("0.161.0")
+
+    # An npm copy records no fork provenance: refused, not run.
+    refused = _wrapped(tmp_path)
+    assert refused.returncode == 78, refused.stdout
+    assert "not a Codex fork release" in refused.stderr
+    assert "ran" not in refused.stdout
+
+    # A fork release records `<repository>@<commit>` and runs, with the pin
+    # flag the wrapper always adds.
+    (prefix / "source").write_text(
+        f"https://github.com/TheDancingDeveloper-org/codex@{FORK_SHA}\n",
+        encoding="utf-8",
+    )
+    ran = _wrapped(tmp_path)
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.strip() == "ran --no-daemon --version"
+
+
+REQUIREMENTS = (
+    REPO_ROOT / "engine" / "deploy" / "driven-session-codex-requirements.toml"
+)
+DOCKERFILE = REPO_ROOT / "engine" / "Dockerfile"
+GITGUARD_HOOK = "/usr/local/bin/klaudia hook gitguard"
+
+
+def test_the_gitguard_hook_runs_the_image_klaudia_a_runtime_pin_cannot_reach() -> None:
+    """WI-1146: the hook names the root-owned image build by absolute path.
+
+    A bare `klaudia` resolves through PATH, whose first entry is the
+    session-owned `/opt/vogt/agent-clis/bin`, so a session could shadow it
+    with a stub. A runtime `VOGT_KLAUDIA_VERSION` pin installs under that same
+    tree and must never be what the hook runs.
+    """
+    import tomllib
+
+    hooks = tomllib.loads(REQUIREMENTS.read_text(encoding="utf-8"))["hooks"]
+    commands = [
+        handler["command"]
+        for event in ("SessionStart", "PreToolUse")
+        for group in hooks[event]
+        for handler in group["hooks"]
+    ]
+    assert commands == [GITGUARD_HOOK, GITGUARD_HOOK]
+
+    # The installer writes only under its agent-CLI root, never the hook's
+    # program.
+    assert "/usr/local/bin/klaudia" not in INSTALL.read_text(encoding="utf-8")
+
+    # The image keeps that program a root-owned 0755 regular file, and says so
+    # in a build-time assertion.
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert "go build -trimpath -o /usr/local/bin/klaudia" in dockerfile
+    assert "stat -c '%u %a %F' /usr/local/bin/klaudia /usr/local/bin" in dockerfile

@@ -128,16 +128,26 @@ and `opencode` CLIs at the Renovate-pinned versions in
 `engine/agent-versions.env`, `codex` (WI-1142) from the fork release asset for
 the full commit `VOGT_CODEX_SHA` of `VOGT_CODEX_SOURCE` (tag `fork-<sha>`,
 asset `codex-<target>.tar.gz`, checked against the sha256 recorded beside the
-pin), and `klaudia` (WI-950), a Go coding agent no
+pin). The release is x86_64 only, so `VOGT_CODEX_SHA256_LINUX_ARM64` is empty
+and an arm64 image build leaves the Codex copy unset instead of failing. It
+also bakes `codex-acp` (WI-1595), the upstream `@agentclientprotocol/codex-acp`
+adapter pinned there as `VOGT_CODEX_ACP_VERSION`, and `klaudia` (WI-950), a Go coding agent no
 registry publishes, built with the image's Go from the commit pinned there
 (`VOGT_KLAUDIA_VERSION`, a full commit id of `VOGT_KLAUDIA_SOURCE`); it is off by default for a local build and on in
-the published image. That baked copy is the baseline, and the version a
+the published image. The adapter is not a Codex of its own: it starts
+`codex app-server` and translates ACP into it, and the entrypoint exports
+`CODEX_PATH` at the baked fork binary (the runtime pin's `codex/current` when
+one is flipped, else `/usr/local/libexec/codex-real`) so it never falls back to
+the older `@openai/codex` its package bundles. An explicit `CODEX_PATH` wins.
+That baked copy is the baseline, and the version a
 running pod uses can be moved without a rebuild by the runtime pin described
 in [`DEPLOYMENT.md`](DEPLOYMENT.md) §3 (`VOGT_CLAUDE_CODE_VERSION` and
 friends, applied by `vogt-agent-cli-install` at container start). Stock npm
-Codex stays selectable for rollback: `VOGT_CODEX_VERSION` still names
-`@openai/codex`, and the `codex-npm` row (kind `npm`) installs it into the
-volume when that pin is set. Codex's row is kind `github-release`: a runtime
+Codex is not a runtime option (WI-1146): it has no managed hooks, so the
+gitguard hook would not run under it. `VOGT_CODEX_VERSION` still names
+`@openai/codex` in the `codex-npm` row (kind `npm`), but the installer refuses
+a pin of it (exit 64) and drops any `current` an older image left, and the
+wrapper refuses a runtime copy whose prefix has no fork `source` line. Codex's row is kind `github-release`: a runtime
 `VOGT_CODEX_SHA` is another full commit, downloaded the same way and checked
 against the release's `SHA256SUMS` before `current` moves. The wrapper runs
 the binary with `--no-daemon`, and bootstrap writes
@@ -184,7 +194,7 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-klaudia-mcp` | `deploy/klaudia-mcp.sh` | `set [-e KEY=VALUE]…`/`remove` a stdio server in Klaudia's `.mcp.json` (`~/.klaudia`, or `KLAUDIA_CONFIG_DIR`), which Klaudia has no `mcp` command to write; `vogt-mcp-bootstrap` uses it, and a derivative image's bootstrap may (§4) | only with `klaudia` present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
-| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. Stock Codex reads `/etc/codex/requirements.toml` with no flag; the image copies `deploy/driven-session-codex-requirements.toml` there and to `/usr/local/share/vogt/`. On stock Codex 0.160.0 that file is comments only: the gitguard hook table and destructive-git prefix rules are not a shape that has been shown to load (WI-1146) | only with `INSTALL_AI_CLIENTS` |
+| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. The fork reads `/etc/codex/requirements.toml` with no flag (TUI, `exec` and app-server alike); the image copies `deploy/driven-session-codex-requirements.toml` there, root-owned `0644` in a root-owned `0755` directory, and a reference copy to `/usr/local/share/vogt/`. That file pins `[features] hooks = true` and runs `/usr/local/bin/klaudia hook gitguard` (the image's root-owned build, by absolute path) fail-closed on `SessionStart` (baseline capture) and `PreToolUse` (matcher `Bash`, `shell`, `exec_command`, `write_stdin`, `apply_patch`; timeout 30 s), so a hook that fails, or a session with no baseline, blocks the tool call (WI-1146, WI-1356). A runtime copy under `codex/current` runs only when its prefix records a fork release `source`; anything else exits 78 rather than run without the hook. That `source` file sits in the session-owned agent-CLI tree, so this check is an accident guard against a stale or mistaken pin, not a security boundary | only with `INSTALL_AI_CLIENTS` |
 | `vogt-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`, `fetch`, `store`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
 
 Nothing in the engine itself depends on `agent-auth`: with
@@ -413,7 +423,7 @@ with neither set the bootstrap falls back to the front door on loopback.
 **Codex's browser and isolated sub-agent** (WI-1358). Codex has neither a
 browser nor a way to hand `spawn_agent` a working directory — that tool takes
 `message`, `output_schema`, `fork_turns` and a model, and nothing else, in the
-fork this image ships (`codex-cli 0.162.0+fork.ca04973b4`). When `klaudia` is on
+fork this image ships (`codex-cli 0.162.0+fork.86a742cdc`). When `klaudia` is on
 `PATH`, `vogt-mcp-bootstrap` writes two stdio servers into Codex's config:
 `[mcp_servers.browser]` runs `klaudia mcp browser` (WI-1137) with
 `tool_timeout_sec = 60`, and `[mcp_servers.codex-subagent]` runs
@@ -427,6 +437,44 @@ place on the next launch. Claude and Klaudia keep their own browser and
 sub-agent, so nothing is registered for them. A fork change that adds a
 working directory to `spawn_agent` is what would retire the sub-agent server;
 it is not something this repository can do.
+
+**Codex's driven-session bundle** (WI-1149). The same bootstrap writes the keys
+a session the engine starts needs and an interactive CLI does not.
+`project_doc_fallback_filenames = ["CLAUDE.md"]` at the root, so a checkout
+whose only instructions file is `CLAUDE.md` is still read. `project_doc_mode =
+"all"` and the claude-compat instructions provider belong to the fork
+(WI-1131, WI-1132), and `[skills] extra_roots` likewise (WI-1133); until that
+key exists, `~/.agents/skills` is symlinked to the workspace `.claude/skills`
+when that directory exists and otherwise to `~/.claude/skills`, and only when
+nothing is already at that path. `[tui]` gets `animations = false` and
+`terminal_title = ["agent-state"]`, and `[features]` gains `memories = true`
+beside the `daemon_auto_start = false` the daemon writer forces. `[mcp_servers.vogt]`
+and `[mcp_servers.cadastre]`, when present, get `tool_input_schema_max_bytes`
+raised to 200000 (`CODEX_SCHEMA_MAX_BYTES` overrides it) because both servers
+publish schemas past Codex's 5,000 byte default; a table that already sets a
+higher cap is not lowered, and a server nobody registered is not created. The
+rewrite is the same flock and atomic rename, and a config that does not parse
+is left alone.
+
+A driven Codex runs `-a on-request`, so every MCP tool call would otherwise
+stop at a permission prompt only a person may answer (WI-1634). The bundle
+therefore gives the estate's trusted servers `default_tools_approval_mode =
+"approve"`, the fork's per-server key that skips the prompt for that server
+only: `vogt`, `cadastre`, `codex-subagent`, `browser`, `github-ro`,
+`forgejo-ro` and `grafana-ro` (operator-approved 2026-10-15). This mirrors
+what the Claude driven-session policy lets a Claude session call without a
+person. `komodo` is deliberately not on the list, since its `deploy_stack` and
+`write_stack_file` change running stacks, and neither is any other server:
+those keep the person gate. A table that already names a mode keeps it, and a
+server nobody registered is not created. The read-only, browser and sub-agent
+writers emit the same row in the tables they own, so a restart does not
+rewrite them, and they carry over a mode an operator already set there. The
+key lives in the session's own `~/.codex/config.toml`, which the session can
+edit, so it is a convenience for autonomous work and not a security boundary;
+the engine's person gate (WI-1355) is the boundary.
+`/etc/codex/requirements.toml` cannot carry the setting (its
+`[mcp_servers]` is an identity allowlist), and it is unchanged: gitguard
+stays pinned and the bypass posture stays person-only.
 
 Any further MCP server an agent should reach is registered by hand inside the
 session, the way the Rust LSP entry above shows.
@@ -784,12 +832,23 @@ than these routes.
   a dirty shared checkout cannot leak into the session. Refused (`400`) when
   `cwd` is not a git checkout or is outside the workspace, when the worktree
   itself would land outside the workspace (a checkout at the workspace root),
-  when `base_ref` is not already in it, when `branch` is not a single ref name
+  when `base_ref` is not a branch on `origin`, when `branch` is not a single ref name
   or already exists, when the sibling directory already exists, or together
   with `resume` (a resumed conversation would move `cwd` off the checkout).
-  `base_ref` is resolved locally and never fetched, so a local branch behind
-  its remote is cut where it stands; name `origin/<branch>` for the remote's
-  tip. Every other refusal (codex policy, agent launch) is checked before the
+  Before the cut the engine fetches `base_ref` from `origin` and cuts from
+  `origin/<base>` (WI-1630): the checkout's own local ref of that name is
+  the shared checkout's and lags the remote, so cutting from it starts the
+  session on stale code. A slash in the name is a branch
+  (`integrate/vogt-next`), not a refusal. A `base_ref` that already names the
+  remote (`origin/main`, `origin/integrate/vogt-next`) has that one `origin/`
+  prefix stripped and is fetched the same way, so both forms cut from the
+  same remote-tracking ref. A name that is not a branch ref after that strip
+  (`origin/`, `integrate//next`) is refused as not a ref name. A fetch that
+  fails, or a base the remote does not have, refuses the start (`400`) rather
+  than falling back to the local ref. The fetch moves only that one
+  remote-tracking ref, never a local branch. The fetch runs as the engine
+  process, before the session process exists, so a private origin is reached
+  with the engine user's credentials rather than the session account's. Every other refusal (codex policy, agent launch) is checked before the
   cut, and a start that fails after it (prompt file, PTY spawn) removes the
   worktree and its branch again, so a refused start leaves neither behind.
   Absent means the session opens in `cwd`, byte-identical to a request from
@@ -836,7 +895,7 @@ engine turns them into that CLI's own flags (`agent_cli.rs`):
 | `claude` | `--model <id>` | `--effort <level>` |
 | `codex` | `-m <id>` | `-c model_reasoning_effort=<level>` |
 
-**Codex's default model is the estate LiteLLM router** (WI-1147). The estate Codex fork speaks the Chat Completions wire as well as Responses (WI-1286), and grok returns tool calls only over chat, so `vogt-mcp-bootstrap` writes `[model_providers.litellm]` into `~/.codex/config.toml` (`${CODEX_HOME}` when set) with `base_url = "http://100.92.54.45:4000/v1"`, `wire_api = "chat"` and `env_key = "HOMELAB_LITELLM_SESSION_KEY"`. The key is that environment variable, exported by the agent-auth manifest (§9); the config never contains it. When `model` and `model_provider` are absent, or already name this bundle (`litellm`, or `theclawbay` with model `grok` / `grok-4.7`), bootstrap sets `model_provider = "litellm"` and `model = "grok"` — the router's `grok` group, not a pinned model id. grok has no entry in Codex's bundled model catalog, whose fallback metadata offers no apply_patch tool, so bootstrap also writes `vogt-model-catalog.json` beside the config — one model, `apply_patch_tool_type` `freeform`, `tool_mode` omitted so code mode stays off — and sets `model_catalog_json` to it. That key is set only when absent or when it already names this file; a catalog an operator chose is left alone, and so is the file. A session that passes `-m <id>` still overrides `model` for that process. `[model_providers.theclawbay]` is written as a fallback profile with no bearer token; a profile an operator already wrote under that name (one carrying `experimental_bearer_token`) is left untouched, as is any other provider and model an operator set. The rewrite uses the same flock and atomic rename as the read-only server tables, and a config that does not parse is left alone. The manifest line that exports `HOMELAB_LITELLM_SESSION_KEY` is an ops overlay change (Forgejo `indexarr/ops` pull 52), not part of this repository.
+**Codex's default model is the estate LiteLLM router** (WI-1147). The estate Codex fork speaks the Chat Completions wire as well as Responses (WI-1286), and grok returns tool calls only over chat, so `vogt-mcp-bootstrap` writes `[model_providers.litellm]` into `~/.codex/config.toml` (`${CODEX_HOME}` when set) with `base_url = "http://100.92.54.45:4000/v1"`, `wire_api = "chat"` and `env_key = "HOMELAB_LITELLM_SESSION_KEY"`. The key is that environment variable, exported by the agent-auth manifest (§9); the config never contains it. When `model` and `model_provider` are absent, or already name this bundle (`litellm`, or `theclawbay` with model `grok` / `grok-4.7`), bootstrap sets `model_provider = "litellm"` and `model = "grok"` — the router's `grok` group, not a pinned model id. grok has no entry in Codex's bundled model catalog, whose fallback metadata offers no apply_patch tool, so bootstrap also writes `vogt-model-catalog.json` beside the config — one entry per LiteLLM group that answers a chat completion with the session key (WI-1592): `grok`, `code`, `small`, `reasoning`, `vision`, `or-deepseek-flash`, `or-gemini-flash`, `or-glm-5-3`, and the DLab models whose plan serves them (`dlab-deepseek-v4-pro`, `dlab-deepseek-v4-1-flash`, `dlab-grok-4-5`, `dlab-grok-4-6`, `dlab-grok-4-7`, `dlab-gemini-3-8-flash`, `dlab-glm-5-3`, `dlab-glm-5-3-flash`, `dlab-glm-5-3-flashx`, `dlab-kimi-k3`), plus `premium` hidden from the picker. Each entry has `apply_patch_tool_type` `freeform` and omits `tool_mode` so code mode stays off. Priority is that order, so the fork's ascending sort keeps `grok` as the default. Not listed, because a completion does not succeed: `or-deepseek` (blocked on OpenRouter), `qwen3-coder`, `qwen3-8-27b` and `gpt-oss-120b` (they fail inside LiteLLM — a 408 or a hang; re-adding them is WI-1631), Bedrock (the router has no bedrock model — it needs a LiteLLM provider entry before Codex can offer it, and no credentials are added here), `dlab-gemini-3-1-pro-preview` and `dlab-gemini-3-6-flash` (not on the DLab plan), `dlab-claude-haiku-4-5` (unavailable), and the `gpt-6-*-free` aliases (auth error). Bootstrap sets `model_catalog_json` to that file. That key is set only when absent or when it already names this file; a catalog an operator chose is left alone, and so is the file. A session that passes `-m <id>` still overrides `model` for that process. `[model_providers.theclawbay]` is written as a fallback profile with no bearer token; a profile an operator already wrote under that name (one carrying `experimental_bearer_token`) is left untouched, as is any other provider and model an operator set. The rewrite uses the same flock and atomic rename as the read-only server tables, and a config that does not parse is left alone. The manifest line that exports `HOMELAB_LITELLM_SESSION_KEY` is an ops overlay change (Forgejo `indexarr/ops` pull 52), not part of this repository.
 | `opencode` | `--model <provider/id>` | *refused — it has no effort control* |
 | `klaudia` | `--model <id>` | *refused — it has no effort control* |
 
@@ -997,11 +1056,16 @@ its own. `DELETE /api/sessions/:id` removes the guide with the brief, and the
 prompt sweep keeps a guide while its session is known, live or hibernated,
 exactly as it keeps the brief.
 
-**Project policy.** A project's `agent_policy` reaches a session only as
-text in its brief, which vogt-core composes. The engine writes no
-per-session hooks and enforces none of it yet: refusing `forbidden_text` and
-an agent's merge onto a production branch is a follow-up, and Klaudia has
-no per-session settings flag to carry such a hook.
+**Project policy.** A project's `agent_policy` reaches a session as text in
+its brief, which vogt-core composes, and the engine writes no per-session
+hooks. One part of it is enforced before a session exists at all:
+`agent_policy.review.never_models` is checked in vogt-core when a session
+starts (WI-1590), against the model the start will actually run — the
+purpose's dispatch profile, or the model the caller named — and a start on a
+forbidden model is refused with `policy_refused` rather than spawned. The
+rest stays unenforced: refusing `forbidden_text` and an agent's merge onto a
+production branch is still a follow-up, and Klaudia has no per-session
+settings flag to carry such a hook.
 
 **Quiet defaults for Claude Code.** Engine sessions are often driven by
 another agent through `POST /api/sessions/:id/input`, and Claude Code's
@@ -1525,23 +1589,46 @@ checks decide what it can finish on its own (WI-926; the design is
     else. A person's grant only, as for Claude Code.
   `--approve-for-me` is not used: it hard-wires workspace-write. Default
   and accept-edits use sandbox `danger-full-access` because `bwrap` does
-  not work in the pod. Stock Codex reads `/etc/codex/requirements.toml`
-  itself; the engine does not pass a requirements flag. The image copies
-  `engine/deploy/driven-session-codex-requirements.toml` to that path and
-  to `/usr/local/share/vogt/driven-session-codex-requirements.toml`.
-  `ENGINE_AGENT_CODEX_POLICY` names a deployment's own file (the engine
-  checks that the named path exists, is non-empty and wires the gitguard
-  hook, then still lets Codex load `/etc/codex/requirements.toml` — a
-  deployment that points elsewhere has to put the file where Codex reads
-  it). Empty tries the image path, then `/etc/codex/requirements.toml`; if
-  neither exists the session starts with no policy. `off` is the only way a
-  deployment that has the file starts Codex without that check. A path that
-  is missing, empty, unreadable, or does not wire the hook is `400`, and the
-  session does not fall through to bypass. The shipped file (WI-1356) wires
+  not work in the pod. The fork reads `/etc/codex/requirements.toml` itself,
+  and only that path: the TUI, `exec` and app-server (quick chat) all load it
+  through one config builder, and the engine does not pass a requirements
+  flag. The image copies `engine/deploy/driven-session-codex-requirements.toml`
+  to that path (root-owned, `0644`, in a root-owned `0755` `/etc/codex`) and
+  a reference copy to
+  `/usr/local/share/vogt/driven-session-codex-requirements.toml`. The engine
+  judges the file Codex loads (WI-1146): `/etc/codex/requirements.toml` must
+  exist, be non-empty and wire the gitguard hook, and it and its directory
+  must be owned by root and not group- or world-writable, or a session could
+  rewrite it. `ENGINE_AGENT_CODEX_POLICY` names a deployment's own file; it is
+  checked the same way, and so is `/etc/codex/requirements.toml`, which a
+  deployment that points elsewhere still has to install. Empty checks
+  `/etc/codex/requirements.toml`; the image copy present without it is a
+  refusal, and neither present means the session starts with no policy (a
+  checkout, or a pod built before the file existed). The check runs once, at
+  engine start. `off` is the only way a deployment that has the file starts
+  Codex without that check. A failing check is `400` on every Codex launch,
+  and the session does not fall through to bypass. The shipped file (WI-1356) wires
   the gitguard managed hook for the fork: `[[hooks.SessionStart]]` and
   `[[hooks.PreToolUse]]` (matcher `Bash`, `shell`, `exec_command`,
-  `write_stdin`, `apply_patch`) run `klaudia hook gitguard` with
-  `failClosed = true` (WI-1129), so a hook that fails blocks the tool call.
+  `write_stdin`, `apply_patch`) run `/usr/local/bin/klaudia hook gitguard`
+  with `failClosed = true` (WI-1129), so a hook that fails blocks the tool
+  call. The program is named by absolute path, and the engine requires
+  exactly that command (WI-1146): a bare `klaudia` resolves through PATH,
+  whose first entry `/opt/vogt/agent-clis/bin` the session user owns, so a
+  session could put an `exit 0` stub there and pass every call. The engine
+  also requires `/usr/local/bin/klaudia` to be a root-owned regular file
+  (not a symlink) in a root-owned directory, with no group or world write;
+  the Dockerfile builds it root `0755` and asserts that. A runtime
+  `VOGT_KLAUDIA_VERSION` pin installs under the session-owned
+  `/opt/vogt/agent-clis` and changes the `klaudia` a session runs, never
+  the hook: gitguard always runs the image's build, from the commit
+  `engine/agent-versions.env` names, so moving gitguard to another Klaudia
+  is an image build.
+  On the fork `failClosed` acts only on `PreToolUse`: a `SessionStart` hook
+  that fails lets the session start with no baseline. That is still safe,
+  because gitguard's `PreToolUse` refuses every `Bash` and `apply_patch` call
+  for a session it holds no baseline for, so the session can run nothing
+  until a baseline exists.
   The file also pins `[features] hooks = true`: the fork runs managed hooks
   only while that feature is on, and the pin beats `-c features.hooks=false`,
   `--disable hooks` and any `[features]` in `$CODEX_HOME` or a project
@@ -1556,6 +1643,20 @@ checks decide what it can finish on its own (WI-926; the design is
   `VOGT_CODEX_GITGUARD_E2E=1` to make a missing prerequisite fail). CI runs
   it inside the stack image candidate (`build.yml`, `stack-image`, the
   `codex-gitguard-e2e` Dockerfile target) before the image is pushed.
+  **gitguard is an accident guard, not a sandbox** (operator decision,
+  2026-10-15). It guarantees that an agent running destructive git by
+  mistake (`git stash`, `git checkout -- .`, `git reset --hard`,
+  `git clean -f`, `git restore`, including `git -C <other repo>`) cannot
+  discard work it did not make, and that a session without root cannot
+  switch the guard off: not by editing the requirements file or its
+  directory, not by shadowing `klaudia` on its PATH, not by turning the
+  hooks feature off. It does not stop a determined session. The session
+  user has passwordless sudo in the pod and the operator has kept it, so a
+  session can rewrite `/etc/codex/requirements.toml`,
+  `/usr/local/bin/klaudia` or the Codex binary as root. The ownership
+  checks above are correctness checks, not a security boundary.
+  The test also runs once with an `exit 0` `klaudia` stub first on PATH,
+  and the refusals still hold.
   Destructive-git execpolicy prefix rules stay out: they are Starlark
   (`prefix_rule`), not a requirements table. Claude and opencode launches
   are not blocked by a Codex policy error.
@@ -1934,7 +2035,12 @@ the report says so (`mode=cli`).
 
 `ENGINE_METRICS_ADDR` (`0.0.0.0:9464`) serves `GET /metrics`, in the
 Prometheus text format, on a listener of its own. It is never on the API port,
-which is the front door. Unset, nothing listens.
+which is the front door. Unset, nothing listens. The core does the same on
+`VOGT_METRICS_ADDR` (`0.0.0.0:9465`; the voice sidecar takes 9466), serving the
+process collectors (`process_resident_memory_bytes`,
+`process_cpu_seconds_total`, `process_open_fds`,
+`python_gc_collections_total`) with a `component="core"` label on every
+series, so one query can tell the two processes apart.
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -1950,6 +2056,21 @@ watch is
 `histogram_quantile(0.95, sum by (le) (rate(vogt_session_launch_seconds_bucket[30m])))`.
 First output can come earlier than that (the wrapper prints as it goes), so
 `vogt_session_first_output_seconds` is the measure for `direct` sessions.
+
+The voice sidecar has the same shape of scrape endpoint, on
+`VOGT_VOICE_METRICS_ADDR` (suggested `0.0.0.0:9465`), and it is likewise off
+when unset and never on the sidecar's API port. It exports the Prometheus
+process-collector names so one dashboard reads both processes, plus the
+on-disk size of the in-process weights (Whisper GGML and Piper ONNX) loaded
+at startup. That gauge is file size, not resident pages, so it does not
+double-count RSS. Request latency is not on this endpoint yet.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `process_resident_memory_bytes` | gauge | — |
+| `process_cpu_seconds_total` | counter | — |
+| `process_threads` | gauge | — |
+| `vogt_voice_model_bytes` | gauge | — |
 
 The engine logs without colour when its stdout is not a terminal, so these
 `key=value` fields reach the log pipeline intact.

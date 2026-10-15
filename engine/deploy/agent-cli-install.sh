@@ -51,6 +51,12 @@
 # itself prefers `codex/current/bin/codex` when it exists, so the image's entry
 # point and PATH lookup agree without a second copy of the bypass flags.
 #
+# A `codex` binary from any kind but `github-release` is refused (WI-1146):
+# stock npm Codex has no managed-hook table, so the gitguard hook in
+# /etc/codex/requirements.toml would not run under it. The `codex-npm` row
+# still names the package so a pin of it says why it is refused, and a refusal
+# also drops any `current` an older image left, so nothing stale stays active.
+#
 # Versions are exact by default. The npm dist-tags `latest` and `stable` are
 # accepted only with VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1, so the human gate that
 # caught 2.1.237 stays the default and floating is a deliberate opt-in.
@@ -327,7 +333,10 @@ musl_target() {
 }
 
 # The sha256 the image recorded for this tool's release member, if any.
-# VOGT_CODEX_SHA256_LINUX_AMD64 / _ARM64, named off the binary.
+# VOGT_CODEX_SHA256_LINUX_AMD64 / _ARM64, named off the binary. An empty or
+# unset value means the release does not publish that architecture (WI-1594:
+# the fork is x86_64 only), so the caller skips the member check rather than
+# treating the missing line as a mismatch.
 recorded_member_sha() {
     local binary="$1" arch var
     case "$(uname -m)" in
@@ -450,6 +459,13 @@ main() {
     kind="$(kind_for "$tool")"
 
     mkdir -p "$root/$tool" "$root/bin"
+
+    if [[ "$binary" == "codex" && "$kind" != "github-release" ]] \
+            && [[ -n "$requested" && "$requested" != "image" ]]; then
+        reset_to_image "$tool"
+        write_manifest
+        die "$tool $requested is refused: only the Codex fork (kind github-release) runs managed hooks, and without them the gitguard hook in /etc/codex/requirements.toml does not run. Pin VOGT_CODEX_SHA instead" 64
+    fi
 
     # Resolve the request to an exact version, or to the image copy.
     case "$requested" in

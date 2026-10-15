@@ -658,7 +658,11 @@ def test_daemon_flag_merges_into_an_existing_features_table(tmp_path: Path) -> N
     proc = _codex_bootstrap(tmp_path, {})
     assert proc.returncode == 0, proc.stderr
     parsed = tomllib.loads(config.read_text(encoding="utf-8"))
-    assert parsed["features"] == {"approvals": True, "daemon_auto_start": False}
+    assert parsed["features"] == {
+        "approvals": True,
+        "daemon_auto_start": False,
+        "memories": True,
+    }
     assert parsed["other"] == {"kept": True}
     assert "mcp_servers" not in parsed
 
@@ -670,7 +674,11 @@ def test_daemon_flag_merges_into_an_existing_features_table(tmp_path: Path) -> N
     again = _codex_bootstrap(tmp_path, {})
     assert again.returncode == 0, again.stderr
     parsed = tomllib.loads(config.read_text(encoding="utf-8"))
-    assert parsed["features"] == {"approvals": True, "daemon_auto_start": False}
+    assert parsed["features"] == {
+        "approvals": True,
+        "daemon_auto_start": False,
+        "memories": True,
+    }
     assert parsed["daemon_auto_start"] is True
 
     # Already off: the LiteLLM provider was written by the run above, and a
@@ -705,14 +713,18 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     assert litellm["base_url"] == "http://100.92.54.45:4000/v1"
     assert litellm["wire_api"] == "chat"
     assert litellm["env_key"] == "HOMELAB_LITELLM_SESSION_KEY"
-    assert litellm["web_search"] == "disabled"
+    # web_search is not a setting this Codex fork recognises; it is not written.
+    assert "web_search" not in litellm
     assert "experimental_bearer_token" not in litellm
     # grok is not in Codex's bundled catalog, so bootstrap hands it one:
     # apply_patch freeform, and no tool_mode (code mode stays off).
     catalog_path = codex_home / "vogt-model-catalog.json"
     assert parsed["model_catalog_json"] == str(catalog_path)
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    # The router's groups, and only those: no DLab community or free models.
+    # Groups a session-key completion answered (WI-1592). Not or-deepseek
+    # (blocked), not bedrock (absent), not the DLab models that 400/401/503,
+    # and not qwen3-coder / qwen3-8-27b / gpt-oss-120b, which fail inside
+    # LiteLLM (408 / hang; re-adding them is WI-1631).
     # The fork sorts by priority ascending and defaults to the first visible one.
     by_priority = sorted(catalog["models"], key=lambda model: model["priority"])
     assert [model["slug"] for model in by_priority] == [
@@ -721,6 +733,19 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
         "small",
         "reasoning",
         "vision",
+        "or-deepseek-flash",
+        "or-gemini-flash",
+        "or-glm-5-3",
+        "dlab-deepseek-v4-pro",
+        "dlab-deepseek-v4-1-flash",
+        "dlab-grok-4-5",
+        "dlab-grok-4-6",
+        "dlab-grok-4-7",
+        "dlab-gemini-3-8-flash",
+        "dlab-glm-5-3",
+        "dlab-glm-5-3-flash",
+        "dlab-glm-5-3-flashx",
+        "dlab-kimi-k3",
         "premium",
     ]
     assert by_priority[0]["slug"] == "grok"
@@ -763,6 +788,19 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
         "operator-token"
     )
     assert text.count("[model_providers.theclawbay]") == 1
+
+    # A model the router does not serve, left over from theclawbay, moves to
+    # grok; a catalog group stays (WI-1640).
+    config.write_text(
+        'model = "gpt-6-astra"\nmodel_provider = "litellm"\n', encoding="utf-8"
+    )
+    stale_run = _codex_bootstrap(tmp_path, {})
+    assert stale_run.returncode == 0, stale_run.stderr
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["model"] == "grok"
+    config.write_text('model = "code"\nmodel_provider = "litellm"\n', encoding="utf-8")
+    group_run = _codex_bootstrap(tmp_path, {})
+    assert group_run.returncode == 0, group_run.stderr
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["model"] == "code"
 
     # Some other provider and model are the operator's choice.
     config.write_text(
@@ -839,6 +877,8 @@ def test_codex_gets_the_browser_and_the_isolated_subagent(tmp_path: Path) -> Non
     ]
     # The registration is a command and arguments, never a credential.
     assert "env" not in sub and "bearer_token" not in sub
+    # The child codex exec needs the provider key, passed by name (WI-1639).
+    assert sub["env_vars"] == ["HOMELAB_LITELLM_SESSION_KEY"]
 
     # A second run replaces the tables in place.
     again = _codex_bootstrap(tmp_path, {})
@@ -855,3 +895,293 @@ def test_codex_gets_the_browser_and_the_isolated_subagent(tmp_path: Path) -> Non
     parsed = tomllib.loads(config.read_text(encoding="utf-8"))
     assert "mcp_servers" not in parsed
     assert parsed["other"] == {"kept": True}
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_driven_session_bundle_merges_and_raises_the_schema_cap(
+    tmp_path: Path,
+) -> None:
+    """WI-1149: a driven Codex reads CLAUDE.md, titles itself by agent state,
+    remembers, and accepts the vogt and cadastre tool schemas."""
+    import tomllib
+
+    workspace = tmp_path / "workspace"
+    (workspace / ".claude" / "skills").mkdir(parents=True)
+    (tmp_path / ".claude" / "skills").mkdir(parents=True)
+
+    config = tmp_path / "codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        'model = "grok"\n\n'
+        "[features]\ndaemon_auto_start = false\n\n"
+        '[tui]\nstatus_line = ["model"]\n\n'
+        '[mcp_servers.vogt]\ncommand = "/usr/local/bin/vogt-mcp"\n'
+        "tool_input_schema_max_bytes = 1000\n\n"
+        '[mcp_servers.cadastre]\ncommand = "/usr/local/bin/cadastre-mcp"\n\n'
+        '[mcp_servers.other]\ncommand = "/bin/other"\n',
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "VOGT_SRC": str(tmp_path / "absent"),
+        },
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # No `codex` on PATH: the bundle is for a client that is present.
+    assert "driven-session" not in proc.stderr
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "codex"
+    shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    shim.chmod(0o755)
+    proc = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "VOGT_SRC": str(tmp_path / "absent"),
+        },
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["project_doc_fallback_filenames"] == ["CLAUDE.md"]
+    assert parsed["features"]["memories"] is True
+    assert parsed["features"]["daemon_auto_start"] is False
+    assert parsed["tui"]["animations"] is False
+    assert parsed["tui"]["terminal_title"] == ["agent-state"]
+    assert parsed["tui"]["status_line"] == ["model"]
+    assert parsed["mcp_servers"]["vogt"]["tool_input_schema_max_bytes"] == 200_000
+    assert parsed["mcp_servers"]["cadastre"]["tool_input_schema_max_bytes"] == 200_000
+    assert "tool_input_schema_max_bytes" not in parsed["mcp_servers"]["other"]
+    link = tmp_path / ".agents" / "skills"
+    assert link.is_symlink()
+    assert os.path.realpath(link) == os.path.realpath(workspace / ".claude" / "skills")
+
+    # A cap an operator set higher is not lowered, and a skills path that
+    # already exists is not replaced.
+    config.write_text(
+        "[mcp_servers.vogt]\ntool_input_schema_max_bytes = 900000\n\n"
+        '[mcp_servers.cadastre]\ncommand = "/usr/local/bin/cadastre-mcp"\n',
+        encoding="utf-8",
+    )
+    link.unlink()
+    link.mkdir()
+    again = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "VOGT_SRC": str(tmp_path / "absent"),
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert again.returncode == 0, again.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["mcp_servers"]["vogt"]["tool_input_schema_max_bytes"] == 900_000
+    # A kept cap is re-appended; it still has to stand off from the next header.
+    rewritten = config.read_text(encoding="utf-8")
+    assert "tool_input_schema_max_bytes = 900000\n\n[mcp_servers.cadastre]" in rewritten
+    assert link.is_dir() and not link.is_symlink()
+    # No workspace skills here, so the link would have been the home one.
+    assert not (tmp_path / ".agents" / "skills-unused").exists()
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_driven_session_pre_approves_only_the_trusted_servers(tmp_path: Path) -> None:
+    """WI-1634: a driven Codex runs `-a on-request`, so an MCP call stops at a
+    prompt only a person may answer. The estate's trusted servers are
+    pre-approved; komodo and anything unnamed keep the gate, an explicit mode
+    is kept, and a second run changes nothing."""
+    import tomllib
+
+    trusted = (
+        "vogt",
+        "cadastre",
+        "codex-subagent",
+        "browser",
+        "github-ro",
+        "forgejo-ro",
+        "grafana-ro",
+    )
+    config = tmp_path / "codex" / "config.toml"
+    config.parent.mkdir()
+    tables = "".join(
+        f'[mcp_servers.{name}]\ncommand = "/bin/{name}"\n\n' for name in trusted
+    )
+    config.write_text(
+        tables
+        + '[mcp_servers.komodo]\ncommand = "/bin/komodo"\n\n'
+        + '[mcp_servers.other]\ncommand = "/bin/other"\n\n'
+        + '[mcp_servers.vogt.tools.board_list]\napproval_mode = "approve"\n',
+        encoding="utf-8",
+    )
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    first = config.read_text(encoding="utf-8")
+    servers = tomllib.loads(first)["mcp_servers"]
+    for name in trusted:
+        assert servers[name]["default_tools_approval_mode"] == "approve", name
+    assert "default_tools_approval_mode" not in servers["komodo"]
+    assert "default_tools_approval_mode" not in servers["other"]
+    assert servers["vogt"]["tool_input_schema_max_bytes"] == 200_000
+    assert servers["vogt"]["tools"]["board_list"] == {"approval_mode": "approve"}
+
+    again = _codex_bootstrap(tmp_path, {})
+    assert again.returncode == 0, again.stderr
+    assert config.read_text(encoding="utf-8") == first
+
+    # An operator's explicit mode is theirs; an unregistered server is not made.
+    config.write_text(
+        '[mcp_servers.vogt]\ncommand = "/bin/vogt"\n'
+        'default_tools_approval_mode = "prompt"\n',
+        encoding="utf-8",
+    )
+    kept = _codex_bootstrap(tmp_path, {})
+    assert kept.returncode == 0, kept.stderr
+    servers = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]
+    assert servers["vogt"]["default_tools_approval_mode"] == "prompt"
+    assert set(servers) == {"vogt"}
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_owned_codex_tables_carry_the_approval_and_settle(tmp_path: Path) -> None:
+    """WI-1634: the read-only, browser and sub-agent writers replace their own
+    tables whole, so they write the approval row themselves; otherwise every
+    start would drop it and the bundle would add it back."""
+    import tomllib
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("codex", "klaudia", "github-mcp-server"):
+        path = bindir / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    wrapper = tmp_path / "readonly-mcp"
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    extra = {"GITHUB_MCP_TOKEN": "x", "VOGT_READONLY_MCP_WRAPPER": str(wrapper)}
+    proc = _codex_bootstrap(tmp_path, extra)
+    assert proc.returncode == 0, proc.stderr
+    config = tmp_path / "codex" / "config.toml"
+    first = config.read_text(encoding="utf-8")
+    servers = tomllib.loads(first)["mcp_servers"]
+    for name in ("browser", "codex-subagent", "github-ro"):
+        assert servers[name]["default_tools_approval_mode"] == "approve", name
+    again = _codex_bootstrap(tmp_path, extra)
+    assert again.returncode == 0, again.stderr
+    assert config.read_text(encoding="utf-8") == first
+
+
+def _shims(tmp_path: Path, names: tuple[str, ...]) -> Path:
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    for name in names:
+        path = bindir / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    return bindir
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+@pytest.mark.parametrize("server", ("github-ro", "forgejo-ro", "grafana-ro"))
+def test_readonly_writer_keeps_an_explicit_approval_mode(
+    tmp_path: Path, server: str
+) -> None:
+    """WI-1634: the read-only writer replaces its table whole, so it must read an
+    operator's mode first. Otherwise a "prompt" becomes "approve" on the next
+    start, and only the bundle path would keep it."""
+    import tomllib
+
+    binaries = {
+        "github-ro": "github-mcp-server",
+        "forgejo-ro": "gitea-mcp",
+        "grafana-ro": "mcp-grafana",
+    }
+    _shims(tmp_path, ("codex", binaries[server]))
+    wrapper = tmp_path / "readonly-mcp"
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    config = tmp_path / "codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        f"[mcp_servers.{server}]\n"
+        f'command = "{wrapper}"\n'
+        'default_tools_approval_mode = "prompt"\n'
+        f'\n[mcp_servers.{server}.tools.read]\napproval_mode = "prompt"\n',
+        encoding="utf-8",
+    )
+    env = {
+        "github-ro": {"GITHUB_MCP_TOKEN": "x"},
+        "forgejo-ro": {"GITEA_HOST": "http://git", "GITEA_MCP_TOKEN": "x"},
+        "grafana-ro": {
+            "GRAFANA_URL": "http://grafana",
+            "GRAFANA_SERVICE_ACCOUNT_TOKEN": "x",
+        },
+    }
+    proc = _codex_bootstrap(
+        tmp_path, {"VOGT_READONLY_MCP_WRAPPER": str(wrapper), **env[server]}
+    )
+    assert proc.returncode == 0, proc.stderr
+    servers = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]
+    assert servers[server]["default_tools_approval_mode"] == "prompt"
+    assert servers[server]["command"] == str(wrapper)
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+@pytest.mark.parametrize("server", ("browser", "codex-subagent"))
+def test_klaudia_tools_writer_keeps_an_explicit_approval_mode(
+    tmp_path: Path, server: str
+) -> None:
+    """WI-1634: the browser and sub-agent writer likewise replaces its tables, so
+    an operator's mode on either one has to survive the rewrite."""
+    import tomllib
+
+    _shims(tmp_path, ("codex", "klaudia"))
+    config = tmp_path / "codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        f"[mcp_servers.{server}]\n"
+        'command = "klaudia"\n'
+        'default_tools_approval_mode = "prompt"\n',
+        encoding="utf-8",
+    )
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    servers = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]
+    assert servers[server]["default_tools_approval_mode"] == "prompt"
+    assert servers["browser"]["command"].endswith("/klaudia")
+    again = _codex_bootstrap(tmp_path, {})
+    assert again.returncode == 0, again.stderr
