@@ -231,6 +231,117 @@ def test_the_strict_shadow_policy_still_refuses_and_warn_still_acknowledges(
     assert stray.exists(), "warn leaves the deliberate override in place"
 
 
+# --- The ACP adapter (WI-1595): an ordinary npm row whose binary is `codex-acp`.
+#
+# Unlike `codex` it *does* get a PATH-first link (the codex exception exists
+# only because `/usr/local/bin/codex` is the full-access wrapper), and its
+# smoke check is the same one the image build runs: `--version` must name the
+# pinned version, so a stub install is refused rather than flipped current.
+
+ACP_PINNED = "2.2.2"
+
+
+class AcpSandbox(Sandbox):
+    """A `codex-acp` row served by the same offline npm shim, at ACP_PINNED."""
+
+    def __init__(self, base: Path) -> None:
+        super().__init__(base)
+        (self.share / "agent-versions.resolved").write_text(
+            "codex-acp=0.0.1\n", encoding="utf-8"
+        )
+        (self.share / "agent-clis.tools").write_text(
+            "codex-acp\t@agentclientprotocol/codex-acp\tcodex-acp\tVOGT_CODEX_ACP_VERSION\tnpm\n",
+            encoding="utf-8",
+        )
+        pkg = base / "acp-pkg"
+        (pkg / "bin").mkdir(parents=True)
+        (pkg / "package.json").write_text(
+            f'{{"name":"@agentclientprotocol/codex-acp","version":"{ACP_PINNED}",'
+            '"bin":{"codex-acp":"bin/codex-acp"}}',
+            encoding="utf-8",
+        )
+        binary = pkg / "bin" / "codex-acp"
+        binary.write_text(f"#!/bin/sh\necho {ACP_PINNED}\n", encoding="utf-8")
+        binary.chmod(0o755)
+        subprocess.run(
+            ["npm", "pack", "--silent"], cwd=pkg, check=True, capture_output=True
+        )
+        tarball = next(pkg.glob("*.tgz"))
+        real = shutil.which("npm")
+        assert real is not None
+        (self.shim / "npm").write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = install ] && [ "$2" = -g ]; then\n'
+            f'  case "$5" in @agentclientprotocol/codex-acp@{ACP_PINNED}) '
+            f'exec "{real}" install -g --prefix "$4" "{tarball}" ;; '
+            '*) echo "no such package $5" >&2; exit 1 ;; esac\n'
+            "fi\n"
+            f'exec "{real}" "$@"\n',
+            encoding="utf-8",
+        )
+
+    def install(self, version: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(INSTALL), "codex-acp", version],
+            env=self.env(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def current(self) -> str:
+        link = self.root / "codex-acp" / "current"
+        return str(link.readlink()) if link.is_symlink() else ""
+
+
+@pytest.fixture
+def acp_sandbox(tmp_path: Path) -> AcpSandbox:
+    return AcpSandbox(tmp_path)
+
+
+def test_codex_acp_installs_links_and_verifies(acp_sandbox: AcpSandbox) -> None:
+    """The pin the image carries: an exact version, a `current` symlink, and a
+    PATH-first `bin/codex-acp` whose `--version` is the version asked for."""
+    done = acp_sandbox.install(ACP_PINNED)
+    assert done.returncode == 0, done.stderr
+    assert acp_sandbox.manifest() == f"codex-acp={ACP_PINNED}\n"
+    assert acp_sandbox.current() == ACP_PINNED
+    link = acp_sandbox.root / "bin" / "codex-acp"
+    assert link.is_symlink(), "codex-acp is not the codex wrapper; it gets a link"
+    assert (
+        subprocess.run(
+            [str(link), "--version"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        == ACP_PINNED
+    )
+    assert acp_sandbox.verify().returncode == 0
+
+
+def test_codex_acp_whose_version_lies_is_not_made_current(
+    acp_sandbox: AcpSandbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A package that installs cleanly but whose `--version` names something
+    else — the stub shape that held the claude pin — must not flip `current`.
+    The shim is swapped for one that writes exactly such a binary."""
+    real = shutil.which("npm")
+    assert real is not None
+    (acp_sandbox.shim / "npm").write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = install ] && [ "$2" = -g ]; then\n'
+        '  mkdir -p "$4/bin"\n'
+        "  printf '#!/bin/sh\\necho 0.0.0\\n' > \"$4/bin/codex-acp\"\n"
+        '  chmod 755 "$4/bin/codex-acp"\n'
+        "  exit 0\n"
+        "fi\n"
+        f'exec "{real}" "$@"\n',
+        encoding="utf-8",
+    )
+    failed = acp_sandbox.install(ACP_PINNED)
+    assert failed.returncode == 1
+    assert "not 2.2.2" in failed.stderr
+    assert acp_sandbox.current() == ""
+
+
 # --- The Go toolchain (WI-951): a `go-dist` row, fetched from a release mirror.
 
 GO_BAKED = "1.26.8"
