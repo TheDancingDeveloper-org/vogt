@@ -186,7 +186,7 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-klaudia-mcp` | `deploy/klaudia-mcp.sh` | `set [-e KEY=VALUE]…`/`remove` a stdio server in Klaudia's `.mcp.json` (`~/.klaudia`, or `KLAUDIA_CONFIG_DIR`), which Klaudia has no `mcp` command to write; `vogt-mcp-bootstrap` uses it, and a derivative image's bootstrap may (§4) | only with `klaudia` present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
-| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. The fork reads `/etc/codex/requirements.toml` with no flag (TUI, `exec` and app-server alike); the image copies `deploy/driven-session-codex-requirements.toml` there, root-owned `0644` in a root-owned `0755` directory, and a reference copy to `/usr/local/share/vogt/`. That file pins `[features] hooks = true` and runs `klaudia hook gitguard` fail-closed on `SessionStart` (baseline capture) and `PreToolUse` (matcher `Bash`, `shell`, `exec_command`, `write_stdin`, `apply_patch`; timeout 30 s), so a hook that fails, or a session with no baseline, blocks the tool call (WI-1146, WI-1356). A runtime copy under `codex/current` runs only when its prefix records a fork release `source`; anything else exits 78 rather than run without the hook | only with `INSTALL_AI_CLIENTS` |
+| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. The fork reads `/etc/codex/requirements.toml` with no flag (TUI, `exec` and app-server alike); the image copies `deploy/driven-session-codex-requirements.toml` there, root-owned `0644` in a root-owned `0755` directory, and a reference copy to `/usr/local/share/vogt/`. That file pins `[features] hooks = true` and runs `/usr/local/bin/klaudia hook gitguard` (the image's root-owned build, by absolute path) fail-closed on `SessionStart` (baseline capture) and `PreToolUse` (matcher `Bash`, `shell`, `exec_command`, `write_stdin`, `apply_patch`; timeout 30 s), so a hook that fails, or a session with no baseline, blocks the tool call (WI-1146, WI-1356). A runtime copy under `codex/current` runs only when its prefix records a fork release `source`; anything else exits 78 rather than run without the hook. That `source` file sits in the session-owned agent-CLI tree, so this check is an accident guard against a stale or mistaken pin, not a security boundary | only with `INSTALL_AI_CLIENTS` |
 | `vogt-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`, `fetch`, `store`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
 
 Nothing in the engine itself depends on `agent-auth`: with
@@ -1548,8 +1548,20 @@ checks decide what it can finish on its own (WI-926; the design is
   and the session does not fall through to bypass. The shipped file (WI-1356) wires
   the gitguard managed hook for the fork: `[[hooks.SessionStart]]` and
   `[[hooks.PreToolUse]]` (matcher `Bash`, `shell`, `exec_command`,
-  `write_stdin`, `apply_patch`) run `klaudia hook gitguard` with
-  `failClosed = true` (WI-1129), so a hook that fails blocks the tool call.
+  `write_stdin`, `apply_patch`) run `/usr/local/bin/klaudia hook gitguard`
+  with `failClosed = true` (WI-1129), so a hook that fails blocks the tool
+  call. The program is named by absolute path, and the engine requires
+  exactly that command (WI-1146): a bare `klaudia` resolves through PATH,
+  whose first entry `/opt/vogt/agent-clis/bin` the session user owns, so a
+  session could put an `exit 0` stub there and pass every call. The engine
+  also requires `/usr/local/bin/klaudia` to be a root-owned regular file
+  (not a symlink) in a root-owned directory, with no group or world write;
+  the Dockerfile builds it root `0755` and asserts that. A runtime
+  `VOGT_KLAUDIA_VERSION` pin installs under the session-owned
+  `/opt/vogt/agent-clis` and changes the `klaudia` a session runs, never
+  the hook: gitguard always runs the image's build, from the commit
+  `engine/agent-versions.env` names, so moving gitguard to another Klaudia
+  is an image build.
   On the fork `failClosed` acts only on `PreToolUse`: a `SessionStart` hook
   that fails lets the session start with no baseline. That is still safe,
   because gitguard's `PreToolUse` refuses every `Bash` and `apply_patch` call
@@ -1569,6 +1581,20 @@ checks decide what it can finish on its own (WI-926; the design is
   `VOGT_CODEX_GITGUARD_E2E=1` to make a missing prerequisite fail). CI runs
   it inside the stack image candidate (`build.yml`, `stack-image`, the
   `codex-gitguard-e2e` Dockerfile target) before the image is pushed.
+  **gitguard is an accident guard, not a sandbox** (operator decision,
+  2026-10-15). It guarantees that an agent running destructive git by
+  mistake (`git stash`, `git checkout -- .`, `git reset --hard`,
+  `git clean -f`, `git restore`, including `git -C <other repo>`) cannot
+  discard work it did not make, and that a session without root cannot
+  switch the guard off: not by editing the requirements file or its
+  directory, not by shadowing `klaudia` on its PATH, not by turning the
+  hooks feature off. It does not stop a determined session. The session
+  user has passwordless sudo in the pod and the operator has kept it, so a
+  session can rewrite `/etc/codex/requirements.toml`,
+  `/usr/local/bin/klaudia` or the Codex binary as root. The ownership
+  checks above are correctness checks, not a security boundary.
+  The test also runs once with an `exit 0` `klaudia` stub first on PATH,
+  and the refusals still hold.
   Destructive-git execpolicy prefix rules stay out: they are Starlark
   (`prefix_rule`), not a requirements table. Claude and opencode launches
   are not blocked by a Codex policy error.

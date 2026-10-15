@@ -14,7 +14,10 @@
 //! feature off (`-c`, `--disable`, `$CODEX_HOME/config.toml`, a project
 //! `.codex/config.toml`); the shipped `[features] hooks = true` pin must win.
 //! A nested `codex exec --disable hooks` from a session's shell is the
-//! `--disable` case.
+//! `--disable` case. One more run puts an `exit 0` stub named `klaudia`
+//! first on PATH, as a session could in its own `/opt/vogt/agent-clis/bin`:
+//! the hook names `/usr/local/bin/klaudia`, so the stub is never run
+//! (WI-1146).
 //!
 //! The model is a scripted Responses API on loopback: each turn it asks for
 //! the next shell command, and records what Codex sent back for the last one.
@@ -27,6 +30,7 @@ use std::sync::{Arc, Mutex};
 
 const SHIPPED: &str = include_str!("../../deploy/driven-session-codex-requirements.toml");
 const REQUIREMENTS: &str = "/etc/codex/requirements.toml";
+const KLAUDIA: &str = "/usr/local/bin/klaudia";
 
 fn prerequisites() -> Result<PathBuf, String> {
     match std::fs::read_to_string(REQUIREMENTS) {
@@ -45,7 +49,10 @@ fn prerequisites() -> Result<PathBuf, String> {
                 .find(|p| p.is_file())
         })
     };
-    on_path("klaudia").ok_or("klaudia is not on PATH")?;
+    // The hook runs this path, never a PATH lookup (WI-1146).
+    if !Path::new(KLAUDIA).is_file() {
+        return Err(format!("{KLAUDIA} is not installed"));
+    }
     std::env::var_os("VOGT_CODEX_BIN")
         .map(PathBuf::from)
         .or_else(|| Some(PathBuf::from("/usr/local/libexec/codex-real")).filter(|p| p.is_file()))
@@ -207,6 +214,8 @@ struct Override {
     args: &'static [&'static str],
     codex_home_config: Option<&'static str>,
     project_config: Option<&'static str>,
+    /// Put an `exit 0` `klaudia` first on PATH.
+    shadow_klaudia: bool,
 }
 
 const OVERRIDES: &[Override] = &[
@@ -215,30 +224,42 @@ const OVERRIDES: &[Override] = &[
         args: &[],
         codex_home_config: None,
         project_config: None,
+        shadow_klaudia: false,
     },
     Override {
         name: "-c features.hooks=false",
         args: &["-c", "features.hooks=false"],
         codex_home_config: None,
         project_config: None,
+        shadow_klaudia: false,
     },
     Override {
         name: "--disable hooks",
         args: &["--disable", "hooks"],
         codex_home_config: None,
         project_config: None,
+        shadow_klaudia: false,
     },
     Override {
         name: "$CODEX_HOME/config.toml",
         args: &[],
         codex_home_config: Some("[features]\nhooks = false\n"),
         project_config: None,
+        shadow_klaudia: false,
     },
     Override {
         name: "project .codex/config.toml",
         args: &[],
         codex_home_config: None,
         project_config: Some("[features]\nhooks = false\n"),
+        shadow_klaudia: false,
+    },
+    Override {
+        name: "klaudia stub first on PATH",
+        args: &[],
+        codex_home_config: None,
+        project_config: None,
+        shadow_klaudia: true,
     },
 ];
 
@@ -300,7 +321,19 @@ fn refuses_destructive_git(codex: &Path, case: &Override) {
     let provider = format!(
         "model_providers.mock={{name=\"mock\",base_url=\"http://127.0.0.1:{port}/v1\",wire_api=\"responses\",env_key=\"VOGT_E2E_MOCK_KEY\"}}"
     );
-    let out = Command::new(codex)
+    let mut command = Command::new(codex);
+    if case.shadow_klaudia {
+        use std::os::unix::fs::PermissionsExt;
+        let stub_dir = root.path().join("session-bin");
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        let stub = stub_dir.join("klaudia");
+        std::fs::write(&stub, "#!/bin/sh\ncat >/dev/null\nexit 0\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let paths = std::iter::once(stub_dir).chain(std::env::split_paths(&path));
+        command.env("PATH", std::env::join_paths(paths).unwrap());
+    }
+    let out = command
         .current_dir(&repo)
         .env("CODEX_HOME", &home)
         .env("VOGT_E2E_MOCK_KEY", "unused")
