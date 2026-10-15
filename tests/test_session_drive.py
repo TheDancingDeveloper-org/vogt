@@ -286,6 +286,7 @@ class Engine:
                             "activity": "running",
                             "cwd": ROOT,
                             "created_at": "2026-01-03T00:00:00Z",
+                            **self.extra,
                         }
                     }
                 ).encode()
@@ -1027,6 +1028,33 @@ def test_an_agent_cannot_answer_a_permission_prompt(
         audited = [row.operation for row in view.list_audit(limit=50)]
     assert "session.answer" not in audited
     assert "session.input" not in audited
+
+
+def test_an_oversight_session_answers_a_permission_prompt_and_is_audited(
+    wired: AppContext, engine: Engine
+) -> None:
+    """An autonomous fleet has no person at the prompt: the session the engine
+    marks `oversight` answers for its workers, audited as oversight."""
+    from vogt.application.models import AnswerSessionParams
+    from vogt.application.services import answer_session
+
+    ses_id, _ = _started(wired)
+    engine.permission_prompt = True
+    engine.extra = {"role": "oversight"}
+    overseer = _as(wired, f"agent:engine:{UNLINKED}")
+    result = answer_session(
+        overseer, AnswerSessionParams(id=ses_id, option=1, reason=WHY)
+    )
+    assert result.kind == "permission"
+    assert engine.answers[-1]["person"] is True
+    with wired.declared.read() as view:
+        event = next(
+            e
+            for e in view.list_events(after=0, limit=100)
+            if e.kind == "session.answered"
+        )
+    assert event.summary["person"] is False
+    assert event.summary["oversight"] is True
 
 
 def test_a_person_answers_a_permission_prompt_and_is_audited(
