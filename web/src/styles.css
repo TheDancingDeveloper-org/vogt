@@ -968,7 +968,10 @@ textarea {
 .places-rail-session-area {
   /* Take the leftover column and scroll inside it. `min-height: 0` is required:
      a flex item's default minimum is its content size, which would grow the
-     rail instead of scrolling. The toggle stays put; only the list scrolls. */
+     rail instead of scrolling. The toggle stays put; only the list scrolls.
+     `position: relative` anchors the resize handle, which overlaps the bottom
+     edge instead of adding a row (WI-1664). */
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
@@ -995,9 +998,15 @@ textarea {
   max-height: none;
 }
 .session-area-resize-handle {
-  flex: 0 0 auto;
+  /* Over the bottom edge of the area, out of flow. A flex row (even with a
+     negative margin) shifted the places column and failed the desktop
+     screenshots; the drag still starts from the same edge. */
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
   height: 8px;
-  margin: 2px 0 0;
   cursor: row-resize;
   touch-action: none;
   border-radius: 4px;
