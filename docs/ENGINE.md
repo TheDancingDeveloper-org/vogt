@@ -165,10 +165,7 @@ environment moves it at the next start without a rebuild, checked against
 the Go mirror's own release index. Klaudia's row is kind `go-src`: a runtime
 `VOGT_KLAUDIA_VERSION` is another full commit, fetched alone and built into
 the volume at start (`./cmd/klaudia`, CGO off), its `source` recorded in the
-prefix. That pin is the `klaudia` a session runs; it is not the gitguard hook.
-The hook runs `/usr/local/bin/klaudia`, baked at image build from the commit
-`engine/agent-versions.env` names, so a gitguard fix ships only with an image
-rebuild (WI-1146). `GO_VERSION` as a build argument must
+prefix. `GO_VERSION` as a build argument must
 equal the pin: a build cannot verify a version it has no recorded checksum
 for.
 `POD_BASE_IMAGE` selects the pod base; CI passes it by digest.
@@ -458,6 +455,26 @@ publish schemas past Codex's 5,000 byte default; a table that already sets a
 higher cap is not lowered, and a server nobody registered is not created. The
 rewrite is the same flock and atomic rename, and a config that does not parse
 is left alone.
+
+A driven Codex runs `-a on-request`, so every MCP tool call would otherwise
+stop at a permission prompt only a person may answer (WI-1634). The bundle
+therefore gives the estate's trusted servers `default_tools_approval_mode =
+"approve"`, the fork's per-server key that skips the prompt for that server
+only: `vogt`, `cadastre`, `codex-subagent`, `browser`, `github-ro`,
+`forgejo-ro` and `grafana-ro` (operator-approved 2026-10-15). This mirrors
+what the Claude driven-session policy lets a Claude session call without a
+person. `komodo` is deliberately not on the list, since its `deploy_stack` and
+`write_stack_file` change running stacks, and neither is any other server:
+those keep the person gate. A table that already names a mode keeps it, and a
+server nobody registered is not created. The read-only, browser and sub-agent
+writers emit the same row in the tables they own, so a restart does not
+rewrite them, and they carry over a mode an operator already set there. The
+key lives in the session's own `~/.codex/config.toml`, which the session can
+edit, so it is a convenience for autonomous work and not a security boundary;
+the engine's person gate (WI-1355) is the boundary.
+`/etc/codex/requirements.toml` cannot carry the setting (its
+`[mcp_servers]` is an identity allowlist), and it is unchanged: gitguard
+stays pinned and the bypass posture stays person-only.
 
 Any further MCP server an agent should reach is registered by hand inside the
 session, the way the Rust LSP entry above shows.
@@ -1605,8 +1622,8 @@ checks decide what it can finish on its own (WI-926; the design is
   `VOGT_KLAUDIA_VERSION` pin installs under the session-owned
   `/opt/vogt/agent-clis` and changes the `klaudia` a session runs, never
   the hook: gitguard always runs the image's build, from the commit
-  `engine/agent-versions.env` names, so a gitguard fix ships only with an
-  image rebuild. Moving gitguard to another Klaudia is an image build.
+  `engine/agent-versions.env` names, so moving gitguard to another Klaudia
+  is an image build.
   On the fork `failClosed` acts only on `PreToolUse`: a `SessionStart` hook
   that fails lets the session start with no baseline. That is still safe,
   because gitguard's `PreToolUse` refuses every `Bash` and `apply_patch` call
@@ -2578,13 +2595,9 @@ CLI, run without a terminal. The default agent is Klaudia, driven over its
 stream-json protocol (msp-klaudia `docs/embedding.md`): each message is a
 `user` line on its stdin, and its replies, tool calls and the `result` that
 ends a turn come back on stdout. `ENGINE_CHAT_DRIVER=codex` (WI-1148) uses
-the Codex app-server instead: JSON-RPC lines (`initialize` declaring
-`capabilities.experimentalApi`, and only once that answers, `thread/start` or
-`thread/resume` with the chat id as `threadId`, then `turn/start`). A
-caller-chosen thread id is behind that capability on the fork (WI-1126); sent
-without it, `thread/start` is rejected and the following `turn/start` answers
-`thread not found`. That refusal, and a refused `initialize`, are recorded as a
-retryable error on the chat. Codex approvals arrive as JSON-RPC requests and are answered
+the Codex app-server instead: JSON-RPC lines (`initialize`, then
+`thread/start` or `thread/resume` with the chat id as `threadId`, then
+`turn/start`). Codex approvals arrive as JSON-RPC requests and are answered
 on stdin; they do not use the Klaudia hook gate. A Codex chat writes a
 per-chat `CODEX_HOME` under `state_dir/chats/<id>/codex-home` (that process
 only; `CODEX_HOME` is not on the shared allowlist). Promotion of a Codex chat
