@@ -111,8 +111,10 @@ mod tests {
     }
 
     #[test]
-    fn this_checkout_agrees() {
+    fn this_checkout_agrees_with_itself() {
+        // No expected version: the test must survive a version bump. It reads
+        // the checkout the crate was compiled from, which is the tree under test.
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        run(&root, Some("0.7.9")).expect("this checkout's version is consistent");
+        run(&root, None).expect("this checkout's version is consistent");
     }
 }
