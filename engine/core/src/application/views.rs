@@ -126,14 +126,20 @@ fn observed<C: Clock, I: IdFactory>(
 
 /// `verified` inside the horizon, `stale` once the confirmation ages out. A
 /// subject nothing has confirmed takes its first-seen time.
+///
+/// Confirmation is last-seen, not last-changed: the more recent of first-seen
+/// and last-confirmed is what the horizon is measured from. A confirmation
+/// older than first-seen does not pull the subject backwards. Ports
+/// `_freshest` in `services/views.py`.
 pub fn trust_for<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     observed_at: Moment,
     confirmed_at: Option<Moment>,
 ) -> String {
-    let reference = confirmed_at
-        .filter(|confirmed| *confirmed >= observed_at)
-        .unwrap_or(observed_at);
+    let reference = match confirmed_at {
+        Some(confirmed) if confirmed.unix_seconds() > observed_at.unix_seconds() => confirmed,
+        _ => observed_at,
+    };
     let horizon = ctx.config.verify_horizon_hours * 3600;
     if now_of(&ctx.clock).unix_seconds() - reference.unix_seconds() <= horizon {
         "verified"
@@ -832,7 +838,90 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::projected;
+    use super::{projected, trust_for};
+    use crate::application::context::{build_context, Built};
+    use crate::config::VogtConfig;
+    use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
+
+    fn unique() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// `trust_for` reads the horizon and the clock. The stores are never opened.
+    fn trust_context(now: Moment) -> Built {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-trust-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        build_context(
+            VogtConfig {
+                data_dir: dir,
+                verify_horizon_hours: 24,
+                ..VogtConfig::default()
+            },
+            Some(Principal::new("local:trust", ActorKind::Human, "Trust").unwrap()),
+            Some(StepClock::new(now)),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn with_trust(
+        now: Moment,
+        body: impl FnOnce(&crate::application::context::AppContext<StepClock, SequentialIds>),
+    ) {
+        match trust_context(now) {
+            Built::StepSequential(ctx) => body(&ctx),
+            _other => panic!("expected a step clock and sequential ids"),
+        }
+    }
+
+    #[test]
+    fn a_reconfirmed_subject_stays_verified() {
+        // Ports `tests/test_trust_confirmation.py`. First-seen long ago is
+        // stale on its own; a confirmation five minutes ago keeps it verified.
+        let now = Moment::from_unix(1_781_000_000, 0);
+        let horizon = 24 * 3600;
+        let stale_observed = Moment::from_unix(now.unix_seconds() - horizon - 3600, 0);
+        let fresh_confirmed = Moment::from_unix(now.unix_seconds() - 5 * 60, 0);
+        with_trust(now, |ctx| {
+            assert_eq!(trust_for(ctx, stale_observed, None), "stale");
+            assert_eq!(
+                trust_for(ctx, stale_observed, Some(fresh_confirmed)),
+                "verified"
+            );
+        });
+    }
+
+    #[test]
+    fn confirmation_does_not_rescue_a_genuinely_stale_subject() {
+        // Confirmed, but the confirmation itself aged out. That is still stale.
+        let now = Moment::from_unix(1_781_000_000, 0);
+        let horizon = 24 * 3600;
+        let old = Moment::from_unix(now.unix_seconds() - horizon - 2 * 3600, 0);
+        with_trust(now, |ctx| {
+            assert_eq!(trust_for(ctx, old, Some(old)), "stale");
+        });
+    }
+
+    #[test]
+    fn an_older_confirmation_does_not_age_a_fresh_sighting() {
+        // The horizon is measured from the more recent of the two times.
+        // A confirmation older than first-seen must not pull the subject stale.
+        let now = Moment::from_unix(1_781_000_000, 0);
+        let horizon = 24 * 3600;
+        let fresh = Moment::from_unix(now.unix_seconds() - 60, 0);
+        let ancient = Moment::from_unix(now.unix_seconds() - horizon - 3600, 0);
+        with_trust(now, |ctx| {
+            assert_eq!(trust_for(ctx, fresh, Some(ancient)), "verified");
+        });
+    }
 
     #[test]
     fn a_summary_row_nulls_item_in_place() {
