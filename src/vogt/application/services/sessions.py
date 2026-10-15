@@ -124,6 +124,8 @@ from vogt.application.services._brief import (
 from vogt.application.services.preferences import dispatch_settings
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
+from vogt.collectors.base import CollectorError
+from vogt.collectors.git_local import git_output
 from vogt.core import delivery, oversight, runtime
 from vogt.core.auth import Scope, hash_token, issue, parse_scopes
 from vogt.core.branches import default_branch_name
@@ -252,6 +254,14 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # role nor a permission posture, so naming a purpose can never raise a
     # start past what the caller could ask for directly (WI-1323).
     params, overrides, read_only = _resolve_purpose(ctx, params)
+    # Named before the engine is asked, so a bad path never starts a session
+    # (WI-1671). A purpose profile can set `worktree`; it cannot set `cwd`.
+    if params.cwd and params.worktree:
+        msg = (
+            "cwd and worktree cannot be combined: worktree cuts a new "
+            "checkout, cwd opens one that already exists"
+        )
+        raise InvalidRequest(msg)
     # After the profile fills the model, before anything reaches the engine:
     # a project's review policy is a rule, and a start that would run a model
     # it forbids is refused rather than spawned (WI-1590).
@@ -259,6 +269,8 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     started_by_session, started_by_kind = _started_by(ctx, engine)
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
+    if params.cwd:
+        subject.cwd = _existing_worktree_cwd(params.cwd, subject.cwd)
     actor_ref = f"agent:session:{session_id}"
     session_scopes = _session_scopes(ctx)
     credential = issue(session_scopes)
@@ -333,7 +345,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # at the registry's root, which is what the engine reports back anyway.
     cwd = (
         started.cwd
-        if started.cwd and (params.resume or params.worktree)
+        if started.cwd and (params.resume or params.worktree or params.cwd)
         else subject.cwd
     )
 
@@ -3131,6 +3143,67 @@ class _Subject:
         if self.is_scratch:
             return f"scratch/{self.project_slug}"
         return self.work_item_ref or self.project_slug
+
+
+def _existing_worktree_cwd(raw: str, project_root: str) -> str:
+    """The directory a `cwd` start opens in, or a refusal (WI-1671).
+
+    Three checks, in the order a wrong path fails them: it exists, it sits
+    under the workspace's `Active/` directory, and it is a git worktree of
+    the same repository as the project's registered checkout. The comparison
+    is git's `commondir`, which a linked worktree and the main checkout of
+    one repository share and two repositories do not.
+    """
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        msg = f"cwd {raw!r} must be an absolute path"
+        raise InvalidRequest(msg)
+    if not path.is_dir():
+        msg = f"cwd {raw!r} does not exist"
+        raise InvalidRequest(msg)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        msg = f"cwd {raw!r} cannot be resolved: {exc}"
+        raise InvalidRequest(msg) from exc
+    parts = resolved.parts
+    if "Active" not in parts:
+        msg = f"cwd {resolved} is not under the workspace Active/ directory"
+        raise InvalidRequest(msg)
+    checkout = Path(project_root)
+    if not checkout.is_dir():
+        msg = (
+            f"the project's checkout {project_root!r} does not exist, so "
+            "cwd cannot be checked against it"
+        )
+        raise InvalidRequest(msg)
+    try:
+        asked = git_output(resolved, "rev-parse", "--git-common-dir", required=True)
+        owned = git_output(checkout, "rev-parse", "--git-common-dir", required=True)
+    except CollectorError as exc:
+        msg = (
+            f"cwd {resolved} is not a git worktree of the project's "
+            f"repository ({project_root}): {exc}"
+        )
+        raise InvalidRequest(msg) from exc
+    asked_dir = Path(asked)
+    owned_dir = Path(owned)
+    if not asked_dir.is_absolute():
+        asked_dir = resolved / asked_dir
+    if not owned_dir.is_absolute():
+        owned_dir = checkout / owned_dir
+    try:
+        same = asked_dir.resolve() == owned_dir.resolve()
+    except OSError as exc:
+        msg = f"cwd {raw!r} is not a git worktree of the project's repository: {exc}"
+        raise InvalidRequest(msg) from exc
+    if not same:
+        msg = (
+            f"cwd {resolved} is not a git worktree of the project's "
+            f"repository ({project_root})"
+        )
+        raise InvalidRequest(msg)
+    return str(resolved)
 
 
 def _worktree_branch(subject: _Subject, session_id: str) -> str:

@@ -518,6 +518,80 @@ def test_a_worktree_session_is_cut_from_the_integration_branch(
     assert "worktree" not in engine.last_spec
 
 
+def test_a_cwd_opens_in_an_existing_worktree(
+    wired: AppContext,
+    engine: StandInEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WI-1671: name a worktree that already exists and start in it.
+
+    The engine is handed that directory as cwd and is not asked to cut one.
+    A path that is not under Active/, is not a worktree of the project's
+    repository, or is combined with worktree=true is refused before any
+    session is started.
+    """
+    checkout = tmp_path / "vogt"
+    checkout.mkdir()
+    active = tmp_path / "Active" / "vogt-wi-7"
+    active.mkdir(parents=True)
+    stranger = tmp_path / "Active" / "other"
+    stranger.mkdir()
+
+    def fake_git(root: Path, *args: str, required: bool = False) -> str:
+        if args[:2] == ("rev-parse", "--git-common-dir"):
+            if root == active.resolve() or root == checkout.resolve():
+                return str(tmp_path / "common.git")
+            return str(tmp_path / "other.git")
+        return ""
+
+    monkeypatch.setattr("vogt.application.services.sessions.git_output", fake_git)
+    # The fixture project points at ROOT, which does not exist. Register one
+    # whose checkout is the fake repository so the commondir check has a
+    # tree to compare against.
+    register_project(
+        wired,
+        RegisterProjectParams(name="Checkout", root_path=str(checkout), reason=WHY),
+    )
+
+    result = start_session(
+        wired,
+        StartSessionParams(project="checkout", cwd=str(active), reason=WHY),
+    )
+    assert engine.last_spec["cwd"] == str(active.resolve())
+    assert "worktree" not in engine.last_spec
+    assert result.session.cwd == str(active.resolve())
+
+    with pytest.raises(InvalidRequest, match="Active"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(checkout), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="not a git worktree"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(stranger), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="does not exist"):
+        start_session(
+            wired,
+            StartSessionParams(
+                project="checkout",
+                cwd=str(tmp_path / "Active" / "missing"),
+                reason=WHY,
+            ),
+        )
+    with pytest.raises(InvalidRequest, match="cannot be combined"):
+        start_session(
+            wired,
+            StartSessionParams(
+                project="checkout", cwd=str(active), worktree=True, reason=WHY
+            ),
+        )
+    # None of the refusals reached the engine.
+    assert engine.counter == 1
+
+
 def test_the_whole_session_clock_is_unset_unless_the_project_sets_it(
     wired: AppContext, engine: StandInEngine
 ) -> None:
