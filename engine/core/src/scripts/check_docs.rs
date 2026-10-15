@@ -28,8 +28,16 @@ const EXTERNAL: &[&str] = &["http://", "https://", "mailto:", "tel:"];
 
 /// Run both checks against the checkout at `root`.
 pub fn run(root: &Path) -> Result<(), String> {
-    let mut problems = broken_links(root)?;
-    problems.extend(engine_spec_problems(root)?);
+    let problems = broken_links(root)?;
+    if !problems.is_empty() {
+        // The Python stops here: a broken link fails before the spec is read.
+        return Err(format!(
+            "broken relative links ({}):\n  {}",
+            problems.len(),
+            problems.join("\n  ")
+        ));
+    }
+    let problems = engine_spec_problems(root)?;
     if problems.is_empty() {
         println!("docs checks passed");
         Ok(())
@@ -70,7 +78,8 @@ fn broken_links(root: &Path) -> Result<Vec<String>, String> {
                 }
                 candidate
             };
-            if let Some(fragment) = fragment {
+            // An empty fragment (`file.md#`) names nothing, so Python skips it.
+            if let Some(fragment) = fragment.filter(|frag| !frag.is_empty()) {
                 if resolved.extension().is_some_and(|ext| ext == "md") {
                     let anchors = cache
                         .entry(resolved.clone())
@@ -109,6 +118,14 @@ fn walk(root: &Path, dir: &Path, found: &mut Vec<PathBuf>) -> Result<(), String>
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if path.is_dir() {
+            // A symlink to a directory is not followed: Python's `rglob` does
+            // not follow them either, and one can point outside the checkout.
+            if path
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_symlink())
+            {
+                continue;
+            }
             if SKIP_DIRS.contains(&name.as_ref()) {
                 continue;
             }
@@ -149,6 +166,9 @@ fn anchors_of(path: &Path) -> BTreeSet<String> {
     found
 }
 
+/// GitHub's slug, as `scripts/check_docs.py` computes it: lowercase, drop
+/// anything but word characters, spaces and hyphens, then collapse spaces to
+/// one hyphen. A trailing hyphen is kept, because the Python keeps it.
 fn slugify(heading: &str) -> String {
     let mut out = String::new();
     let mut spaced = false;
@@ -156,12 +176,14 @@ fn slugify(heading: &str) -> String {
         if ch.is_alphanumeric() || ch == '_' || ch == '-' {
             out.push(ch);
             spaced = false;
-        } else if ch.is_whitespace() && !spaced && !out.is_empty() {
-            out.push('-');
+        } else if ch.is_whitespace() {
+            if !spaced && !out.is_empty() {
+                out.push('-');
+            }
             spaced = true;
         }
     }
-    out.trim_end_matches('-').to_string()
+    out
 }
 
 fn display_relative(root: &Path, path: &Path) -> String {
@@ -233,9 +255,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slug_drops_punctuation_and_lowercases() {
+    fn slug_drops_punctuation_and_keeps_a_trailing_hyphen() {
         assert_eq!(slugify("7.4 Upgrade"), "74-upgrade");
         assert_eq!(slugify("Hello, World!"), "hello-world");
+        assert_eq!(slugify("ends here -"), "ends-here--");
+    }
+
+    #[test]
+    fn a_missing_file_is_a_broken_link_and_an_empty_fragment_is_not() {
+        let dir = std::env::temp_dir().join(format!("vogt-docs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(
+            dir.join("docs/a.md"),
+            "[gone](missing.md) and [empty](a.md#)\n",
+        )
+        .unwrap();
+        let problems = broken_links(&dir).expect("scanned");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("missing.md"), "{problems:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
