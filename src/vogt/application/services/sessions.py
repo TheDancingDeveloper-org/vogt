@@ -2576,7 +2576,12 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
-    person = _answers_as_person(ctx)
+    # A person, or an oversight session: autonomous fleets have no person at
+    # the prompt, and the overseer is the driver that answers for them. The
+    # audit line records which one answered.
+    by_person = _answers_as_person(ctx)
+    by_oversight = not by_person and _is_oversight_caller(ctx, engine)
+    person = by_person or by_oversight
     answered = engine.answer_session(
         engine_id,
         option=params.option,
@@ -2614,7 +2619,8 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
             "option": option.number,
             "label": option.label[:200],
             "dismissed": dismissed,
-            "person": person,
+            "person": by_person,
+            "oversight": by_oversight,
         },
         event_kind=SESSION_ANSWERED_EVENT,
     )
@@ -2640,6 +2646,11 @@ def _may_force_wake(ctx: AppContext, engine: EngineClient) -> bool:
     engine has marked `oversight`, may use it. Any other agent is refused."""
     if _answers_as_person(ctx):
         return True
+    return _is_oversight_caller(ctx, engine)
+
+
+def _is_oversight_caller(ctx: AppContext, engine: EngineClient) -> bool:
+    """Whether the caller is a session the engine has marked `oversight`."""
     caller_id = _caller_engine_session_id(ctx)
     if caller_id is None:
         return False
