@@ -19,11 +19,12 @@ pub fn assert_clean(data: &[u8]) -> Result<(), String> {
     let mut leaks = Vec::new();
     for rule in forbidden() {
         for found in rule.pattern.find_iter(data) {
-            // `allow` is a prefix, matching Python's `(?!user\b)`: `/home/user`
-            // and `/home/user.x` are the placeholder, `/home/ada` is not.
+            // `allow` is the placeholder with a word boundary after it, which
+            // is Python's `(?!user\b)`: `/home/user` and `/home/user.x` pass,
+            // and `/home/username` does not, because `n` is a word character.
             if rule
                 .allow
-                .is_some_and(|prefix| found.as_bytes().starts_with(prefix))
+                .is_some_and(|prefix| is_placeholder(found.as_bytes(), prefix))
             {
                 continue;
             }
@@ -148,6 +149,16 @@ struct Forbidden {
     allow: Option<&'static [u8]>,
 }
 
+/// Whether `found` is `prefix` followed by a non-word boundary: the end of
+/// the match, or a byte that is not ASCII alphanumeric or `_`.
+fn is_placeholder(found: &[u8], prefix: &[u8]) -> bool {
+    let Some(rest) = found.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.first()
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+}
+
 fn forbidden() -> Vec<Forbidden> {
     let specs: &[(&str, &str, Option<&[u8]>)] = &[
         (r"(?i)bearer\s+[A-Za-z0-9._\-]{16,}", "bearer token", None),
@@ -235,6 +246,14 @@ ada@example.com lives at /home/sprooty/code and /Users/ada/code\n";
     #[test]
     fn the_placeholder_home_is_allowed() {
         assert_clean(b"cwd=/home/user/work").expect("placeholder is not a leak");
+    }
+
+    #[test]
+    fn a_longer_username_is_not_the_placeholder() {
+        let err = assert_clean(b"cwd=/home/username/x").unwrap_err();
+        assert!(err.contains("home path"), "{err}");
+        let err = assert_clean(b"cwd=/Users/username/x").unwrap_err();
+        assert!(err.contains("users path"), "{err}");
     }
 
     #[test]
