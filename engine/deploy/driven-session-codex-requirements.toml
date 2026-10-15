@@ -1,9 +1,10 @@
 # Driven-session Codex requirements (WI-1143, WI-1146, WI-1356).
 #
-# Codex reads this path (`/etc/codex/requirements.toml`) with no flag. The
-# engine does not pass one: it checks that the named policy file exists, is
-# non-empty and wires the gitguard hook below, then lets Codex load this path
-# itself (`sessions.rs`, `codex_policy_refusal`).
+# Codex reads this path (`/etc/codex/requirements.toml`) with no flag, and no
+# other: the TUI, `exec` and app-server all load it. The engine does not pass
+# one: it checks that this installed file is non-empty, wires the gitguard
+# hook below, and is root-owned and not writable by the session user, then
+# lets Codex load it (`claude_config.rs`, `codex_policy_from`).
 #
 # Shape: the Codex fork (fork-ca04973b) parses `[hooks]` here as
 # `ManagedHooksRequirementsToml` — the event tables flattened under `hooks`,
@@ -13,10 +14,36 @@
 # trusted without a hash and always enabled.
 #
 # `failClosed = true` (fork WI-1129) makes a hook that crashes, times out or
-# cannot be started block the tool call instead of letting it run.
+# cannot be started block the tool call instead of letting it run. The fork
+# enforces it on PreToolUse only; a SessionStart hook that fails still lets
+# the session start, with no baseline. gitguard's PreToolUse then refuses
+# every Bash and apply_patch call for that session ("no baseline"), so the
+# safe outcome holds there too. The SessionStart flag is kept for a fork that
+# honours it.
 # `klaudia hook gitguard` (WI-1136) captures the dirty working tree on
 # SessionStart and refuses, on PreToolUse, a shell command or patch that would
 # discard it (stash, checkout --, restore, clean, reset --hard, ...).
+#
+# The hook runs `/usr/local/bin/klaudia` by absolute path: the image's own
+# build, root-owned 0755, from the commit `VOGT_KLAUDIA_VERSION` names at
+# image build. Never a bare `klaudia`: PATH starts with
+# /opt/vogt/agent-clis/bin, which the session user owns, so a stub there
+# would pass every call. A runtime `VOGT_KLAUDIA_VERSION` pin (installed
+# under that same session-owned tree) changes the `klaudia` a session runs,
+# not this hook. A gitguard fix ships only with an image rebuild; moving
+# gitguard to another Klaudia means an image build.
+# The engine refuses a Codex launch unless both commands are exactly this
+# string and /usr/local/bin/klaudia is a root-owned regular file.
+#
+# What this guards, and what it does not (operator decision, 2026-10-15):
+# gitguard is an ACCIDENT GUARD, not a sandbox. It stops an agent that
+# runs destructive git by mistake from discarding work it did not make, and
+# it stops a session without root from switching the guard off by editing
+# this file, shadowing `klaudia` on its PATH, or turning the hooks feature
+# off. It does NOT stop a determined session: the session user has
+# passwordless sudo in the pod and can rewrite this file, the klaudia binary
+# or the codex binary as root. Root ownership is a correctness check here,
+# not a security boundary.
 #
 # PreToolUse tool names the fork sends: `Bash` for shell, exec_command and
 # write_stdin; `apply_patch` (aliases Write/Edit) for patches; `write_stdin`
@@ -40,7 +67,7 @@ hooks = true
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = "klaudia hook gitguard"
+command = "/usr/local/bin/klaudia hook gitguard"
 timeout = 30
 failClosed = true
 
@@ -49,6 +76,6 @@ matcher = "^(Bash|shell|exec_command|write_stdin|apply_patch)$"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "klaudia hook gitguard"
+command = "/usr/local/bin/klaudia hook gitguard"
 timeout = 30
 failClosed = true

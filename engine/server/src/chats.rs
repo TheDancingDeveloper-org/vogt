@@ -591,6 +591,12 @@ struct Proc {
     stdin: mpsc::UnboundedSender<String>,
     gate_token: String,
     pid: Option<u32>,
+    /// The codex driver's thread is started (or resumed). Until it is, a
+    /// `turn/start` names a thread the app-server does not have and fails
+    /// with `thread not found`, so turns wait in `held` (WI-1641). Always
+    /// true for the stream-json driver.
+    thread_ready: bool,
+    held: Vec<String>,
 }
 
 #[derive(Default)]
@@ -1028,7 +1034,17 @@ impl ChatRuntime {
             }
             live.last_activity = Some(Instant::now());
         }
-        if stdin.send(line).is_err() {
+        let line = {
+            let mut live = handle.live.lock();
+            match live.proc.as_mut() {
+                Some(proc) if !proc.thread_ready => {
+                    proc.held.push(line);
+                    None
+                }
+                _ => Some(line),
+            }
+        };
+        if line.is_some_and(|line| stdin.send(line).is_err()) {
             handle.live.lock().turns = 0;
             self.note(
                 id,
@@ -1609,6 +1625,8 @@ impl ChatRuntime {
                 stdin: tx.clone(),
                 gate_token,
                 pid,
+                thread_ready: !codex,
+                held: Vec::new(),
             });
             live.creator = record.creator.clone();
             live.last_activity = Some(Instant::now());
@@ -1672,22 +1690,11 @@ impl ChatRuntime {
                 .await;
         });
         if codex {
-            // The engine asked for this thread id. `parse_line` cannot tell an
-            // empty thread/start success from initialize, so mark started when
-            // the request is queued; a later ThreadReady is the same fact.
-            let handshake = if record.started {
-                crate::chat_codex::thread_resume("resume", id)
-            } else {
-                crate::chat_codex::thread_start("start", id, record.model.as_deref())
-            };
+            // Hold thread/start until initialize is answered. The fork gates a
+            // caller-chosen threadId on the experimentalApi capability declared
+            // there (WI-1632); sending it first is rejected, and the following
+            // turn/start then answers "thread not found".
             let _ = tx.send(crate::chat_codex::initialize("init"));
-            let _ = tx.send(handshake);
-            if !record.started {
-                if let Ok(mut stored) = self.record(id).await {
-                    stored.started = true;
-                    let _ = self.store.update_chat(&stored).await;
-                }
-            }
         }
         Ok(tx)
     }
@@ -2086,18 +2093,75 @@ impl ChatRuntime {
                 == Some(hook_config(self.cfg.chat.approval_timeout).as_str())
     }
 
+    /// Send the thread request the initialize handshake was holding (WI-1632).
+    /// A fresh chat asks the fork to create the chat id as its thread; a chat
+    /// that already has one resumes it.
+    async fn codex_thread(&self, id: Uuid, handle: &ChatHandle) {
+        let Ok(record) = self.record(id).await else {
+            return;
+        };
+        let line = if record.started {
+            crate::chat_codex::thread_resume("resume", id)
+        } else {
+            crate::chat_codex::thread_start("start", id, record.model.as_deref())
+        };
+        let sent = handle
+            .live
+            .lock()
+            .proc
+            .as_ref()
+            .is_some_and(|proc| proc.stdin.send(line).is_ok());
+        if !sent {
+            self.note(
+                id,
+                "error",
+                "The chat's agent stopped before its thread could be started.".into(),
+                true,
+            )
+            .await;
+        }
+    }
+
     async fn on_codex_line(self: &Arc<Self>, id: Uuid, handle: &ChatHandle, line: &str) {
         use crate::chat_codex::{parse_line, CodexEvent};
         handle.live.lock().last_activity = Some(Instant::now());
         match parse_line(line) {
-            CodexEvent::Initialized | CodexEvent::Ignore => {}
+            CodexEvent::Ignore => {}
+            CodexEvent::Initialized => self.codex_thread(id, handle).await,
+            CodexEvent::InitializeFailed(text) => {
+                self.note(id, "error", text, true).await;
+                self.changed(id).await;
+            }
             CodexEvent::ThreadReady => {
+                {
+                    let mut live = handle.live.lock();
+                    if let Some(proc) = live.proc.as_mut() {
+                        proc.thread_ready = true;
+                        for line in std::mem::take(&mut proc.held) {
+                            let _ = proc.stdin.send(line);
+                        }
+                    }
+                }
                 if let Ok(mut record) = self.record(id).await {
                     if !record.started {
                         record.started = true;
                         let _ = self.store.update_chat(&record).await;
                     }
                 }
+            }
+            CodexEvent::ThreadFailed(text) => {
+                {
+                    // The held turns can never run on this process.
+                    let mut live = handle.live.lock();
+                    if let Some(proc) = live.proc.as_mut() {
+                        if !std::mem::take(&mut proc.held).is_empty() {
+                            live.turns = 0;
+                            live.turn_started = None;
+                        }
+                    }
+                }
+                self.note(id, "error", text, true).await;
+                self.changed(id).await;
             }
             CodexEvent::Assistant(text) => {
                 if !text.trim().is_empty() {

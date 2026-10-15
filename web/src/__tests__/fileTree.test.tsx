@@ -1,4 +1,5 @@
-import { Route, Router } from "@solidjs/router";
+import { createEffect, createSignal } from "solid-js";
+import { Route, Router, useLocation } from "@solidjs/router";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, WORKSPACE_READ_FORBIDDEN, workspaceReadError } from "../api";
@@ -90,6 +91,45 @@ describe("FileTree", () => {
     expect(screen.getByRole("button", { name: "Open terminal" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Delete" })).toBeVisible();
     await waitFor(() => expect(api.tree).toHaveBeenCalledWith("source", 0));
+  });
+
+  it("opens a file in the editor on the first click, not the session page (WI-1412)", async () => {
+    vi.spyOn(api, "tree").mockResolvedValue([
+      { name: "notes.md", path: "docs/notes.md", is_dir: false },
+    ]);
+    vi.spyOn(api, "gitStatus").mockResolvedValue({
+      repo: "",
+      is_repo: false,
+      branch: "",
+      ahead: 0,
+      behind: 0,
+      entries: [],
+    });
+    const onOpen = vi.fn();
+    const [path, setPath] = createSignal("");
+
+    const Probe = () => {
+      const location = useLocation();
+      createEffect(() => setPath(location.pathname));
+      return <FileTree onOpen={onOpen} />;
+    };
+
+    render(() => (
+      <Router>
+        <Route path="*" component={Probe} />
+      </Router>
+    ));
+
+    await fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    await fireEvent.click(await screen.findByText("notes.md"));
+
+    // The rail's onOpen navigates to /sessions. A file click must not take
+    // that path, or the first click lands on the session page and only the
+    // second click opens the editor.
+    expect(onOpen).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(path()).toBe(`/e/${encodeURIComponent("docs/notes.md")}`),
+    );
   });
 
   it("reports a failed folder expand in place instead of throwing", async () => {

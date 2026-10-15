@@ -219,8 +219,12 @@ def run(  # pragma: no cover - exercised by running the server, not by tests
     """Start the listener."""
     import uvicorn
 
+    from vogt.adapters.http.metrics import start_from_env
+
     resolved = config if config is not None else load_config()
     configure_logging(level=resolved.log_level, fmt=resolved.log_format)
+    # Opt-in and separate from the API port: unset means nothing listens.
+    start_from_env()
     app = build_server(options, config=resolved)
     log.info(
         "serving",

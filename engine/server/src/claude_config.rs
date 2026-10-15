@@ -156,9 +156,10 @@ pub const IMAGE_OPENCODE_CONFIG: &str = "/usr/local/share/vogt/driven-session-op
 /// stock Codex reads without a flag.
 pub const IMAGE_CODEX_POLICY: &str = "/usr/local/share/vogt/driven-session-codex-requirements.toml";
 
-/// The managed requirements path Codex reads. A deployment that points
-/// `ENGINE_AGENT_CODEX_POLICY` elsewhere still has to put that file where
-/// Codex will load it; the engine only checks the named path exists.
+/// The managed requirements path Codex reads, and the only one: the fork's
+/// loader has no flag or variable for another (WI-1146). A deployment that
+/// points `ENGINE_AGENT_CODEX_POLICY` elsewhere still has to put that file
+/// here, and the engine checks both.
 pub const CODEX_REQUIREMENTS_FILE: &str = "/etc/codex/requirements.toml";
 
 /// The permission values opencode accepts. Anything else makes opencode
@@ -192,28 +193,122 @@ pub fn opencode_config_from(value: Option<&str>) -> Option<String> {
 ///
 /// Fail closed (WI-1143) when a policy is named. A path that is missing,
 /// empty, or unreadable is `Err`: the session must not start, and must not
-/// start with bypass because the hook could not be loaded. Unset or empty
-/// tries the image copy, then `/etc/codex/requirements.toml`; if neither
-/// exists the result is `Ok(None)` ("no policy configured") so a checkout or
-/// a pod built before the file existed still starts. `off` is the only way a
-/// deployment that *has* the file starts Codex without it. OpenCode's
+/// start with bypass because the hook could not be loaded. `off` is the only
+/// way a deployment that *has* the file starts Codex without it. OpenCode's
 /// broken-policy warning is deliberately not copied.
+///
+/// What is judged is the file Codex loads, `/etc/codex/requirements.toml`
+/// (WI-1146): the image copy under `/usr/local/share/vogt` is only what the
+/// image meant to install, and checking it passed a pod whose system file was
+/// missing or different. That file must wire gitguard, and it must be owned
+/// by root and writable by nobody else, along with its directory, or a
+/// session could rewrite it before the next Codex starts. A named file is
+/// checked as well. Unset or empty with neither file present is `Ok(None)`
+/// ("no policy configured"), so a checkout or a pod built before the file
+/// existed still starts; the image copy without the system file is `Err`.
 pub fn codex_policy_from(value: Option<&str>) -> Result<Option<PathBuf>, String> {
+    codex_policy_at(
+        value,
+        Path::new(IMAGE_CODEX_POLICY),
+        Path::new(CODEX_REQUIREMENTS_FILE),
+        true,
+    )
+}
+
+/// [`codex_policy_from`] with the image and system paths given, and the
+/// ownership check optional, so tests need neither root nor `/etc`.
+fn codex_policy_at(
+    value: Option<&str>,
+    image: &Path,
+    system: &Path,
+    root_owned: bool,
+) -> Result<Option<PathBuf>, String> {
+    let loaded = || -> Result<Option<PathBuf>, String> {
+        let path = readable_policy(system.to_path_buf())?;
+        if root_owned {
+            protected_from_sessions(system)?;
+            protected_hook_binary(Path::new(GITGUARD_BIN))?;
+        }
+        Ok(path)
+    };
     match value.map(str::trim) {
         Some("off") => Ok(None),
-        Some(path) if !path.is_empty() => readable_policy(PathBuf::from(path)),
-        _ => match readable_policy(PathBuf::from(IMAGE_CODEX_POLICY)) {
-            Ok(path) => Ok(path),
-            Err(_) => match readable_policy(PathBuf::from(CODEX_REQUIREMENTS_FILE)) {
-                Ok(path) => Ok(path),
-                // A checkout, a unit test, or a pod built before the policy
-                // existed has neither file. That is "no policy configured",
-                // which launch treats as off. A deployment that *names* a
-                // missing file still fails above.
-                Err(_) => Ok(None),
-            },
-        },
+        Some(path) if !path.is_empty() => {
+            readable_policy(PathBuf::from(path))?;
+            loaded()
+        }
+        _ if system.exists() => loaded(),
+        _ if image.exists() => Err(format!(
+            "{} is installed but {} is not, and Codex reads only the latter; refusing to start a Codex session without the gitguard hook",
+            image.display(),
+            system.display()
+        )),
+        // A checkout, a unit test, or a pod built before the policy existed
+        // has neither file. That is "no policy configured", which launch
+        // treats as off. A deployment that *names* a file still fails above.
+        _ => Ok(None),
     }
+}
+
+/// Why a session could change the requirements file Codex loads: the file or
+/// its directory is not owned by root, or is writable by group or others. A
+/// session runs as the engine's user, so root ownership with no group/other
+/// write is what keeps the hook out of its reach.
+fn protected_from_sessions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    for p in [path, dir] {
+        let meta = std::fs::metadata(p).map_err(|e| {
+            format!(
+                "Codex requirements {} cannot be inspected ({e}); refusing to start a Codex session",
+                p.display()
+            )
+        })?;
+        if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            return Err(format!(
+                "Codex requirements {} is owned by uid {} with mode {:o}; it must be root-owned and writable only by root, or a session could switch the gitguard hook off. Refusing to start a Codex session",
+                p.display(),
+                meta.uid(),
+                meta.mode() & 0o7777
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Why a session could swap the program the gitguard hook runs: the hook
+/// names [`GITGUARD_BIN`] by absolute path, so that path must be a regular
+/// file (not a symlink a session could re-point), owned by root and not
+/// group- or world-writable, in a directory with the same ownership. A bare
+/// `klaudia` would resolve through the session's PATH, whose first entry
+/// (`/opt/vogt/agent-clis/bin`) the session user owns, so an `exit 0` stub
+/// there would pass every call (WI-1146).
+fn protected_hook_binary(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    for p in [path, dir] {
+        let meta = std::fs::symlink_metadata(p).map_err(|e| {
+            format!(
+                "gitguard hook program {} cannot be inspected ({e}); refusing to start a Codex session",
+                p.display()
+            )
+        })?;
+        let shape_ok = if p == path {
+            meta.file_type().is_file()
+        } else {
+            meta.file_type().is_dir()
+        };
+        if !shape_ok || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            return Err(format!(
+                "gitguard hook program {} is {} owned by uid {} with mode {:o}; it must be a root-owned regular file in a root-owned directory, writable only by root, or a session could replace it. Refusing to start a Codex session",
+                p.display(),
+                if meta.file_type().is_symlink() { "a symlink" } else { "a path" },
+                meta.uid(),
+                meta.mode() & 0o7777
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn readable_policy(path: PathBuf) -> Result<Option<PathBuf>, String> {
@@ -239,8 +334,16 @@ fn readable_policy(path: PathBuf) -> Result<Option<PathBuf>, String> {
     }
 }
 
-/// The hook command the Codex requirements file must run (WI-1136).
-const GITGUARD_HOOK: &str = "klaudia hook gitguard";
+/// The program the gitguard hook runs: the image's root-owned Klaudia build,
+/// by absolute path (WI-1146). Never resolved through PATH, and never a
+/// runtime `VOGT_KLAUDIA_VERSION` copy, which lives under the session-owned
+/// `/opt/vogt/agent-clis`.
+const GITGUARD_BIN: &str = "/usr/local/bin/klaudia";
+
+/// The hook command the Codex requirements file must run (WI-1136): exactly
+/// this string, so a bare `klaudia` (resolved through the session's PATH) is
+/// refused.
+const GITGUARD_HOOK: &str = "/usr/local/bin/klaudia hook gitguard";
 
 /// PreToolUse tool names the gitguard matcher must select: the fork sends
 /// `Bash` for shell, exec_command and write_stdin, and `apply_patch` for
@@ -250,7 +353,7 @@ const GITGUARD_TOOLS: &[&str] = &["Bash", "apply_patch"];
 /// Why a Codex requirements file would let a session run without gitguard
 /// (WI-1356). It must be TOML with `[[hooks.SessionStart]]` and
 /// `[[hooks.PreToolUse]]` groups, each holding a `type = "command"` handler
-/// that runs `klaudia hook gitguard` with `failClosed = true`, and the
+/// that runs `/usr/local/bin/klaudia hook gitguard` with `failClosed = true`, and the
 /// PreToolUse group's matcher must select every name in [`GITGUARD_TOOLS`].
 /// It must also pin `[features] hooks = true`: the fork runs managed hooks
 /// only while that feature is on, and without the pin a session could switch
@@ -1039,6 +1142,20 @@ mod driven_policy_tests {
         (dir, path)
     }
 
+    /// The resolver against a given system file, ownership unchecked, and no
+    /// image copy.
+    fn policy_at(
+        value: Option<&str>,
+        system: &std::path::Path,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        super::codex_policy_at(
+            value,
+            std::path::Path::new("/nonexistent/image-requirements.toml"),
+            system,
+            false,
+        )
+    }
+
     #[test]
     fn codex_policy_off_is_none() {
         assert_eq!(super::codex_policy_from(Some("off")).unwrap(), None);
@@ -1047,20 +1164,102 @@ mod driven_policy_tests {
 
     #[test]
     fn codex_policy_named_file_must_be_readable_and_non_empty() {
+        let (sys_dir, system) = policy_file(SHIPPED_CODEX_POLICY.as_bytes());
         let (dir, path) = policy_file(SHIPPED_CODEX_POLICY.as_bytes());
-        let got = super::codex_policy_from(Some(path.to_str().unwrap()))
+        // The file Codex loads is the answer, whatever was named.
+        let got = policy_at(Some(path.to_str().unwrap()), &system)
             .unwrap()
             .unwrap();
-        assert_eq!(got, path);
+        assert_eq!(got, system);
         std::fs::remove_dir_all(dir).ok();
 
         let (dir, empty_path) = policy_file(b"");
-        let err = super::codex_policy_from(Some(empty_path.to_str().unwrap())).unwrap_err();
+        let err = policy_at(Some(empty_path.to_str().unwrap()), &system).unwrap_err();
         assert!(err.contains("empty"), "{err}");
         let missing = dir.join("missing.toml");
-        let err = super::codex_policy_from(Some(missing.to_str().unwrap())).unwrap_err();
+        let err = policy_at(Some(missing.to_str().unwrap()), &system).unwrap_err();
         assert!(err.contains("cannot be read"), "{err}");
         std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(sys_dir).ok();
+    }
+
+    /// WI-1146: what Codex reads is `/etc/codex/requirements.toml`, so a
+    /// good named or image file does not stand in for a missing or
+    /// unguarded system file.
+    #[test]
+    fn codex_policy_judges_the_file_codex_loads() {
+        let (dir, named) = policy_file(SHIPPED_CODEX_POLICY.as_bytes());
+        let missing = dir.join("etc-codex-requirements.toml");
+        let err = policy_at(Some(named.to_str().unwrap()), &missing).unwrap_err();
+        assert!(err.contains("cannot be read"), "{err}");
+
+        // The image copy installed, the system file not: refused, not "off".
+        let err = super::codex_policy_at(None, &named, &missing, false).unwrap_err();
+        assert!(err.contains("Codex reads only"), "{err}");
+
+        // Unset with a system file that is comments only: refused, even
+        // though the image copy beside it is good.
+        let (sys_dir, stale) = policy_file(b"# requirements\n");
+        let err = super::codex_policy_at(None, &named, &stale, false).unwrap_err();
+        assert!(err.contains("does not wire the gitguard hook"), "{err}");
+        let err = policy_at(Some(named.to_str().unwrap()), &stale).unwrap_err();
+        assert!(err.contains("does not wire the gitguard hook"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(sys_dir).ok();
+    }
+
+    /// A requirements file the session user owns (as every file a test can
+    /// make is) could be rewritten by a session, so it is refused.
+    #[test]
+    fn a_codex_policy_the_session_can_rewrite_is_refused() {
+        let (dir, system) = policy_file(SHIPPED_CODEX_POLICY.as_bytes());
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: running as root, every temp file is root-owned");
+            std::fs::remove_dir_all(dir).ok();
+            return;
+        }
+        let err = super::codex_policy_at(None, std::path::Path::new("/nonexistent"), &system, true)
+            .unwrap_err();
+        assert!(err.contains("must be root-owned"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The gitguard hook program must be a root-owned regular file: one the
+    /// session user owns (as every file a test can make is), a symlink, or a
+    /// missing path is refused (WI-1146).
+    #[test]
+    fn a_gitguard_program_the_session_can_replace_is_refused() {
+        let dir = std::env::temp_dir().join(format!("gitguard-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = super::protected_hook_binary(&dir.join("missing")).unwrap_err();
+        assert!(err.contains("cannot be inspected"), "{err}");
+        let link = dir.join("klaudia-link");
+        std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
+        let err = super::protected_hook_binary(&link).unwrap_err();
+        assert!(err.contains("a symlink"), "{err}");
+        if unsafe { libc::geteuid() } != 0 {
+            let own = dir.join("klaudia");
+            std::fs::write(&own, "#!/bin/sh\nexit 0\n").unwrap();
+            let err = super::protected_hook_binary(&own).unwrap_err();
+            assert!(err.contains("must be a root-owned regular file"), "{err}");
+        }
+        // A root-owned regular file in a root-owned directory passes.
+        if std::path::Path::new("/bin/sh").exists() {
+            let sh = std::fs::canonicalize("/bin/sh").unwrap();
+            super::protected_hook_binary(&sh).unwrap();
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_shipped_codex_policy_runs_the_root_owned_klaudia() {
+        assert_eq!(
+            SHIPPED_CODEX_POLICY
+                .matches(&format!("command = \"{}\"", super::GITGUARD_HOOK))
+                .count(),
+            2
+        );
+        assert!(super::GITGUARD_HOOK.starts_with(&format!("{} ", super::GITGUARD_BIN)));
     }
 
     const SHIPPED_CODEX_POLICY: &str =
@@ -1074,10 +1273,12 @@ mod driven_policy_tests {
     #[test]
     fn a_codex_policy_without_a_fail_closed_gitguard_hook_is_refused() {
         // The comments-only file WI-1146 shipped: Codex ran unguarded.
+        let (sys_dir, system) = policy_file(SHIPPED_CODEX_POLICY.as_bytes());
         let (dir, path) = policy_file(b"# requirements\n");
-        let err = super::codex_policy_from(Some(path.to_str().unwrap())).unwrap_err();
+        let err = policy_at(Some(path.to_str().unwrap()), &system).unwrap_err();
         assert!(err.contains("does not wire the gitguard hook"), "{err}");
         std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(sys_dir).ok();
 
         let check = super::check_codex_policy;
         let without = |from: &str, to: &str| {
@@ -1101,7 +1302,18 @@ mod driven_policy_tests {
         ))
         .is_err());
         // Another command.
-        assert!(check(&SHIPPED_CODEX_POLICY.replace("klaudia hook gitguard", "true")).is_err());
+        assert!(check(&SHIPPED_CODEX_POLICY.replace(super::GITGUARD_HOOK, "true")).is_err());
+        // Klaudia by bare name, or from a session-writable path (WI-1146):
+        // PATH lookup would let a session shadow it with a stub.
+        for shadowable in [
+            "klaudia hook gitguard",
+            "/opt/vogt/agent-clis/bin/klaudia hook gitguard",
+            "env klaudia hook gitguard",
+        ] {
+            let err =
+                check(&SHIPPED_CODEX_POLICY.replace(super::GITGUARD_HOOK, shadowable)).unwrap_err();
+            assert!(err.contains(super::GITGUARD_HOOK), "{err}");
+        }
         assert!(check("not = [toml").is_err());
         // The hooks feature not pinned on: a session could disable it.
         let err = check(&without("[features]\nhooks = true\n", "")).unwrap_err();
@@ -1125,11 +1337,15 @@ mod driven_policy_tests {
 
     #[test]
     fn codex_policy_unset_without_image_files_is_unconfigured() {
-        // Neither the image path nor /etc/codex/requirements.toml exists in
-        // the unit-test tree. Unset and empty are "no policy configured",
-        // not a refusal — a named missing path is the error, above.
-        assert_eq!(super::codex_policy_from(None).unwrap(), None);
-        assert_eq!(super::codex_policy_from(Some("")).unwrap(), None);
-        assert_eq!(super::codex_policy_from(Some("   ")).unwrap(), None);
+        // Neither the image copy nor the system file exists. Unset and empty
+        // are "no policy configured", not a refusal — a named path is
+        // checked, above. Paths given so the test holds inside the image too.
+        let none = std::path::Path::new("/nonexistent/requirements.toml");
+        for value in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                super::codex_policy_at(value, none, none, true).unwrap(),
+                None
+            );
+        }
     }
 }

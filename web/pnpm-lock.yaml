@@ -26,8 +26,8 @@ importers:
         specifier: ^8.5.3
         version: 8.5.3
       '@capacitor/push-notifications':
-        specifier: ^8.1.2
-        version: 8.1.2(@capacitor/core@8.5.3)
+        specifier: ^8.1.3
+        version: 8.1.3(@capacitor/core@8.5.3)
       '@solidjs/router':
         specifier: ^1.0.0
         version: 1.0.0(solid-js@1.9.17)
@@ -61,7 +61,7 @@ importers:
         version: 0.8.10(@solidjs/router@1.0.0(solid-js@1.9.17))(solid-js@1.9.17)
       '@testing-library/jest-dom':
         specifier: ^7.0.1
-        version: 7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.3(jsdom@30.1.2)(vite@8.3.2))
+        version: 7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.3(jsdom@30.1.2)(vite@8.3.4))
       '@testing-library/user-event':
         specifier: ^14.6.7
         version: 14.6.7(@testing-library/dom@10.4.1)
@@ -78,14 +78,14 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
       vite:
-        specifier: ^8.3.2
-        version: 8.3.2
+        specifier: ^8.3.4
+        version: 8.3.4
       vite-plugin-solid:
         specifier: ^2.11.14
-        version: 2.11.14(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.3(jsdom@30.1.2)(vite@8.3.2)))(solid-js@1.9.17)(vite@8.3.2)
+        version: 2.11.14(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.3(jsdom@30.1.2)(vite@8.3.4)))(solid-js@1.9.17)(vite@8.3.4)
       vitest:
         specifier: ^5.0.3
-        version: 5.0.3(jsdom@30.1.2)(vite@8.3.2)
+        version: 5.0.3(jsdom@30.1.2)(vite@8.3.4)
 
 packages:
 
@@ -202,8 +202,8 @@ packages:
   '@capacitor/core@8.5.3':
     resolution: {integrity: sha512-oBE1oGuYE4ZzYYrulC75OuHdSsD6zLUy7d5o1tFwDLG4govGoubY15cxpiI5l0+q87Lm5p0bhbehMdzJg4aFag==}
 
-  '@capacitor/push-notifications@8.1.2':
-    resolution: {integrity: sha512-TQl4XxqJfNF+KbSYBFMXYYT5WXUaleVKXlByhh/8+KySMVNjp+l5OqAUoGe/sY1IAnGXEuUeCjA/WLZEVvGwrA==}
+  '@capacitor/push-notifications@8.1.3':
+    resolution: {integrity: sha512-UlOCTS3uiw8ZUJ1rkFKJgoqPADipHDNn0lq5mNRwtXALVxQXIeIoRd3iqpzC+962R2LpCRJRkCTjPX2OHK3tBA==}
     peerDependencies:
       '@capacitor/core': '>=8.0.0'
 
@@ -894,8 +894,8 @@ packages:
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
 
-  nanoid@3.3.18:
-    resolution: {integrity: sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w==}
+  nanoid@3.3.20:
+    resolution: {integrity: sha512-uKdg2G3GNCKQn9byYOpxbGqrT2fGO5KRt5J/8b3pok8rT6qxGWF6hxMyJiEYtAf+FVyYuD9hRaDqX5uPFYJ4ZQ==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
@@ -930,8 +930,8 @@ packages:
     engines: {node: '>=20'}
     hasBin: true
 
-  postcss@8.5.28:
-    resolution: {integrity: sha512-RRuzqDtt5Y9h3quz5hWhK+TPnsmVs6WwSU6LkJMeY4HstUEDuYTG8UJSdawMRzmzAtV+KEoG8N3Qg2qLy5vM/A==}
+  postcss@8.5.29:
+    resolution: {integrity: sha512-49cGhUbXj8Qenv0iTMxA1cFBzxXoctpC9Ujd77t1WcbJIr6nF/eI7g/8MgxrYldFRuAXvja7xQRwavoW7kgrxQ==}
     engines: {node: ^10 || ^12 || >=14}
 
   pretty-format@27.5.1:
@@ -1054,8 +1054,8 @@ packages:
       '@testing-library/jest-dom':
         optional: true
 
-  vite@8.3.2:
-    resolution: {integrity: sha512-SQr1x6W5vVSbROg7vsyXIaxK9b0G7zsT68acdWWRmnBUsgDieLCRG+Rep9WdZgcposvv/GSnr4GUUBqB3vXq6w==}
+  vite@8.3.4:
+    resolution: {integrity: sha512-IftLE8phJhdNRIGNEV4JCCvfNScoZQVfcXaN8TQropWGJtOHcu+iAB9pHcuGvmEb/kddw0LBe/jS8ztdC6xdiQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
     peerDependencies:
@@ -1329,7 +1329,7 @@ snapshots:
     dependencies:
       tslib: 2.8.1
 
-  '@capacitor/push-notifications@8.1.2(@capacitor/core@8.5.3)':
+  '@capacitor/push-notifications@8.1.3(@capacitor/core@8.5.3)':
     dependencies:
       '@capacitor/core': 8.5.3
 
@@ -1455,7 +1455,7 @@ snapshots:
       picocolors: 1.1.1
       pretty-format: 27.5.1
 
-  '@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.3(jsdom@30.1.2)(vite@8.3.2))':
+  '@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.3(jsdom@30.1.2)(vite@8.3.4))':
     dependencies:
       '@adobe/css-tools': 4.5.0
       '@testing-library/dom': 10.4.1
@@ -1465,7 +1465,7 @@ snapshots:
       picocolors: 1.1.1
       redent: 3.0.0
     optionalDependencies:
-      vitest: 5.0.3(jsdom@30.1.2)(vite@8.3.2)
+      vitest: 5.0.3(jsdom@30.1.2)(vite@8.3.4)
 
   '@testing-library/user-event@14.6.7(@testing-library/dom@10.4.1)':
     dependencies:
@@ -1566,14 +1566,14 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  '@vitest/mocker@5.0.3(vite@8.3.2)':
+  '@vitest/mocker@5.0.3(vite@8.3.4)':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       '@vitest/spy': 5.0.3
       estree-walker: 3.0.3
       magic-string: 1.4.2
     optionalDependencies:
-      vite: 8.3.2
+      vite: 8.3.4
 
   '@vitest/spy@5.0.3': {}
 
@@ -1821,7 +1821,7 @@ snapshots:
 
   ms@2.1.3: {}
 
-  nanoid@3.3.18: {}
+  nanoid@3.3.20: {}
 
   node-releases@2.0.54: {}
 
@@ -1845,9 +1845,9 @@ snapshots:
     dependencies:
       playwright-core: 1.64.0
 
-  postcss@8.5.28:
+  postcss@8.5.29:
     dependencies:
-      nanoid: 3.3.18
+      nanoid: 3.3.20
       picocolors: 1.1.1
       source-map-js: 1.2.2
 
@@ -1984,7 +1984,7 @@ snapshots:
       escalade: 3.2.0
       picocolors: 1.1.1
 
-  vite-plugin-solid@2.11.14(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.3(jsdom@30.1.2)(vite@8.3.2)))(solid-js@1.9.17)(vite@8.3.2):
+  vite-plugin-solid@2.11.14(@testing-library/jest-dom@7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.3(jsdom@30.1.2)(vite@8.3.4)))(solid-js@1.9.17)(vite@8.3.4):
     dependencies:
       '@babel/core': 7.29.7
       '@types/babel__core': 7.20.5
@@ -1992,31 +1992,31 @@ snapshots:
       merge-anything: 5.1.7
       solid-js: 1.9.17
       solid-refresh: 0.6.3(solid-js@1.9.17)
-      vite: 8.3.2
-      vitefu: 1.1.3(vite@8.3.2)
+      vite: 8.3.4
+      vitefu: 1.1.3(vite@8.3.4)
     optionalDependencies:
-      '@testing-library/jest-dom': 7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.3(jsdom@30.1.2)(vite@8.3.2))
+      '@testing-library/jest-dom': 7.0.1(@testing-library/dom@10.4.1)(vitest@5.0.3(jsdom@30.1.2)(vite@8.3.4))
     transitivePeerDependencies:
       - supports-color
 
-  vite@8.3.2:
+  vite@8.3.4:
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
-      postcss: 8.5.28
+      postcss: 8.5.29
       rolldown: 1.2.12
       tinyglobby: 0.2.17
     optionalDependencies:
       fsevents: 2.3.3
 
-  vitefu@1.1.3(vite@8.3.2):
+  vitefu@1.1.3(vite@8.3.4):
     optionalDependencies:
-      vite: 8.3.2
+      vite: 8.3.4
 
-  vitest@5.0.3(jsdom@30.1.2)(vite@8.3.2):
+  vitest@5.0.3(jsdom@30.1.2)(vite@8.3.4):
     dependencies:
       '@types/chai': 5.2.3
-      '@vitest/mocker': 5.0.3(vite@8.3.2)
+      '@vitest/mocker': 5.0.3(vite@8.3.4)
       chai: 6.2.2
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
@@ -2027,7 +2027,7 @@ snapshots:
       tinybench: 6.2.0
       tinyexec: 1.3.1
       tinyglobby: 0.2.17
-      vite: 8.3.2
+      vite: 8.3.4
       why-is-node-running: 3.2.1
     optionalDependencies:
       jsdom: 30.1.2

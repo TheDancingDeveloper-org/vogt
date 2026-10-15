@@ -872,10 +872,16 @@ textarea {
   gap: 14px;
   background: var(--bg-elev);
   border-right: 1px solid var(--bd);
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  /* The rail itself does not scroll. The session list
+     (`.places-rail-session-area`) is the one scroller, so nav, section toggles
+     and the footer stay put when there are many sessions. `min-height: 0` on
+     this column (already set) is what lets that child shrink below its content. */
+  overflow: hidden;
+}
+.places-rail:has(.file-tree .places-section-toggle[aria-expanded="true"]) {
+  /* Eight blocks times the 14px gap costs about 100px, which is what starves
+     an open file tree on a short window. Tighten it while Files is open. */
+  gap: 6px;
 }
 .places-brand {
   display: flex;
@@ -955,11 +961,31 @@ textarea {
   text-align: left;
 }
 .places-nav {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 .places-rail-session-area {
-  flex: 0 0 auto;
+  /* Take the leftover column and scroll inside it. `min-height: 0` is required:
+     a flex item's default minimum is its content size, which would grow the
+     rail instead of scrolling. The toggle stays put; only the list scrolls. */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
   padding-top: 2px;
+}
+.places-rail-session-area > div {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.places-rail:has(.file-tree .places-section-toggle[aria-expanded="true"]) > .places-rail-session-area {
+  /* Files is open, so the running list gives up the space below this cap.
+     The list still scrolls inside itself. */
+  flex: 0 1 auto;
+  max-height: 220px;
 }
 .places-section-label {
   padding: 0 8px 4px;
@@ -984,7 +1010,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
 }
 .places-group-label {
   padding: 0 8px 4px;
@@ -1002,12 +1028,23 @@ textarea {
   border-radius: 5px;
   text-decoration: none;
   font-size: 13px;
+  /* One line each. Wrapped links doubled the nav and starved the session
+     list of the height it needs to scroll inside the rail. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .places-group a {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  white-space: nowrap;
+}
+.places-group a > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .place-count {
   display: inline-flex;
@@ -1069,16 +1106,16 @@ textarea {
   gap: 6px;
   padding-top: 10px;
   border-top: 1px solid var(--bd);
-  /* Pinned to the foot of the rail's own scroller: with a full session
-     list the footer used to sit below the fold, so Settings and Sign out were
-     unreachable at 1440×900 without scrolling. `margin-top: auto` keeps it at
-     the bottom when the rail is short; `sticky` keeps it on screen when it is
-     not. The elevated background is what stops the scrolling list showing
-     through it. */
-  position: sticky;
-  bottom: 0;
+  /* The rail no longer scrolls, so the footer is just the last flex item. It
+     stays at the foot when the session list is short (`margin-top: auto`) and
+     stays on screen when the list is long, because the list scrolls inside
+     itself rather than pushing the footer down. It may shrink on a short
+     window; its buttons then scroll inside it. */
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 140px;
+  overflow-y: auto;
   margin-top: auto;
-  z-index: 2;
   background: var(--bg-elev);
 }
 .rail-hidden-toggle {
@@ -1117,7 +1154,10 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  max-height: 160px;
 }
 
 .places-recent a {
@@ -3509,11 +3549,19 @@ textarea {
   border-top: 1px solid var(--bd);
 }
 .places-rail > .file-tree {
-  /* The rail itself is the scroll viewport. Files keeps enough room for its
-     heading, search, several rows and progressive controls, then grows with
-     its contents instead of introducing another trapped scroll area. */
-  min-height: 260px;
+  /* The session list is the rail's scroller. A collapsed tree is just its
+     heading. Once open it keeps a usable floor (capped), and its own tree
+     scrolls inside that, so a deep tree cannot push the footer off screen. */
+  min-height: 0;
   flex: 0 0 auto;
+  overflow: hidden;
+}
+.places-rail > .file-tree:has(.places-section-toggle[aria-expanded="true"]) {
+  /* Open Files keeps enough for its heading, search and a row, and may grow.
+     The nav above it scrolls if the column cannot hold both. */
+  flex: 1 1 180px;
+  min-height: 150px;
+  max-height: 320px;
 }
 .file-tree-header {
   flex: 0 0 auto;
@@ -3563,8 +3611,11 @@ textarea {
   font-size: 12px;
 }
 .places-rail > .file-tree .tree-scroll {
-  flex: 0 0 auto;
-  overflow-y: visible;
+  /* Overrides the 140px floor on `.tree-scroll`. In the rail the tree must be
+     able to shrink so the search and a row stay visible in a short column. */
+  flex: 1 1 auto;
+  min-height: 0 !important;
+  overflow-y: auto;
 }
 .tree-row {
   display: flex;
@@ -3804,10 +3855,66 @@ textarea {
   color: var(--fg-muted);
   font-size: 11px;
 }
+.editor-host-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
 .editor-host {
   flex: 1;
   min-height: 0;
   min-width: 0;
+}
+/* Touch edit bar: a long-press in the editor raises it (Editor.tsx). It sits at
+   the bottom so it never covers the first lines, where a long-press usually
+   lands, and its labels are not themselves selectable text. */
+.editor-touch-edit {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 30;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  max-width: calc(100% - 16px);
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.editor-touch-edit button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+/* Above the edit bar, never over the top lines: Monaco hit-tests a long-press
+   with caretRangeFromPoint, which a notice lying over the text would swallow. */
+.editor-touch-notice {
+  position: absolute;
+  bottom: 68px;
+  right: 8px;
+  z-index: 30;
+  max-width: calc(100% - 32px);
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.editor-touch-notice-error {
+  background: var(--danger);
 }
 /* Inline notices between the toolbar and the editor: a stale-save conflict and
    a restored-but-stale draft. */
@@ -11088,8 +11195,9 @@ a.vogt-projects-tag:hover {
 }
 
 /* == 5b — places rail ===================================================== *
- * Additive to the shipped rail. The rail is the scroller (`.places-rail`
- * overflow-y:auto); every block below stays flex:0 0 auto so that stays true.
+ * Additive to the shipped rail. The session list is the scroller
+ * (`.places-rail-session-area`); blocks below stay flex:0 0 auto so nav,
+ * toggles and the footer stay put.
  * ========================================================================= */
 
 /* 1. The attention card. Rendered only for a waiting session or an engine

@@ -78,6 +78,21 @@ if [[ -x /usr/local/bin/vogt-agent-cli-install && -r "$agent_cli_tools" ]]; then
     done < "$agent_cli_tools"
 fi
 
+# The ACP adapter (codex-acp, WI-1595) execs whatever CODEX_PATH names instead of
+# the @openai/codex its own package bundles, which is older than the fork this
+# image carries (the fork's docs/fork/acp.md). Point it at the same copy the
+# codex-full-access wrapper runs: the runtime pin's `current` when one is
+# flipped, else the image's real binary. An explicit CODEX_PATH wins, and a
+# build with the CLIs off has neither, so nothing is invented.
+if [[ -z "${CODEX_PATH:-}" ]]; then
+    agent_cli_root="${VOGT_AGENT_CLI_ROOT:-/opt/vogt/agent-clis}"
+    if [[ -x "$agent_cli_root/codex/current/bin/codex" ]]; then
+        export CODEX_PATH="$agent_cli_root/codex/current/bin/codex"
+    elif [[ -x /usr/local/libexec/codex-real ]]; then
+        export CODEX_PATH=/usr/local/libexec/codex-real
+    fi
+fi
+
 # Agent CLIs are checked before any optional service starts: the active copy
 # must be the one the manifest names, and a stale persisted-home copy must not
 # be able to shadow it (exit 78 if it would).

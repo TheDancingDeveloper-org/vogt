@@ -14,6 +14,7 @@ use reqwest::StatusCode;
 use serde_json::{json, Value};
 use time::OffsetDateTime;
 use tokio_tungstenite::tungstenite::Message;
+use uuid::Uuid;
 use vogt_engine_contract::{ServerEvent, SessionDetail};
 use vogt_engine_server::{app::router, app::AppState, config::SessionTemplate, Config};
 
@@ -9010,6 +9011,137 @@ async fn session_changes_are_sequenced_filtered_and_waited_on() {
     }
 }
 
+/// WI-1519: a worker that finished its turn and rests `idle` at its prompt is
+/// a `ready` change, not silence. Claude Code's boxed prompt rarely matches
+/// the waiting patterns, and Klaudia is forced to `idle` by its window title,
+/// so neither used to wake `wait-any` while `/wait?until=ready` did.
+#[tokio::test]
+async fn an_idle_prompt_is_one_ready_change_and_wait_any_agrees_with_wait() {
+    let (base, state, _h) = boot_with_state(test_config()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // Claude Code's input box: a `❯` at the start of its line, inside a border,
+    // with no `?` waiting pattern anywhere, drawn after a burst of output and
+    // then left alone. The border characters the screen reader strips are `│`,
+    // `┃`, `║` and `|`; a `┌┐` box leaves the `❯` where `shows_prompt` reads it.
+    let boxed = "printf 'thinking\\n'; sleep 0.4; printf '\\033[2J\\033[H\\n  output\\n┌────┐\\n❯\\n└────┘\\n'; sleep 30";
+    let claude = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "idle-boxed-prompt",
+            "command": ["/bin/sh", "-c", boxed],
+        }),
+    )
+    .await;
+
+    // Klaudia announces rest in the window title, which forces the activity to
+    // `idle` even while the screen keeps being drawn. The title only outranks
+    // output recency for a session the engine knows runs Klaudia, so the
+    // conversation is set on the live session rather than inferred from a shell
+    // command.
+    let titled = "printf 'thinking\\n'; sleep 0.4; printf '\\033]0;klaudia: ready\\007\\033[2J\\033[H\\n│ › Ask Klaudia │\\n╾──╼\\n'; sleep 30";
+    let klaudia = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "idle-klaudia-title",
+            "command": ["/bin/sh", "-c", titled],
+        }),
+    )
+    .await;
+    state
+        .sessions
+        .get(Uuid::parse_str(&klaudia).unwrap())
+        .unwrap()
+        .set_conversation(Some(vogt_engine_contract::AgentConversation {
+            agent: "klaudia".to_string(),
+            id: "conv-1".to_string(),
+        }));
+
+    // The `ready` rows for one session, polled until one appears.
+    let ready_rows = |id: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            for _ in 0..60 {
+                let got: Value = client
+                    .get(format!("{base}/api/sessions/changes?since=0&ids={id}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                let rows: Vec<Value> = got["changes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c["kind"] == "ready")
+                    .cloned()
+                    .collect();
+                if !rows.is_empty() {
+                    return rows;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("session {id} never published a ready change");
+        }
+    };
+
+    for id in [&claude, &klaudia] {
+        let rows = ready_rows(id.clone()).await;
+        assert_eq!(rows.len(), 1, "one ready per turn for {id}: {rows:?}");
+
+        let seq = rows[0]["seq"].as_u64().unwrap();
+        let any: Value = client
+            .get(format!(
+                "{base}/api/sessions/wait-any?ids={id}&until=ready&cursor=0&timeout_s=5"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(any["outcome"], "changed", "{id}: {any}");
+        assert_eq!(any["change"]["seq"].as_u64().unwrap(), seq);
+
+        let one: Value = client
+            .get(format!(
+                "{base}/api/sessions/{id}/wait?until=ready&timeout_s=5"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(one["outcome"], "ready", "{id}: {one}");
+        assert_eq!(one["matched"], true, "{id}: {one}");
+    }
+
+    // Still at the prompt a moment later: the quiet does not become a second
+    // `ready`. (The brief's ten minutes is the same claim — one per turn,
+    // reset only when the session goes running again.)
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    for id in [&claude, &klaudia] {
+        let rows = ready_rows(id.clone()).await;
+        assert_eq!(rows.len(), 1, "no ready storm for {id}: {rows:?}");
+    }
+
+    for id in [claude, klaudia] {
+        client
+            .delete(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap();
+    }
+}
+
 /// WI-1246: `Last-Event-ID` replays what the ring still holds, and the live
 /// payload stays the raw event — the sequence rides on the SSE `id`.
 #[tokio::test]
@@ -13152,6 +13284,134 @@ async fn session_showing_dialog(
     }
 }
 
+/// WI-1355: a Codex MCP tool approval is a person's to answer. The fork
+/// (codex-real 0.162.0+fork.ca04973b4, PTY bytes captured off it) asks
+/// "Allow the echo MCP server to run tool …?" in its elicitation form; prod
+/// saw it with approval null, activity idle and an agent's typed prompt
+/// answering it. Replayed through a real session, the engine must report the
+/// approval, hand a wait back as needing a person, and refuse agent input —
+/// whether the title says `awaiting approval` or, as on prod, still `working`.
+#[tokio::test]
+async fn a_codex_mcp_tool_approval_needs_a_person() {
+    let (base, tmp, _guard) = wi983_front_door().await;
+    let operator = client_for(TEST_TOKEN);
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/codex-approvals/mcp-120.pty");
+    let script = tmp.path().join("replay.py");
+    std::fs::write(
+        &script,
+        r#"import os, sys, tty
+fixture, title, typed = sys.argv[1:4]
+data = open(fixture, "rb").read()
+data = data.replace(b"codex: awaiting approval", title.encode())
+fd = sys.stdin.fileno()
+tty.setraw(fd)
+os.write(sys.stdout.fileno(), data)
+while True:
+    got = os.read(fd, 64)
+    if not got:
+        break
+    with open(typed, "ab") as f:
+        f.write(got)
+"#,
+    )
+    .unwrap();
+
+    for title in ["codex: awaiting approval", "codex: working"] {
+        let typed = tmp.path().join(format!("typed-{}", title.len()));
+        let created: Value = operator
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({
+                "name": "codex-mcp",
+                "cols": 120,
+                "rows": 40,
+                "command": [
+                    "python3",
+                    script.to_string_lossy(),
+                    fixture.to_string_lossy(),
+                    title,
+                    typed.to_string_lossy(),
+                ],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // A wait comes back as soon as the dialog shows, not at its timeout.
+        let waited: Value = operator
+            .get(format!(
+                "{base}/api/sessions/{id}/wait?until=ready&timeout_s=20"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(waited["outcome"], "awaiting-approval", "{title}: {waited}");
+        let screen = &waited["screen"];
+        assert_eq!(screen["activity"], "awaiting-approval", "{title}: {screen}");
+        assert_eq!(screen["ready"], false, "{title}: {screen}");
+        let approval = &screen["approval"];
+        assert_eq!(approval["kind"], "permission", "{title}: {approval}");
+        assert_eq!(
+            approval["question"], "Allow the echo MCP server to run tool \"echo\"?",
+            "{title}: read off the screen, not the title: {approval}"
+        );
+        let labels: Vec<&str> = approval["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            ["Allow", "Allow for this session", "Always allow", "Cancel"],
+            "{title}"
+        );
+
+        // An agent's prompt that happens to start with a digit, a bare
+        // option number and Enter are each an answer to the form: refused.
+        let agent = client_for(WI983_SESSION);
+        for text in ["Gitguard test (1) run board_list", "1", "\r"] {
+            let sent = agent
+                .post(format!("{base}/api/sessions/{id}/input"))
+                .json(&json!({ "text": text, "submit": true, "person": true }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(sent.status(), StatusCode::FORBIDDEN, "{title} {text:?}");
+            let said: Value = sent.json().await.unwrap();
+            assert!(
+                said["error"].as_str().unwrap().contains("person required"),
+                "{said}"
+            );
+        }
+        let answered = agent
+            .post(format!("{base}/api/sessions/{id}/answer"))
+            .json(&json!({ "option": 1, "person": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(answered.status(), StatusCode::FORBIDDEN, "{title}");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let typed = std::fs::read(&typed).unwrap_or_default();
+        assert!(
+            !typed.iter().any(|b| matches!(b, b'1' | b'\r' | b'G')),
+            "{title}: agent keys reached the form: {typed:?}"
+        );
+        let _ = operator
+            .post(format!("{base}/api/sessions/{id}/kill"))
+            .send()
+            .await;
+    }
+}
+
 async fn wi983_front_door() -> (String, tempfile::TempDir, ServerGuard) {
     let core = stand_in_core_knowing(vec![
         (
@@ -13661,6 +13921,68 @@ fn texts(entries: &Value, kind: &str) -> Vec<String> {
         .filter(|e| e["kind"] == kind)
         .map(|e| e["text"].as_str().unwrap_or("").to_string())
         .collect()
+}
+
+/// WI-1641: on the codex driver the first message must wait for the thread.
+/// The stand-in (`tests/fixtures/fake-codex-app-server.py`) answers
+/// `thread/start` late and refuses a `turn/start` for a thread it has not
+/// started, as the fork does; a chat that sends the turn early dies with
+/// `thread not found` instead of answering.
+#[tokio::test]
+async fn a_codex_chat_holds_its_first_turn_until_the_thread_is_ready() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: the stand-in app-server is written in python3");
+        return;
+    }
+    let bin = tempfile::tempdir().unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake-codex-app-server.py")
+        .canonicalize()
+        .unwrap();
+    let driver = bin.path().join("codex");
+    std::os::unix::fs::symlink(&fixture, &driver).unwrap();
+    let cfg = Config {
+        chat: vogt_engine_server::chats::ChatPolicy {
+            enabled: true,
+            command: Some(vec![driver.to_string_lossy().into_owned()]),
+            approval_timeout: Duration::from_secs(10),
+            ..Default::default()
+        },
+        session_templates: vec![],
+        ..test_config()
+    };
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "driver": "codex" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created: Value = created.json().await.unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+
+    let sent = chat_send(&client, &base, &id, "ping").await;
+    let chat: Value = client
+        .get(format!("{base}/api/chats/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entries = &chat["entries"];
+    assert_eq!(texts(entries, "assistant"), vec!["pong"], "{sent} {chat}");
+    assert!(texts(entries, "error").is_empty(), "{chat}");
 }
 
 #[tokio::test]
@@ -14675,15 +14997,42 @@ fn worktree_git(dir: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// A committed checkout at `repo` with a dirty edit, as the shared checkout is.
+/// A committed checkout at `repo` with a dirty edit, as the shared checkout is,
+/// whose local `main` lags `origin/main` (WI-1630). The bare origin is a
+/// sibling of the checkout, so the session start's fetch stays on disk.
 fn worktree_checkout(repo: &std::path::Path) {
-    std::fs::create_dir_all(repo).unwrap();
-    worktree_git(repo, &["init", "-q", "-b", "main"]);
+    let origin = repo.parent().unwrap().join("origin.git");
+    worktree_git(
+        repo.parent().unwrap(),
+        &[
+            "init",
+            "--bare",
+            "-q",
+            "-b",
+            "main",
+            &origin.display().to_string(),
+        ],
+    );
+    worktree_git(
+        repo.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            &origin.display().to_string(),
+            &repo.display().to_string(),
+        ],
+    );
     worktree_git(repo, &["config", "user.email", "t@example"]);
     worktree_git(repo, &["config", "user.name", "t"]);
     std::fs::write(repo.join("f.txt"), "base\n").unwrap();
     worktree_git(repo, &["add", "f.txt"]);
     worktree_git(repo, &["commit", "-q", "-m", "base"]);
+    worktree_git(repo, &["push", "-q", "origin", "main"]);
+    std::fs::write(repo.join("f.txt"), "remote\n").unwrap();
+    worktree_git(repo, &["add", "f.txt"]);
+    worktree_git(repo, &["commit", "-q", "-m", "remote"]);
+    worktree_git(repo, &["push", "-q", "origin", "main"]);
+    worktree_git(repo, &["reset", "--hard", "HEAD~1"]);
     std::fs::write(repo.join("f.txt"), "dirty\n").unwrap();
 }
 
@@ -14730,7 +15079,7 @@ async fn a_worktree_session_opens_in_its_worktree_and_wakes_back_into_it() {
     assert_eq!(created["cwd"], worktree.to_string_lossy().as_ref());
     assert_eq!(
         std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
-        "base\n"
+        "remote\n"
     );
     assert_eq!(
         worktree_git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
@@ -14882,6 +15231,52 @@ async fn a_worktree_outside_the_workspace_is_refused_before_it_is_cut() {
     }
 }
 
+/// A stand-in Klaudia that takes its next turn from a file rather than the
+/// PTY: each line appended to `turns.feed` starts one turn. An agent that
+/// prompts itself leaves no person-input stamp, and writing the PTY from the
+/// test would — the engine's own token counts as a person, which resets the
+/// idle clock the budget stop waits on.
+fn file_fed_klaudia(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("klaudia");
+    std::fs::write(dir.join("turns.feed"), "").unwrap();
+    std::fs::write(
+        &stub,
+        format!(
+            r#"#!/usr/bin/env bash
+ready() {{
+  printf '\033]0;klaudia: ready\007\033[2J\033[H'
+  printf '╭──────────────────────╮\r\n│ › Ask Klaudia…       │\r\n╰──────────────────────╯\r\n  grok · stand-in\r\n'
+}}
+ready
+n=0
+seen=0
+while true; do
+  lines=$(wc -l < '{feed}')
+  if [ "$lines" -gt "$seen" ]; then
+    seen=$lines
+    printf '\033]0;klaudia: working\007'
+    printf '  ⣟  thinking…  (esc to interrupt)\r\n'; sleep 0.3
+    n=$((n+1))
+    printf '{{"type":"assistant","timestamp":"2026-10-13T00:%02d:00Z","message":{{"content":"turn %s"}}}}\n' "$n" "$n" >> "$(cat '{at}')"
+    echo "$n" >> '{log}'
+    ready
+  fi
+  sleep 0.1
+done
+"#,
+            at = dir.join("transcript_at").display(),
+            log = dir.join("turns.log").display(),
+            feed = dir.join("turns.feed").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    stub
+}
+
 /// A stand-in Klaudia TUI for the budget tests (WI-1281). It announces its
 /// state in the window title the way Klaudia does, draws its idle input box at
 /// rest, and per line of input runs one turn: about 1.5 s of `(esc to
@@ -15027,6 +15422,102 @@ async fn a_klaudia_autopilot_session_hibernates_at_its_turn_budget() {
         std::fs::read_to_string(dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl")))
             .unwrap();
     assert_eq!(transcript.lines().count(), turns);
+}
+
+/// WI-1281, again: a blocked report must not keep a session past its budget.
+///
+/// The report is the agent's own word that it is waiting on a person, and the
+/// watcher defers to it. An agent that instead keeps taking turns while
+/// re-posting the report — each one worded differently, so no repeat guard
+/// sees a loop — used that deferral to run for hundreds of turns. Once the
+/// hard limit is crossed the report is cleared and the session hibernates at
+/// the next turn boundary, the same as one that never reported a block.
+#[tokio::test]
+async fn a_blocked_report_does_not_outrun_the_turn_budget() {
+    const LIMIT: usize = 3;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let stub = file_fed_klaudia(dir);
+    let (base, _h) = boot_with_config(budget_sandbox(dir)).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "klaudia reporting itself blocked",
+            "command": [stub.to_string_lossy()],
+            "autopilot": true,
+            "budget": { "turns": LIMIT, "wall_clock_minutes": 90 },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let conversation = created["conversation"]["id"].as_str().unwrap();
+    std::fs::write(
+        dir.join("transcript_at"),
+        dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl"))
+            .display()
+            .to_string(),
+    )
+    .unwrap();
+
+    // What the runaway sessions did: keep taking turns while re-reporting
+    // "blocked", each report worded differently. Autopilot will not nudge a
+    // blocked session, and the runaway did not need it to — it prompted
+    // itself. The turns are fed through a file so they leave no person-input
+    // stamp, and the feed stops once the limit is passed: past that the
+    // session sits at its prompt, which is where the stop lands.
+    let reporter = tokio::spawn({
+        let client = client.clone();
+        let base = base.clone();
+        let id = id.clone();
+        let feed = dir.join("turns.feed");
+        let log = dir.join("turns.log");
+        async move {
+            loop {
+                let done = std::fs::read_to_string(&log)
+                    .unwrap_or_default()
+                    .lines()
+                    .count();
+                if done > LIMIT {
+                    break;
+                }
+                client
+                    .post(format!("{base}/api/sessions/{id}/blocked"))
+                    .json(&json!({
+                        "blocked": true,
+                        "reason": format!("waiting on operator input, report {done}"),
+                    }))
+                    .send()
+                    .await
+                    .ok();
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&feed)
+                    .unwrap();
+                std::io::Write::write_all(&mut f, b"go on\n").unwrap();
+                tokio::time::sleep(Duration::from_millis(700)).await;
+            }
+        }
+    });
+
+    let row = wait_hibernated(&client, &base, &id, 60).await;
+    reporter.abort();
+    assert_eq!(row["hibernation"]["trigger"], "budget", "{row}");
+    // The report must not survive into the record a wake restores, or the
+    // session would come back still excused from its budget.
+    assert!(row.get("blocked").is_none_or(Value::is_null), "{row}");
+    let turns = turns_run(dir);
+    assert!(
+        (LIMIT..=LIMIT + 2).contains(&turns),
+        "stopped after {turns} turns against a limit of {LIMIT}"
+    );
 }
 
 /// WI-1281: the whole-session wall clock banks running time across turns and

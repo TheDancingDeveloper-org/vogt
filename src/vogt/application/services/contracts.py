@@ -525,6 +525,7 @@ def _view(criterion: object) -> CriterionView:
         target=criterion.target,  # type: ignore[attr-defined]
         satisfied=criterion.satisfied,  # type: ignore[attr-defined]
         detail=criterion.detail,  # type: ignore[attr-defined]
+        applicable=criterion.applicable,  # type: ignore[attr-defined]
         tracked=criterion.tracked,  # type: ignore[attr-defined]
     )
 
