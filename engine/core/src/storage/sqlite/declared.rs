@@ -799,8 +799,13 @@ impl ReadView for SqliteReadView {
             },
         )
     }
-    fn comments_for(&self, id: &str, limit: i64) -> Result<Vec<Comment>, VogtError> {
-        many(&self.conn, "SELECT c.*, a.display_name AS actor_display_name FROM comments c JOIN actors a ON a.id = c.actor_id WHERE c.work_item_id = ? ORDER BY c.created_at, c.id LIMIT ?", params![id, limit], row_comment)
+    fn comments_for(&self, id: &str, limit: i64, newest: bool) -> Result<Vec<Comment>, VogtError> {
+        let sql = if newest {
+            "SELECT c.*, a.display_name AS actor_display_name FROM comments c JOIN actors a ON a.id = c.actor_id WHERE c.work_item_id = ? ORDER BY c.created_at DESC, c.id DESC LIMIT ?"
+        } else {
+            "SELECT c.*, a.display_name AS actor_display_name FROM comments c JOIN actors a ON a.id = c.actor_id WHERE c.work_item_id = ? ORDER BY c.created_at, c.id LIMIT ?"
+        };
+        many(&self.conn, sql, params![id, limit], row_comment)
     }
     fn label_by_name(&self, name: &str) -> Result<Option<Label>, VogtError> {
         one(
@@ -1471,8 +1476,8 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
     fn unfinished_blockers(&self, a: &str, b: &[&str]) -> Result<Vec<Blocker>, VogtError> {
         self.view.unfinished_blockers(a, b)
     }
-    fn comments_for(&self, a: &str, b: i64) -> Result<Vec<Comment>, VogtError> {
-        self.view.comments_for(a, b)
+    fn comments_for(&self, a: &str, b: i64, newest: bool) -> Result<Vec<Comment>, VogtError> {
+        self.view.comments_for(a, b, newest)
     }
     fn label_by_name(&self, a: &str) -> Result<Option<Label>, VogtError> {
         self.view.label_by_name(a)
@@ -1843,7 +1848,11 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         Ok(())
     }
     fn insert_comment(&mut self, comment: &Comment) -> Result<(), VogtError> {
-        self.view.conn.execute("INSERT INTO comments (id, work_item_id, actor_id, body, created_at) VALUES (?, ?, ?, ?, ?)", params![comment.id, comment.work_item_id, comment.actor_id, comment.body, to_iso(comment.created_at)]).map_err(sql_err)?;
+        let data = comment
+            .handoff
+            .as_ref()
+            .map(|value| crate::decisions::python_json_dumps(value, false));
+        self.view.conn.execute("INSERT INTO comments (id, work_item_id, actor_id, body, created_at, kind, data) VALUES (?, ?, ?, ?, ?, ?, ?)", params![comment.id, comment.work_item_id, comment.actor_id, comment.body, to_iso(comment.created_at), comment.kind, data]).map_err(sql_err)?;
         Ok(())
     }
     fn insert_suppression(&mut self, suppression: &Suppression) -> Result<(), VogtError> {
@@ -3126,6 +3135,8 @@ fn row_relation(row: &Row<'_>) -> rusqlite::Result<crate::core::Relation> {
 }
 
 fn row_comment(row: &Row<'_>) -> rusqlite::Result<Comment> {
+    let raw: Option<String> = row.get("data").ok().flatten();
+    let handoff = raw.and_then(|text| serde_json::from_str(&text).ok());
     Ok(Comment {
         id: row.get("id")?,
         work_item_id: row.get("work_item_id")?,
@@ -3133,6 +3144,8 @@ fn row_comment(row: &Row<'_>) -> rusqlite::Result<Comment> {
         actor_display_name: row.get("actor_display_name")?,
         body: row.get("body")?,
         created_at: moment(row, "created_at")?,
+        kind: row.get("kind").unwrap_or_else(|_| "note".to_string()),
+        handoff,
     })
 }
 
@@ -3769,6 +3782,8 @@ mod more {
             actor_display_name: String::new(),
             body: "noted".into(),
             created_at: now,
+            kind: "note".into(),
+            handoff: None,
         })
         .unwrap();
         let audit = txn
@@ -3803,7 +3818,7 @@ mod more {
         assert_eq!(loaded.relations.len(), 1);
         assert_eq!(loaded.relations[0].related_ref, "WI-2");
         assert_eq!(
-            view.comments_for(&item.id, 10).unwrap()[0].actor_display_name,
+            view.comments_for(&item.id, 10, false).unwrap()[0].actor_display_name,
             actor.display_name
         );
         // The store, not the caller, owns the transaction id and revision.

@@ -202,7 +202,7 @@ pub fn brief_for_work_item(
         lines.push(String::new());
     }
 
-    let comments = view.comments_for(&item.id, 20)?;
+    let comments = view.comments_for(&item.id, 20, false)?;
     if !comments.is_empty() {
         lines.extend(["## Comments".to_string(), String::new()]);
         for comment in &comments {

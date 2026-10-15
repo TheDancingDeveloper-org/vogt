@@ -271,6 +271,7 @@ pub trait ReadView {
         &self,
         work_item_id: &str,
         limit: i64,
+        newest: bool,
     ) -> Result<Vec<Comment>, crate::errors::VogtError>;
     fn label_by_name(&self, name: &str) -> Result<Option<Label>, crate::errors::VogtError>;
     fn list_labels(&self, limit: i64, offset: i64) -> Result<Vec<Label>, crate::errors::VogtError>;

@@ -974,7 +974,7 @@ impl<'a, V: ReadView> Planner<'a, V> {
         if !self.target_comments.contains_key(work_item_id) {
             let ids = self
                 .view
-                .comments_for(work_item_id, BIG)?
+                .comments_for(work_item_id, BIG, false)?
                 .iter()
                 .map(|comment| comment.id.clone())
                 .collect();
@@ -1672,6 +1672,8 @@ fn apply_plan<T: WriteTxn>(
             actor_display_name: actor.display_name.clone(),
             body: note.body.clone(),
             created_at: now,
+            kind: "note".into(),
+            handoff: None,
         })?;
     }
     Ok(())
