@@ -3110,17 +3110,22 @@ class _Subject:
         return self.work_item_ref or self.project_slug
 
 
-def _git_common_dir(root: Path) -> str:
-    """`git rev-parse --git-common-dir` with config that cannot run hooks.
+def _git_probe(root: Path, flag: str) -> str:
+    """One `git rev-parse` question, with nothing the repo can run.
 
-    The directory is one the caller named, so the probe must not honour a
-    repo's fsmonitor, hooks, or system gitconfig. `-c` overrides the repo
-    config; `GIT_CONFIG_NOSYSTEM` drops the system one.
+    `rev-parse` runs no hooks. `core.fsmonitor` and `core.hooksPath` are
+    overridden so a repo's monitor and hooks are not consulted, and
+    `GIT_CONFIG_NOSYSTEM` drops the system gitconfig. Inherited `GIT_DIR`,
+    `GIT_WORK_TREE` and `GIT_COMMON_DIR` are removed so the engine's own
+    environment cannot point the probe at a different repository.
     """
 
-    env = os.environ.copy()
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG_COUNT"}
+    }
     env["GIT_CONFIG_NOSYSTEM"] = "1"
-    env["GIT_CONFIG_COUNT"] = "0"
     try:
         completed = subprocess.run(  # fixed argv, never a shell
             [
@@ -3132,7 +3137,7 @@ def _git_common_dir(root: Path) -> str:
                 "-c",
                 "core.hooksPath=/dev/null",
                 "rev-parse",
-                "--git-common-dir",
+                flag,
             ],
             capture_output=True,
             text=True,
@@ -3156,9 +3161,11 @@ def _existing_worktree_cwd(raw: str, project_root: str) -> str:
     Four checks, in the order a wrong path fails them: it exists, it sits
     under the workspace's real `Active/` directory (the parent of the
     project's registered checkout, not any path component named `Active`),
-    it is not that checkout itself, and it is a git worktree of the same
-    repository. The comparison is git's `commondir`, which a linked worktree
-    and the main checkout of one repository share and two repositories do not.
+    it is not inside that checkout (its git toplevel differs, so a linked
+    worktree nested under the checkout still passes), and it is a git
+    worktree of the same repository. The comparison is git's `commondir`,
+    which a linked worktree and the main checkout of one repository share
+    and two repositories do not.
     """
     path = Path(raw).expanduser()
     if not path.is_absolute():
@@ -3184,15 +3191,13 @@ def _existing_worktree_cwd(raw: str, project_root: str) -> str:
     if active.name != "Active" or not resolved.is_relative_to(active):
         msg = f"cwd {resolved} is not under the workspace Active/ directory ({active})"
         raise InvalidRequest(msg)
-    if resolved == checkout_resolved:
-        msg = (
-            f"cwd {resolved} is the project's shared checkout; name a "
-            "worktree of it instead"
-        )
-        raise InvalidRequest(msg)
     try:
-        asked = _git_common_dir(resolved)
-        owned = _git_common_dir(checkout_resolved)
+        asked = _git_probe(resolved, "--git-common-dir")
+        owned = _git_probe(checkout_resolved, "--git-common-dir")
+        # A subdirectory of the shared checkout shares its commondir and is
+        # under Active/, so the path comparison above misses it. Its
+        # toplevel is the checkout, which a linked worktree's is not.
+        toplevel = _git_probe(resolved, "--show-toplevel")
     except CollectorError as exc:
         msg = (
             f"cwd {resolved} is not a git worktree of the project's "
@@ -3214,6 +3219,17 @@ def _existing_worktree_cwd(raw: str, project_root: str) -> str:
         msg = (
             f"cwd {resolved} is not a git worktree of the project's "
             f"repository ({project_root})"
+        )
+        raise InvalidRequest(msg)
+    try:
+        top = Path(toplevel).resolve()
+    except OSError as exc:
+        msg = f"cwd {resolved} is not a git worktree: {exc}"
+        raise InvalidRequest(msg) from exc
+    if top == checkout_resolved:
+        msg = (
+            f"cwd {resolved} is inside the project's shared checkout; name a "
+            "worktree of it instead"
         )
         raise InvalidRequest(msg)
     return str(resolved)

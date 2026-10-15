@@ -860,8 +860,9 @@ than these routes.
   the workspace `Active/` directory (the parent of the project's registered
   checkout, not any path component named `Active`), and be a git worktree of
   the same repository as that checkout (the same git `commondir`). The
-  checkout itself is refused: a cwd start is how a worker stays off the
-  shared tree. A symlink is accepted as the directory it resolves to.
+  checkout, and any subdirectory of it, is refused: its git toplevel is
+  the checkout, so a worker cannot start inside the shared tree. A linked
+  worktree nested under the checkout has its own toplevel and is accepted. A symlink is accepted as the directory it resolves to.
   Combining it with an explicit `worktree: true` is refused before the
   engine is asked. A purpose whose profile would have set `worktree` (the
   `implement` profile does) does not: `cwd` means the checkout already
