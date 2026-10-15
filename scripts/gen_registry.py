@@ -9,10 +9,10 @@ against a Python tree that had grown to 134). Run this after changing the
 Python operation set; the committed golden at
 `tests/parity/golden/registry.json` is what the Rust dump is checked against.
 
-The golden is recorded from Python's own `registry.dump`, with the parameter
-and result schemas replaced by ``{"not_ported": true}``. Real schemas arrive
-with the schema emitter (WI-1060); until then the marker is honest, and it is
-deliberately not hidden by a normaliser rule.
+The golden and `schemas.rs` are recorded from Python's own `registry.dump`,
+schemas included. `--check` diffs both, so a model change that alters a
+schema fails here rather than at the next review. Deriving those schemas
+from Rust types, instead of recording pydantic's, remains WI-1060.
 """
 
 from __future__ import annotations
@@ -191,6 +191,14 @@ def main() -> int:
     rendered = render_operations_rs(operations)
     strips = record_strips()
     outputs = {OPERATIONS_RS: rendered, STRIPS_RS: strips}
+    # The schema table and the registry golden are Python's own dump. They
+    # are checked on --check as well as written, so a model change that
+    # alters a schema cannot pass CI while the Rust table still describes
+    # the old one. `record_golden` imports the registry, so it needs the
+    # package importable; the metadata check above does not.
+    golden, schemas = record_golden()
+    outputs[GOLDEN] = golden
+    outputs[SCHEMAS_RS] = schemas
     if check:
         # Drift fails here, at the Python source, rather than waiting for
         # someone to remember to regenerate. The Rust test checks the same
