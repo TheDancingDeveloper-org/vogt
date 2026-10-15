@@ -2439,6 +2439,117 @@ def test_naming_a_forbidden_model_is_refused_too(
     assert engine.sent == []
 
 
+def test_forbidden_text_refuses_a_model_never_models_does_not_list(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1590: `(?i)grok` is the project's rule even when never_models is
+    empty, and it applies to the model the purpose filled in."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(forbidden_text=["(?i)grok"]),
+            reason=WHY,
+        ),
+    )
+    with pytest.raises(PolicyRefused, match="forbidden_text"):
+        start_session(
+            wired,
+            StartSessionParams(
+                work_item="WI-1", purpose="implement", task="fix it", reason=WHY
+            ),
+        )
+    assert engine.sent == []
+
+
+def test_forbidden_text_refuses_a_model_the_caller_names(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Purpose plus an explicit model is the same check: naming grok-4.8
+    over the profile still matches `(?i)grok`."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(
+                forbidden_text=["(?i)grok"],
+                review=ReviewPolicy(never_models=["something-else"]),
+            ),
+            reason=WHY,
+        ),
+    )
+    with pytest.raises(PolicyRefused, match="forbidden_text"):
+        start_session(
+            wired,
+            StartSessionParams(
+                work_item="WI-1",
+                purpose="implement",
+                model="grok-4.8",
+                reason=WHY,
+            ),
+        )
+    assert engine.sent == []
+
+
+def test_claude_refuses_a_model_it_does_not_speak(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """`template=claude` with a non-Anthropic model id would launch
+    `claude --model grok-4.7`. The template's own name resolves the same way
+    the engine resolves a tag."""
+    with pytest.raises(PolicyRefused, match="Claude Code"):
+        start_session(
+            wired,
+            StartSessionParams(
+                project="vogt", template="claude", model="grok-4.7", reason=WHY
+            ),
+        )
+    with pytest.raises(PolicyRefused, match="Claude Code"):
+        start_session(
+            wired,
+            StartSessionParams(
+                project="vogt",
+                template="Claude Code (protected)",
+                model="grok-4.7",
+                reason=WHY,
+            ),
+        )
+    assert engine.sent == []
+
+
+def test_claude_accepts_an_anthropic_model(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """A claude model id, and the aliases Claude Code resolves itself, start."""
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", template="claude", model="claude-opus-4-5", reason=WHY
+        ),
+    )
+    assert engine.last_spec["model"] == "claude-opus-4-5"
+    start_session(
+        wired,
+        StartSessionParams(project="vogt", template="claude", model="opus", reason=WHY),
+    )
+    assert engine.last_spec["model"] == "opus"
+
+
+def test_klaudia_may_run_a_model_claude_refuses(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The refusal is about Claude Code, not about the model. The implement
+    profile's own pairing — klaudia with grok-4.7 — keeps starting."""
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="implement", task="fix it", reason=WHY
+        ),
+    )
+    assert engine.last_spec["template"] == "klaudia"
+    assert engine.last_spec["model"] == "grok-4.7"
+
+
 def test_a_model_the_project_does_not_forbid_still_starts(
     wired: AppContext, engine: StandInEngine
 ) -> None:
