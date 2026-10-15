@@ -465,6 +465,12 @@ RUN set -eu; \
             arm64) target=aarch64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_ARM64" ;; \
             *) echo "no pinned Codex for $(dpkg --print-architecture)" >&2; exit 1 ;; \
         esac; \
+        # An empty checksum means this architecture is not in the release
+        # (WI-1594: x86_64 only). Skip the download rather than failing the
+        # image build; amd64 still checks the recorded member.
+        if [ -z "$codex_sum" ]; then \
+            echo "no Codex release for $(dpkg --print-architecture); leaving the image copy unset" >&2; \
+        else \
         asset="codex-${target}.tar.gz"; \
         curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${codex_sha}/${asset}" -o "/tmp/${asset}"; \
         curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${codex_sha}/SHA256SUMS" -o /tmp/SHA256SUMS; \
@@ -478,6 +484,7 @@ RUN set -eu; \
         rm -rf "/tmp/${asset}" /tmp/SHA256SUMS "/tmp/${target}"; \
         ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex; \
         /usr/local/libexec/codex-real --version; \
+        fi; \
     fi
 
 # Klaudia (WI-950), built from the pinned commit with the pinned Go: no
