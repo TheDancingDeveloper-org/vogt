@@ -713,7 +713,8 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     assert litellm["base_url"] == "http://100.92.54.45:4000/v1"
     assert litellm["wire_api"] == "chat"
     assert litellm["env_key"] == "HOMELAB_LITELLM_SESSION_KEY"
-    assert litellm["web_search"] == "disabled"
+    # web_search is not a setting this Codex fork recognises; it is not written.
+    assert "web_search" not in litellm
     assert "experimental_bearer_token" not in litellm
     # grok is not in Codex's bundled catalog, so bootstrap hands it one:
     # apply_patch freeform, and no tool_mode (code mode stays off).
@@ -721,7 +722,9 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     assert parsed["model_catalog_json"] == str(catalog_path)
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     # Groups a session-key completion answered (WI-1592). Not or-deepseek
-    # (blocked), not bedrock (absent), not the DLab models that 400/401/503.
+    # (blocked), not bedrock (absent), not the DLab models that 400/401/503,
+    # and not qwen3-coder / qwen3-8-27b / gpt-oss-120b, which fail inside
+    # LiteLLM (408 / hang; re-adding them is WI-1631).
     # The fork sorts by priority ascending and defaults to the first visible one.
     by_priority = sorted(catalog["models"], key=lambda model: model["priority"])
     assert [model["slug"] for model in by_priority] == [
@@ -733,9 +736,6 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
         "or-deepseek-flash",
         "or-gemini-flash",
         "or-glm-5-3",
-        "qwen3-coder",
-        "qwen3-8-27b",
-        "gpt-oss-120b",
         "dlab-deepseek-v4-pro",
         "dlab-deepseek-v4-1-flash",
         "dlab-grok-4-5",
