@@ -116,7 +116,12 @@ it with a digest), and the runtime. The runtime stage starts `FROM` a
 `ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean-*`): an Ubuntu image
 carrying the toolchains an agent working *inside* a session is likely to want
 — Node, Rust, Java/Gradle, the Android SDK; its `INSTALL_FLUTTER` build
-argument adds Flutter for a pod that builds the Android app. It is a
+argument adds Flutter for a pod that builds the Android app. A third variant,
+`workbench`, is `full` plus the public session tools (Chrome and `chrome-ci`,
+Python 3.12, Terraform, sshpass, pingcli, actionlint, and the Tailscale
+client, which the image never joins). `build.yml` publishes the merged image
+built on it as `vogt-stack-workbench`; nothing in this repository deploys
+that image. It is a
 development pod rather than a hardened service image — it runs as a named
 user with `sudo`, with a writable home — which is why the core image at the
 repository root is a separate build rather than a stage of this one: it is
