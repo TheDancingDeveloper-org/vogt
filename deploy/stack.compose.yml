@@ -43,7 +43,7 @@ services:
     # `prod-<sha>` tags in the same repository are the maintainer's own pods:
     # same CLIs, plus estate integrations that address one estate's
     # infrastructure and mean nothing outside it. See DEPLOYMENT.md.
-    image: ${VOGT_STACK_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.14}
+    image: ${VOGT_STACK_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.16}
     restart: unless-stopped
 
     # tini as PID 1 reaps the processes agent sessions leave behind. The
@@ -197,6 +197,7 @@ services:
       # floating pin is a deliberate opt-in. See DEPLOYMENT.md.
       VOGT_CLAUDE_CODE_VERSION: "${VOGT_CLAUDE_CODE_VERSION:-}"
       VOGT_CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
+      VOGT_CODEX_ACP_VERSION: "${VOGT_CODEX_ACP_VERSION:-}"
       VOGT_OPENCODE_VERSION: "${VOGT_OPENCODE_VERSION:-}"
       VOGT_GO_VERSION: "${VOGT_GO_VERSION:-}"
       VOGT_KLAUDIA_VERSION: "${VOGT_KLAUDIA_VERSION:-}"
@@ -262,7 +263,7 @@ services:
     # Digest-pin this for a real deployment, exactly as the stack
     # image above. Pin the release family (`X.Y.Z`, `latest`); the default is a
     # tag so the file is runnable as-is.
-    image: ${VOGT_VOICE_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.14}
+    image: ${VOGT_VOICE_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.16}
     restart: unless-stopped
     # It only reads its baked models and writes audio to tmpfs, so it can run
     # locked down even though the pod beside it cannot.
@@ -285,6 +286,11 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # Opt-in Prometheus scrape, same idea as ENGINE_METRICS_ADDR on the engine:
+    # its own listener, off when empty, never the API port. Publish the port
+    # from an overlay only where the scraper sits.
+    environment:
+      VOGT_VOICE_METRICS_ADDR: "${VOGT_VOICE_METRICS_ADDR:-}"
 
 volumes:
   engine-home:

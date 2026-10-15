@@ -49,23 +49,42 @@ pub fn response_err(id: &str, message: &str) -> String {
 }
 
 /// `initialize` with the thread id the fork accepts on `thread/start` (WI-1126).
+///
+/// A caller-chosen `threadId` is an experimental field on the fork
+/// (`thread/start.threadId requires experimentalApi capability`,
+/// `app-server-protocol/src/experimental_api.rs`). The capability is the
+/// `experimentalApi` boolean on `InitializeParams.capabilities`
+/// (`schema/json/v1/InitializeParams.json`). Without it the fork rejects
+/// `thread/start` and the following `turn/start` answers `thread not found`.
 pub fn initialize(id: &str) -> String {
     request(
         id,
         METHOD_INITIALIZE,
         json!({
             "clientInfo": { "name": "vogt-engine", "version": "0" },
-            "capabilities": {}
+            "capabilities": { "experimentalApi": true }
         }),
     )
 }
 
+/// First visible catalog slug. Codex's built-in default (`gpt-6-astra`) is not
+/// a catalog slug, and a custom `model_provider` rejects it (WI-1638).
+pub const DEFAULT_MODEL: &str = "grok";
+
 pub fn thread_start(id: &str, thread_id: Uuid, model: Option<&str>) -> String {
-    let mut params = json!({ "threadId": thread_id.to_string(), "approvalPolicy": "on-request" });
-    if let Some(model) = model {
-        params["model"] = json!(model);
-    }
-    request(id, METHOD_THREAD_START, params)
+    let model = model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(DEFAULT_MODEL);
+    request(
+        id,
+        METHOD_THREAD_START,
+        json!({
+            "threadId": thread_id.to_string(),
+            "approvalPolicy": "on-request",
+            "model": model
+        }),
+    )
 }
 
 pub fn thread_resume(id: &str, thread_id: Uuid) -> String {
@@ -123,27 +142,29 @@ pub fn app_server_argv(binary: &str) -> Vec<String> {
 /// session key.
 pub fn home_config(env_key: &str) -> String {
     format!(
-        r#"[model_providers.litellm]
+        // Root keys come before the first table: a key after
+        // `[model_providers.litellm]` belongs to that table, and Codex then
+        // ignores it and starts on its own OpenAI default (WI-1640).
+        r#"model_provider = "litellm"
+model = "{DEFAULT_MODEL}"
+model_catalog_json = "vogt-model-catalog.json"
+
+[model_providers.litellm]
 name = "litellm"
 base_url = "{LITELLM_BASE}"
 wire_api = "chat"
 env_key = "{env_key}"
 requires_openai_auth = false
 supports_websockets = false
-web_search = "disabled"
-
-model_provider = "litellm"
-model = "grok"
-model_catalog_json = "vogt-model-catalog.json"
 "#
     )
 }
 
 /// The router-group catalog WI-1147 writes, one ModelsResponse entry per
-/// LiteLLM group (grok, code, small, reasoning, vision, premium). The fork
-/// sorts by priority ascending and takes the first visible model as the
-/// default, so priority is the index in router order and grok stays first.
-/// premium is the router's opt-in group, hidden from the picker.
+/// LiteLLM group that answers a chat completion (WI-1592). The fork sorts
+/// by priority ascending and takes the first visible model as the default,
+/// so priority is the index in router order and grok stays first. premium
+/// is the router's opt-in group, hidden from the picker.
 pub fn model_catalog() -> String {
     fn entry(slug: &str, priority: u8, visibility: &str) -> String {
         format!(
@@ -179,7 +200,30 @@ pub fn model_catalog() -> String {
     }
     // Same groups, in the same order, as ROUTER_GROUPS in mcp-bootstrap.sh.
     // Priority is the index: the fork sorts ascending and defaults to the first.
-    let groups = ["grok", "code", "small", "reasoning", "vision", "premium"];
+    let groups = [
+        "grok",
+        "code",
+        "small",
+        "reasoning",
+        "vision",
+        "or-deepseek-flash",
+        "or-gemini-flash",
+        "or-glm-5-3",
+        "qwen3-coder",
+        "qwen3-8-27b",
+        "gpt-oss-120b",
+        "dlab-deepseek-v4-pro",
+        "dlab-deepseek-v4-1-flash",
+        "dlab-grok-4-5",
+        "dlab-grok-4-6",
+        "dlab-grok-4-7",
+        "dlab-gemini-3-8-flash",
+        "dlab-glm-5-3",
+        "dlab-glm-5-3-flash",
+        "dlab-glm-5-3-flashx",
+        "dlab-kimi-k3",
+        "premium",
+    ];
     let body = groups
         .iter()
         .enumerate()
@@ -198,10 +242,17 @@ pub fn model_catalog() -> String {
 /// What one server line means for the chat transcript.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodexEvent {
-    /// The handshake answered; the thread may be started or resumed.
+    /// `initialize` answered and the thread may be started or resumed.
     Initialized,
+    /// `initialize` was refused. The thread request must not be sent: the
+    /// fork would reject `threadId` and the next turn would say the thread
+    /// was never created.
+    InitializeFailed(String),
     /// `thread/start` or `thread/resume` answered.
     ThreadReady,
+    /// `thread/start` or `thread/resume` was refused. A later `turn/start`
+    /// would answer `thread not found`; the chat records this instead.
+    ThreadFailed(String),
     /// Assistant text.
     Assistant(String),
     /// A tool the agent is about to run.
@@ -349,6 +400,15 @@ fn parse_response(msg: &Value) -> CodexEvent {
                 error: Some(message.to_string()),
             };
         }
+        // `thread/start` and `thread/resume` share the `start`/`resume` ids the
+        // handshake sends. Their refusal means the thread was never created, so
+        // the follow-on `turn/start` (`thread not found`) is the same failure.
+        if id == "start" || id == "resume" {
+            return CodexEvent::ThreadFailed(message.to_string());
+        }
+        if id == "init" {
+            return CodexEvent::InitializeFailed(message.to_string());
+        }
         return CodexEvent::Notice(message.to_string());
     }
     let result = msg.get("result").cloned().unwrap_or(Value::Null);
@@ -370,6 +430,65 @@ fn parse_response(msg: &Value) -> CodexEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_declares_experimental_api_before_the_thread() {
+        // Recorded from the fork's app-server (WI-1632). Without
+        // capabilities.experimentalApi, thread/start.threadId is rejected with
+        // "thread/start.threadId requires experimentalApi capability" and the
+        // turn that follows answers "thread not found".
+        let id = Uuid::nil();
+        let init: Value = serde_json::from_str(&initialize("init")).unwrap();
+        assert_eq!(init["method"], "initialize");
+        assert_eq!(init["params"]["capabilities"]["experimentalApi"], true);
+
+        let start: Value = serde_json::from_str(&thread_start("start", id, Some("grok"))).unwrap();
+        assert_eq!(start["method"], "thread/start");
+        assert_eq!(start["params"]["threadId"], id.to_string());
+
+        let initialized = r#"{"jsonrpc":"2.0","id":"init","result":{"userAgent":"0.153.4-vogt.1","capabilities":{"experimentalApi":true}}}"#;
+        assert_eq!(parse_line(initialized), CodexEvent::Initialized);
+
+        let ready =
+            format!(r#"{{"jsonrpc":"2.0","id":"start","result":{{"thread":{{"id":"{id}"}}}}}}"#);
+        assert_eq!(parse_line(&ready), CodexEvent::ThreadReady);
+
+        let rejected = r#"{"jsonrpc":"2.0","id":"start","error":{"code":-32600,"message":"thread/start.threadId requires experimentalApi capability"}}"#;
+        assert_eq!(
+            parse_line(rejected),
+            CodexEvent::ThreadFailed(
+                "thread/start.threadId requires experimentalApi capability".into()
+            )
+        );
+        let missing = format!(
+            r#"{{"jsonrpc":"2.0","id":"turn-1","error":{{"code":-32600,"message":"thread not found: {id}"}}}}"#
+        );
+        assert_eq!(
+            parse_line(&missing),
+            CodexEvent::TurnEnd {
+                error: Some(format!("thread not found: {id}"))
+            }
+        );
+        let handshake = r#"{"jsonrpc":"2.0","id":"init","error":{"message":"initialize refused"}}"#;
+        assert_eq!(
+            parse_line(handshake),
+            CodexEvent::InitializeFailed("initialize refused".into())
+        );
+    }
+
+    #[test]
+    fn thread_start_without_a_model_uses_the_catalog_default() {
+        let id = Uuid::nil();
+        for omitted in [None, Some(""), Some("  ")] {
+            let v: Value = serde_json::from_str(&thread_start("start", id, omitted)).unwrap();
+            assert_eq!(v["method"], METHOD_THREAD_START);
+            assert_eq!(v["params"]["model"], DEFAULT_MODEL);
+        }
+        let named: Value = serde_json::from_str(&thread_start("start", id, Some("code"))).unwrap();
+        assert_eq!(named["params"]["model"], "code");
+        let cfg = home_config("ENGINE_CHAT_PROVIDER_KEY");
+        assert!(cfg.contains(&format!("model = \"{DEFAULT_MODEL}\"")));
+    }
 
     #[test]
     fn turn_start_names_the_chat_thread() {
@@ -430,6 +549,21 @@ mod tests {
         assert!(cfg.contains("env_key = \"ENGINE_CHAT_PROVIDER_KEY\""));
         assert!(cfg.contains(LITELLM_BASE));
         assert!(!cfg.contains("HOMELAB_LITELLM_SESSION_KEY"));
+        // The provider, model and catalog are root keys, not part of the
+        // provider table (WI-1640).
+        let root: toml::Table = cfg.parse().unwrap();
+        assert_eq!(root["model_provider"].as_str(), Some("litellm"));
+        assert_eq!(root["model"].as_str(), Some(DEFAULT_MODEL));
+        assert_eq!(
+            root["model_catalog_json"].as_str(),
+            Some("vogt-model-catalog.json")
+        );
+        let litellm = root["model_providers"]["litellm"].as_table().unwrap();
+        assert!(!litellm.contains_key("model"));
+        assert_eq!(
+            litellm["env_key"].as_str(),
+            Some("ENGINE_CHAT_PROVIDER_KEY")
+        );
         let catalog: Value = serde_json::from_str(&model_catalog()).unwrap();
         let models = catalog["models"].as_array().unwrap();
         let mut sorted = models.clone();
@@ -439,7 +573,30 @@ mod tests {
                 .iter()
                 .map(|model| model["slug"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["grok", "code", "small", "reasoning", "vision", "premium"]
+            [
+                "grok",
+                "code",
+                "small",
+                "reasoning",
+                "vision",
+                "or-deepseek-flash",
+                "or-gemini-flash",
+                "or-glm-5-3",
+                "qwen3-coder",
+                "qwen3-8-27b",
+                "gpt-oss-120b",
+                "dlab-deepseek-v4-pro",
+                "dlab-deepseek-v4-1-flash",
+                "dlab-grok-4-5",
+                "dlab-grok-4-6",
+                "dlab-grok-4-7",
+                "dlab-gemini-3-8-flash",
+                "dlab-glm-5-3",
+                "dlab-glm-5-3-flash",
+                "dlab-glm-5-3-flashx",
+                "dlab-kimi-k3",
+                "premium",
+            ]
         );
         // The fork defaults to the first visible model after an ascending sort.
         assert_eq!(sorted[0]["slug"], "grok");

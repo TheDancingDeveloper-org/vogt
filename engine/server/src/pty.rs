@@ -165,6 +165,10 @@ pub struct Session {
     /// prompt. While set, autopilot does not re-prompt the session, so it comes
     /// to rest at its prompt and the action lands at a turn boundary (WI-1281).
     budget_hold: AtomicBool,
+    /// A `ready` change has already been published for the current turn
+    /// (WI-1519). Set when one is, cleared when the next turn starts, so a
+    /// session that keeps idling does not announce readiness again.
+    ready_announced: AtomicBool,
 }
 
 impl Session {
@@ -1254,6 +1258,7 @@ pub fn spawn(
         budget_running_since: Mutex::new(None),
         budget_session_banked: Mutex::new(Duration::ZERO),
         budget_hold: AtomicBool::new(false),
+        ready_announced: AtomicBool::new(false),
     });
 
     spawn_reader_thread(
@@ -1625,6 +1630,13 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
             }
 
             if session.activity() != ActivityState::Running {
+                // Already at rest, but the prompt can land after the output
+                // that ended the turn: a window title set a moment later, or a
+                // box drawn once the burst settles (WI-1519). One more look
+                // when the screen changes, so that rest still becomes `ready`.
+                if session.activity() == ActivityState::Idle {
+                    announce_ready_if_at_prompt(&session, ActivityState::Idle, &bus);
+                }
                 session.activity_notify.notified().await;
                 continue;
             }
@@ -1633,7 +1645,7 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
             // byte: an identical repaint is not work (WI-1090).
             let reference = session.last_change().unwrap_or(session.spawned_at);
             let elapsed_ms = reference.elapsed().as_millis() as u64;
-            if elapsed_ms >= session.idle_after_ms {
+            let wait_ms = if elapsed_ms >= session.idle_after_ms {
                 let new_state = if session.last_output.lock().is_some() {
                     // Settle pending output before classifying.
                     let _ = session.last_change();
@@ -1642,13 +1654,21 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
                     ActivityState::Idle
                 };
                 update_activity_if_changed(&session, new_state, &bus);
-                continue;
-            }
+                if session.activity() != ActivityState::Running {
+                    continue;
+                }
+                // Still running though the screen is quiet: a `working`
+                // title holds the turn open (WI-1598). Wait a full window
+                // before asking again — looping straight back never yields,
+                // pinning a runtime worker and starving every other task on
+                // it, terminal input included (WI-1644).
+                session.idle_after_ms
+            } else {
+                session.idle_after_ms - elapsed_ms
+            };
 
             let epoch = session.activity_epoch.load(Ordering::Acquire);
-            let sleep = tokio::time::sleep(std::time::Duration::from_millis(
-                session.idle_after_ms - elapsed_ms,
-            ));
+            let sleep = tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
             tokio::pin!(sleep);
 
             tokio::select! {
@@ -1688,6 +1708,36 @@ const APPROVAL_SCAN_BYTES: usize = 4096;
 /// whose title this engine reads.
 fn title_says(title: Option<&str>, state: crate::screen::AgentTitle) -> bool {
     crate::screen::agent_title(title).is_some_and(|(_, found)| found == state)
+}
+
+/// How an agent's window title revises the state the quiet window computed.
+///
+/// `ready` only ever moves toward rest, and only when the screen does not show
+/// a turn: anything in the session can set a title. `working` moves the other
+/// way, because the fork's `agent-state` title changes before the screen does
+/// (WI-1598). An untitled agent, or one whose title this engine does not read,
+/// is left as the quiet window classified it.
+fn titled_activity(
+    state: ActivityState,
+    titled: bool,
+    title: Option<&str>,
+    screen_busy: bool,
+) -> ActivityState {
+    if !titled {
+        return state;
+    }
+    if title_says(title, crate::screen::AgentTitle::Ready)
+        && state == ActivityState::Running
+        && !screen_busy
+    {
+        ActivityState::Idle
+    } else if title_says(title, crate::screen::AgentTitle::Working)
+        && matches!(state, ActivityState::Idle | ActivityState::WaitingForInput)
+    {
+        ActivityState::Running
+    } else {
+        state
+    }
 }
 
 /// A permission dialog inferred from the window title alone, when the rendered
@@ -1733,23 +1783,16 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
         *session.approval.lock() = None;
         return session.terminal_state().unwrap_or(state);
     }
-    // Klaudia (WI-1090) and the WI-1127 Codex fork (WI-1145) say when they are
-    // at rest in the window title, and that word outranks output recency:
-    // whatever the TUI still draws there is not a turn. Only ever towards
-    // rest — a `running` the title would force could not collapse when the
-    // output stops, and the watcher would spin on it. A title anything in the
-    // session could have set is checked against the screen: no working line or
-    // question showing under it. Codex has no marker of its own, so it shares
-    // Klaudia's.
-    let state = if state == ActivityState::Running
-        && title_says(session.title().as_deref(), crate::screen::AgentTitle::Ready)
-        && matches!(session.agent().as_deref(), Some("klaudia" | "codex"))
-        && !crate::screen::klaudia_busy(&session.render_screen(0).0.lines)
-    {
-        ActivityState::Idle
-    } else {
-        state
-    };
+    // The title outranks the quiet window in both directions (WI-1598). A
+    // `ready` title collapses a still-drawing TUI to rest, and a `working`
+    // title keeps the turn running while the TUI has gone quiet: the fork's
+    // agent-state title turns to `codex: working` at the start of a turn,
+    // before the screen has changed enough to move the change clock, so the
+    // quiet window alone reads `idle` while the title says working. Only for
+    // an agent whose title this engine reads, and never over a terminal state.
+    let titled = matches!(session.agent().as_deref(), Some("klaudia" | "codex"));
+    let screen_busy = crate::screen::klaudia_busy(&session.render_screen(0).0.lines);
+    let state = titled_activity(state, titled, session.title().as_deref(), screen_busy);
     // A permission dialog overrides whatever the tail heuristics said: its
     // countdown keeps redrawing (so it reads `running`) and its menu ends in
     // `❯ 1.` (so it reads `waiting-for-input`), and either way a driver must
@@ -1802,14 +1845,19 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
 /// activity lock, and the event is published under it too, so subscribers
 /// see the transitions in the order they were stored.
 fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &EventBus) {
-    let mut a = session.activity.lock();
-    let new = session.terminal_state().unwrap_or(new);
-    if *a != new {
+    let settled = {
+        let mut a = session.activity.lock();
+        let new = session.terminal_state().unwrap_or(new);
+        if *a == new {
+            return;
+        }
         let now = time::OffsetDateTime::now_utc();
         // A turn starts when the session goes to work from rest; a permission
         // dialog in the middle of a turn, answered, resumes the same turn.
         if begins_turn(*a, new) {
             *session.turn_started_at.lock() = Some(now);
+            // The next rest at a prompt is a new turn's readiness (WI-1519).
+            session.ready_announced.store(false, Ordering::Release);
         }
         if new != ActivityState::AwaitingApproval {
             *session.approval.lock() = None;
@@ -1818,6 +1866,8 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
         if new.is_terminal() {
             *session.blocked.lock() = None;
         }
+        let came_to_rest = (*a == ActivityState::Running || *a == ActivityState::Idle)
+            && new == ActivityState::Idle;
         *a = new;
         *session.activity_since.lock() = Instant::now();
         *session.activity_changed_at.lock() = now;
@@ -1829,6 +1879,39 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
             approval: session.approval_prompt(),
             turn_started_at: session.turn_started_at().map(format_rfc3339),
         });
+        came_to_rest.then_some(new)
+    };
+    // A worker that finished a turn and rests at its prompt is ready, even
+    // when the activity reads `idle` rather than `waiting-for-input`: Claude
+    // Code's boxed prompt rarely matches the waiting patterns, and Klaudia and
+    // Codex are forced to `idle` by their window title (WI-1519). `idle` itself
+    // stays out of the change feed — a session that went quiet mid-turn is not
+    // ready — so readiness is its own event, and at most one of them per turn.
+    // The render happens after the activity lock is dropped: reading the grid
+    // under it would stall the PTY reader on a screen render.
+    if let Some(resting) = settled {
+        announce_ready_if_at_prompt(session, resting, bus);
+    }
+}
+
+/// Publish one `ready` change when `session` has just gone idle and its screen
+/// shows a prompt a driver can type into. At most one per turn: an earlier
+/// rest in the same turn that was not at a prompt does not count, because the
+/// prompt often lands a moment after the output that began the turn.
+fn announce_ready_if_at_prompt(session: &Session, resting: ActivityState, bus: &EventBus) {
+    if session.ready_announced.load(Ordering::Acquire) {
+        return;
+    }
+    let (rendered, _) = session.render_screen(0);
+    let ready = crate::screen::is_ready(
+        resting,
+        session.is_alive(),
+        &rendered.lines,
+        session.agent().as_deref(),
+        rendered.title.as_deref(),
+    );
+    if ready && !session.ready_announced.swap(true, Ordering::AcqRel) {
+        bus.publish(ServerEvent::SessionReady { id: session.id });
     }
 }
 
@@ -1893,6 +1976,57 @@ mod turn_tests {
         assert!(!begins_turn(Running, Running));
         assert!(!begins_turn(Running, Idle));
         assert!(!begins_turn(Idle, AwaitingApproval));
+    }
+
+    /// The sequence the fork actually writes (WI-1598): `codex: ready` at rest,
+    /// `codex: working` at the start of a turn — before the screen has changed,
+    /// so the quiet window still says idle — then `codex: awaiting approval`
+    /// for an MCP elicitation, then `codex: ready` again. The title has to
+    /// carry the activity through that, not only demote a busy screen to idle.
+    #[test]
+    fn a_working_title_is_running_while_the_quiet_window_says_idle() {
+        use crate::activity::classify;
+        use std::time::{Duration, Instant};
+
+        let quiet = Instant::now() - Duration::from_secs(10);
+        let titles = [
+            ("codex: ready", false),
+            ("codex: working", true),
+            ("codex: working · editing", true),
+            ("codex: awaiting approval", false),
+            ("codex: ready", false),
+        ];
+        let mut seen_running = false;
+        for (title, working) in titles {
+            // The screen has not changed, so the quiet window reads idle.
+            let from_quiet = classify(Some(quiet), b"", 1_500, None);
+            assert_eq!(from_quiet, Idle, "{title}");
+            let state = super::titled_activity(from_quiet, true, Some(title), false);
+            if working {
+                assert_eq!(state, Running, "{title} must read running");
+                seen_running = true;
+            } else if title.contains("approval") {
+                // The title dialog, applied after this, is what makes it
+                // awaiting-approval. This step must not have called it idle.
+                assert_ne!(state, Running, "{title}");
+            } else {
+                assert_eq!(state, Idle, "{title} is at rest");
+            }
+        }
+        assert!(seen_running);
+
+        // A title anything in the session could have set does not outrank a
+        // screen that shows a turn, and an agent with no title of its own
+        // stays on the quiet window.
+        let recent = classify(Some(Instant::now()), b"drawing", 1_500, None);
+        assert_eq!(
+            super::titled_activity(recent, true, Some("codex: ready"), true),
+            Running
+        );
+        assert_eq!(
+            super::titled_activity(Idle, false, Some("codex: working"), false),
+            Idle
+        );
     }
 }
 

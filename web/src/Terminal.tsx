@@ -1,5 +1,6 @@
 import { Component, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { listSessions } from "./vogtApi";
+
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -36,6 +37,36 @@ import {
 } from "./terminalReplay";
 import { planDormantResume } from "./terminalDormancy";
 import { acquireDormantSlot, releaseDormantSlot } from "./dormantSlots";
+import { acquireInitialAttach } from "./initialAttachSlots";
+
+/** How long one `session.list` answer serves every terminal that mounts. */
+const WORK_ITEM_LINKS_TTL_MS = 5000;
+let workItemLinksRead: { at: number; answer: ReturnType<typeof listSessions> } | null = null;
+
+/**
+ * The full session list, read once for every terminal mounting together.
+ * Each mount used to read it for itself, so warming ~70 terminals fired ~70
+ * full lists in under a second (WI-1413). A failed read is not kept.
+ */
+/** Drop the shared read, so the next mount asks again (tests). */
+export function forgetWorkItemLinks(): void {
+  workItemLinksRead = null;
+}
+
+export function workItemLinks(): ReturnType<typeof listSessions> {
+  const now = Date.now();
+  if (workItemLinksRead && now - workItemLinksRead.at < WORK_ITEM_LINKS_TTL_MS) {
+    return workItemLinksRead.answer;
+  }
+  const answer = listSessions({ include_stopped: true });
+  const read = { at: now, answer };
+  workItemLinksRead = read;
+  answer.catch(() => {
+    if (workItemLinksRead === read) workItemLinksRead = null;
+  });
+  return answer;
+}
+
 
 // Cap on the scrollback the serialized cache persists. A 5000-line scrollback
 // full of wide chars and colour serializes large; 2000 lines keeps the cache
@@ -99,6 +130,10 @@ interface Props {
   sessionId: string;
   /** Keep xterm mounted while parking the live socket for an inactive pane. */
   parked?: boolean;
+  /** This pane's workspace is the one on screen, even if another half of its
+   *  split has the keyboard. A visible pane attaches on load; only a pane in a
+   *  workspace the reader is not looking at is subject to the load cap. */
+  workspaceActive?: boolean;
   /** Exposed so the parent can inject mobile-modkey input straight into the PTY. */
   registerSend?: (fn: ((data: string | ArrayBuffer) => void) | null) => void;
   /** Exposed so the parent (modkey row, etc.) can drive copy/paste. */
@@ -655,7 +690,7 @@ const TerminalView: Component<Props> = (props) => {
     // Ask Vogt whether this PTY belongs to a work item. One read, at mount,
     // and silence on any failure: the badge is worth having and worth
     // nothing at all if it costs the terminal.
-    void listSessions({ include_stopped: true })
+    void workItemLinks()
       .then((answer) => {
         const link = (answer.sessions ?? []).find(
           (row) => row.engine_session_id === props.sessionId,
@@ -982,6 +1017,31 @@ const TerminalView: Component<Props> = (props) => {
       enterForegroundReplay();
       if (!cached) {
         setReadyToConnect(true);
+        // A parked pane with nothing cached only attaches on load if a slot is
+        // left (WI-1413). Slots go to the first parked panes to mount; the rest
+        // stay dark until viewed. Attaching every retained tab opened one
+        // socket per live session.
+        if (isParked() && props.workspaceActive !== true) {
+          const slot = acquireInitialAttach(props.sessionId);
+          if (slot === null) {
+            // Past the budget: no socket until this pane is viewed. Mark the
+            // attach done and park so the resume path attaches on activation.
+            initialAttachDone = true;
+            parkSocket();
+            return;
+          }
+          // The panes that do attach must not all open in the same tick. Opening
+          // the pane during the wait must not lose the attach: the timer
+          // connects unless the pane has been destroyed, and connect() drops
+          // any socket it already opened, so this cannot double-connect.
+          if (slot > 0) {
+            setTimeout(() => {
+              if (destroyed) return;
+              connect();
+            }, slot * 250);
+            return;
+          }
+        }
         // Render the initial snapshot even when parked-on-mount, then park
         // (WI-170 render-then-park): connect()'s initial-attach guard lets this
         // first attach through regardless of parked, and parkSocket() defers the

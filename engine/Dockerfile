@@ -358,6 +358,7 @@ RUN set -eu; \
 ARG INSTALL_AI_CLIENTS
 ARG CODEX_VERSION
 ARG CODEX_SHA
+ARG CODEX_ACP_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG OPENCODE_VERSION
 ARG KLAUDIA_VERSION
@@ -378,13 +379,19 @@ COPY engine/deploy/driven-session-settings.json /usr/local/share/vogt/driven-ses
 # Its opencode half (WI-932), given as OPENCODE_CONFIG_CONTENT; replaced with
 # ENGINE_AGENT_OPENCODE_CONFIG.
 COPY engine/deploy/driven-session-opencode.json /usr/local/share/vogt/driven-session-opencode.json
-# Codex requirements (WI-1143, WI-1146). Stock Codex reads
-# /etc/codex/requirements.toml with no flag; the image copy is what
-# ENGINE_AGENT_CODEX_POLICY resolves to when unset. The file wires the
-# gitguard managed hook fail-closed for the Codex fork (WI-1356) — see the
-# file. Do not add a flag Codex does not have.
+# Codex requirements (WI-1143, WI-1146). The Codex fork reads
+# /etc/codex/requirements.toml and no other path — the TUI, `exec` and
+# app-server (quick chat) all load it through the same config builder — and
+# the engine checks that file before a Codex launch. The share copy is a
+# reference. The file wires the gitguard managed hook fail-closed and pins
+# the hooks feature on (WI-1356) — see the file. It and /etc/codex are
+# root-owned and not writable by the session user, which the engine also
+# checks: a session that could rewrite them could drop the hook. Do not add a
+# flag Codex does not have.
 COPY engine/deploy/driven-session-codex-requirements.toml /usr/local/share/vogt/driven-session-codex-requirements.toml
-COPY engine/deploy/driven-session-codex-requirements.toml /etc/codex/requirements.toml
+COPY --chown=root:root --chmod=0644 engine/deploy/driven-session-codex-requirements.toml /etc/codex/requirements.toml
+RUN chown root:root /etc/codex && chmod 0755 /etc/codex \
+    && test "$(stat -c '%u %a' /etc/codex /etc/codex/requirements.toml)" = "$(printf '0 755\n0 644')"
 # The pin below is the *baked baseline*. A deployment may name a different
 # version per tool at runtime (`VOGT_CLAUDE_CODE_VERSION` and friends in the
 # container's environment; `agent-clis.tools`, written below, is the
@@ -416,19 +423,21 @@ ENV PATH=/opt/vogt/agent-clis/bin:$PATH
 RUN set -eu; \
     . /usr/local/share/vogt/agent-versions.env; \
     codex_sha="${CODEX_SHA:-${VOGT_CODEX_SHA}}"; \
+    codex_acp_version="${CODEX_ACP_VERSION:-${VOGT_CODEX_ACP_VERSION}}"; \
     claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
     opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
     go_version="$(go version | sed -n 's/^go version go\([^ ]*\) .*/\1/p')"; \
     klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
-    printf 'codex=%s\nclaude-code=%s\nopencode=%s\ngo=%s\nklaudia=%s\n' \
-        "$codex_sha" "$claude_code_version" "$opencode_version" "$go_version" "$klaudia_version" \
+    printf 'codex=%s\ncodex-acp=%s\nclaude-code=%s\nopencode=%s\ngo=%s\nklaudia=%s\n' \
+        "$codex_sha" "$codex_acp_version" "$claude_code_version" "$opencode_version" "$go_version" "$klaudia_version" \
         > /usr/local/share/vogt/agent-versions.resolved; \
-    printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
+    printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-acp\t@agentclientprotocol/codex-acp\tcodex-acp\tVOGT_CODEX_ACP_VERSION\tnpm\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
         "$VOGT_CODEX_SOURCE" "$VOGT_KLAUDIA_SOURCE" \
         > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
         pkgs="$pkgs @anthropic-ai/claude-code@${claude_code_version}"; \
+        pkgs="$pkgs @agentclientprotocol/codex-acp@${codex_acp_version}"; \
         pkgs="$pkgs opencode-ai@${opencode_version}"; \
         # The pod base's unpinned copy (its `curl | bash` installer) is
         # replaced by the pinned package; npm refuses to overwrite a file it
@@ -443,14 +452,17 @@ RUN set -eu; \
         || { echo "claude is not $claude_code_version — a stub install" >&2; exit 1; } \
         && /usr/local/bin/opencode --version | grep -qF "$opencode_version" \
         || { echo "opencode is not $opencode_version — the platform binary did not install" >&2; exit 1; } \
+        && /usr/local/bin/codex-acp --version | grep -qF "$codex_acp_version" \
+        || { echo "codex-acp is not $codex_acp_version — a stub install" >&2; exit 1; } \
         && install -d /usr/local/libexec; \
     fi
 # Codex (WI-1142) is the fork's release asset, not the npm package. The tag is
 # `fork-<sha>` and the asset is `codex-<target>.tar.gz`; the recorded sha256 is
 # of the `codex` member inside it (the same one a runtime pin checks against
 # SHA256SUMS), so a CODEX_SHA that is not the pin has nothing to be checked
-# against and is refused. Stock npm Codex stays selectable: pin
-# VOGT_CODEX_VERSION at runtime and the `codex-npm` row installs it.
+# against and is refused. Stock npm Codex is not a runtime option (WI-1146):
+# it has no managed hooks, so the installer refuses a `codex-npm` pin and the
+# wrapper refuses a runtime copy that is not a fork release.
 RUN set -eu; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
         . /usr/local/share/vogt/agent-versions.env; \
@@ -464,6 +476,12 @@ RUN set -eu; \
             arm64) target=aarch64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_ARM64" ;; \
             *) echo "no pinned Codex for $(dpkg --print-architecture)" >&2; exit 1 ;; \
         esac; \
+        # An empty checksum means this architecture is not in the release
+        # (WI-1594: x86_64 only). Skip the download rather than failing the
+        # image build; amd64 still checks the recorded member.
+        if [ -z "$codex_sum" ]; then \
+            echo "no Codex release for $(dpkg --print-architecture); leaving the image copy unset" >&2; \
+        else \
         asset="codex-${target}.tar.gz"; \
         curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${codex_sha}/${asset}" -o "/tmp/${asset}"; \
         curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${codex_sha}/SHA256SUMS" -o /tmp/SHA256SUMS; \
@@ -477,6 +495,7 @@ RUN set -eu; \
         rm -rf "/tmp/${asset}" /tmp/SHA256SUMS "/tmp/${target}"; \
         ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex; \
         /usr/local/libexec/codex-real --version; \
+        fi; \
     fi
 
 # Klaudia (WI-950), built from the pinned commit with the pinned Go: no
@@ -484,6 +503,12 @@ RUN set -eu; \
 # reinstalling the npm CLIs above. Only that commit is fetched, the build
 # must reproduce it exactly (`-mod=readonly`, `-trimpath`, CGO off), and the
 # module and build caches are dropped so the image carries the binary alone.
+# This copy is also the gitguard hook program: /etc/codex/requirements.toml
+# runs `/usr/local/bin/klaudia hook gitguard` by absolute path, so it must stay
+# a root-owned 0755 regular file in a root-owned directory (asserted below,
+# and checked by the engine before a Codex launch). A runtime
+# `VOGT_KLAUDIA_VERSION` pin lands under the session-owned /opt/vogt/agent-clis
+# and is never what the hook runs (WI-1146).
 RUN set -eu; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
         . /usr/local/share/vogt/agent-versions.env; \
@@ -497,6 +522,10 @@ RUN set -eu; \
             go build -trimpath -o /usr/local/bin/klaudia ./cmd/klaudia); \
         GOMODCACHE=/tmp/gomod go clean -modcache; \
         rm -rf /tmp/klaudia /tmp/gomod /tmp/gocache; \
+        chown root:root /usr/local/bin/klaudia; \
+        chmod 0755 /usr/local/bin/klaudia; \
+        test "$(stat -c '%u %a %F' /usr/local/bin/klaudia /usr/local/bin)" \
+            = "$(printf '0 755 regular file\n0 755 directory')"; \
         /usr/local/bin/klaudia --version; \
     fi
 
