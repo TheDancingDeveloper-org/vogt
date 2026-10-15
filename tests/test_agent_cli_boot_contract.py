@@ -772,3 +772,40 @@ def test_the_codex_wrapper_refuses_a_runtime_copy_that_is_not_a_fork_release(
     ran = _wrapped(tmp_path)
     assert ran.returncode == 0, ran.stderr
     assert ran.stdout.strip() == "ran --no-daemon --version"
+
+
+REQUIREMENTS = (
+    REPO_ROOT / "engine" / "deploy" / "driven-session-codex-requirements.toml"
+)
+DOCKERFILE = REPO_ROOT / "engine" / "Dockerfile"
+GITGUARD_HOOK = "/usr/local/bin/klaudia hook gitguard"
+
+
+def test_the_gitguard_hook_runs_the_image_klaudia_a_runtime_pin_cannot_reach() -> None:
+    """WI-1146: the hook names the root-owned image build by absolute path.
+
+    A bare `klaudia` resolves through PATH, whose first entry is the
+    session-owned `/opt/vogt/agent-clis/bin`, so a session could shadow it
+    with a stub. A runtime `VOGT_KLAUDIA_VERSION` pin installs under that same
+    tree and must never be what the hook runs.
+    """
+    import tomllib
+
+    hooks = tomllib.loads(REQUIREMENTS.read_text(encoding="utf-8"))["hooks"]
+    commands = [
+        handler["command"]
+        for event in ("SessionStart", "PreToolUse")
+        for group in hooks[event]
+        for handler in group["hooks"]
+    ]
+    assert commands == [GITGUARD_HOOK, GITGUARD_HOOK]
+
+    # The installer writes only under its agent-CLI root, never the hook's
+    # program.
+    assert "/usr/local/bin/klaudia" not in INSTALL.read_text(encoding="utf-8")
+
+    # The image keeps that program a root-owned 0755 regular file, and says so
+    # in a build-time assertion.
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert "go build -trimpath -o /usr/local/bin/klaudia" in dockerfile
+    assert "stat -c '%u %a %F' /usr/local/bin/klaudia /usr/local/bin" in dockerfile

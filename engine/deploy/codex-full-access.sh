@@ -26,6 +26,15 @@ set -euo pipefail
 # without it — an npm copy an older image flipped to — is refused rather than
 # run. When the image's tools table is readable, the repository must be the
 # fork it names.
+#
+# This is an accident guard, not a security boundary: `codex/current` and its
+# `source` file live under /opt/vogt/agent-clis, which the session user owns,
+# so a session can write a fork-shaped `source` beside any binary. It stops a
+# stale or mistaken pin (an npm copy an older image flipped to) from running
+# unguarded; it does not stop a session that sets out to. The gitguard hook
+# itself does not depend on this file: it runs the root-owned
+# /usr/local/bin/klaudia by absolute path, and the fork reads the root-owned
+# /etc/codex/requirements.toml (WI-1146).
 prefix="${VOGT_AGENT_CLI_ROOT:-/opt/vogt/agent-clis}/codex/current"
 runtime="$prefix/bin/codex"
 if [[ -x "$runtime" ]]; then

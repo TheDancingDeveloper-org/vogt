@@ -227,6 +227,7 @@ fn codex_policy_at(
         let path = readable_policy(system.to_path_buf())?;
         if root_owned {
             protected_from_sessions(system)?;
+            protected_hook_binary(Path::new(GITGUARD_BIN))?;
         }
         Ok(path)
     };
@@ -275,6 +276,41 @@ fn protected_from_sessions(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Why a session could swap the program the gitguard hook runs: the hook
+/// names [`GITGUARD_BIN`] by absolute path, so that path must be a regular
+/// file (not a symlink a session could re-point), owned by root and not
+/// group- or world-writable, in a directory with the same ownership. A bare
+/// `klaudia` would resolve through the session's PATH, whose first entry
+/// (`/opt/vogt/agent-clis/bin`) the session user owns, so an `exit 0` stub
+/// there would pass every call (WI-1146).
+fn protected_hook_binary(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    for p in [path, dir] {
+        let meta = std::fs::symlink_metadata(p).map_err(|e| {
+            format!(
+                "gitguard hook program {} cannot be inspected ({e}); refusing to start a Codex session",
+                p.display()
+            )
+        })?;
+        let shape_ok = if p == path {
+            meta.file_type().is_file()
+        } else {
+            meta.file_type().is_dir()
+        };
+        if !shape_ok || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            return Err(format!(
+                "gitguard hook program {} is {} owned by uid {} with mode {:o}; it must be a root-owned regular file in a root-owned directory, writable only by root, or a session could replace it. Refusing to start a Codex session",
+                p.display(),
+                if meta.file_type().is_symlink() { "a symlink" } else { "a path" },
+                meta.uid(),
+                meta.mode() & 0o7777
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn readable_policy(path: PathBuf) -> Result<Option<PathBuf>, String> {
     match std::fs::read(&path) {
         Ok(bytes) if !bytes.is_empty() => {
@@ -298,8 +334,16 @@ fn readable_policy(path: PathBuf) -> Result<Option<PathBuf>, String> {
     }
 }
 
-/// The hook command the Codex requirements file must run (WI-1136).
-const GITGUARD_HOOK: &str = "klaudia hook gitguard";
+/// The program the gitguard hook runs: the image's root-owned Klaudia build,
+/// by absolute path (WI-1146). Never resolved through PATH, and never a
+/// runtime `VOGT_KLAUDIA_VERSION` copy, which lives under the session-owned
+/// `/opt/vogt/agent-clis`.
+const GITGUARD_BIN: &str = "/usr/local/bin/klaudia";
+
+/// The hook command the Codex requirements file must run (WI-1136): exactly
+/// this string, so a bare `klaudia` (resolved through the session's PATH) is
+/// refused.
+const GITGUARD_HOOK: &str = "/usr/local/bin/klaudia hook gitguard";
 
 /// PreToolUse tool names the gitguard matcher must select: the fork sends
 /// `Bash` for shell, exec_command and write_stdin, and `apply_patch` for
@@ -309,7 +353,7 @@ const GITGUARD_TOOLS: &[&str] = &["Bash", "apply_patch"];
 /// Why a Codex requirements file would let a session run without gitguard
 /// (WI-1356). It must be TOML with `[[hooks.SessionStart]]` and
 /// `[[hooks.PreToolUse]]` groups, each holding a `type = "command"` handler
-/// that runs `klaudia hook gitguard` with `failClosed = true`, and the
+/// that runs `/usr/local/bin/klaudia hook gitguard` with `failClosed = true`, and the
 /// PreToolUse group's matcher must select every name in [`GITGUARD_TOOLS`].
 /// It must also pin `[features] hooks = true`: the fork runs managed hooks
 /// only while that feature is on, and without the pin a session could switch
@@ -1180,6 +1224,44 @@ mod driven_policy_tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// The gitguard hook program must be a root-owned regular file: one the
+    /// session user owns (as every file a test can make is), a symlink, or a
+    /// missing path is refused (WI-1146).
+    #[test]
+    fn a_gitguard_program_the_session_can_replace_is_refused() {
+        let dir = std::env::temp_dir().join(format!("gitguard-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = super::protected_hook_binary(&dir.join("missing")).unwrap_err();
+        assert!(err.contains("cannot be inspected"), "{err}");
+        let link = dir.join("klaudia-link");
+        std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
+        let err = super::protected_hook_binary(&link).unwrap_err();
+        assert!(err.contains("a symlink"), "{err}");
+        if unsafe { libc::geteuid() } != 0 {
+            let own = dir.join("klaudia");
+            std::fs::write(&own, "#!/bin/sh\nexit 0\n").unwrap();
+            let err = super::protected_hook_binary(&own).unwrap_err();
+            assert!(err.contains("must be a root-owned regular file"), "{err}");
+        }
+        // A root-owned regular file in a root-owned directory passes.
+        if std::path::Path::new("/bin/sh").exists() {
+            let sh = std::fs::canonicalize("/bin/sh").unwrap();
+            super::protected_hook_binary(&sh).unwrap();
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_shipped_codex_policy_runs_the_root_owned_klaudia() {
+        assert_eq!(
+            SHIPPED_CODEX_POLICY
+                .matches(&format!("command = \"{}\"", super::GITGUARD_HOOK))
+                .count(),
+            2
+        );
+        assert!(super::GITGUARD_HOOK.starts_with(&format!("{} ", super::GITGUARD_BIN)));
+    }
+
     const SHIPPED_CODEX_POLICY: &str =
         include_str!("../../deploy/driven-session-codex-requirements.toml");
 
@@ -1220,7 +1302,18 @@ mod driven_policy_tests {
         ))
         .is_err());
         // Another command.
-        assert!(check(&SHIPPED_CODEX_POLICY.replace("klaudia hook gitguard", "true")).is_err());
+        assert!(check(&SHIPPED_CODEX_POLICY.replace(super::GITGUARD_HOOK, "true")).is_err());
+        // Klaudia by bare name, or from a session-writable path (WI-1146):
+        // PATH lookup would let a session shadow it with a stub.
+        for shadowable in [
+            "klaudia hook gitguard",
+            "/opt/vogt/agent-clis/bin/klaudia hook gitguard",
+            "env klaudia hook gitguard",
+        ] {
+            let err =
+                check(&SHIPPED_CODEX_POLICY.replace(super::GITGUARD_HOOK, shadowable)).unwrap_err();
+            assert!(err.contains(super::GITGUARD_HOOK), "{err}");
+        }
         assert!(check("not = [toml").is_err());
         // The hooks feature not pinned on: a session could disable it.
         let err = check(&without("[features]\nhooks = true\n", "")).unwrap_err();
