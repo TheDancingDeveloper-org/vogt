@@ -789,6 +789,19 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     )
     assert text.count("[model_providers.theclawbay]") == 1
 
+    # A model the router does not serve, left over from theclawbay, moves to
+    # grok; a catalog group stays (WI-1640).
+    config.write_text(
+        'model = "gpt-6-astra"\nmodel_provider = "litellm"\n', encoding="utf-8"
+    )
+    fixed = _codex_bootstrap(tmp_path, {})
+    assert fixed.returncode == 0, fixed.stderr
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["model"] == "grok"
+    config.write_text('model = "code"\nmodel_provider = "litellm"\n', encoding="utf-8")
+    chosen = _codex_bootstrap(tmp_path, {})
+    assert chosen.returncode == 0, chosen.stderr
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["model"] == "code"
+
     # Some other provider and model are the operator's choice.
     config.write_text(
         'model = "gpt-5.6"\nmodel_provider = "dlab"\n\n[other]\nkept = true\n',
