@@ -18,6 +18,16 @@
 # This script is the local floor for what CI runs, not a mirror of it: a CI
 # job may legitimately do more, so keep the commands below in step with
 # `ci.yml` by hand.
+# Product scripts ported to Rust (WI-1079), run from a core-only checkout as:
+#   vogt-core check-product-version [EXPECTED]
+#   vogt-core check-docs
+#   vogt-core sanitise-transcript [--check] INPUT [OUTPUT]
+# The Python originals stay because the python half below and the docs
+# workflow still call them. CI-only scripts stay Python and run under a
+# uv-less python3 on the runner with no project dependency:
+# play_preflight, check_workflow_policy, check_bundle, check_rust_version,
+# check_engine_spec, check_demo_assets, call_latency.
+
 set -uo pipefail
 
 # `|| exit` because this script sets `-uo pipefail` and deliberately not
