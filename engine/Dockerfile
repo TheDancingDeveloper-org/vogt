@@ -430,6 +430,7 @@ RUN set -eu; \
         > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
+        pkgs="$pkgs @anthropic-ai/claude-code@${claude_code_version}"; \
         pkgs="$pkgs @agentclientprotocol/codex-acp@${codex_acp_version}"; \
         pkgs="$pkgs opencode-ai@${opencode_version}"; \
         # The pod base's unpinned copy (its `curl | bash` installer) is
