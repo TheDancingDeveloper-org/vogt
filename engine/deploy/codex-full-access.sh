@@ -56,6 +56,14 @@ fi
 # process the one just resolved; `daemon_auto_start=false` is written into
 # Codex config by mcp-bootstrap so a client that omits the flag still does not
 # start one.
+# The ACP adapter (`codex-acp`, WI-1595) reads CODEX_PATH for the binary it
+# execs as `codex app-server`. Export it here so a session that reaches the
+# adapter through this wrapper inherits the same fork copy this wrapper runs,
+# never the older @openai/codex the adapter bundles. An explicit CODEX_PATH wins.
+if [[ -z "${CODEX_PATH:-}" ]]; then
+    export CODEX_PATH="$codex_real"
+fi
+
 exec "$codex_real" \
     --no-daemon \
     "$@"
