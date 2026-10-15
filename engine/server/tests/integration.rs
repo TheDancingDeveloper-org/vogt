@@ -13923,6 +13923,68 @@ fn texts(entries: &Value, kind: &str) -> Vec<String> {
         .collect()
 }
 
+/// WI-1641: on the codex driver the first message must wait for the thread.
+/// The stand-in (`tests/fixtures/fake-codex-app-server.py`) answers
+/// `thread/start` late and refuses a `turn/start` for a thread it has not
+/// started, as the fork does; a chat that sends the turn early dies with
+/// `thread not found` instead of answering.
+#[tokio::test]
+async fn a_codex_chat_holds_its_first_turn_until_the_thread_is_ready() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: the stand-in app-server is written in python3");
+        return;
+    }
+    let bin = tempfile::tempdir().unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake-codex-app-server.py")
+        .canonicalize()
+        .unwrap();
+    let driver = bin.path().join("codex");
+    std::os::unix::fs::symlink(&fixture, &driver).unwrap();
+    let cfg = Config {
+        chat: vogt_engine_server::chats::ChatPolicy {
+            enabled: true,
+            command: Some(vec![driver.to_string_lossy().into_owned()]),
+            approval_timeout: Duration::from_secs(10),
+            ..Default::default()
+        },
+        session_templates: vec![],
+        ..test_config()
+    };
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "driver": "codex" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created: Value = created.json().await.unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+
+    let sent = chat_send(&client, &base, &id, "ping").await;
+    let chat: Value = client
+        .get(format!("{base}/api/chats/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entries = &chat["entries"];
+    assert_eq!(texts(entries, "assistant"), vec!["pong"], "{sent} {chat}");
+    assert!(texts(entries, "error").is_empty(), "{chat}");
+}
+
 #[tokio::test]
 async fn a_chat_answers_switches_model_and_resumes_after_its_process_stops() {
     let Some((base, client, state, _guard, _bin)) = boot_chats().await else {
