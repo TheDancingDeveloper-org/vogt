@@ -2515,6 +2515,85 @@ test("Phone editor gives the editor the width and floats Files as an overlay dra
   await expect(page.locator(".editor-sidebar")).toHaveCount(0);
 });
 
+// WI-1591: Monaco owns a phone's long-press (no native selection or Copy/Paste
+// menu), so the editor answers it with its own edit bar. A real touch hold —
+// not a mouse right-click — must select the word under the finger, copy it to
+// the clipboard, and paste the clipboard back over a later selection.
+test("Phone editor long-press copies and pastes through the edit bar", async ({ page, context }) => {
+  test.skip(test.info().project.name !== "phone", "Touch long-press is the coarse-pointer path");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installFixtures(page);
+  await page.route("**/api/files**", async (route) => route.fulfill({ json: {
+    path: "src/an-identifiable-long-filename.tsx",
+    size: 21,
+    content: "const alpha = omega;\n",
+    content_base64: null,
+    is_binary: false,
+  } }));
+  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+  const lines = page.locator(".monaco-editor .view-lines");
+  // Monaco is a cold, lazily loaded chunk on the dev server.
+  await expect(lines).toContainText("const alpha = omega;", { timeout: 15_000 });
+
+  const cdp = await context.newCDPSession(page);
+  // Monaco hit-tests a hold where the touch *started*, against where the editor
+  // is when it *ends*; the shell header is still settling just after load, so
+  // wait for the editor to stop moving before holding a finger on it.
+  const editorRect = () => page.locator(".monaco-editor").evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return `${r.x},${r.y},${r.width},${r.height}`;
+  });
+  const settle = async () => {
+    let last = "";
+    await expect.poll(async () => {
+      const now = await editorRect();
+      const still = now === last;
+      last = now;
+      return still;
+    }, { intervals: [400] }).toBe(true);
+  };
+  // Hold a touch on a word for longer than Monaco's 700 ms hold delay. The
+  // point is measured on the word's own characters: whether the line is one
+  // span or several depends on whether the tokenizer has loaded yet.
+  const longPress = async (word: string) => {
+    await settle();
+    const point = await page.evaluate((target) => {
+      const walker = document.createTreeWalker(
+        document.querySelector(".monaco-editor .view-lines")!,
+        NodeFilter.SHOW_TEXT,
+      );
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const at = node.textContent!.indexOf(target);
+        if (at < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, at);
+        range.setEnd(node, at + target.length);
+        const r = range.getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      }
+      return null;
+    }, word);
+    expect(point).not.toBeNull();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point!] });
+    await page.waitForTimeout(900);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  };
+
+  await longPress("alpha");
+  const bar = page.getByRole("toolbar", { name: "Edit" });
+  await expect(bar).toBeVisible();
+  await bar.getByRole("button", { name: "Copy" }).tap();
+  await expect(page.getByText("Copied to clipboard")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("alpha");
+  await expect(bar).toBeHidden();
+
+  await longPress("omega");
+  await expect(bar).toBeVisible();
+  await bar.getByRole("button", { name: "Paste" }).tap();
+  await expect(lines).toContainText("const alpha = alpha;");
+  await expect(bar).toBeHidden();
+});
+
 test("Phone editor splitter resizes on a touch drag", async ({ page }) => {
   test.skip(test.info().project.name !== "phone", "The touch splitter is exercised on the phone project");
   await installFixtures(page, {}, [], [
