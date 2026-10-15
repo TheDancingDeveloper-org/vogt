@@ -548,13 +548,22 @@ def test_a_cwd_opens_in_an_existing_worktree(
     other = tmp_path / "other.git"
     seen: list[Path] = []
 
-    def fake_git(root: Path) -> str:
+    nested = checkout / "src"
+    nested.mkdir()
+
+    def fake_git(root: Path, flag: str) -> str:
         seen.append(root)
-        if root in {worktree.resolve(), checkout.resolve()}:
+        if flag == "--show-toplevel":
+            # A subdirectory of the checkout reports the checkout. A linked
+            # worktree reports itself.
+            if root.resolve() in {worktree.resolve(), linked.resolve()}:
+                return str(worktree.resolve())
+            return str(checkout.resolve())
+        if root.resolve() in {worktree.resolve(), checkout.resolve(), nested.resolve()}:
             return str(common)
         return str(other)
 
-    monkeypatch.setattr("vogt.application.services.sessions._git_common_dir", fake_git)
+    monkeypatch.setattr("vogt.application.services.sessions._git_probe", fake_git)
     register_project(
         wired,
         RegisterProjectParams(name="Checkout", root_path=str(checkout), reason=WHY),
@@ -583,6 +592,11 @@ def test_a_cwd_opens_in_an_existing_worktree(
         start_session(
             wired,
             StartSessionParams(project="checkout", cwd=str(checkout), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="shared checkout"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(nested), reason=WHY),
         )
     with pytest.raises(InvalidRequest, match="not under the workspace Active"):
         start_session(
