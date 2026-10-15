@@ -3804,10 +3804,66 @@ textarea {
   color: var(--fg-muted);
   font-size: 11px;
 }
+.editor-host-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
 .editor-host {
   flex: 1;
   min-height: 0;
   min-width: 0;
+}
+/* Touch edit bar: a long-press in the editor raises it (Editor.tsx). It sits at
+   the bottom so it never covers the first lines, where a long-press usually
+   lands, and its labels are not themselves selectable text. */
+.editor-touch-edit {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 30;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  max-width: calc(100% - 16px);
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.editor-touch-edit button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+/* Above the edit bar, never over the top lines: Monaco hit-tests a long-press
+   with caretRangeFromPoint, which a notice lying over the text would swallow. */
+.editor-touch-notice {
+  position: absolute;
+  bottom: 68px;
+  right: 8px;
+  z-index: 30;
+  max-width: calc(100% - 32px);
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.editor-touch-notice-error {
+  background: var(--danger);
 }
 /* Inline notices between the toolbar and the editor: a stale-save conflict and
    a restored-but-stale draft. */

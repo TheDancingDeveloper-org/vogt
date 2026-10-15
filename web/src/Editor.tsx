@@ -20,6 +20,7 @@ import {
 } from "./editorDrafts";
 import { bumpWorkspaceVersion } from "./workspaceVersion";
 import { revealPathInGit } from "./gitReveal";
+import { readClipboardText, writeClipboardText } from "./clipboard";
 
 interface Props {
   tabId: string;
@@ -28,6 +29,9 @@ interface Props {
 
 /** How long typing must pause before the draft is captured. */
 const DRAFT_CAPTURE_DELAY_MS = 300;
+
+/** How long a touch edit-bar notice ("Copied", a failure) stays up. */
+const TOUCH_NOTICE_MS = 2500;
 
 const Editor: Component<Props> = (props) => {
   let host: HTMLDivElement | undefined;
@@ -63,6 +67,84 @@ const Editor: Component<Props> = (props) => {
   let contentChangeDisposable: { dispose: () => void } | null = null;
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
   let unregisterEditor: () => void = () => undefined;
+
+  // Touch copy/paste. On a phone Monaco owns the long-press: its gesture
+  // handler swallows the touch (no native selection, no WebView Copy/Paste
+  // menu — the lines are `user-select: none` outside Safari) and turns the hold
+  // into an editor context-menu event. The menu that event would open lives in
+  // a contribution this build does not load, and its Paste could not read the
+  // Android WebView clipboard anyway. So a long-press selects the word under
+  // the finger and raises this edit bar, whose actions go through the same
+  // clipboard path as the terminal (`clipboard.ts`: the native Android bridge,
+  // else the async Clipboard API with its execCommand fallback).
+  const isCoarsePointer =
+    window.matchMedia?.("(pointer: coarse)").matches ?? false;
+  const [touchEditOpen, setTouchEditOpen] = createSignal(false);
+  const [touchNotice, setTouchNotice] = createSignal<{
+    text: string;
+    tone: "info" | "error";
+  } | null>(null);
+  let touchNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+  let contextMenuDisposable: { dispose: () => void } | null = null;
+
+  const noticeTouch = (text: string, tone: "info" | "error") => {
+    clearTimeout(touchNoticeTimer);
+    setTouchNotice({ text, tone });
+    touchNoticeTimer = setTimeout(() => setTouchNotice(null), TOUCH_NOTICE_MS);
+  };
+
+  const selectedText = (): string => {
+    const selection = editor?.getSelection();
+    if (!editor || !model || !selection || selection.isEmpty()) return "";
+    return model.getValueInRange(selection);
+  };
+
+  const touchCopy = async (cut: boolean) => {
+    const selection = editor?.getSelection();
+    const text = selectedText();
+    if (!editor || !selection || !text) {
+      noticeTouch("Nothing selected", "error");
+      return;
+    }
+    try {
+      await writeClipboardText(text);
+    } catch (err) {
+      noticeTouch(`Copy failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return;
+    }
+    if (cut) {
+      editor.executeEdits("vogt-touch-cut", [{ range: selection, text: "" }]);
+    }
+    setTouchEditOpen(false);
+    noticeTouch(cut ? "Cut to clipboard" : "Copied to clipboard", "info");
+  };
+
+  const touchPaste = async () => {
+    if (!editor) return;
+    let text: string;
+    try {
+      text = await readClipboardText();
+    } catch (err) {
+      noticeTouch(`Paste failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return;
+    }
+    const selection = editor?.getSelection();
+    if (!editor || !selection) return;
+    if (!text) {
+      noticeTouch("Clipboard is empty", "error");
+      return;
+    }
+    editor.executeEdits("vogt-touch-paste", [
+      { range: selection, text, forceMoveMarkers: true },
+    ]);
+    editor.pushUndoStop();
+    setTouchEditOpen(false);
+  };
+
+  const touchSelectAll = () => {
+    if (!editor || !model) return;
+    editor.setSelection(model.getFullModelRange());
+  };
 
   const isDirty = () => {
     const tab = tabsStore.tabs.find((t) => t.id === props.tabId);
@@ -237,6 +319,31 @@ const Editor: Component<Props> = (props) => {
         clearTimeout(draftTimer);
         draftTimer = setTimeout(captureDraft, DRAFT_CAPTURE_DELAY_MS);
       });
+      if (isCoarsePointer) {
+        contextMenuDisposable = createdEditor.onContextMenu((event) => {
+          const position = event.target.position;
+          const selection = createdEditor.getSelection();
+          // A long-press outside the current selection selects the word under
+          // the finger, the way a native long-press on text does.
+          if (
+            position &&
+            (!selection || selection.isEmpty() || !selection.containsPosition(position))
+          ) {
+            const word = createdModel.getWordAtPosition(position);
+            if (word) {
+              createdEditor.setSelection({
+                startLineNumber: position.lineNumber,
+                startColumn: word.startColumn,
+                endLineNumber: position.lineNumber,
+                endColumn: word.endColumn,
+              });
+            } else {
+              createdEditor.setPosition(position);
+            }
+          }
+          setTouchEditOpen(true);
+        });
+      }
       createdEditor.addCommand(
         monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
         () => void save(),
@@ -260,6 +367,9 @@ const Editor: Component<Props> = (props) => {
   onCleanup(() => {
     disposed = true;
     clearTimeout(draftTimer);
+    clearTimeout(touchNoticeTimer);
+    contextMenuDisposable?.dispose();
+    contextMenuDisposable = null;
     if (editor) {
       rememberEditorDraft(props.tabId, {
         path: props.path,
@@ -349,7 +459,45 @@ const Editor: Component<Props> = (props) => {
           </span>
         </div>
       </Show>
-      <div class="editor-host" ref={host} />
+      <div class="editor-host-frame">
+        <div class="editor-host" ref={host} />
+        <Show when={touchEditOpen()}>
+          <div class="editor-touch-edit" role="toolbar" aria-label="Edit">
+            {/* preventDefault on pointerdown keeps focus (and the selection)
+                in the editor while a button is pressed. */}
+            <button type="button" onPointerDown={(e) => e.preventDefault()} onClick={touchSelectAll}>
+              Select all
+            </button>
+            <button type="button" onPointerDown={(e) => e.preventDefault()} onClick={() => void touchCopy(true)}>
+              Cut
+            </button>
+            <button type="button" onPointerDown={(e) => e.preventDefault()} onClick={() => void touchCopy(false)}>
+              Copy
+            </button>
+            <button type="button" onPointerDown={(e) => e.preventDefault()} onClick={() => void touchPaste()}>
+              Paste
+            </button>
+            <button
+              type="button"
+              aria-label="Close edit bar"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => setTouchEditOpen(false)}
+            >
+              ✕
+            </button>
+          </div>
+        </Show>
+        <Show when={touchNotice()}>
+          {(notice) => (
+            <div
+              class={`editor-touch-notice editor-touch-notice-${notice().tone}`}
+              role={notice().tone === "error" ? "alert" : "status"}
+            >
+              {notice().text}
+            </div>
+          )}
+        </Show>
+      </div>
     </div>
   );
 };
