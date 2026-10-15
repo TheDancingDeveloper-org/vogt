@@ -720,7 +720,8 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     catalog_path = codex_home / "vogt-model-catalog.json"
     assert parsed["model_catalog_json"] == str(catalog_path)
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    # The router's groups, and only those: no DLab community or free models.
+    # Groups a session-key completion answered (WI-1592). Not or-deepseek
+    # (blocked), not bedrock (absent), not the DLab models that 400/401/503.
     # The fork sorts by priority ascending and defaults to the first visible one.
     by_priority = sorted(catalog["models"], key=lambda model: model["priority"])
     assert [model["slug"] for model in by_priority] == [
@@ -729,6 +730,22 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
         "small",
         "reasoning",
         "vision",
+        "or-deepseek-flash",
+        "or-gemini-flash",
+        "or-glm-5-3",
+        "qwen3-coder",
+        "qwen3-8-27b",
+        "gpt-oss-120b",
+        "dlab-deepseek-v4-pro",
+        "dlab-deepseek-v4-1-flash",
+        "dlab-grok-4-5",
+        "dlab-grok-4-6",
+        "dlab-grok-4-7",
+        "dlab-gemini-3-8-flash",
+        "dlab-glm-5-3",
+        "dlab-glm-5-3-flash",
+        "dlab-glm-5-3-flashx",
+        "dlab-kimi-k3",
         "premium",
     ]
     assert by_priority[0]["slug"] == "grok"
