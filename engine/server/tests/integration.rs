@@ -14882,6 +14882,52 @@ async fn a_worktree_outside_the_workspace_is_refused_before_it_is_cut() {
     }
 }
 
+/// A stand-in Klaudia that takes its next turn from a file rather than the
+/// PTY: each line appended to `turns.feed` starts one turn. An agent that
+/// prompts itself leaves no person-input stamp, and writing the PTY from the
+/// test would — the engine's own token counts as a person, which resets the
+/// idle clock the budget stop waits on.
+fn file_fed_klaudia(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("klaudia");
+    std::fs::write(dir.join("turns.feed"), "").unwrap();
+    std::fs::write(
+        &stub,
+        format!(
+            r#"#!/usr/bin/env bash
+ready() {{
+  printf '\033]0;klaudia: ready\007\033[2J\033[H'
+  printf '╭──────────────────────╮\r\n│ › Ask Klaudia…       │\r\n╰──────────────────────╯\r\n  grok · stand-in\r\n'
+}}
+ready
+n=0
+seen=0
+while true; do
+  lines=$(wc -l < '{feed}')
+  if [ "$lines" -gt "$seen" ]; then
+    seen=$lines
+    printf '\033]0;klaudia: working\007'
+    printf '  ⣟  thinking…  (esc to interrupt)\r\n'; sleep 0.3
+    n=$((n+1))
+    printf '{{"type":"assistant","timestamp":"2026-10-13T00:%02d:00Z","message":{{"content":"turn %s"}}}}\n' "$n" "$n" >> "$(cat '{at}')"
+    echo "$n" >> '{log}'
+    ready
+  fi
+  sleep 0.1
+done
+"#,
+            at = dir.join("transcript_at").display(),
+            log = dir.join("turns.log").display(),
+            feed = dir.join("turns.feed").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    stub
+}
+
 /// A stand-in Klaudia TUI for the budget tests (WI-1281). It announces its
 /// state in the window title the way Klaudia does, draws its idle input box at
 /// rest, and per line of input runs one turn: about 1.5 s of `(esc to
@@ -15027,6 +15073,102 @@ async fn a_klaudia_autopilot_session_hibernates_at_its_turn_budget() {
         std::fs::read_to_string(dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl")))
             .unwrap();
     assert_eq!(transcript.lines().count(), turns);
+}
+
+/// WI-1281, again: a blocked report must not keep a session past its budget.
+///
+/// The report is the agent's own word that it is waiting on a person, and the
+/// watcher defers to it. An agent that instead keeps taking turns while
+/// re-posting the report — each one worded differently, so no repeat guard
+/// sees a loop — used that deferral to run for hundreds of turns. Once the
+/// hard limit is crossed the report is cleared and the session hibernates at
+/// the next turn boundary, the same as one that never reported a block.
+#[tokio::test]
+async fn a_blocked_report_does_not_outrun_the_turn_budget() {
+    const LIMIT: usize = 3;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let stub = file_fed_klaudia(dir);
+    let (base, _h) = boot_with_config(budget_sandbox(dir)).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "klaudia reporting itself blocked",
+            "command": [stub.to_string_lossy()],
+            "autopilot": true,
+            "budget": { "turns": LIMIT, "wall_clock_minutes": 90 },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let conversation = created["conversation"]["id"].as_str().unwrap();
+    std::fs::write(
+        dir.join("transcript_at"),
+        dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl"))
+            .display()
+            .to_string(),
+    )
+    .unwrap();
+
+    // What the runaway sessions did: keep taking turns while re-reporting
+    // "blocked", each report worded differently. Autopilot will not nudge a
+    // blocked session, and the runaway did not need it to — it prompted
+    // itself. The turns are fed through a file so they leave no person-input
+    // stamp, and the feed stops once the limit is passed: past that the
+    // session sits at its prompt, which is where the stop lands.
+    let reporter = tokio::spawn({
+        let client = client.clone();
+        let base = base.clone();
+        let id = id.clone();
+        let feed = dir.join("turns.feed");
+        let log = dir.join("turns.log");
+        async move {
+            loop {
+                let done = std::fs::read_to_string(&log)
+                    .unwrap_or_default()
+                    .lines()
+                    .count();
+                if done > LIMIT {
+                    break;
+                }
+                client
+                    .post(format!("{base}/api/sessions/{id}/blocked"))
+                    .json(&json!({
+                        "blocked": true,
+                        "reason": format!("waiting on operator input, report {done}"),
+                    }))
+                    .send()
+                    .await
+                    .ok();
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&feed)
+                    .unwrap();
+                std::io::Write::write_all(&mut f, b"go on\n").unwrap();
+                tokio::time::sleep(Duration::from_millis(700)).await;
+            }
+        }
+    });
+
+    let row = wait_hibernated(&client, &base, &id, 60).await;
+    reporter.abort();
+    assert_eq!(row["hibernation"]["trigger"], "budget", "{row}");
+    // The report must not survive into the record a wake restores, or the
+    // session would come back still excused from its budget.
+    assert!(row.get("blocked").is_none_or(Value::is_null), "{row}");
+    let turns = turns_run(dir);
+    assert!(
+        (LIMIT..=LIMIT + 2).contains(&turns),
+        "stopped after {turns} turns against a limit of {LIMIT}"
+    );
 }
 
 /// WI-1281: the whole-session wall clock banks running time across turns and
