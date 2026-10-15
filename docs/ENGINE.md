@@ -857,11 +857,15 @@ than these routes.
   `session.start`'s `cwd` (WI-1671) is the other way in: the caller names an
   existing worktree and vogt-core sends it as this `cwd`, with no
   `SessionSpec.worktree`. It must be an absolute path that exists, sit under
-  the workspace `Active/` directory, and be a git worktree of the same
-  repository as the project's registered checkout (the same git `commondir`).
-  Combining it with `worktree: true` is refused before the engine is asked,
-  because one start cannot both cut a checkout and open one that already
-  exists.
+  the workspace `Active/` directory (the parent of the project's registered
+  checkout, not any path component named `Active`), and be a git worktree of
+  the same repository as that checkout (the same git `commondir`). The
+  checkout itself is refused: a cwd start is how a worker stays off the
+  shared tree. A symlink is accepted as the directory it resolves to.
+  Combining it with an explicit `worktree: true` is refused before the
+  engine is asked. A purpose whose profile would have set `worktree` (the
+  `implement` profile does) does not: `cwd` means the checkout already
+  exists, so the profile's worktree is left out.
 - `POST /api/sessions/:id/conversation` `{"agent", "id", "ended"?}` ->
   `SessionSummary` (WI-962). Links the agent conversation running in the
   session, or with `ended` unlinks it while it is still the session's. See

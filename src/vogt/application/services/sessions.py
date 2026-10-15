@@ -26,7 +26,9 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -125,7 +127,6 @@ from vogt.application.services.preferences import dispatch_settings
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
 from vogt.collectors.base import CollectorError
-from vogt.collectors.git_local import git_output
 from vogt.core import delivery, oversight, runtime
 from vogt.core.auth import Scope, hash_token, issue, parse_scopes
 from vogt.core.branches import default_branch_name
@@ -253,15 +254,18 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # Resolved only after both guards above, and a profile carries neither a
     # role nor a permission posture, so naming a purpose can never raise a
     # start past what the caller could ask for directly (WI-1323).
-    params, overrides, read_only = _resolve_purpose(ctx, params)
-    # Named before the engine is asked, so a bad path never starts a session
-    # (WI-1671). A purpose profile can set `worktree`; it cannot set `cwd`.
-    if params.cwd and params.worktree:
+    # Before the profile fills unset fields (WI-1671). Only a worktree the
+    # caller asked for conflicts with `cwd`: the implement profile sets
+    # `worktree` itself, and that is the case `cwd` exists for.
+    if params.cwd and "worktree" in params.model_fields_set and params.worktree:
         msg = (
             "cwd and worktree cannot be combined: worktree cuts a new "
             "checkout, cwd opens one that already exists"
         )
         raise InvalidRequest(msg)
+    params, overrides, read_only = _resolve_purpose(ctx, params)
+    if params.cwd and params.worktree:
+        params = params.model_copy(update={"worktree": None})
     # After the profile fills the model, before anything reaches the engine:
     # a project's review policy is a rule, and a start that would run a model
     # it forbids is refused rather than spawned (WI-1590).
@@ -3106,14 +3110,55 @@ class _Subject:
         return self.work_item_ref or self.project_slug
 
 
+def _git_common_dir(root: Path) -> str:
+    """`git rev-parse --git-common-dir` with config that cannot run hooks.
+
+    The directory is one the caller named, so the probe must not honour a
+    repo's fsmonitor, hooks, or system gitconfig. `-c` overrides the repo
+    config; `GIT_CONFIG_NOSYSTEM` drops the system one.
+    """
+
+    env = os.environ.copy()
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_COUNT"] = "0"
+    try:
+        completed = subprocess.run(  # fixed argv, never a shell
+            [
+                "git",
+                "-C",
+                str(root),
+                "-c",
+                "core.fsmonitor=",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "rev-parse",
+                "--git-common-dir",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        msg = f"git could not be run against {root}: {exc}"
+        raise CollectorError(msg) from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit {completed.returncode}"
+        msg = f"git rev-parse could not be read in {root}: {detail}"
+        raise CollectorError(msg)
+    return completed.stdout.strip()
+
+
 def _existing_worktree_cwd(raw: str, project_root: str) -> str:
     """The directory a `cwd` start opens in, or a refusal (WI-1671).
 
-    Three checks, in the order a wrong path fails them: it exists, it sits
-    under the workspace's `Active/` directory, and it is a git worktree of
-    the same repository as the project's registered checkout. The comparison
-    is git's `commondir`, which a linked worktree and the main checkout of
-    one repository share and two repositories do not.
+    Four checks, in the order a wrong path fails them: it exists, it sits
+    under the workspace's real `Active/` directory (the parent of the
+    project's registered checkout, not any path component named `Active`),
+    it is not that checkout itself, and it is a git worktree of the same
+    repository. The comparison is git's `commondir`, which a linked worktree
+    and the main checkout of one repository share and two repositories do not.
     """
     path = Path(raw).expanduser()
     if not path.is_absolute():
@@ -3127,10 +3172,6 @@ def _existing_worktree_cwd(raw: str, project_root: str) -> str:
     except OSError as exc:
         msg = f"cwd {raw!r} cannot be resolved: {exc}"
         raise InvalidRequest(msg) from exc
-    parts = resolved.parts
-    if "Active" not in parts:
-        msg = f"cwd {resolved} is not under the workspace Active/ directory"
-        raise InvalidRequest(msg)
     checkout = Path(project_root)
     if not checkout.is_dir():
         msg = (
@@ -3138,9 +3179,20 @@ def _existing_worktree_cwd(raw: str, project_root: str) -> str:
             "cwd cannot be checked against it"
         )
         raise InvalidRequest(msg)
+    checkout_resolved = checkout.resolve()
+    active = checkout_resolved.parent
+    if active.name != "Active" or not resolved.is_relative_to(active):
+        msg = f"cwd {resolved} is not under the workspace Active/ directory ({active})"
+        raise InvalidRequest(msg)
+    if resolved == checkout_resolved:
+        msg = (
+            f"cwd {resolved} is the project's shared checkout; name a "
+            "worktree of it instead"
+        )
+        raise InvalidRequest(msg)
     try:
-        asked = git_output(resolved, "rev-parse", "--git-common-dir", required=True)
-        owned = git_output(checkout, "rev-parse", "--git-common-dir", required=True)
+        asked = _git_common_dir(resolved)
+        owned = _git_common_dir(checkout_resolved)
     except CollectorError as exc:
         msg = (
             f"cwd {resolved} is not a git worktree of the project's "
