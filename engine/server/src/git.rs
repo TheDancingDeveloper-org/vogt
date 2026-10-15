@@ -157,14 +157,19 @@ pub fn worktree_destination(checkout: &Path, branch: &str) -> Result<PathBuf> {
 /// tree is left exactly as it was, because the new branch comes from
 /// `base_ref` rather than from the working tree.
 ///
-/// `base_ref` is resolved in the checkout as it stands: it is never fetched,
-/// so a local branch that is behind its remote is cut where it is. A caller
-/// that wants the remote's tip names `origin/<branch>`.
+/// A plain branch name is fetched from `origin` first and the new branch is
+/// cut from `origin/<base_ref>`, not from the checkout's local ref of the same
+/// name (WI-1630). The shared checkout's local branch is often far behind the
+/// remote, and cutting from it silently starts the session on stale code. A
+/// fetch that fails refuses the start: falling back to the local ref is the
+/// bug this closes. A `base_ref` that already names a remote (`origin/main`)
+/// is fetched and used as it stands.
 ///
 /// Refuses before running git when the checkout is not a git tree, when
 /// either name is not a ref name, when the branch already exists, or when the
-/// destination already exists. When git itself refuses part way, neither the
-/// directory nor the branch is left behind.
+/// destination already exists. A fetch that fails, or a remote ref that is
+/// still absent after it, refuses before the worktree is cut. When git itself
+/// refuses part way, neither the directory nor the branch is left behind.
 pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<PathBuf> {
     let destination = worktree_destination(checkout, branch)?;
     let branch = clean_ref_name("branch", branch)?;
@@ -199,15 +204,10 @@ pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<
             checkout.display()
         )));
     }
-    // The base must already be in the checkout. Fetching it here would reach
-    // the network and could move a remote-tracking ref the caller did not ask
-    // to move; an unknown base is a plain refusal.
-    if git_output(checkout, &["rev-parse", "--verify", "--quiet", &base_ref]).is_err() {
-        return Err(ApiError::BadRequest(format!(
-            "base ref {base_ref:?} is not in {}",
-            checkout.display()
-        )));
-    }
+    // Cut from the remote's tip. The local ref of the same name is the shared
+    // checkout's, and it lags the remote (WI-1630). A fetch failure refuses
+    // rather than silently cutting from that stale ref.
+    let remote_ref = fetch_base_ref(checkout, &base_ref)?;
     git_output(
         checkout,
         &[
@@ -217,7 +217,7 @@ pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<
             "-b",
             &branch,
             &destination.display().to_string(),
-            &base_ref,
+            &remote_ref,
         ],
     )
     .map_err(|error| {
@@ -252,6 +252,50 @@ pub fn remove_worktree(checkout: &Path, path: &Path, branch: &str) {
             tracing::warn!(branch, error = %e, "could not delete a session worktree's branch");
         }
     }
+}
+
+/// Fetch `base_ref` from `origin` and return the remote-tracking ref to cut
+/// from: `origin/<base_ref>`, or `base_ref` itself when it already names a
+/// remote.
+///
+/// Refuses when the fetch fails or the remote ref is not there afterwards.
+/// The local ref is deliberately never a fallback — a start on a base the
+/// remote could not confirm is worse than no start (WI-1630). The fetch moves
+/// only the one remote-tracking ref, never a local branch.
+fn fetch_base_ref(checkout: &Path, base_ref: &str) -> Result<String> {
+    let remote_ref = if let Some(rest) = base_ref.strip_prefix("origin/") {
+        if rest.is_empty() || rest.contains('/') {
+            return Err(ApiError::BadRequest(format!(
+                "base ref {base_ref:?} is not a branch on origin"
+            )));
+        }
+        base_ref.to_string()
+    } else if base_ref.contains('/') {
+        // A slash that is not the origin prefix is a local branch with a
+        // slash in its name (`integrate/vogt-next`), which `git fetch origin
+        // <ref>` maps onto `refs/remotes/origin/<ref>`.
+        format!("origin/{base_ref}")
+    } else {
+        format!("origin/{base_ref}")
+    };
+    let source = remote_ref
+        .strip_prefix("origin/")
+        .expect("remote ref starts with origin/");
+    // An explicit refspec. `git fetch origin <branch>` with a matching local
+    // branch updates that local branch, not `refs/remotes/origin/<branch>`,
+    // and the local branch is exactly the stale ref this must not follow.
+    let spec = format!("+refs/heads/{source}:refs/remotes/origin/{source}");
+    git_output(checkout, &["fetch", "--quiet", "origin", &spec]).map_err(|error| {
+        ApiError::BadRequest(format!(
+            "could not fetch base ref {base_ref:?} from origin: {error}"
+        ))
+    })?;
+    if git_output(checkout, &["rev-parse", "--verify", "--quiet", &remote_ref]).is_err() {
+        return Err(ApiError::BadRequest(format!(
+            "base ref {base_ref:?} is not on origin"
+        )));
+    }
+    Ok(remote_ref)
 }
 
 /// git, synchronously, with its stdout on success and its stderr in the error.
@@ -1446,18 +1490,47 @@ mod tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
-    /// A committed repo with one uncommitted edit, the state the shared
-    /// checkout is in when a worker must not touch it (WI-1298).
+    /// A committed checkout whose local `integrate` lags `origin/integrate`,
+    /// plus one uncommitted edit (WI-1298, WI-1630). The bare origin is a
+    /// sibling, so the fetch stays on disk.
     fn dirty_checkout(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        let origin = tmp.path().join("origin.git");
+        git(
+            tmp.path(),
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "main",
+                &origin.display().to_string(),
+            ],
+        );
         let repo = tmp.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        git(&repo, &["init", "-b", "main"]);
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "--quiet",
+                &origin.display().to_string(),
+                &repo.display().to_string(),
+            ],
+        );
         git(&repo, &["config", "user.email", "t@example"]);
         git(&repo, &["config", "user.name", "t"]);
         std::fs::write(repo.join("f.txt"), "base\n").unwrap();
         git(&repo, &["add", "f.txt"]);
         git(&repo, &["commit", "-m", "base"]);
         git(&repo, &["branch", "integrate"]);
+        git(&repo, &["push", "--quiet", "origin", "main", "integrate"]);
+        // The remote moves on; the local ref of the base is left behind.
+        std::fs::write(repo.join("f.txt"), "remote\n").unwrap();
+        git(&repo, &["add", "f.txt"]);
+        git(&repo, &["commit", "-m", "remote"]);
+        git(&repo, &["push", "--quiet", "origin", "main"]);
+        git(&repo, &["branch", "-f", "integrate", "HEAD"]);
+        git(&repo, &["push", "--quiet", "origin", "integrate"]);
+        git(&repo, &["reset", "--hard", "HEAD~1"]);
+        git(&repo, &["branch", "-f", "integrate", "HEAD"]);
         std::fs::write(repo.join("f.txt"), "dirty\n").unwrap();
         repo
     }
@@ -1473,7 +1546,8 @@ mod tests {
         assert_eq!(worktree, tmp.path().join("wi-1298-worker"));
         assert_eq!(
             std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
-            "base\n"
+            "remote\n",
+            "the worktree is cut from origin, not the stale local ref"
         );
         // The checkout the worktree was cut from is byte-for-byte as it was.
         assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), before);
@@ -1494,7 +1568,7 @@ mod tests {
         let option = create_worktree(&repo, "--upload-pack=evil", "integrate").unwrap_err();
         assert!(option.to_string().contains("not a ref name"), "{option}");
         let unknown = create_worktree(&repo, "wi-1", "no-such-ref").unwrap_err();
-        assert!(unknown.to_string().contains("not in"), "{unknown}");
+        assert!(unknown.to_string().contains("could not fetch"), "{unknown}");
 
         std::fs::create_dir(tmp.path().join("taken")).unwrap();
         let taken = create_worktree(&repo, "taken", "integrate").unwrap_err();
@@ -1525,6 +1599,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = dirty_checkout(&tmp);
         let first = create_worktree(&repo, "first", "integrate").unwrap();
+        git(&first, &["push", "--quiet", "-u", "origin", "first"]);
         let second = create_worktree(&first, "second", "first").unwrap();
         assert_eq!(second, tmp.path().join("second"));
         assert_eq!(
@@ -1532,6 +1607,30 @@ mod tests {
                 .unwrap()
                 .trim(),
             "second"
+        );
+    }
+
+    #[test]
+    fn a_fetch_failure_refuses_the_worktree_instead_of_cutting_from_the_stale_local_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let local = git_output(&repo, &["rev-parse", "integrate"]).unwrap();
+        // The remote goes away. The local ref is still there and behind.
+        std::fs::remove_dir_all(tmp.path().join("origin.git")).unwrap();
+
+        let failed = create_worktree(&repo, "wi-1630-worker", "integrate").unwrap_err();
+
+        assert!(failed.to_string().contains("could not fetch"), "{failed}");
+        assert!(!tmp.path().join("wi-1630-worker").exists());
+        assert!(git_output(
+            &repo,
+            &["rev-parse", "--verify", "refs/heads/wi-1630-worker"]
+        )
+        .is_err());
+        // The stale local ref is untouched, and was not what got cut.
+        assert_eq!(
+            git_output(&repo, &["rev-parse", "integrate"]).unwrap(),
+            local
         );
     }
 }
