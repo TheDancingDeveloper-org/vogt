@@ -30,7 +30,8 @@
 # /opt/vogt/agent-clis/bin, which the session user owns, so a stub there
 # would pass every call. A runtime `VOGT_KLAUDIA_VERSION` pin (installed
 # under that same session-owned tree) changes the `klaudia` a session runs,
-# not this hook; moving gitguard to another Klaudia means an image build.
+# not this hook. A gitguard fix ships only with an image rebuild; moving
+# gitguard to another Klaudia means an image build.
 # The engine refuses a Codex launch unless both commands are exactly this
 # string and /usr/local/bin/klaudia is a root-owned regular file.
 #

@@ -165,7 +165,10 @@ environment moves it at the next start without a rebuild, checked against
 the Go mirror's own release index. Klaudia's row is kind `go-src`: a runtime
 `VOGT_KLAUDIA_VERSION` is another full commit, fetched alone and built into
 the volume at start (`./cmd/klaudia`, CGO off), its `source` recorded in the
-prefix. `GO_VERSION` as a build argument must
+prefix. That pin is the `klaudia` a session runs; it is not the gitguard hook.
+The hook runs `/usr/local/bin/klaudia`, baked at image build from the commit
+`engine/agent-versions.env` names, so a gitguard fix ships only with an image
+rebuild (WI-1146). `GO_VERSION` as a build argument must
 equal the pin: a build cannot verify a version it has no recorded checksum
 for.
 `POD_BASE_IMAGE` selects the pod base; CI passes it by digest.
@@ -1602,8 +1605,8 @@ checks decide what it can finish on its own (WI-926; the design is
   `VOGT_KLAUDIA_VERSION` pin installs under the session-owned
   `/opt/vogt/agent-clis` and changes the `klaudia` a session runs, never
   the hook: gitguard always runs the image's build, from the commit
-  `engine/agent-versions.env` names, so moving gitguard to another Klaudia
-  is an image build.
+  `engine/agent-versions.env` names, so a gitguard fix ships only with an
+  image rebuild. Moving gitguard to another Klaudia is an image build.
   On the fork `failClosed` acts only on `PreToolUse`: a `SessionStart` hook
   that fails lets the session start with no baseline. That is still safe,
   because gitguard's `PreToolUse` refuses every `Bash` and `apply_patch` call
