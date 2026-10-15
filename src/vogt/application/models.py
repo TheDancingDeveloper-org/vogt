@@ -102,6 +102,18 @@ DIGEST_LIVE_STATES: frozenset[str] = frozenset(
 _DIGEST_ROW_BUDGET = 300
 
 
+def comma_list(value: object) -> object:
+    """Split one comma-separated string into a list.
+
+    MCP and HTTP callers often send `fields` as `"a,b"` rather than
+    `["a", "b"]`. A list is left as it is. A lone value with no comma stays
+    a one-element list.
+    """
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return value
+
+
 def apply_aliases(data: object, aliases: dict[str, str], *, model: str) -> object:
     """Rename a tolerated parameter alias to the field it means.
 
@@ -4809,7 +4821,18 @@ class ListSessionsParams(Params):
     )
     fields: list[str] = Field(
         default=[],
-        description="Extra SessionSummary attribute names on each digest row.",
+        description=(
+            "Extra SessionSummary attribute names on each digest row. A "
+            "comma-separated string is accepted as well as a list."
+        ),
+    )
+    started_by_session: str | None = Field(
+        default=None,
+        description=(
+            "Keep only sessions this one started: the starter's engine "
+            "session id, or its Vogt `ses_…` id. Unlinked engine sessions "
+            "(no starter) never match."
+        ),
     )
     states: list[str] | None = Field(
         default=None,
@@ -4838,6 +4861,19 @@ class ListSessionsParams(Params):
     )
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
+
+    @field_validator("fields", mode="before")
+    @classmethod
+    def _fields_may_be_csv(cls, value: object) -> object:
+        return comma_list(value)
+
+    @field_validator("started_by_session")
+    @classmethod
+    def _starter_is_an_id(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or len(value) > 200):
+            msg = "started_by_session is 1-200 characters"
+            raise ValueError(msg)
+        return None if value is None else value.strip()
 
 
 class SessionResult(Result):
@@ -5493,12 +5529,14 @@ class SessionWaitAnyParams(Params):
             "default (ready, blocked, approval, exited, errored)."
         ),
     )
-    cursor: int | None = Field(
+    cursor: int | str | None = Field(
         default=None,
-        ge=0,
         description=(
             "Ignore deltas at or before this seq, so a replayed page is not "
-            "waited on twice. Omit to accept the next match."
+            "waited on twice. Omit to accept the next match. `now` skips "
+            "everything already published and waits only for a change that "
+            "lands after this call starts; the result's `next_cursor` is "
+            "that head when nothing new arrives."
         ),
     )
     timeout_s: int = Field(
@@ -5507,6 +5545,28 @@ class SessionWaitAnyParams(Params):
         le=600,
         description="Seconds to wait at most (1-600). Answers `timeout` then.",
     )
+
+    @field_validator("cursor", mode="before")
+    @classmethod
+    def _cursor_is_seq_or_now(cls, value: object) -> object:
+        if value is None or isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"", "now"}:
+                return "now" if text == "now" else None
+            if text.isdigit():
+                return int(text)
+        msg = "cursor is a sequence number, or 'now' to skip events already published"
+        raise ValueError(msg)
+
+    @field_validator("cursor")
+    @classmethod
+    def _cursor_not_negative(cls, value: int | str | None) -> int | str | None:
+        if isinstance(value, int) and value < 0:
+            msg = "cursor is at least 0"
+            raise ValueError(msg)
+        return value
 
 
 class SessionWaitAnyResult(Result):

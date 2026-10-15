@@ -1164,7 +1164,7 @@ class EngineClient:
         *,
         ids: list[str] | None = None,
         until: list[str] | None = None,
-        cursor: int | None = None,
+        cursor: int | str | None = None,
         timeout_s: int = 120,
     ) -> EngineWaitAny | None:
         """Block until one of `ids` publishes a kind in `until`, or time runs
@@ -1179,7 +1179,7 @@ class EngineClient:
         if until:
             query["until"] = ",".join(until)
         if cursor is not None:
-            query["cursor"] = str(int(cursor))
+            query["cursor"] = "now" if cursor == "now" else str(int(cursor))
         payload = self._call(
             f"/api/sessions/wait-any?{urllib.parse.urlencode(query)}",
             allow_missing=True,

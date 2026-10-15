@@ -237,6 +237,7 @@ def test_sessions_are_listed_by_project_and_by_work_item(
             s.id for s in view.list_sessions(work_item_id=item.id, limit=10, offset=0)
         ] == [on_item.id]
         assert view.list_sessions(limit=1, offset=1)[0].id == on_project.id
+        assert view.list_sessions(started_by_session="nobody", limit=10, offset=0) == []
 
 
 def test_stopping_a_session_takes_it_out_of_the_live_list(

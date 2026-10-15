@@ -69,8 +69,16 @@ def test_every_driving_tool_takes_either_id(tools: dict[str, Any], name: str) ->
 def test_session_list_names_both_ids_and_the_states(tools: dict[str, Any]) -> None:
     description = tools["session_list"].description
     assert "engine_session_id" in description
+    assert "started_by_session" in description
+    assert "comma-separated" in description
     for state in ("running", "idle", "waiting-for-input", "exited", "errored"):
         assert state in description
+
+
+def test_session_wait_any_documents_cursor_now(tools: dict[str, Any]) -> None:
+    description = tools["session_wait_any"].description
+    assert "cursor=now" in description
+    assert "next_cursor" in description
 
 
 def test_session_input_warns_against_a_blind_enter(tools: dict[str, Any]) -> None:
