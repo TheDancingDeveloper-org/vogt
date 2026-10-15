@@ -48,7 +48,6 @@ from vogt.core.contract import (
     recommendations,
 )
 from vogt.core.entities import Actor, ContractExemption, Project
-from vogt.core.ids import new_id
 from vogt.storage.interface import ProjectUpdate, ReadView, WriteTxn
 
 CONTRACT_CHECK = "contract.check"
@@ -412,7 +411,7 @@ def contract_inapplicable(
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[ContractExemptionResult]:
         txn.insert_contract_exemption(
             ContractExemption(
-                id=new_id("cex"),
+                id=ctx.id_factory("cex"),
                 project_id=project.id,
                 project_slug=project.slug,
                 rule=params.rule,
