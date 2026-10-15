@@ -225,7 +225,9 @@ jobs:
           tags: ${{ steps.tag.outputs.ref }}
           build-args: |
             INSTALL_FLUTTER=${{ matrix.variant == 'full' || matrix.variant == 'workbench' }}
-            POD_VARIANT=${{ matrix.variant }}
+          # `workbench` is its own stage. `lean` and `full` build the default
+          # stage, so neither inherits the workbench ENV or layers.
+          target: ${{ matrix.variant == 'workbench' && 'workbench' || 'toolchain' }}
           # Layer cache on the operator's LAN registry, keyed per
           # variant so `lean` and `full` do not evict each other. Not GHCR:
           # see the header — this cache stays beside the runners.

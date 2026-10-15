@@ -15,7 +15,7 @@ name: release
 # digests. Tagging `vX.Y.Z` on that commit then makes this workflow:
 #
 #   1. prove the tag is on main and names the version the source carries;
-#   2. prove `build.yml` ran for this commit on main and its three image jobs
+#   2. prove `build.yml` ran for this commit on main and its four image jobs
 #      succeeded, resolve each `sha-<commit>` tag to its digest, and verify
 #      the digest carries build.yml's own signature for this exact commit plus
 #      its SBOM and provenance attestations — anything missing FAILS the
@@ -48,7 +48,7 @@ permissions:
 env:
   # The core alone — the verifiable build input of the product (the stack
   # image copies `/opt/vogt` out of it by digest), not the product. Promoted
-  # and release-signed with the pair so the manifest records all three.
+  # and release-signed with the pair so the manifest records all four.
   # Nothing tells an operator to deploy it (DEPLOYMENT.md).
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
   # The product: core plus session engine, PWA and agent CLIs in one
@@ -125,7 +125,7 @@ jobs:
   # build.yml is the only thing that builds images, so a release starts by
   # proving it did so for this commit. Its run *conclusion* is deliberately not
   # the test: the run also builds the public demo image, whose Trivy scan can
-  # fail on a stale base package without touching the three product images.
+  # fail on a stale base package without touching the four product images.
   # What must have succeeded is each job that publishes one of them, in the
   # latest attempt of some build.yml run for this exact commit on main.
   build-run:
@@ -145,7 +145,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_SHA: ${{ github.sha }}
-          # The `name:` of build.yml's three publishing jobs. tests/
+          # The `name:` of build.yml's four publishing jobs. tests/
           # test_release_workflow.py fails if build.yml renames one.
           REQUIRED_JOBS: |
             build and publish a commit image
@@ -179,19 +179,19 @@ jobs:
             done <<<"$REQUIRED_JOBS"
             url="$(jq -r --argjson id "$id" '.workflow_runs[] | select(.id == $id) | .html_url' <<<"$runs")"
             if [ -z "$missing" ]; then
-              echo "build.yml run ${url} published all three images for ${TAG_SHA}"
+              echo "build.yml run ${url} published every image for ${TAG_SHA}"
               echo "run_id=${id}" >> "$GITHUB_OUTPUT"
               echo "run_url=${url}" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             printf 'build.yml run %s did not publish every image:\n%s' "$url" "$missing"
           done
-          echo "::error::No build.yml run for ${TAG_SHA} on main published all three images (see above). Nothing is rebuilt here: re-run the failed build.yml jobs (gh run rerun <id> --failed) and then re-run this workflow."
+          echo "::error::No build.yml run for ${TAG_SHA} on main published every image (see above). Nothing is rebuilt here: re-run the failed build.yml jobs (gh run rerun <id> --failed) and then re-run this workflow."
           exit 1
 
   # The promotion itself: resolve, verify, retag, release-sign. One job, so
-  # the three digests leave it together and a partial promotion is visible as
-  # one red job rather than three half-done ones.
+  # the digests leave it together and a partial promotion is visible as
+  # one red job rather than half-done ones.
   promote:
     name: promote the built images by digest
     needs: [distribution, build-run]
@@ -492,7 +492,7 @@ jobs:
 
   # The stack and its voice sidecar are one release pair, with the core they
   # were built from. An independent read-back after promotion: every semver
-  # tag of all three images resolves to the digest promoted (and therefore to
+  # tag of every image resolves to the digest promoted (and therefore to
   # the one commit's build), so a deployment pinning `X.Y.Z` of each gets the
   # pair the dev lane ran together.
   release-pair:
@@ -575,7 +575,8 @@ jobs:
           set -euo pipefail
           apk_count="$(find release-assets/android -type f -name '*.apk' | wc -l)"
           [ "$apk_count" -ge 1 ] || { echo "signed APK is required" >&2; exit 1; }
-          # All three digests must be present: the stack and its voice sidecar
+          # Every digest must be present: the stack, the workbench stack and
+          # the voice sidecar
           # are one release pair, so a manifest missing the voice half
           # is not a complete release.
           case "$CORE_DIGEST:$STACK_DIGEST:$WORKBENCH_DIGEST:$VOICE_DIGEST" in
