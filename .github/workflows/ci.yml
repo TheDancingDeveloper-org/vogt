@@ -298,13 +298,16 @@ jobs:
       # cargo-audit is a fixed version, and compiling it from crates.io is
       # most of the audit step (build-cycle review, 2026-10-15). The binary
       # is cached by that version, so a run installs it only on a cold cache.
+      # The path is $CARGO_HOME, not ~: on these runners the job's CARGO_HOME
+      # (/root/.cargo) is not the home actions/cache expands `~` against, so a
+      # `~/.cargo` entry restores somewhere cargo never looks.
       - name: restore the cargo-audit binary
         id: cargo-audit
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled()
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ~/.cargo/bin/cargo-audit
+          path: ${{ env.CARGO_HOME }}/bin/cargo-audit
           key: cargo-audit-0.22.2-${{ runner.os }}-${{ runner.arch }}
 
       - name: install cargo-audit
@@ -318,7 +321,11 @@ jobs:
         working-directory: engine
         run: |
           set -euo pipefail
-          test "$(cargo audit --version)" = "cargo-audit 0.22.2"
+          got="$(cargo audit --version 2>&1 || true)"
+          if [ "$got" != "cargo-audit 0.22.2" ]; then
+            echo "cargo audit --version returned: $got" >&2
+            exit 1
+          fi
 
           # The self-hosted runner carries a global gitconfig that injects this
           # org's credentials for github.com. RustSec/advisory-db is a different
