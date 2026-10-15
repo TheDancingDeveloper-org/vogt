@@ -266,27 +266,24 @@ fn login_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
             )));
         }
     }
-    // pydantic reports every missing field, not the first. A present field that
-    // is the wrong type is its own error and is reported instead, because that
-    // is the one Python raises before it gets to "field required".
-    let mut missing = Vec::new();
+    // pydantic reports every problem, not the first. A field that is absent is
+    // `missing`; an explicit null or any other non-string is `string_type`, and
+    // the two are listed together in field order (`username`, then `password`).
+    let mut problems: Vec<(&str, &str, &str)> = Vec::new();
     for field in ["username", "password"] {
         match object.get(field) {
-            None | Some(serde_json::Value::Null) => missing.push(field),
+            None => problems.push((field, "missing", "Field required")),
             Some(value) if !value.is_string() => {
-                return Err(VogtError::InvalidRequest(format!(
-                    "invalid arguments for auth.login:\n1 validation error for \
-                     LoginParams\n{field}\n  Input should be a valid string"
-                )));
+                problems.push((field, "string_type", "Input should be a valid string"))
             }
             Some(_) => {}
         }
     }
-    if !missing.is_empty() {
-        let count = missing.len();
-        let errors = missing
+    if !problems.is_empty() {
+        let count = problems.len();
+        let errors = problems
             .iter()
-            .map(|field| format!("{field}\n  Field required"))
+            .map(|(field, kind, msg)| format!("{field}\n{kind}\n  {msg}"))
             .collect::<Vec<_>>()
             .join("\n");
         let noun = if count == 1 {
@@ -506,8 +503,15 @@ async fn dispatch<C: Clock, I: IdFactory>(
         .headers()
         .get("host")
         .and_then(|value| value.to_str().ok())
-        .unwrap_or("localhost")
-        .to_string();
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|info| info.0.to_string())
+                .unwrap_or_else(|| "localhost".to_string())
+        });
+    let headers_scheme = forwarded_scheme(request.headers());
     // Read one byte past the limit so an oversized body is distinguishable from
     // one that fits. `unwrap_or_default` used to turn a too-large body into an
     // empty one, and the caller was told their parameters were wrong.
@@ -549,19 +553,30 @@ async fn dispatch<C: Clock, I: IdFactory>(
         // Starlette's `redirect_slashes` (FastAPI's default), and only when the
         // path as given matches nothing: `/api/work/` is a 307 to `/api/work`,
         // preserving the method and the query, with an absolute Location.
-        if let Some(bare) = operation_path.strip_suffix('/') {
-            if !bare.is_empty() && !bare.ends_with('/') {
-                let mut target = format!("http://{host}{API_PREFIX}{bare}");
-                if let Some(query) = query.as_deref() {
-                    target.push('?');
-                    target.push_str(query);
-                }
-                return Response::builder()
-                    .status(StatusCode::TEMPORARY_REDIRECT)
-                    .header("location", target)
-                    .body(Body::empty())
-                    .expect("a fixed redirect builds");
+        // Starlette redirects only when stripping every trailing slash leaves a
+        // path a route actually owns (`/nope/` stays 404; `/api/work//` goes to
+        // `/api/work`). The scheme follows the request, including
+        // `X-Forwarded-Proto`, rather than a hard-coded `http`.
+        let bare = operation_path.trim_end_matches('/');
+        let hand_owned = matches!(
+            bare,
+            "/auth/login" | "/install/status" | "/install/bootstrap"
+        );
+        if bare.len() != operation_path.len()
+            && !bare.is_empty()
+            && (hand_owned || found.iter().any(|operation| operation.route.path == bare))
+        {
+            let scheme = request_scheme(&headers_scheme);
+            let mut target = format!("{scheme}://{host}{API_PREFIX}{bare}");
+            if let Some(query) = query.as_deref() {
+                target.push('?');
+                target.push_str(query);
             }
+            return Response::builder()
+                .status(StatusCode::TEMPORARY_REDIRECT)
+                .header("location", target)
+                .body(Body::empty())
+                .expect("a fixed redirect builds");
         }
         // The path is real but the verb is not: Starlette answers 405 and names
         // the verbs the path does accept. An unknown path stays 404.
@@ -1310,23 +1325,41 @@ fn login_missing_fields(message: &str) -> Option<Vec<serde_json::Value>> {
     if !head.ends_with("validation error") && !head.ends_with("validation errors") {
         return None;
     }
-    let (field_msg, error_type, msg) = if let Some(field) = body.strip_suffix("\n  Field required")
-    {
-        (field, "missing", "Field required")
-    } else {
-        let field = body.strip_suffix("\n  Input should be a valid string")?;
-        (field, "string_type", "Input should be a valid string")
-    };
+    // Each problem is `field\n<type>\n  <msg>`, joined by a newline. A message
+    // from before that encoding (one type for the whole body) still parses.
     let mut detail = Vec::new();
-    for field in field_msg.split("\n  Field required\n") {
-        let field = field.trim();
-        if field.is_empty() {
-            continue;
+    if body.contains("\nmissing\n") || body.contains("\nstring_type\n") {
+        let mut lines = body.split('\n');
+        while let Some(field) = lines.next() {
+            let Some(kind) = lines.next() else { break };
+            let Some(msg) = lines.next() else { break };
+            let msg = msg.trim();
+            if field.is_empty() || (kind != "missing" && kind != "string_type") {
+                return None;
+            }
+            detail.push(serde_json::json!({
+                "loc": ["body", field],
+                "msg": msg,
+                "type": kind,
+            }));
         }
+    } else if let Some(field) = body.strip_suffix("\n  Field required") {
+        for field in field.split("\n  Field required\n") {
+            let field = field.trim();
+            if field.is_empty() {
+                continue;
+            }
+            detail.push(serde_json::json!({
+                "loc": ["body", field],
+                "msg": "Field required",
+                "type": "missing",
+            }));
+        }
+    } else if let Some(field) = body.strip_suffix("\n  Input should be a valid string") {
         detail.push(serde_json::json!({
-            "loc": ["body", field],
-            "msg": msg,
-            "type": error_type,
+            "loc": ["body", field.trim()],
+            "msg": "Input should be a valid string",
+            "type": "string_type",
         }));
     }
     if detail.is_empty() {
@@ -1334,6 +1367,23 @@ fn login_missing_fields(message: &str) -> Option<Vec<serde_json::Value>> {
     } else {
         Some(detail)
     }
+}
+
+/// `http` unless a proxy said otherwise. Starlette's redirect uses the request
+/// scheme; behind the estate door that arrives as `X-Forwarded-Proto`.
+fn forwarded_scheme(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| *value == "http" || *value == "https")
+        .unwrap_or("http")
+        .to_string()
+}
+
+fn request_scheme(scheme: &str) -> &str {
+    scheme
 }
 
 /// A body that never reached the validator. Python reports a body that is not
@@ -1443,29 +1493,25 @@ fn not_found() -> Response {
 /// Python's login and install routes are mounted before the registry ones, so a
 /// path they own names their verb and no other.
 fn method_not_allowed(registry: &OperationRegistry, operation_path: &str) -> Response {
-    let mut allow: Vec<&str> = Vec::new();
-    let hand = match operation_path {
-        "/auth/login" => Some("POST"),
+    // Starlette answers 405 from the first route whose path matches and whose
+    // methods do not include the verb. `Allow` is that route's methods only,
+    // not the union of every verb later mounted on the same path. The hand
+    // routes are mounted before the registry, so they win when they own it.
+    let first = match operation_path {
+        "/auth/login" | "/install/bootstrap" => Some("POST"),
         "/install/status" => Some("GET"),
-        "/install/bootstrap" => Some("POST"),
-        _ => None,
-    };
-    if let Some(verb) = hand {
-        allow.push(verb);
-    }
-    for operation in registry.for_transport(Transport::Http) {
-        if operation.route.path == operation_path {
-            let verb = match operation.route.method {
+        _ => registry
+            .for_transport(Transport::Http)
+            .into_iter()
+            .find(|operation| operation.route.path == operation_path)
+            .map(|operation| match operation.route.method {
                 HttpMethod::Get => "GET",
                 HttpMethod::Post => "POST",
                 HttpMethod::Patch => "PATCH",
                 HttpMethod::Delete => "DELETE",
-            };
-            if !allow.contains(&verb) {
-                allow.push(verb);
-            }
-        }
-    }
+            }),
+    };
+    let allow = first.into_iter().collect::<Vec<_>>();
     Response::builder()
         .status(StatusCode::METHOD_NOT_ALLOWED)
         .header("allow", allow.join(", "))
@@ -1549,6 +1595,23 @@ mod tests {
     /// the 405 and 307 answers are mostly header.
     fn request_head(addr: std::net::SocketAddr, method: &str, path: &str) -> (u16, String, String) {
         raw(addr, method, path, None, None)
+    }
+
+    fn request_head_extra(
+        addr: std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        extra: &str,
+    ) -> (u16, String, String) {
+        raw(addr, method, path, None, Some(extra))
+    }
+
+    fn header_value(head: &str, name: &str) -> Option<String> {
+        head.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_string())
+        })
     }
 
     fn raw(
@@ -1929,26 +1992,69 @@ mod tests {
         assert_eq!(detail[0]["loc"], serde_json::json!(["body", "username"]));
         assert_eq!(detail[1]["loc"], serde_json::json!(["body", "password"]));
         assert!(detail.iter().all(|entry| entry["type"] == "missing"));
+        // A wrong type and a missing field are both reported, in field order.
+        // An explicit null is a type error, not "missing".
+        let (status, body) = post_json(running.addr, "/api/auth/login", r#"{"username":1}"#);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status, 422, "{body}");
+        let detail = json["error"]["detail"].as_array().unwrap();
+        assert_eq!(detail.len(), 2, "{body}");
+        assert_eq!(detail[0]["type"], "string_type");
+        assert_eq!(detail[0]["loc"], serde_json::json!(["body", "username"]));
+        assert_eq!(detail[1]["type"], "missing");
+        assert_eq!(detail[1]["loc"], serde_json::json!(["body", "password"]));
+        let (status, body) = post_json(running.addr, "/api/auth/login", r#"{"password":null}"#);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status, 422, "{body}");
+        let detail = json["error"]["detail"].as_array().unwrap();
+        assert_eq!(detail[0]["type"], "missing");
+        assert_eq!(detail[1]["type"], "string_type");
+        assert_eq!(detail[1]["loc"], serde_json::json!(["body", "password"]));
     }
 
     #[test]
     fn a_wrong_method_is_405_with_the_verbs_the_path_accepts() {
         let running = serve(true);
+        // `/api/work` is registered POST and then GET. Starlette answers from
+        // the first partial route, so Allow names POST only, not "POST, GET".
         let (status, head, body) = request_head(running.addr, "PUT", "/api/work");
         assert_eq!(status, 405, "{body}");
         assert_eq!(body, r#"{"detail":"Method Not Allowed"}"#);
-        assert!(head.to_ascii_lowercase().contains("allow: post"), "{head}");
+        let allow = header_value(&head, "allow");
+        assert_eq!(allow.as_deref(), Some("POST"), "{head}");
         let (status, _, _) = request_head(running.addr, "POST", "/api/no/such");
         assert_eq!(status, 404);
     }
 
     #[test]
-    fn a_trailing_slash_redirects_to_the_bare_path() {
+    fn a_trailing_slash_redirects_only_when_the_bare_path_is_a_route() {
         let running = serve(true);
         let (status, head, _) = request_head(running.addr, "GET", "/api/work/?limit=1");
         assert_eq!(status, 307, "{head}");
         assert!(
             head.contains("location: http://localhost/api/work?limit=1"),
+            "{head}"
+        );
+        // Every trailing slash is stripped, the way Starlette's rstrip does.
+        let (status, head, _) = request_head(running.addr, "GET", "/api/work//");
+        assert_eq!(status, 307, "{head}");
+        assert!(
+            head.contains("location: http://localhost/api/work"),
+            "{head}"
+        );
+        // An unknown path stays 404. Redirecting it was the review's blocker.
+        let (status, _, body) = request_head(running.addr, "GET", "/api/nope/?a=1");
+        assert_eq!(status, 404, "{body}");
+        // A proxy's scheme is the one the Location uses.
+        let (status, head, _) = request_head_extra(
+            running.addr,
+            "GET",
+            "/api/work/",
+            "X-Forwarded-Proto: https\r\n",
+        );
+        assert_eq!(status, 307, "{head}");
+        assert!(
+            head.contains("location: https://localhost/api/work"),
             "{head}"
         );
     }
