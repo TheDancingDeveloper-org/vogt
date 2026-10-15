@@ -292,21 +292,23 @@ fn scripts_command(argv: &[String]) -> Option<ExitCode> {
         "check-product-version" => {
             // Only arguments after the command count. A global flag before it
             // (such as `--data-dir`) is not the expected version.
-            let expected = argv
+            let after: Vec<&str> = argv
                 .iter()
                 .skip_while(|arg| arg.as_str() != word)
                 .skip(1)
-                .find(|arg| !arg.starts_with('-'))
-                .map(String::as_str);
+                .map(String::as_str)
+                .collect();
+            let expected = positional(&after).first().copied();
             scripts::check_product_version(&root, expected)
         }
         "sanitise-transcript" => {
-            let rest: Vec<String> = argv
+            let after: Vec<&str> = argv
                 .iter()
                 .skip_while(|arg| arg.as_str() != word)
                 .skip(1)
-                .cloned()
+                .map(String::as_str)
                 .collect();
+            let rest: Vec<String> = positional(&after).into_iter().map(str::to_string).collect();
             scripts::sanitise_transcript(&rest)
         }
         "check-docs" => scripts::check_docs(&root),
@@ -321,6 +323,27 @@ fn scripts_command(argv: &[String]) -> Option<ExitCode> {
     })
 }
 
+/// The arguments that are not `--root PATH`: flags keep their values, and a
+/// bare word is positional. `--root`'s value must never be read as one.
+fn positional<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index];
+        if arg == "--root" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--root=") {
+            index += 1;
+            continue;
+        }
+        out.push(arg);
+        index += 1;
+    }
+    out
+}
+
 /// Where a script looks for the checkout: `--root PATH`, or the working
 /// directory. A distributed binary must not check the build machine's path.
 fn scripts_root(argv: &[String]) -> PathBuf {
@@ -328,6 +351,10 @@ fn scripts_root(argv: &[String]) -> PathBuf {
         .position(|arg| arg == "--root")
         .and_then(|index| argv.get(index + 1))
         .map(PathBuf::from)
+        .or_else(|| {
+            argv.iter()
+                .find_map(|arg| arg.strip_prefix("--root=").map(PathBuf::from))
+        })
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
@@ -341,6 +368,13 @@ fn command_word(argv: &[String]) -> Option<&str> {
         }
         if arg == "--data-dir" || is_global_prefix(arg, "data-dir") {
             // `--data=DIR` carries its value; `--data DIR` takes the next token.
+            index += if arg.contains('=') { 1 } else { 2 };
+            continue;
+        }
+        if arg == "--root" || arg.starts_with("--root=") {
+            // The ported scripts' checkout override. It may sit before the
+            // command (`vogt-core --root PATH check-docs`), so it has to be
+            // stepped over here or the generated CLI rejects it.
             index += if arg.contains('=') { 1 } else { 2 };
             continue;
         }
