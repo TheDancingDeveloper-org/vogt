@@ -815,9 +815,15 @@ def block(name: str, args: list[str], extra: str = "", mode: str = "") -> str:
 
 wanted = {
     "browser": block("browser", ["mcp", "browser"], "tool_timeout_sec = 60\n"),
+    # Codex starts a stdio server with a cleared environment (HOME, PATH and a
+    # few more) plus the names in env_vars. The child `codex exec` the
+    # sub-agent spawns authenticates to the same provider, whose env_key is
+    # HOMELAB_LITELLM_SESSION_KEY, so that name is passed through by name; the
+    # value never lands in the file (WI-1639).
     "codex-subagent": block(
         "codex-subagent",
         ["mcp", "codex-subagent", "--codex", real, "--root", root],
+        'env_vars = ["HOMELAB_LITELLM_SESSION_KEY"]\n',
     ),
 }
 

@@ -864,6 +864,8 @@ def test_codex_gets_the_browser_and_the_isolated_subagent(tmp_path: Path) -> Non
     ]
     # The registration is a command and arguments, never a credential.
     assert "env" not in sub and "bearer_token" not in sub
+    # The child codex exec needs the provider key, passed by name (WI-1639).
+    assert sub["env_vars"] == ["HOMELAB_LITELLM_SESSION_KEY"]
 
     # A second run replaces the tables in place.
     again = _codex_bootstrap(tmp_path, {})
