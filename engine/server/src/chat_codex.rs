@@ -139,11 +139,11 @@ model_catalog_json = "vogt-model-catalog.json"
     )
 }
 
-    /// The router-group catalog WI-1147 writes, one ModelsResponse entry per
-    /// LiteLLM group that answers a chat completion (WI-1592). The fork sorts
-    /// by priority ascending and takes the first visible model as the default,
-    /// so priority is the index in router order and grok stays first. premium
-    /// is the router's opt-in group, hidden from the picker.
+/// The router-group catalog WI-1147 writes, one ModelsResponse entry per
+/// LiteLLM group that answers a chat completion (WI-1592). The fork sorts
+/// by priority ascending and takes the first visible model as the default,
+/// so priority is the index in router order and grok stays first. premium
+/// is the router's opt-in group, hidden from the picker.
 pub fn model_catalog() -> String {
     fn entry(slug: &str, priority: u8, visibility: &str) -> String {
         format!(
