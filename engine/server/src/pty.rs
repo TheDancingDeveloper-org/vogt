@@ -1645,7 +1645,7 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
             // byte: an identical repaint is not work (WI-1090).
             let reference = session.last_change().unwrap_or(session.spawned_at);
             let elapsed_ms = reference.elapsed().as_millis() as u64;
-            if elapsed_ms >= session.idle_after_ms {
+            let wait_ms = if elapsed_ms >= session.idle_after_ms {
                 let new_state = if session.last_output.lock().is_some() {
                     // Settle pending output before classifying.
                     let _ = session.last_change();
@@ -1654,13 +1654,21 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
                     ActivityState::Idle
                 };
                 update_activity_if_changed(&session, new_state, &bus);
-                continue;
-            }
+                if session.activity() != ActivityState::Running {
+                    continue;
+                }
+                // Still running though the screen is quiet: a `working`
+                // title holds the turn open (WI-1598). Wait a full window
+                // before asking again — looping straight back never yields,
+                // pinning a runtime worker and starving every other task on
+                // it, terminal input included (WI-1644).
+                session.idle_after_ms
+            } else {
+                session.idle_after_ms - elapsed_ms
+            };
 
             let epoch = session.activity_epoch.load(Ordering::Acquire);
-            let sleep = tokio::time::sleep(std::time::Duration::from_millis(
-                session.idle_after_ms - elapsed_ms,
-            ));
+            let sleep = tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
             tokio::pin!(sleep);
 
             tokio::select! {
