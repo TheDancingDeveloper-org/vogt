@@ -72,6 +72,22 @@ class PersonRequired(VogtError):
     http_status = 403
 
 
+class PolicyRefused(VogtError):
+    """A start would put a model the project's review policy forbids on a
+    session (WI-1590).
+
+    A project's `agent_policy.review.never_models` is a hard rule, not
+    guidance: a session whose model is on it is refused before the engine
+    spawns anything, whether the model came from the purpose's dispatch
+    profile or from the caller naming it. A start with no model at all is not
+    refused — there is nothing to judge — and a project with no `review`
+    policy has nothing to refuse against.
+    """
+
+    code = "policy_refused"
+    http_status = 422
+
+
 class RoleRefused(VogtError):
     """An agent asked to make a session an overseer (WI-957, WI-973 F3).
 

@@ -1036,11 +1036,16 @@ its own. `DELETE /api/sessions/:id` removes the guide with the brief, and the
 prompt sweep keeps a guide while its session is known, live or hibernated,
 exactly as it keeps the brief.
 
-**Project policy.** A project's `agent_policy` reaches a session only as
-text in its brief, which vogt-core composes. The engine writes no
-per-session hooks and enforces none of it yet: refusing `forbidden_text` and
-an agent's merge onto a production branch is a follow-up, and Klaudia has
-no per-session settings flag to carry such a hook.
+**Project policy.** A project's `agent_policy` reaches a session as text in
+its brief, which vogt-core composes, and the engine writes no per-session
+hooks. One part of it is enforced before a session exists at all:
+`agent_policy.review.never_models` is checked in vogt-core when a session
+starts (WI-1590), against the model the start will actually run — the
+purpose's dispatch profile, or the model the caller named — and a start on a
+forbidden model is refused with `policy_refused` rather than spawned. The
+rest stays unenforced: refusing `forbidden_text` and an agent's merge onto a
+production branch is still a follow-up, and Klaudia has no per-session
+settings flag to carry such a hook.
 
 **Quiet defaults for Claude Code.** Engine sessions are often driven by
 another agent through `POST /api/sessions/:id/input`, and Claude Code's

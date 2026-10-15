@@ -55,8 +55,15 @@ from vogt.application.services import (
     update_project,
 )
 from vogt.core.auth import hash_token
-from vogt.core.entities import AgentPolicy
-from vogt.errors import Conflict, InvalidRequest, MissingReason, NotFound, RoleRefused
+from vogt.core.entities import AgentPolicy, ReviewPolicy
+from vogt.errors import (
+    Conflict,
+    InvalidRequest,
+    MissingReason,
+    NotFound,
+    PolicyRefused,
+    RoleRefused,
+)
 from vogt.storage.interface import ProjectUpdate
 
 from tests.conftest import native_work_item
@@ -2386,6 +2393,80 @@ def test_purpose_implement_resolves_the_implement_profile(
     assert summary["repo_map"] is True
     assert summary["overrides"] == []
     assert result.session.purpose == "implement"
+
+
+def test_a_purpose_whose_model_the_project_forbids_is_refused(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1590: the review policy is a rule, not text in the brief. The
+    implement profile runs grok-4.7, and a project that forbids it gets no
+    session and no engine call."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(review=ReviewPolicy(never_models=["grok-4.7"])),
+            reason=WHY,
+        ),
+    )
+    with pytest.raises(PolicyRefused, match=r"grok-4\.7"):
+        start_session(
+            wired,
+            StartSessionParams(
+                work_item="WI-1", purpose="implement", task="fix it", reason=WHY
+            ),
+        )
+    assert engine.sent == []
+
+
+def test_naming_a_forbidden_model_is_refused_too(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The caller naming the model is the same start, so the same rule."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(review=ReviewPolicy(never_models=["grok-4.7"])),
+            reason=WHY,
+        ),
+    )
+    with pytest.raises(PolicyRefused, match="never_models"):
+        start_session(
+            wired,
+            StartSessionParams(project="vogt", model="grok-4.7", reason=WHY),
+        )
+    assert engine.sent == []
+
+
+def test_a_model_the_project_does_not_forbid_still_starts(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(review=ReviewPolicy(never_models=["grok-4.7"])),
+            reason=WHY,
+        ),
+    )
+    start_session(
+        wired,
+        StartSessionParams(work_item="WI-1", purpose="review", reason=WHY),
+    )
+    assert engine.last_spec["model"] == "opus"
+
+
+def test_a_project_with_no_review_policy_refuses_nothing(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="implement", task="fix it", reason=WHY
+        ),
+    )
+    assert engine.last_spec["model"] == "grok-4.7"
 
 
 def test_purpose_review_resolves_opus_low_forty_turns_read_only(
