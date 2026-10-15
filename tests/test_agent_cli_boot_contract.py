@@ -336,6 +336,12 @@ def test_image_installs_claude_code_beside_codex_acp() -> None:
     smoke = block.split("npm install -g", 1)[1]
     assert "/usr/local/bin/claude --version" in smoke
     assert "/usr/local/bin/codex-acp --version" in smoke
+    # The handshake needs the fork binary, which the next RUN installs, so it
+    # lives there rather than beside the `--version` check above.
+    codex_run = dockerfile.split("install -m 0755", 1)[1]
+    assert "codex-acp-initialize.py" in codex_run, (
+        "the image never checks that codex-acp answers initialize"
+    )
 
 
 def test_codex_acp_whose_version_lies_is_not_made_current(
@@ -896,7 +902,8 @@ def test_the_codex_wrapper_refuses_a_runtime_copy_that_is_not_a_fork_release(
     assert "ran" not in refused.stdout
 
     # A fork release records `<repository>@<commit>` and runs, with the pin
-    # flag the wrapper always adds.
+    # flag the wrapper always adds. The flag is a top-level option, so it
+    # precedes the caller's argv: `app-server` rejects it afterwards (WI-1633).
     (prefix / "source").write_text(
         f"https://github.com/TheDancingDeveloper-org/codex@{FORK_SHA}\n",
         encoding="utf-8",
@@ -904,6 +911,16 @@ def test_the_codex_wrapper_refuses_a_runtime_copy_that_is_not_a_fork_release(
     ran = _wrapped(tmp_path)
     assert ran.returncode == 0, ran.stderr
     assert ran.stdout.strip() == "ran --no-daemon --version"
+
+    app_server = subprocess.run(
+        ["bash", str(WRAPPER), "app-server"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "VOGT_AGENT_CLI_ROOT": str(tmp_path)},
+        check=False,
+    )
+    assert app_server.returncode == 0, app_server.stderr
+    assert app_server.stdout.strip() == "ran --no-daemon app-server"
 
 
 REQUIREMENTS = (

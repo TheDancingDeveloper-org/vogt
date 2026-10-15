@@ -55,7 +55,10 @@ fi
 # execs that copy, which then sits outside the pin. `--no-daemon` keeps the
 # process the one just resolved; `daemon_auto_start=false` is written into
 # Codex config by mcp-bootstrap so a client that omits the flag still does not
-# start one.
+# start one. It is a top-level option on the fork this image carries: `codex
+# app-server` (what `codex-acp` spawns) rejects it after the subcommand and
+# exits 2 before it reads stdin, so an ACP initialize then exits 0 with no
+# JSON-RPC result (WI-1633). It goes before the caller's argv.
 # The ACP adapter (`codex-acp`, WI-1595) reads CODEX_PATH for the binary it
 # execs as `codex app-server`. Export it here so a session that reaches the
 # adapter through this wrapper inherits the same fork copy this wrapper runs,
@@ -64,6 +67,4 @@ if [[ -z "${CODEX_PATH:-}" ]]; then
     export CODEX_PATH="$codex_real"
 fi
 
-exec "$codex_real" \
-    --no-daemon \
-    "$@"
+exec "$codex_real" --no-daemon "$@"

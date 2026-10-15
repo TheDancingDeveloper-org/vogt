@@ -366,6 +366,9 @@ ARG KLAUDIA_VERSION
 # name (`danger-full-access` for default and accept-edits; bypass is the only
 # posture that skips it, and only when a person asked).
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
+# ACP initialize smoke (WI-1633). `--version` does not catch a wrapper that
+# makes the adapter's app-server child exit before it can answer.
+COPY --chmod=755 engine/deploy/codex-acp-initialize.py /usr/local/libexec/codex-acp-initialize.py
 # The driven-session permission policy (WI-926): auto-mode rules every
 # engine-launched Claude session gets with --settings. A deployment replaces it
 # with ENGINE_AGENT_CLAUDE_SETTINGS (docs/ENGINE.md, "Permission posture").
@@ -489,6 +492,8 @@ RUN set -eu; \
         rm -rf "/tmp/${asset}" /tmp/SHA256SUMS "/tmp/${target}"; \
         ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex; \
         /usr/local/libexec/codex-real --version; \
+        python3 /usr/local/libexec/codex-acp-initialize.py /usr/local/bin/codex-acp \
+        || { echo "codex-acp initialize returned no JSON-RPC result" >&2; exit 1; }; \
         fi; \
     fi
 

@@ -150,7 +150,9 @@ a pin of it (exit 64) and drops any `current` an older image left, and the
 wrapper refuses a runtime copy whose prefix has no fork `source` line. Codex's row is kind `github-release`: a runtime
 `VOGT_CODEX_SHA` is another full commit, downloaded the same way and checked
 against the release's `SHA256SUMS` before `current` moves. The wrapper runs
-the binary with `--no-daemon`, and bootstrap writes
+the binary with `--no-daemon` ahead of the caller's arguments (it is a
+top-level option; `app-server` rejects it after the subcommand, which is what
+left an ACP `initialize` with no JSON-RPC result, WI-1633), and bootstrap writes
 `daemon_auto_start = false` into `$CODEX_HOME/config.toml` whenever `codex`
 is installed — merging the key into an existing `[features]` table and
 forcing a `true` already there to `false` — so a client that does not go
