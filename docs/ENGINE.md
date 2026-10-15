@@ -812,12 +812,17 @@ than these routes.
   a dirty shared checkout cannot leak into the session. Refused (`400`) when
   `cwd` is not a git checkout or is outside the workspace, when the worktree
   itself would land outside the workspace (a checkout at the workspace root),
-  when `base_ref` is not already in it, when `branch` is not a single ref name
+  when `base_ref` is not a branch on `origin`, when `branch` is not a single ref name
   or already exists, when the sibling directory already exists, or together
   with `resume` (a resumed conversation would move `cwd` off the checkout).
-  `base_ref` is resolved locally and never fetched, so a local branch behind
-  its remote is cut where it stands; name `origin/<branch>` for the remote's
-  tip. Every other refusal (codex policy, agent launch) is checked before the
+  Before the cut the engine fetches `base_ref` from `origin` and cuts from
+  `origin/<base_ref>` (WI-1630): the checkout's own local ref of that name is
+  the shared checkout's and lags the remote, so cutting from it starts the
+  session on stale code. A fetch that fails, or a base the remote does not
+  have, refuses the start (`400`) rather than falling back to the local ref.
+  A `base_ref` that already names the remote (`origin/main`) is fetched and
+  used as given. The fetch moves only that one remote-tracking ref, never a
+  local branch. Every other refusal (codex policy, agent launch) is checked before the
   cut, and a start that fails after it (prompt file, PTY spawn) removes the
   worktree and its branch again, so a refused start leaves neither behind.
   Absent means the session opens in `cwd`, byte-identical to a request from

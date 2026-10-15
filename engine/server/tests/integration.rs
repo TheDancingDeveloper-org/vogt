@@ -14675,15 +14675,36 @@ fn worktree_git(dir: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// A committed checkout at `repo` with a dirty edit, as the shared checkout is.
+/// A committed checkout at `repo` with a dirty edit, as the shared checkout is,
+/// whose local `main` lags `origin/main` (WI-1630). The bare origin is a
+/// sibling of the checkout, so the session start's fetch stays on disk.
 fn worktree_checkout(repo: &std::path::Path) {
-    std::fs::create_dir_all(repo).unwrap();
-    worktree_git(repo, &["init", "-q", "-b", "main"]);
+    let origin = repo.parent().unwrap().join("origin.git");
+    worktree_git(repo.parent().unwrap(), &[
+        "init",
+        "--bare",
+        "-q",
+        "-b",
+        "main",
+        &origin.display().to_string(),
+    ]);
+    worktree_git(repo.parent().unwrap(), &[
+        "clone",
+        "-q",
+        &origin.display().to_string(),
+        &repo.display().to_string(),
+    ]);
     worktree_git(repo, &["config", "user.email", "t@example"]);
     worktree_git(repo, &["config", "user.name", "t"]);
     std::fs::write(repo.join("f.txt"), "base\n").unwrap();
     worktree_git(repo, &["add", "f.txt"]);
     worktree_git(repo, &["commit", "-q", "-m", "base"]);
+    worktree_git(repo, &["push", "-q", "origin", "main"]);
+    std::fs::write(repo.join("f.txt"), "remote\n").unwrap();
+    worktree_git(repo, &["add", "f.txt"]);
+    worktree_git(repo, &["commit", "-q", "-m", "remote"]);
+    worktree_git(repo, &["push", "-q", "origin", "main"]);
+    worktree_git(repo, &["reset", "--hard", "HEAD~1"]);
     std::fs::write(repo.join("f.txt"), "dirty\n").unwrap();
 }
 
@@ -14730,7 +14751,7 @@ async fn a_worktree_session_opens_in_its_worktree_and_wakes_back_into_it() {
     assert_eq!(created["cwd"], worktree.to_string_lossy().as_ref());
     assert_eq!(
         std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
-        "base\n"
+        "remote\n"
     );
     assert_eq!(
         worktree_git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
