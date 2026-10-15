@@ -34,6 +34,13 @@ pub fn python_json_dumps(payload: &Value, sort_keys: bool) -> String {
     render_python_json(payload, true, sort_keys, 0)
 }
 
+/// `json.dumps` with `separators=(",", ":")`: no space after a comma or a
+/// colon. This is what MCP tool text and stdio framing use; `python_json_dumps`
+/// is the spaced form the stores write.
+pub fn python_json_dumps_compact(payload: &Value) -> String {
+    render_python_json(payload, false, false, 0)
+}
+
 /// `json.dumps(payload, indent=n)`: the same escaping as `python_json_dumps`,
 /// with each nesting level indented by `n` spaces and no space before a colon.
 pub fn python_json_dumps_indent(payload: &Value, indent: usize) -> String {

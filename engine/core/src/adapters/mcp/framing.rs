@@ -121,8 +121,10 @@ pub struct Dispatcher<'a, G: ToolGrant> {
     grant: &'a G,
     transport: McpTransport,
     report: ServeReport,
-    /// The caller's context, when the transport has one. Stdio has none, and a
-    /// ported service then says so rather than running against a guessed one.
+    /// The caller's context. Both transports have one: the HTTP route builds it
+    /// from the authenticated grant, and `mcp.stdio` passes the context the
+    /// command was invoked with. Absent, a ported service says so rather than
+    /// running against a guessed one.
     context: Option<&'a crate::application::context::Built>,
 }
 
@@ -137,8 +139,7 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
         }
     }
 
-    /// The context a tool call runs against. The HTTP route sets it; stdio,
-    /// which has no authenticated caller, leaves it unset.
+    /// The context a tool call runs against. Both transports set it.
     pub fn with_context(mut self, context: &'a crate::application::context::Built) -> Self {
         self.context = Some(context);
         self
@@ -462,7 +463,10 @@ fn accepted(schema: &Value) -> (Vec<String>, Vec<String>) {
 /// result, nulls included. Klaudia reads this text and only falls back to the
 /// structured body when the text is empty, so a summary here would hide it.
 fn compact_text(value: &Value) -> String {
-    crate::decisions::python_json_dumps(&without_nulls(value), false)
+    // `separators=(",", ":")`. The second argument of `python_json_dumps` is
+    // sort_keys, and that helper always writes the spaced separators the stores
+    // use, so the compact form is its own function.
+    crate::decisions::python_json_dumps_compact(&without_nulls(value))
 }
 
 /// Drop null-valued keys at every depth. A null list item stays, as Python's
@@ -510,7 +514,23 @@ pub fn serve_stdio<G: ToolGrant>(
     registry: &OperationRegistry,
     grant: &G,
 ) -> ServeReport {
+    serve_stdio_with(input, output, registry, grant, None)
+}
+
+/// [`serve_stdio`] against a context. `None` is the unauthenticated path the
+/// framing tests use; `mcp.stdio` passes the context it was called with, which
+/// is the principal and the data directory the tools then run against.
+pub fn serve_stdio_with<G: ToolGrant>(
+    input: &str,
+    output: &mut String,
+    registry: &OperationRegistry,
+    grant: &G,
+    context: Option<&crate::application::context::Built>,
+) -> ServeReport {
     let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Stdio);
+    if let Some(context) = context {
+        dispatcher = dispatcher.with_context(context);
+    }
     feed_lines(input.lines(), &mut dispatcher, output);
     report_of(&dispatcher)
 }
@@ -524,8 +544,21 @@ pub fn serve_stdio_streams<G: ToolGrant>(
     registry: &OperationRegistry,
     grant: &G,
 ) -> Result<ServeReport, std::io::Error> {
+    serve_stdio_streams_with(registry, grant, None)
+}
+
+/// [`serve_stdio_streams`] against a context. `mcp.stdio` passes the context
+/// the command was invoked with, so a tool runs as that caller.
+pub fn serve_stdio_streams_with<G: ToolGrant>(
+    registry: &OperationRegistry,
+    grant: &G,
+    context: Option<&crate::application::context::Built>,
+) -> Result<ServeReport, std::io::Error> {
     use std::io::{BufRead, Write};
     let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Stdio);
+    if let Some(context) = context {
+        dispatcher = dispatcher.with_context(context);
+    }
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let stdout = std::io::stdout();
@@ -548,7 +581,7 @@ fn feed_lines<'a, G: ToolGrant>(
 ) {
     for line in lines {
         if let Some(response) = dispatcher.handle_line(line) {
-            output.push_str(&crate::decisions::python_json_dumps(&response, false));
+            output.push_str(&crate::decisions::python_json_dumps_compact(&response));
             output.push('\n');
         }
     }
@@ -678,6 +711,13 @@ mod tests {
             "counts": {"total": 1},
         });
         let text = compact_text(&payload);
+        // The separators are (",", ":"), not the spaced (", ", ": ") the stores
+        // write. Re-parsing cannot tell the two apart, so the bytes are checked.
+        let tail = "x".repeat(300);
+        let expected = format!(
+            "{{\"rows\":[{{\"id\":\"ses_1\",\"tail\":[\"{tail}\"]}}],\"counts\":{{\"total\":1}}}}"
+        );
+        assert_eq!(text, expected);
         assert!(!text.contains('\n'));
         assert_eq!(
             serde_json::from_str::<Value>(&text).unwrap(),

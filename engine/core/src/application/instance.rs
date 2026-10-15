@@ -304,18 +304,18 @@ fn bind_instance(
 /// session report. A remote client uses `/mcp` instead, which is why the
 /// operation is not an MCP tool.
 pub fn mcp_stdio_op(
-    _ctx: &Built,
+    ctx: &Built,
     _params: serde_json::Value,
 ) -> Result<serde_json::Value, VogtError> {
-    let registry = crate::registry::operations::build_operations();
-    let registry = crate::registry::OperationRegistry::new(registry).map_err(|err| {
-        VogtError::InvalidRequest(format!("operation registry is inconsistent: {err}"))
-    })?;
-    let report = crate::adapters::mcp::framing::serve_stdio_streams(
-        &registry,
-        &crate::adapters::mcp::framing::FullGrant,
-    )
-    .map_err(|err| VogtError::InvalidRequest(format!("mcp stdio failed: {err}")))?;
+    // The registry the process already built, not a second one. The grant is
+    // everything MCP exposes, which is what a local session may do; the
+    // principal stays the caller's, because the context the tools run in is
+    // this one rather than one rebuilt for the transport.
+    let registry = crate::registry::default_registry();
+    let grant = crate::adapters::mcp::framing::FullGrant;
+    let report =
+        crate::adapters::mcp::framing::serve_stdio_streams_with(&registry, &grant, Some(ctx))
+            .map_err(|err| VogtError::InvalidRequest(format!("mcp stdio failed: {err}")))?;
     Ok(serde_json::json!({
         "protocol_version": report.protocol_version,
         "messages_handled": report.messages_handled,
@@ -446,10 +446,7 @@ mod tests {
     fn mcp_stdio_reports_a_session_read_from_its_input() {
         // The service owns the process stdin, so the loop it calls is what a
         // test can drive. A closed stream is zero messages and no version.
-        let registry = crate::registry::OperationRegistry::new(
-            crate::registry::operations::build_operations(),
-        )
-        .unwrap();
+        let registry = crate::registry::default_registry();
         let mut output = String::new();
         let report = crate::adapters::mcp::framing::serve_stdio(
             "",
@@ -460,5 +457,78 @@ mod tests {
         assert!(output.is_empty());
         assert_eq!(report.messages_handled, 0);
         assert!(report.protocol_version.is_none());
+    }
+
+    #[test]
+    fn mcp_stdio_runs_a_tool_against_the_callers_context() {
+        // The review's blocker: the operation used to build a dispatcher with
+        // no context, so every ported tool failed with "needs an instance
+        // context". A tools/call of `status` has to come back as that instance.
+        use crate::application::context::{build_context, Built};
+        use crate::config::VogtConfig;
+        use crate::core::{ActorKind, Principal, SequentialIds, StepClock};
+        use crate::storage::interface::DeclaredStore;
+
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-mcp-stdio-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let principal = Principal::new("local:stdio", ActorKind::Human, "Stdio").unwrap();
+        let built = build_context(
+            VogtConfig {
+                data_dir: dir.clone(),
+                ..VogtConfig::default()
+            },
+            Some(principal.clone()),
+            Some(StepClock::new(crate::core::Moment::from_unix(
+                1_700_000_000,
+                0,
+            ))),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("the test asks for a step clock and sequential ids");
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared.bootstrap(&principal).unwrap();
+
+        let registry = crate::registry::default_registry();
+        let mut output = String::new();
+        let report = crate::adapters::mcp::framing::serve_stdio_with(
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"status","arguments":{}}}"#,
+                "\n",
+            ),
+            &mut output,
+            &registry,
+            &crate::adapters::mcp::framing::FullGrant,
+            Some(&built),
+        );
+        assert_eq!(report.messages_handled, 2, "{output}");
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2, "{output}");
+        let call: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(call["result"]["isError"], false, "{call}");
+        let text = call["result"]["content"][0]["text"].as_str().unwrap();
+        // Compact, the way Python's tool_success writes it: no spaces, no
+        // newlines, and the principal is the caller's rather than a guessed one.
+        assert!(!text.contains(' ') && !text.contains('\n'), "{text}");
+        let body: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["principal"], "local:stdio");
+        assert_eq!(body["data_dir"], dir.display().to_string());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
