@@ -1,10 +1,12 @@
 """The release is *build once, promote by digest* (`.github/workflows/release.yml`).
 
-`build.yml` builds, smoke-tests, signs and publishes the three images once per
-commit on `main`; the dev lane deploys and validates those digests; a `v*` tag
-then retags and release-signs the same digests. These tests pin the shape that
-makes that true, because each property is one innocent-looking edit away from
-quietly going back to "a release rebuilds something the dev lane never ran".
+`build.yml` builds, smoke-tests, signs and publishes the images once per
+commit on `main` — the core, the lean stack, the workbench stack and the
+voice sidecar; the dev lane deploys and validates the digests it consumes; a
+`v*` tag then retags and release-signs the same digests. These tests pin the
+shape that makes that true, because each property is one innocent-looking
+edit away from quietly going back to "a release rebuilds something the dev
+lane never ran".
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ pytestmark = pytest.mark.skipif(
     not RELEASE.is_file(), reason="workflows are absent from the core-only test image"
 )
 
-IMAGES = ("IMAGE", "STACK_IMAGE", "VOICE_IMAGE")
+IMAGES = ("IMAGE", "STACK_IMAGE", "STACK_WORKBENCH_IMAGE", "VOICE_IMAGE")
 
 
 def _release() -> str:
@@ -81,7 +83,7 @@ def test_the_images_promoted_are_the_ones_build_yml_publishes() -> None:
         assert _group(pattern, release, re.M) == _group(pattern, build, re.M)
     # build.yml tags a main commit `sha-<7>` (metadata-action `type=sha`);
     # the release finds the digest by exactly that tag.
-    assert build.count("type=sha,enable=${{ github.ref == 'refs/heads/main' }}") == 3
+    assert build.count("type=sha,enable=${{ github.ref == 'refs/heads/main' }}") == 4
     assert "BUILD_TAG_PREFIX: sha-" in release
     assert 'BUILD_TAG_SHA_LENGTH: "7"' in release
 
@@ -94,7 +96,7 @@ def test_the_build_run_gate_names_build_yml_jobs_that_exist() -> None:
     block = _job_block(_release(), "build-run")
     required = _group(r"REQUIRED_JOBS: \|\n((?:\s{12}.+\n)+)", block)
     names = [line.strip() for line in required.splitlines() if line.strip()]
-    assert len(names) == 3
+    assert len(names) == 4
     assert set(names) <= build_names, set(names) - build_names
     assert "actions/workflows/build.yml/runs?head_sha=" in block
     assert "branch=main" in block

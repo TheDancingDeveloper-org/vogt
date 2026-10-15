@@ -61,6 +61,11 @@ env:
   # somebody eventually pins the wrong one. `main` publishes `sha-<commit>`
   # and every release publishes the semver pair; nothing else pushes here.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+  # The same merged image built on the public `workbench` pod base instead of
+  # `lean`. Additive: nothing in this repository deploys it. A derivative that
+  # wants the public session tools (Chrome, Python 3.12, Terraform, sshpass,
+  # pingcli, actionlint, the Tailscale client) builds `FROM` this digest.
+  STACK_WORKBENCH_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack-workbench
   # Static public-demo image. It contains neither the engine nor the core and
   # is published from `main`; deployment is a separate digest handoff.
   DEMO_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-demo
@@ -802,4 +807,116 @@ jobs:
             echo "See \`docs/DEPLOYMENT.md\` before the first deploy: the"
             echo "smoke test above proves the halves start, not that the front"
             echo "door reaches a core."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The workbench pod base, built (or found already published) only for the
+  # workbench stack below. Separate from `pod-base` so the lean stack keeps
+  # the prerequisite it has always had and the two variants do not share a
+  # concurrency group.
+  pod-base-workbench:
+    name: the workbench pod base is in GHCR
+    needs: base-images
+    uses: ./.github/workflows/pod-base.yml
+    with:
+      variant: workbench
+    permissions:
+      contents: read
+      packages: write
+
+  stack-workbench-image:
+    name: build and publish the workbench stack image
+    needs: [base-images, pod-base-workbench, image]
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        id: meta
+        with:
+          images: ${{ env.STACK_WORKBENCH_IMAGE }}
+          tags: |
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+          flavor: |
+            latest=false
+
+      # One build, pushed straight away. The smoke below runs that pushed
+      # digest, so a green job is the image that was tested rather than a
+      # second build that happens to look like it. Its own cache tag, so it
+      # cannot evict the lean stack's layers.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        id: push
+        with:
+          context: .
+          file: engine/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            POD_BASE_IMAGE=${{ needs.pod-base-workbench.outputs.image }}
+            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=0.7.16
+            INSTALL_AI_CLIENTS=true
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-workbench-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-workbench-${{ github.ref_name }},mode=max
+
+      - name: the workbench image runs, and carries the workbench tools
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image="${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+          docker run --rm --entrypoint vogt "$image" --version >/dev/null
+          docker run --rm --entrypoint vogt-engine "$image" --help >/dev/null
+          docker run --rm --entrypoint vogt-verify-agent-clis "$image"
+          for tool in claude codex google-chrome chrome-ci python3.12 terraform pingcli actionlint tailscale; do
+            docker run --rm --entrypoint "$tool" "$image" --version >/dev/null \
+              || { echo "the workbench image is missing $tool" >&2; exit 1; }
+          done
+          # sshpass has no --version; -V prints its version and exits 0.
+          docker run --rm --entrypoint sshpass "$image" -V >/dev/null \
+            || { echo "the workbench image is missing sshpass" >&2; exit 1; }
+          echo "workbench image runs both halves and carries its tools"
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: sign the image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Workbench stack image from \`${GITHUB_SHA:0:7}\`"
+            echo
+            echo "Nothing in this repository deploys this image. A derivative"
+            echo "that wants the public workbench tools pins this digest:"
+            echo
+            echo '```yaml'
+            echo "    image: ${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
