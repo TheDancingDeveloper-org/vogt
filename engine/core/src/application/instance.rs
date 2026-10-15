@@ -16,11 +16,15 @@ use crate::storage::interface::{DeclaredStore, MigrationReport, ObservedStore, R
 use crate::storage::sqlite::migrator;
 use crate::storage::sqlite::{declared_path, observed_path};
 
+#[derive(Debug)]
 pub struct InitOutcome {
     pub declared: MigrationReport,
     pub observed: MigrationReport,
     pub created: bool,
     pub instance_id: String,
+    /// `not_configured`, `already_present` or `adopted`, per configured token.
+    pub bootstrap_core_token: String,
+    pub bootstrap_agent_token: String,
 }
 
 /// `clock` and `ids` are resolved once by the caller from the hook environment.
@@ -79,12 +83,54 @@ pub fn init(
     } else {
         instance_id_of(data_dir)?
     };
+    let (bootstrap_core_token, bootstrap_agent_token) = adopt_configured(data_dir, clock, ids)?;
     Ok(InitOutcome {
         created: !declared_existed,
         declared,
         observed,
         instance_id,
+        bootstrap_core_token,
+        bootstrap_agent_token,
     })
+}
+
+/// Adopt the operator-supplied bootstrap tokens once the instance exists.
+///
+/// A missing, unreadable or empty file is `not_configured` and init still
+/// succeeds. A secret too short to be one, or a scope that does not exist,
+/// fails startup: a deployment that believes it supplied a credential must not
+/// come up without it.
+fn adopt_configured(
+    data_dir: &Path,
+    clock: &mut Option<crate::core::StepClock>,
+    ids: &mut Option<SequentialIds>,
+) -> Result<(String, String), migrator::MigrateError> {
+    let mut overrides = serde_json::Map::new();
+    overrides.insert(
+        "data_dir".to_string(),
+        data_dir.display().to_string().into(),
+    );
+    let config = crate::config::load_config(&overrides).map_err(migrator::MigrateError::Message)?;
+    let built = crate::application::context::build_context(
+        config,
+        None,
+        clock.clone(),
+        ids.clone(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
+    let core = crate::with_ctx!(&built, |ctx| {
+        crate::application::services::auth::adopt_bootstrap(ctx, true)
+    })
+    .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
+    let agent = crate::with_ctx!(&built, |ctx| {
+        crate::application::services::auth::adopt_bootstrap(ctx, false)
+    })
+    .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
+    Ok((core, agent))
 }
 
 /// Pending migrations on a database that already exists. Zero means a
@@ -389,5 +435,90 @@ fn stamp_if(clock: &mut Option<crate::core::StepClock>, due: bool) -> String {
     match clock {
         Some(clock) => crate::core::to_iso(Clock::now(clock)),
         None => crate::core::to_iso(crate::core::utc_now()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A configured bootstrap secret is adopted at init, and a second init with
+    /// the same secret changes nothing. The reported words are the ones Python
+    /// returns.
+    #[test]
+    fn init_adopts_a_configured_bootstrap_token_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("vogt-adopt-a-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = dir.join("core-token");
+        std::fs::write(&secret, "this-secret-is-long-enough-to-adopt\n").unwrap();
+        // SAFETY: the test process is the only one reading these, and they are
+        // removed before the test returns.
+        let _guard = EnvVar::set("VOGT_BOOTSTRAP_CORE_TOKEN_FILE", &secret);
+        let mut clock = None;
+        let mut ids = None;
+        let first = init(&dir, &mut clock, &mut ids).unwrap();
+        assert_eq!(first.bootstrap_core_token, "adopted");
+        assert_eq!(first.bootstrap_agent_token, "not_configured");
+        let second = init(&dir, &mut clock, &mut ids).unwrap();
+        assert!(!second.created);
+        assert_eq!(second.bootstrap_core_token, "already_present");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A secret too short to be a credential fails startup rather than coming
+    /// up as if the operator had supplied none.
+    #[test]
+    fn init_refuses_a_bootstrap_secret_that_is_too_short() {
+        let dir = std::env::temp_dir().join(format!("vogt-adopt-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = dir.join("core-token");
+        std::fs::write(&secret, "too-short\n").unwrap();
+        let _guard = EnvVar::set("VOGT_BOOTSTRAP_CORE_TOKEN_FILE", &secret);
+        let err = init(&dir, &mut None, &mut None).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("at least 24 characters"), "{message}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+fn env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Puts an environment variable back the way it was, and keeps every other
+/// test out while it is changed: the variable is process-wide, so one test
+/// setting it changes what every other test's `init` adopts.
+struct EnvVar {
+    name: &'static str,
+    prior: Option<std::ffi::OsString>,
+    _held: std::sync::MutexGuard<'static, ()>,
+}
+
+impl EnvVar {
+    fn set(name: &'static str, value: &std::path::Path) -> Self {
+        let held = env_lock().lock().expect("the env lock is not poisoned");
+        let prior = std::env::var_os(name);
+        unsafe {
+            std::env::set_var(name, value);
+        }
+        Self {
+            name,
+            prior,
+            _held: held,
+        }
+    }
+}
+
+impl Drop for EnvVar {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
     }
 }
