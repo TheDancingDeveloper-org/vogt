@@ -852,34 +852,57 @@ jobs:
         id: meta
         with:
           images: ${{ env.STACK_WORKBENCH_IMAGE }}
+          # The tag is not applied here. The bake pushes by digest and
+          # `tag the smoked digest` writes `sha-<commit>` only after the
+          # smoke passes. release.yml finds the image by this tag.
           tags: |
             type=sha,enable=${{ github.ref == 'refs/heads/main' }}
           flavor: |
             latest=false
 
-      # One build, pushed straight away. The smoke below runs that pushed
-      # digest, so a green job is the image that was tested rather than a
-      # second build that happens to look like it. Its own cache tag, so it
-      # cannot evict the lean stack's layers.
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+      # Same shape as the lean stack's bake (`.github/stack-bake.hcl`), its
+      # own file so the two jobs do not share a bake definition while S2 is
+      # in flight. Pushed by digest with provenance and an SBOM; the tag and
+      # the signature come only after the smoke. A failed smoke leaves an
+      # untagged orphan, which ghcr-retention.yml prunes after the policy's
+      # 7-day grace — that policy lists this package below.
+      - name: build the workbench stack once, by digest
         id: push
-        with:
-          context: .
-          file: engine/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            POD_BASE_IMAGE=${{ needs.pod-base-workbench.outputs.image }}
-            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
-            VOGT_SOURCE_REF=${{ github.ref_name }}
-            VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.16
-            INSTALL_AI_CLIENTS=true
-          provenance: true
-          sbom: true
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-workbench-${{ github.ref_name }}
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-workbench-${{ github.ref_name }},mode=max
+        env:
+          POD_BASE_IMAGE: ${{ needs.pod-base-workbench.outputs.image }}
+          CORE_IMAGE: ${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+          VOGT_SOURCE_REF: ${{ github.ref_name }}
+          VOGT_SOURCE_SHA: ${{ github.sha }}
+          LABELS: ${{ steps.meta.outputs.labels }}
+          CACHE_REF: ${{ env.CACHE_IMAGE }}:stack-workbench-${{ github.ref_name }}
+          META_FILE: ${{ runner.temp }}/workbench-bake-meta.json
+        run: |
+          set -euo pipefail
+          args=(
+            --file .github/workbench-bake.hcl
+            --metadata-file "$META_FILE"
+            --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
+            --set "*.args.CORE_IMAGE=${CORE_IMAGE}"
+            --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
+            --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
+            --set "*.args.VOGT_PRODUCT_VERSION=0.7.16"
+          )
+          # metadata-action's labels are newline-separated key=value.
+          while IFS= read -r pair || [ -n "$pair" ]; do
+            [ -n "$pair" ] || continue
+            args+=(--set "stack.labels.${pair%%=*}=${pair#*=}")
+          done <<< "$LABELS"
+          docker buildx bake "${args[@]}" stack
+          python3 - "$META_FILE" <<'PY'
+          import json, os, sys
+          meta = json.load(open(sys.argv[1]))
+          digest = meta["stack"]["containerimage.digest"]
+          if not isinstance(digest, str) or not digest.startswith("sha256:"):
+              raise SystemExit(f"workbench bake produced no digest: {digest!r}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"digest={digest}\n")
+          print(digest)
+          PY
 
       - name: the workbench image runs, and carries the workbench tools
         env:
@@ -887,6 +910,7 @@ jobs:
         run: |
           set -euo pipefail
           image="${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+          docker pull "$image"
           docker run --rm --entrypoint vogt "$image" --version >/dev/null
           docker run --rm --entrypoint vogt-engine "$image" --help >/dev/null
           docker run --rm --entrypoint vogt-verify-agent-clis "$image"
@@ -898,6 +922,16 @@ jobs:
           docker run --rm --entrypoint sshpass "$image" -V >/dev/null \
             || { echo "the workbench image is missing sshpass" >&2; exit 1; }
           echo "workbench image runs both halves and carries its tools"
+
+      - name: tag the smoked digest
+        if: github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${STACK_WORKBENCH_IMAGE}:sha-${GITHUB_SHA:0:7}" \
+            "${STACK_WORKBENCH_IMAGE}@${DIGEST}"
 
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
