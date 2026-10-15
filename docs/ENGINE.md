@@ -1062,7 +1062,11 @@ stripped. This route instead answers with what the terminal shows now:
 - `ready` — the program is waiting for input: the session is alive and
   either `activity` is `waiting-for-input`, or it is `idle` and one of the
   lowest ten non-blank lines, box border stripped, starts with a prompt glyph
-  (`>`, `❯`, `›`, `>>>`) — Claude Code's input box, Codex's composer, a REPL.
+  (`>`, `❯`, `›`, `>>>`) — Claude Code's input box, Codex's composer, a REPL
+  — or the window title is exactly `codex: ready` (Codex's own name for a turn
+  that has finished; `codex: working` is not). The glyph alone misses a Codex
+  frame whose composer has scrolled out of those ten lines, which left an
+  autopilot Codex session never `ready` and so never re-driven (WI-1600).
   `running` is never ready, because those TUIs keep drawing their input box
   while they work; nor is `awaiting-approval`, where typing answers a dialog.
 - `scrollback` — with `?scrollback_lines=N`, up to N lines that scrolled off
@@ -1451,6 +1455,13 @@ agent may stop to announce its next step. So the engine re-drives it
 
 The summary's `autopilot` reads `false` once it is off. A nudge is input, so
 it restarts the quiet clock and nudges cannot stack up.
+
+**When Codex is `ready`.** Codex sets its window title to `codex: ready` once
+a turn has finished and `codex: working` while one runs. `ready` treats the
+exact `codex: ready` title as the prompt waiting, because the composer glyph
+is not on screen in every idle frame. A title of `codex: working`, or a
+session that is `running` or `awaiting-approval`, is still not ready: the
+title never overrides those.
 
 **When opencode is `ready`.** opencode draws no prompt glyph, so `ready`
 recognises its composer separately: the `┃` bar closed by a `╹▀` footer near

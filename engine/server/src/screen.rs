@@ -244,6 +244,21 @@ pub fn shows_prompt(lines: &[String]) -> bool {
     shows_glyph_prompt(lines) || shows_opencode_prompt(lines)
 }
 
+/// Whether a Codex window title says the TUI is sitting at its prompt.
+///
+/// Codex sets its title (OSC 0) to `codex: ready` when a turn has finished and
+/// to `codex: working` while one runs. The composer glyph is not enough on its
+/// own: Codex keeps drawing `›` through a turn, and a frame that has scrolled
+/// the composer out of the lowest ten lines reads as not ready even though the
+/// title says the prompt is waiting. Without the title, an autopilot Codex
+/// session is never `ready` and is never re-driven (WI-1600).
+///
+/// Only the exact `codex: ready` form counts. `codex: working` and a title that
+/// merely mentions the word do not.
+pub fn codex_title_ready(title: Option<&str>) -> bool {
+    title.is_some_and(|t| t.trim().eq_ignore_ascii_case("codex: ready"))
+}
+
 fn shows_glyph_prompt(lines: &[String]) -> bool {
     const BORDER: &[char] = &['│', '┃', '║', '|', ' ', '\u{a0}'];
     lines
@@ -293,13 +308,18 @@ pub fn shows_opencode_prompt(lines: &[String]) -> bool {
 ///
 /// A session `awaiting-approval` is not ready: it is at a permission dialog,
 /// where typed text and Enter answer the dialog rather than reach the agent.
-pub fn is_ready(activity: ActivityState, alive: bool, lines: &[String]) -> bool {
+pub fn is_ready(
+    activity: ActivityState,
+    alive: bool,
+    lines: &[String],
+    title: Option<&str>,
+) -> bool {
     if !alive {
         return false;
     }
     match activity {
         ActivityState::WaitingForInput => true,
-        ActivityState::Idle => shows_prompt(lines),
+        ActivityState::Idle => shows_prompt(lines) || codex_title_ready(title),
         _ => false,
     }
 }
@@ -324,7 +344,12 @@ pub async fn session_screen(
         tokio::task::spawn_blocking(move || rendering.render_screen(scrollback_lines))
             .await
             .map_err(|e| ApiError::Internal(format!("render screen: {e}")))?;
-    let ready = is_ready(summary.activity, summary.alive, &rendered.lines);
+    let ready = is_ready(
+        summary.activity,
+        summary.alive,
+        &rendered.lines,
+        rendered.title.as_deref(),
+    );
     Ok(SessionScreen {
         id: session.id,
         cols: rendered.cols,
@@ -625,8 +650,8 @@ mod tests {
         assert!(shows_prompt(&fresh));
         assert!(shows_prompt(&finished));
         assert!(!shows_prompt(&running), "a running turn is not ready");
-        assert!(is_ready(ActivityState::Idle, true, &finished));
-        assert!(!is_ready(ActivityState::Running, true, &finished));
+        assert!(is_ready(ActivityState::Idle, true, &finished, None));
+        assert!(!is_ready(ActivityState::Running, true, &finished, None));
         // A bar with no footer is just a box-drawing character in output.
         assert!(!shows_opencode_prompt(&screen(&["┃ some table cell"])));
     }
@@ -706,12 +731,60 @@ mod tests {
     fn readiness_needs_a_live_quiet_prompt() {
         let prompt = vec!["│ > ".to_string()];
         let plain = vec!["building".to_string()];
-        assert!(is_ready(ActivityState::WaitingForInput, true, &plain));
-        assert!(is_ready(ActivityState::Idle, true, &prompt));
-        assert!(!is_ready(ActivityState::Idle, true, &plain));
+        assert!(is_ready(ActivityState::WaitingForInput, true, &plain, None));
+        assert!(is_ready(ActivityState::Idle, true, &prompt, None));
+        assert!(!is_ready(ActivityState::Idle, true, &plain, None));
         // A TUI keeps its input box on screen while it works.
-        assert!(!is_ready(ActivityState::Running, true, &prompt));
-        assert!(!is_ready(ActivityState::WaitingForInput, false, &prompt));
-        assert!(!is_ready(ActivityState::Exited, false, &prompt));
+        assert!(!is_ready(ActivityState::Running, true, &prompt, None));
+        assert!(!is_ready(
+            ActivityState::WaitingForInput,
+            false,
+            &prompt,
+            None
+        ));
+        assert!(!is_ready(ActivityState::Exited, false, &prompt, None));
+    }
+
+    /// WI-1600: Codex names its own state in the window title. `codex: ready`
+    /// means the prompt is waiting even when the composer has scrolled out of
+    /// the lines readiness looks at; `codex: working` does not, and a running
+    /// turn stays not ready whatever the title says.
+    #[test]
+    fn a_codex_title_of_ready_is_ready_when_the_composer_is_not_on_screen() {
+        let scrolled = screen(&[
+            "  finished the first step and stopped to say so",
+            "",
+            "  (the composer is above this window)",
+        ]);
+        assert!(codex_title_ready(Some("codex: ready")));
+        assert!(codex_title_ready(Some("  Codex: Ready  ")));
+        assert!(!codex_title_ready(Some("codex: working")));
+        assert!(!codex_title_ready(Some("codex: ready now")));
+        assert!(!codex_title_ready(None));
+        assert!(!shows_prompt(&scrolled));
+        assert!(is_ready(
+            ActivityState::Idle,
+            true,
+            &scrolled,
+            Some("codex: ready")
+        ));
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &scrolled,
+            Some("codex: working")
+        ));
+        assert!(!is_ready(
+            ActivityState::Running,
+            true,
+            &scrolled,
+            Some("codex: ready")
+        ));
+        assert!(!is_ready(
+            ActivityState::AwaitingApproval,
+            true,
+            &scrolled,
+            Some("codex: ready")
+        ));
     }
 }
