@@ -363,12 +363,18 @@ PY
 #
 # The router's groups have no entry in Codex's bundled catalog, and the
 # fallback metadata offers no apply_patch tool and does not turn code mode off.
-# Alongside the provider this writes a catalog of those groups (apply_patch
-# freeform, tool_mode omitted) and points model_catalog_json at it. The groups
-# are the router's own — grok, code, small, reasoning, vision, premium — and
-# nothing else (no DLab community or free models). Priority is the index in
-# that order, because the fork sorts ascending and defaults to the first
-# visible model, so grok stays the default. premium is hidden from the picker.
+# Alongside the provider this writes a catalog of the groups that answered a
+# chat completion with the session key (WI-1592), apply_patch freeform and
+# tool_mode omitted, and points model_catalog_json at it. Listed, in order:
+# grok, code, small, reasoning, vision, the OpenRouter groups that answer
+# (or-deepseek-flash, or-gemini-flash, or-glm-5-3 — not or-deepseek, which
+# LiteLLM blocks), the local qwen and gpt-oss groups, and the DLab models
+# whose plan actually serves them. Priority is the index in that order,
+# because the fork sorts ascending and defaults to the first visible model,
+# so grok stays the default. premium is hidden from the picker. Not listed,
+# because a completion does not succeed: bedrock (no such model on the
+# router), the DLab Gemini preview and Claude Haiku (plan / availability
+# errors), and the DLab free gpt-6 aliases (auth error).
 # absent or when it already names the file this writer owns; an operator's
 # catalog is left alone. Top-level model and model_provider are set only when
 # absent or when they already name this bundle (litellm, or theclawbay as the
@@ -394,7 +400,33 @@ path = os.environ["CODEX_CONFIG"]
 # ascending and marks the first visible model as the default, so priority is
 # the index in router order and grok stays first. premium is the router's
 # opt-in group, so its visibility is "hide": choosable by name, not in the picker.
-ROUTER_GROUPS = ("grok", "code", "small", "reasoning", "vision", "premium")
+# Groups a chat completion with the session key actually answered (WI-1592).
+# or-deepseek is blocked at the router and is not here. Bedrock is not a
+# model on this router. DLab models that 400/401/503 are not here either.
+ROUTER_GROUPS = (
+    "grok",
+    "code",
+    "small",
+    "reasoning",
+    "vision",
+    "or-deepseek-flash",
+    "or-gemini-flash",
+    "or-glm-5-3",
+    "qwen3-coder",
+    "qwen3-8-27b",
+    "gpt-oss-120b",
+    "dlab-deepseek-v4-pro",
+    "dlab-deepseek-v4-1-flash",
+    "dlab-grok-4-5",
+    "dlab-grok-4-6",
+    "dlab-grok-4-7",
+    "dlab-gemini-3-8-flash",
+    "dlab-glm-5-3",
+    "dlab-glm-5-3-flash",
+    "dlab-glm-5-3-flashx",
+    "dlab-kimi-k3",
+    "premium",
+)
 
 def _catalog_model(priority: int, slug: str) -> dict[str, object]:
     return {

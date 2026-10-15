@@ -139,11 +139,11 @@ model_catalog_json = "vogt-model-catalog.json"
     )
 }
 
-/// The router-group catalog WI-1147 writes, one ModelsResponse entry per
-/// LiteLLM group (grok, code, small, reasoning, vision, premium). The fork
-/// sorts by priority ascending and takes the first visible model as the
-/// default, so priority is the index in router order and grok stays first.
-/// premium is the router's opt-in group, hidden from the picker.
+    /// The router-group catalog WI-1147 writes, one ModelsResponse entry per
+    /// LiteLLM group that answers a chat completion (WI-1592). The fork sorts
+    /// by priority ascending and takes the first visible model as the default,
+    /// so priority is the index in router order and grok stays first. premium
+    /// is the router's opt-in group, hidden from the picker.
 pub fn model_catalog() -> String {
     fn entry(slug: &str, priority: u8, visibility: &str) -> String {
         format!(
@@ -179,7 +179,30 @@ pub fn model_catalog() -> String {
     }
     // Same groups, in the same order, as ROUTER_GROUPS in mcp-bootstrap.sh.
     // Priority is the index: the fork sorts ascending and defaults to the first.
-    let groups = ["grok", "code", "small", "reasoning", "vision", "premium"];
+    let groups = [
+        "grok",
+        "code",
+        "small",
+        "reasoning",
+        "vision",
+        "or-deepseek-flash",
+        "or-gemini-flash",
+        "or-glm-5-3",
+        "qwen3-coder",
+        "qwen3-8-27b",
+        "gpt-oss-120b",
+        "dlab-deepseek-v4-pro",
+        "dlab-deepseek-v4-1-flash",
+        "dlab-grok-4-5",
+        "dlab-grok-4-6",
+        "dlab-grok-4-7",
+        "dlab-gemini-3-8-flash",
+        "dlab-glm-5-3",
+        "dlab-glm-5-3-flash",
+        "dlab-glm-5-3-flashx",
+        "dlab-kimi-k3",
+        "premium",
+    ];
     let body = groups
         .iter()
         .enumerate()
@@ -439,7 +462,30 @@ mod tests {
                 .iter()
                 .map(|model| model["slug"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["grok", "code", "small", "reasoning", "vision", "premium"]
+            [
+                "grok",
+                "code",
+                "small",
+                "reasoning",
+                "vision",
+                "or-deepseek-flash",
+                "or-gemini-flash",
+                "or-glm-5-3",
+                "qwen3-coder",
+                "qwen3-8-27b",
+                "gpt-oss-120b",
+                "dlab-deepseek-v4-pro",
+                "dlab-deepseek-v4-1-flash",
+                "dlab-grok-4-5",
+                "dlab-grok-4-6",
+                "dlab-grok-4-7",
+                "dlab-gemini-3-8-flash",
+                "dlab-glm-5-3",
+                "dlab-glm-5-3-flash",
+                "dlab-glm-5-3-flashx",
+                "dlab-kimi-k3",
+                "premium",
+            ]
         );
         // The fork defaults to the first visible model after an ascending sort.
         assert_eq!(sorted[0]["slug"], "grok");
