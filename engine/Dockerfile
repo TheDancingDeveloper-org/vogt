@@ -485,6 +485,12 @@ RUN set -eu; \
 # reinstalling the npm CLIs above. Only that commit is fetched, the build
 # must reproduce it exactly (`-mod=readonly`, `-trimpath`, CGO off), and the
 # module and build caches are dropped so the image carries the binary alone.
+# This copy is also the gitguard hook program: /etc/codex/requirements.toml
+# runs `/usr/local/bin/klaudia hook gitguard` by absolute path, so it must stay
+# a root-owned 0755 regular file in a root-owned directory (asserted below,
+# and checked by the engine before a Codex launch). A runtime
+# `VOGT_KLAUDIA_VERSION` pin lands under the session-owned /opt/vogt/agent-clis
+# and is never what the hook runs (WI-1146).
 RUN set -eu; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
         . /usr/local/share/vogt/agent-versions.env; \
@@ -498,6 +504,10 @@ RUN set -eu; \
             go build -trimpath -o /usr/local/bin/klaudia ./cmd/klaudia); \
         GOMODCACHE=/tmp/gomod go clean -modcache; \
         rm -rf /tmp/klaudia /tmp/gomod /tmp/gocache; \
+        chown root:root /usr/local/bin/klaudia; \
+        chmod 0755 /usr/local/bin/klaudia; \
+        test "$(stat -c '%u %a %F' /usr/local/bin/klaudia /usr/local/bin)" \
+            = "$(printf '0 755 regular file\n0 755 directory')"; \
         /usr/local/bin/klaudia --version; \
     fi
 
