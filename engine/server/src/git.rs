@@ -1478,6 +1478,14 @@ mod tests {
             Self { saved }
         }
 
+        fn set(pairs: &[(&'static str, &str)]) -> Self {
+            let owned: Vec<(&'static str, Option<&str>)> = pairs
+                .iter()
+                .map(|(key, value)| (*key, Some(*value)))
+                .collect();
+            Self::apply(&owned)
+        }
+
         fn clear() -> Self {
             Self::apply(&[
                 ("ENGINE_WORKTREE_GITHUB_TOKEN", None),
@@ -1934,6 +1942,186 @@ mod tests {
     }
 
     #[test]
+    fn a_github_fetch_uses_askpass_and_strips_other_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let origin = tmp.path().join("origin.git");
+        let trace = tmp.path().join("fetch-env");
+        let real = "/usr/bin/git";
+        let wrapper = tmp.path().join("git");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n\
+real='{real}'\n\
+origin='{origin}'\n\
+trace='{trace}'\n\
+if [ \"$1\" = fetch ]; then\n\
+  {{\n\
+    echo \"askpass=${{GIT_ASKPASS:-}}\"\n\
+    echo \"gh=${{GH_TOKEN-unset}}\"\n\
+    echo \"ght=${{GITHUB_TOKEN-unset}}\"\n\
+    echo \"gat=${{GIT_AUTH_TOKEN-unset}}\"\n\
+    echo \"fetch=${{ENGINE_WORKTREE_FETCH_TOKEN:-}}\"\n\
+    echo \"helper=$(\"$real\" -C \"$PWD\" config --get credential.helper || true)\"\n\
+  }} > \"$trace\"\n\
+  token=$(\"$GIT_ASKPASS\" \"Password for 'https://github.com':\") || exit 7\n\
+  echo \"printed=$token\" >> \"$trace\"\n\
+  [ \"$token\" = worktree-token-secret ] || exit 8\n\
+  exit 9\n\
+fi\n\
+exec \"$real\" \"$@\"\n",
+                real = real,
+                origin = origin.display(),
+                trace = trace.display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&wrapper).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&wrapper, perms).unwrap();
+        }
+        git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/TheDancingDeveloper-org/example.git",
+            ],
+        );
+        git(
+            &repo,
+            &[
+                "config",
+                "credential.helper",
+                "!echo password=helper-token-must-not-win",
+            ],
+        );
+
+        let _guard = EnvLock::acquire();
+        let askpass = repo_askpass().canonicalize().expect("askpass");
+        let askpass_s = askpass.display().to_string();
+        let _env = TokenEnv::set(&[
+            ("ENGINE_WORKTREE_GITHUB_TOKEN", "worktree-token-secret"),
+            ("GH_TOKEN", "session-token-should-not-be-used"),
+            ("GITHUB_TOKEN", "github-token-should-not-be-used"),
+            ("GIT_AUTH_TOKEN", "git-auth-should-not-be-used"),
+            ("ENGINE_WORKTREE_ASKPASS", &askpass_s),
+        ]);
+        let original = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{original}", tmp.path().display()));
+
+        let failed = create_worktree(&repo, "wi-1666-wired", "topic");
+        std::env::set_var("PATH", &original);
+        let recorded = std::fs::read_to_string(&trace).unwrap_or_default();
+        let message = failed
+            .expect_err("the wrapper stops after recording the fetch environment")
+            .to_string();
+        assert!(message.contains("could not fetch"), "{message}\n{recorded}");
+        assert!(
+            !message.contains("worktree-token-secret"),
+            "token leaked into the error: {message}"
+        );
+        let askpass = recorded
+            .lines()
+            .find_map(|line| line.strip_prefix("askpass="))
+            .unwrap_or("");
+        let expected = repo_askpass().canonicalize().unwrap().display().to_string();
+        assert_eq!(
+            askpass, expected,
+            "GIT_ASKPASS must be the shipped askpass: {recorded}"
+        );
+        assert!(
+            recorded.contains("gh=unset\n") || recorded.contains("gh=\n"),
+            "{recorded}"
+        );
+        assert!(recorded.contains("ght=unset"), "{recorded}");
+        assert!(recorded.contains("gat=unset"), "{recorded}");
+        assert!(
+            recorded.contains("printed=worktree-token-secret"),
+            "{recorded}"
+        );
+        assert!(
+            recorded.lines().any(|line| line == "helper="),
+            "credential.helper must be blanked: {recorded}"
+        );
+    }
+
+    #[test]
+    fn a_non_github_origin_keeps_its_own_credentials_when_gh_token_is_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let trace = tmp.path().join("fetch-env");
+        let real = "/usr/bin/git";
+        let wrapper = tmp.path().join("git");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n\
+real='{real}'\n\
+trace='{trace}'\n\
+if [ \"$1\" = fetch ]; then\n\
+  {{\n\
+    echo \"askpass=${{GIT_ASKPASS-unset}}\"\n\
+    echo \"fetch=${{ENGINE_WORKTREE_FETCH_TOKEN-unset}}\"\n\
+    echo \"gh=${{GH_TOKEN-unset}}\"\n\
+    echo \"helper=$(\"$real\" -C \"$PWD\" config --get credential.helper || true)\"\n\
+  }} > \"$trace\"\n\
+fi\n\
+exec \"$real\" \"$@\"\n",
+                real = real,
+                trace = trace.display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&wrapper).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&wrapper, perms).unwrap();
+        }
+
+        let _guard = EnvLock::acquire();
+        let inherited_askpass = std::env::var("GIT_ASKPASS").ok();
+        std::env::remove_var("GIT_ASKPASS");
+        let _env = TokenEnv::set(&[("GH_TOKEN", "session-token-should-not-be-used")]);
+        let original = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{original}", tmp.path().display()));
+
+        let worktree = create_worktree(&repo, "wi-1666-local", "topic");
+        std::env::set_var("PATH", &original);
+        match inherited_askpass {
+            Some(value) => std::env::set_var("GIT_ASKPASS", value),
+            None => std::env::remove_var("GIT_ASKPASS"),
+        }
+        let recorded = std::fs::read_to_string(&trace).unwrap_or_default();
+        let worktree = worktree.unwrap_or_else(|error| {
+            panic!("local fetch failed: {error}\ntrace:\n{recorded}");
+        });
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
+            "remote\n"
+        );
+        assert!(
+            recorded.contains("askpass=unset"),
+            "a non-GitHub fetch must not set GIT_ASKPASS: {recorded}"
+        );
+        assert!(
+            recorded.contains("fetch=unset"),
+            "a non-GitHub fetch must not receive the token: {recorded}"
+        );
+        assert!(
+            recorded.contains("session-token-should-not-be-used"),
+            "the engine user's GH_TOKEN stays for a non-GitHub origin: {recorded}"
+        );
+    }
+
+    #[test]
     fn an_ssh_github_origin_does_not_require_the_token() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = dirty_checkout(&tmp);
@@ -1943,7 +2131,7 @@ mod tests {
                 "remote",
                 "set-url",
                 "origin",
-                "git@github.com:TheDancingDeveloper-org/example.git",
+                "git@github.invalid:TheDancingDeveloper-org/example.git",
             ],
         );
         let _guard = EnvLock::acquire();
@@ -1960,8 +2148,6 @@ mod tests {
 
     #[test]
     fn the_shipped_askpass_prints_the_worktree_token_for_github_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        let seen = tmp.path().join("seen");
         let askpass = repo_askpass();
         let run = |prompt: &str, extra: &[(&str, &str)]| -> String {
             let mut cmd = std::process::Command::new(&askpass);
@@ -1994,11 +2180,10 @@ mod tests {
         assert_eq!(lookalike.trim(), "git-auth-token");
         let not_github = run("Password for 'https://notgithub.com':", &[]);
         assert_eq!(not_github.trim(), "git-auth-token");
-        let _ = seen;
     }
 
     #[test]
-    fn a_github_https_fetch_refuses_when_only_a_lookalike_host_is_configured() {
+    fn github_https_matches_the_host_exactly() {
         // Host matching is exact. A checkout whose origin merely contains the
         // substring github.com is not given the token and is not refused for
         // lacking one.
