@@ -1370,10 +1370,12 @@ where
     let mut writing = crate::application::context::write_of(ctx);
     let clock = std::sync::Arc::clone(writing.clock());
     let stored = audited_write(&mut writing, WORK_BIND, &reason, move |txn, _actor| {
-        let fresh = resolve::work_item(txn, &reference)?;
+        // Declared-only `resolve::work_item` misses an upstream subject key.
+        // Resolve the same way Python does inside the transaction body.
+        let fresh = upstream::resolve_work_ref(ctx, txn, &reference)?;
         let Some(project_id) = fresh.project_id.clone() else {
             return Err(VogtError::InvalidRequest(format!(
-                "{} has no project, so it has no branch to bind",
+                "{} belongs to no project, so there is no branch to bind it to",
                 fresh.reference
             )));
         };
@@ -1396,7 +1398,7 @@ where
             txn.upsert_work_overlay(&overlay)?;
         }
         let payload = serde_json::to_value(&overlay).unwrap_or(Value::Null);
-        let updated = resolve::work_item(txn, &fresh.reference)?;
+        let updated = upstream::resolve_work_ref(ctx, txn, &fresh.reference)?;
         Ok(WriteOutcome::new(
             updated,
             "work_item",
@@ -1500,64 +1502,6 @@ where
         ))
     })?;
     Ok(json!({"item": item, "link": link}))
-}
-
-/// Record a skipped write-back. The native write already committed; a ledger
-/// row that cannot be written does not undo it, matching the Python path where
-/// the skip is a consequence rather than part of the declared transaction.
-fn record_skipped<C, I>(
-    ctx: &AppContext<C, I>,
-    project_id: Option<&str>,
-    work_item_id: Option<&str>,
-    action: &str,
-    reason: &str,
-) -> Result<(), VogtError>
-where
-    C: Clock + 'static,
-    I: IdFactory + 'static,
-{
-    let parsed: crate::core::WriteBackAction = action
-        .parse()
-        .unwrap_or(crate::core::WriteBackAction::Comment);
-    let mut writing = crate::application::context::write_of(ctx);
-    let clock = std::sync::Arc::clone(writing.clock());
-    let ids = std::sync::Arc::clone(writing.ids());
-    let project_id = project_id.map(str::to_string);
-    let work_item_id = work_item_id.map(str::to_string);
-    let reason_owned = reason.to_string();
-    let reason_for_audit = reason_owned.clone();
-    audited_write(
-        &mut writing,
-        "writeback.skip",
-        &reason_for_audit,
-        move |txn, actor| {
-            let now = super::now_of(&clock);
-            let record = WriteBackRecord {
-                id: super::next_id(&ids, "wbk"),
-                at: now,
-                project_id,
-                work_item_id,
-                actor_id: actor.id.clone(),
-                action: parsed,
-                subject_key: None,
-                policy: "none".to_string(),
-                outcome: crate::core::WriteBackOutcome::Skipped,
-                reason: reason_owned.clone(),
-                detail: None,
-                source_url: None,
-            };
-            txn.insert_writeback(&record)?;
-            Ok(WriteOutcome::new(
-                (),
-                "writeback",
-                &record.id,
-                serde_json::to_value(&record).unwrap_or(Value::Null),
-                "writeback.skipped",
-                json!({}),
-            ))
-        },
-    )?;
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1839,7 +1783,7 @@ mod tests {
         ActorKind, LinkState, Moment, Principal, Project, SequentialIds, StepClock, WriteBack,
     };
     use crate::errors::VogtError;
-    use crate::storage::interface::{DeclaredStore, ObservedStore, WriteTxn};
+    use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn};
     use serde_json::{json, Value};
 
     fn moment() -> Moment {
@@ -2169,5 +2113,57 @@ mod tests {
         let board = list_board(ctx, json!({"cells": [{"lane_key": "", "state": "open"}]})).unwrap();
         assert_eq!(board["total"], 1);
         assert_eq!(board["cells"][0]["items"][0]["ref"], "WI-1");
+    }
+
+    #[test]
+    fn binding_a_branch_to_an_upstream_subject_stores_the_overlay() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        insert_project(&built, "beta", true, WriteBack::Disabled);
+        let sweep = ctx
+            .observed
+            .begin_sweep("forge", &["prj_beta".into()], moment())
+            .unwrap();
+        ctx.observed
+            .append(
+                &sweep.id,
+                &[crate::storage::observed_types::PendingObservation {
+                    kind: "forge.issue".into(),
+                    subject_key: "gh:acme/beta#7".into(),
+                    payload: serde_json::json!({
+                        "title": "upstream",
+                        "state": "open",
+                        "number": 7
+                    }),
+                    content_digest: "sha256:issue-7".into(),
+                    project_id: Some("prj_beta".into()),
+                    source_url: Some("https://github.com/acme/beta/issues/7".into()),
+                    promoted: false,
+                }],
+                moment(),
+            )
+            .unwrap();
+        ctx.observed.rebuild_latest().unwrap();
+        let bound = bind_branch(
+            ctx,
+            json!({"ref": "gh:acme/beta#7", "branch": "feat/upstream", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(bound["item"]["ref"], "gh:acme/beta#7");
+        assert_eq!(bound["item"]["project_id"], "prj_beta");
+        let view = ctx.declared.read().unwrap();
+        let overlay = view.work_overlay("gh:acme/beta#7").unwrap().unwrap();
+        assert_eq!(overlay.branches, vec!["feat/upstream".to_string()]);
+        drop(view);
+        bind_branch(
+            ctx,
+            json!({"ref": "gh:acme/beta#7", "branch": "feat/upstream", "reason": "test"}),
+        )
+        .unwrap();
+        let view = ctx.declared.read().unwrap();
+        let again = view.work_overlay("gh:acme/beta#7").unwrap().unwrap();
+        assert_eq!(again.branches, vec!["feat/upstream".to_string()]);
     }
 }
