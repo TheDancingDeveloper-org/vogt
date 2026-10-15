@@ -123,11 +123,11 @@ fn adopt_configured(
     )
     .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
     let core = crate::with_ctx!(&built, |ctx| {
-        crate::application::services::auth::adopt_bootstrap(ctx, true)
+        crate::application::services::bootstrap::adopt_bootstrap(ctx, true)
     })
     .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
     let agent = crate::with_ctx!(&built, |ctx| {
-        crate::application::services::auth::adopt_bootstrap(ctx, false)
+        crate::application::services::bootstrap::adopt_bootstrap(ctx, false)
     })
     .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
     Ok((core, agent))
