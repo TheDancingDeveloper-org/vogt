@@ -295,13 +295,18 @@ fn main() -> ExitCode {
 /// The three ported scripts. `None` means the argv is some other command.
 fn scripts_command(argv: &[String]) -> Option<ExitCode> {
     let word = command_word(argv)?;
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // The checkout being checked is the working directory, not the tree the
+    // binary was compiled in. `--root PATH` overrides it.
+    let root = scripts_root(argv);
     let result = match word {
         "check-product-version" => {
+            // Only arguments after the command count. A global flag before it
+            // (such as `--data-dir`) is not the expected version.
             let expected = argv
                 .iter()
-                .rev()
-                .find(|arg| !arg.starts_with('-') && arg.as_str() != word)
+                .skip_while(|arg| arg.as_str() != word)
+                .skip(1)
+                .find(|arg| !arg.starts_with('-'))
                 .map(String::as_str);
             scripts::check_product_version(&root, expected)
         }
@@ -324,6 +329,16 @@ fn scripts_command(argv: &[String]) -> Option<ExitCode> {
             ExitCode::from(1)
         }
     })
+}
+
+/// Where a script looks for the checkout: `--root PATH`, or the working
+/// directory. A distributed binary must not check the build machine's path.
+fn scripts_root(argv: &[String]) -> PathBuf {
+    argv.iter()
+        .position(|arg| arg == "--root")
+        .and_then(|index| argv.get(index + 1))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 fn command_word(argv: &[String]) -> Option<&str> {

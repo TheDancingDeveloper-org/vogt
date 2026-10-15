@@ -19,7 +19,12 @@ pub fn assert_clean(data: &[u8]) -> Result<(), String> {
     let mut leaks = Vec::new();
     for rule in forbidden() {
         for found in rule.pattern.find_iter(data) {
-            if rule.allow == Some(found.as_bytes()) {
+            // `allow` is a prefix, matching Python's `(?!user\b)`: `/home/user`
+            // and `/home/user.x` are the placeholder, `/home/ada` is not.
+            if rule
+                .allow
+                .is_some_and(|prefix| found.as_bytes().starts_with(prefix))
+            {
                 continue;
             }
             let shown: String = found
@@ -87,45 +92,59 @@ pub fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Rewrite secret-shaped bytes in place, keeping non-UTF-8 bytes intact.
+///
+/// A transcript is raw PTY output, so this works on bytes. `regex::bytes`
+/// matches the ASCII patterns and copies the surrounding bytes through, which
+/// is what `scripts/sanitise_transcript.py` does. A lossy UTF-8 decode would
+/// turn `0xFF 0xFE` into U+FFFD and change the fixture.
+///
+/// Two deliberate differences from the Python, both fixes:
+///
+/// - the specific shapes (`sk-`, `ghp_`, `AKIA`, `xoxb-`, JWTs) are rewritten
+///   before the generic `token=` rule. Python's order turns `token=ghp_…`
+///   into `token=REDACTED_TOKEN`, which hides that it was a GitHub token;
+///   here it becomes `token=ghx_REDACTED`.
+/// - the AKIA placeholder is `AKIAREDACTEDKEY000`. Python's
+///   `AKIAREDACTEDREDACT00` matches its own forbidden `AKIA[0-9A-Z]{16}`
+///   pattern, so `assert_clean` refuses every file that contained an AWS key.
 fn rewrite(data: &[u8]) -> Vec<u8> {
-    let mut text = String::from_utf8_lossy(data).into_owned();
-    let rules: &[(&str, &str)] = &[
+    let rules: &[(&str, &[u8])] = &[
         (
             r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+",
-            "${1}REDACTED_TOKEN",
+            b"${1}REDACTED_TOKEN",
         ),
-        // The specific shapes come before the generic `token=` rule, which
-        // would otherwise swallow a `ghp_` token whole.
-        (r"sk-[A-Za-z0-9]{20,}", "sk-REDACTED"),
-        (r"gh[pousr]_[A-Za-z0-9]{20,}", "ghx_REDACTED"),
-        (r"AKIA[0-9A-Z]{16}", "AKIAREDACTEDKEY000"),
-        (
-            r#"(?i)(token[=:\s\"']+)[A-Za-z0-9._\-]{16,}"#,
-            "${1}REDACTED_TOKEN",
-        ),
-        (r"xox[baprs]-[A-Za-z0-9-]{10,}", "xoxb-REDACTED"),
+        (r"sk-[A-Za-z0-9]{20,}", b"sk-REDACTED"),
+        (r"gh[pousr]_[A-Za-z0-9]{20,}", b"ghx_REDACTED"),
+        (r"AKIA[0-9A-Z]{16}", b"AKIAREDACTEDKEY000"),
+        (r"xox[baprs]-[A-Za-z0-9-]{10,}", b"xoxb-REDACTED"),
         (
             r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
-            "eyJ.REDACTED.JWT",
+            b"eyJ.REDACTED.JWT",
+        ),
+        (
+            r#"(?i)(token[=:\s\"']+)[A-Za-z0-9._\-]{16,}"#,
+            b"${1}REDACTED_TOKEN",
         ),
         (
             r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
-            "user@example.invalid",
+            b"user@example.invalid",
         ),
-        (r"/home/[A-Za-z0-9._\-]+", "/home/user"),
-        (r"/Users/[A-Za-z0-9._\-]+", "/Users/user"),
+        (r"/home/[A-Za-z0-9._\-]+", b"/home/user"),
+        (r"/Users/[A-Za-z0-9._\-]+", b"/Users/user"),
     ];
+    let mut text = data.to_vec();
     for (pattern, replacement) in rules {
-        let re = regex::Regex::new(pattern).expect("rewrite pattern compiles");
+        let re = regex::bytes::Regex::new(pattern).expect("rewrite pattern compiles");
         text = re.replace_all(&text, *replacement).into_owned();
     }
-    text.into_bytes()
+    text
 }
 
 struct Forbidden {
     name: &'static str,
     pattern: regex::bytes::Regex,
-    /// A match whose text equals this exactly is the placeholder, not a leak.
+    /// A match that starts with this is the placeholder, not a leak.
     allow: Option<&'static [u8]>,
 }
 
@@ -161,6 +180,34 @@ fn forbidden() -> Vec<Forbidden> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_utf8_bytes_pass_through_unchanged() {
+        let raw = b"a\xff\xfeb /home/ada end";
+        let cleaned = sanitise(raw).expect("clean");
+        assert!(cleaned.windows(2).any(|w| w == [0xff, 0xfe]), "{cleaned:?}");
+        assert!(cleaned.windows(10).any(|w| w == b"/home/user"));
+        assert!(!cleaned.windows(3).any(|w| w == [0xef, 0xbf, 0xbd]));
+    }
+
+    #[test]
+    fn a_home_placeholder_with_a_suffix_is_allowed() {
+        assert_clean(b"cwd=/home/user.x/work").expect("user.x is the placeholder");
+    }
+
+    #[test]
+    fn the_cli_writes_the_cleaned_bytes() {
+        let dir = std::env::temp_dir().join(format!("vogt-sanitise-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("in.bin");
+        let output = dir.join("out.bin");
+        std::fs::write(&input, b"token=ghp_abcdefghijklmnopqrstuvwxyz0123\n").unwrap();
+        run(&[input.display().to_string(), output.display().to_string()]).expect("rewritten");
+        let written = std::fs::read(&output).unwrap();
+        assert_eq!(written, b"token=ghx_REDACTED\n");
+        run(&["--check".to_string(), output.display().to_string()]).expect("clean");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn rewrites_every_secret_shape() {
