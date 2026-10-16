@@ -74,6 +74,11 @@ services:
     environment:
       VOGT_CORE_TOKEN_FILE: /run/rust-tokens/vogt_core_token
       ENGINE_TOKEN: "${ENGINE_TOKEN_VALUE:-}"
+      # The e2e engine image sets ENGINE_CONFIG and nothing else, so the
+      # server falls back to 127.0.0.1:8910. A client inside the container
+      # that dials the published address then gets "connection refused".
+      # Bind every interface, which is what the production overlay does.
+      ENGINE_BIND: "0.0.0.0:8910"
     volumes:
       - rust_core_tokens:/run/rust-tokens:ro
       # The session's cwd has to be inside the engine's workspace root
