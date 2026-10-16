@@ -763,27 +763,19 @@ describe("Files keeps its selection across a session update (WI-1682)", () => {
     activity: "idle",
     exit_code: null,
   };
-  const readme = { name: "README.md", path: "README.md", is_dir: false };
-  const notes = { name: "NOTES.md", path: "NOTES.md", is_dir: false };
 
-  /** A session event makes the engine re-list the tree with fresh objects. */
-  function shellWithTree() {
-    let tree = [readme];
+  it("a session-created refresh keeps the selected file row and its focus", async () => {
+    setRailSection("files", true);
+    // The list grows when the event arrives, so the refresh the store does
+    // for an unknown session-created is answered with a genuinely new list.
+    let listed = [session];
     const shell = mountShell("/board", {
       sessions: [session],
-      engine: { "GET /api/tree": () => ({ body: tree.map((node) => ({ ...node })) }) },
-    });
-    return {
-      shell,
-      grow() {
-        tree = [readme, notes];
+      engine: {
+        "GET /api/tree": () => ({ body: [{ name: "README.md", path: "README.md", is_dir: false }] }),
+        "GET /api/sessions": () => ({ body: listed.map((row) => ({ ...row })) }),
       },
-    };
-  }
-
-  it("a tree refetch from a session event keeps the selected file and its focus", async () => {
-    setRailSection("files", true);
-    const { shell, grow } = shellWithTree();
+    });
     await liveStream(shell.vogt);
     const file = await waitFor(() => shell.container.querySelector<HTMLElement>('[aria-label="Open README.md"]'));
     expect(file).toBeTruthy();
@@ -791,30 +783,35 @@ describe("Files keeps its selection across a session update (WI-1682)", () => {
     fireEvent.click(file!);
     expect(file!.closest(".tree-row")).toHaveClass("tree-row--selected");
 
-    grow();
-    shell.vogt.stream.changed();
-    await waitFor(() => expect(shell.container.textContent).toContain("NOTES.md"));
+    listed = [session, { ...session, id: "eng-2", name: "other" }];
+    shell.vogt.stream.push({ type: "session-created", id: "eng-2", name: "other" });
+    await waitFor(() => expect(shell.container.textContent).toContain("other"));
 
     const again = shell.container.querySelector<HTMLElement>('[aria-label="Open README.md"]');
-    // The refetch handed back a new object. The row staying the same element
-    // is what keeps the selection and the focus; a replacement is the bug.
-    expect(again, "the refetch replaced the selected row").toBe(file);
+    expect(again, "the session refresh replaced the selected row").toBe(file);
     expect(again?.closest(".tree-row")).toHaveClass("tree-row--selected");
     expect(document.activeElement).toBe(again);
   });
 
-  it("a tree refetch does not pull focus back from the Sessions list", async () => {
+  it("a session-created refresh does not pull focus back from the Sessions list", async () => {
     setRailSection("files", true);
-    const { shell, grow } = shellWithTree();
+    let listed = [session];
+    const shell = mountShell("/board", {
+      sessions: [session],
+      engine: {
+        "GET /api/tree": () => ({ body: [{ name: "README.md", path: "README.md", is_dir: false }] }),
+        "GET /api/sessions": () => ({ body: listed.map((row) => ({ ...row })) }),
+      },
+    });
     await liveStream(shell.vogt);
     const file = await waitFor(() => shell.container.querySelector<HTMLElement>('[aria-label="Open README.md"]'));
     fireEvent.click(file!);
     const row = await waitFor(() => shell.container.querySelector<HTMLElement>(".session-row"));
     row!.focus();
 
-    grow();
-    shell.vogt.stream.changed();
-    await waitFor(() => expect(shell.container.textContent).toContain("NOTES.md"));
+    listed = [session, { ...session, id: "eng-2", name: "other" }];
+    shell.vogt.stream.push({ type: "session-created", id: "eng-2", name: "other" });
+    await waitFor(() => expect(shell.container.textContent).toContain("other"));
 
     expect(document.activeElement?.closest(".session-row")).not.toBeNull();
     expect(document.activeElement?.closest(".file-tree")).toBeNull();
