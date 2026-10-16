@@ -29,11 +29,11 @@
 # call them: those jobs have no Rust toolchain, and the docs and release jobs
 # run on a core-only checkout that has no engine/core to build.
 #
-# Still Python, deliberately (WI-1079). Each is a developer tool that shells
-# out to git, gh or a running stack, and none is called by a Rust job:
-#   load.py            registry-driven load generator (needs the Python core)
-#   fake_agent_core.py deterministic agent stand-in for agent-task tests / e2e
-#   fixture_reset.py   rebuilds the forge fixture repo over the GitHub API
+# Also ported (WI-1079), each a vogt-core subcommand:
+#   vogt-core load [--scale N] [--mode load|soak|deployed] [--check-baseline FILE]
+#   vogt-core fake-agent [SCENARIO]
+#   vogt-core fixture-reset [--dry-run] [--repo OWNER/NAME]
+# The Python originals stay as the reference the ports were checked against.
 # CI-only scripts stay Python and run under a uv-less python3 on the runner
 # with no project dependency:
 #   play_preflight, check_workflow_policy, check_bundle, check_rust_version,
