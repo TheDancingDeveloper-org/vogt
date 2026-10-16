@@ -621,9 +621,7 @@ RUN chmod +x /usr/local/bin/vogt-engine
 COPY --from=core /opt/vogt /opt/vogt
 RUN set -eu; \
     ln -sfn /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt; \
-    if [ -e /opt/vogt/.venv/bin/.rust-core ]; then \
-        ln -sfn /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt-core; \
-    else \
+    if [ ! -e /opt/vogt/.venv/bin/.rust-core ]; then \
         ln -sfn /opt/vogt/.venv/bin/vogt-mcp /usr/local/bin/vogt-mcp; \
         ln -sfn /opt/vogt/.venv/bin/vogt-mcp-remote /usr/local/bin/vogt-mcp-remote; \
     fi; \

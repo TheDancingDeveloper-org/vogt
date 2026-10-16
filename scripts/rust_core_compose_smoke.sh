@@ -35,9 +35,11 @@ trap cleanup EXIT
 
 openssl rand -hex 32 > "$SECRET"
 chmod 644 "$SECRET"
-# The overlay's secret source is deploy/vogt-core-token, a relative path.
+# The overlay's secret sources are relative paths beside the compose files.
 cp "$SECRET" deploy/vogt-core-token
-trap 'cleanup; rm -f deploy/vogt-core-token' EXIT
+printf '%s' "$ENGINE_TOKEN" > deploy/engine-token
+chmod 644 deploy/engine-token
+trap 'cleanup; rm -f deploy/vogt-core-token deploy/engine-token' EXIT
 
 export VOGT_IMAGE="vogt-core:rust"
 export VOGT_PUBLIC_URL="http://127.0.0.1:18080"
@@ -96,9 +98,12 @@ echo "writing an event through the core and reading it from the engine"
 
 found=""
 for _ in $(seq 1 12); do
-  if "${COMPOSE[@]}" exec -T engine curl -fsS -N --max-time 8 \
-      -H "Authorization: Bearer $ENGINE_TOKEN" \
-      http://127.0.0.1:8910/api/events | grep -q 'work'; then
+  # The stream never closes, so curl exits non-zero on --max-time and a
+  # pipefail pipeline would fail the smoke on the first event it saw. Bound
+  # the read by line count instead, and match the event kind exactly.
+  if "${COMPOSE[@]}" exec -T engine sh -c \
+      "curl -sS -N --max-time 8 -H \"Authorization: Bearer $ENGINE_TOKEN\" http://127.0.0.1:8910/api/events | head -n 40" \
+      | grep -q '"kind":"work.created"'; then
     found=yes; break
   fi
   sleep 2
@@ -109,12 +114,27 @@ if [ -z "$found" ]; then
 fi
 echo "event follower saw the Rust core"
 
-# session.list on the Rust core must be answered by the real engine.
+# session.* on the Rust core, against the real engine. Start one through the
+# core so the row is the engine's own session, then read the engine's list
+# and require the core's answer to name that same id. Matching the word
+# "sessions" would pass against the empty unconfigured list.
+echo "session.start on the Rust core"
+started="$("${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/secrets/vogt_core_token engine \
+  sh -c 'tok=$(cat "$VOGT_CORE_TOKEN_FILE"); curl -fsS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
+    -d "{\"name\":\"rust-core-smoke\",\"reason\":\"compose smoke\"}" \
+    http://vogt:8000/api/sessions')"
+engine_id="$(printf '%s' "$started" | sed -n 's/.*"engine_session_id":"\([^"]*\)".*/\1/p')"
+if [ -z "$engine_id" ]; then
+  echo "session.start did not come back with an engine session id: $started" >&2
+  exit 1
+fi
 echo "session.list on the Rust core against the real engine"
 body="$("${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/secrets/vogt_core_token engine \
   sh -c 'tok=$(cat "$VOGT_CORE_TOKEN_FILE"); curl -fsS -H "Authorization: Bearer $tok" http://vogt:8000/api/sessions')"
-printf '%s\n' "$body" | grep -q '"sessions"' || {
-  echo "session.list did not return a session list: $body" >&2
+# An unconfigured core returns {"sessions": []} with an engine note. A core
+# that reached the real engine returns a row naming the engine's own id.
+printf '%s\n' "$body" | grep -q "\"$engine_id\"" || {
+  echo "session.list did not name the engine session $engine_id: $body" >&2
   exit 1
 }
 echo "session.list reached the engine"
