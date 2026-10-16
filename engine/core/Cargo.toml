@@ -49,6 +49,7 @@ rustls = { version = "0.23.19", default-features = false, features = ["ring", "s
 rustls-native-certs = "0.7"
 rustls-pemfile = "2"
 openssl-probe = "0.1.6"
+portable-pty = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

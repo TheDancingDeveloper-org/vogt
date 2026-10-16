@@ -312,19 +312,43 @@ fn scripts_command(argv: &[String]) -> Option<ExitCode> {
             scripts::sanitise_transcript(&rest)
         }
         "check-docs" => scripts::check_docs(&root),
+        "gen-config-docs" => scripts::gen_config_docs(&root),
+        "capture-transcript" => {
+            let after = after_command(argv, word);
+            scripts::capture_transcript(&after)
+        }
         _ => return None,
     };
     Some(match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(problem) => {
             eprintln!("{problem}");
-            ExitCode::from(1)
+            // A missing or malformed argument is a usage error, as argparse's
+            // exit 2 was. A check that ran and found drift stays exit 1.
+            let code = if problem.contains("required")
+                || problem.contains("unknown option")
+                || problem.contains("not a number")
+            {
+                2
+            } else {
+                1
+            };
+            ExitCode::from(code)
         }
     })
 }
 
 /// The arguments that are not `--root PATH`: flags keep their values, and a
 /// bare word is positional. `--root`'s value must never be read as one.
+/// The tokens after the command word, as owned strings.
+fn after_command(argv: &[String], word: &str) -> Vec<String> {
+    argv.iter()
+        .skip_while(|arg| arg.as_str() != word)
+        .skip(1)
+        .cloned()
+        .collect()
+}
+
 fn positional<'a>(args: &[&'a str]) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut index = 0;
