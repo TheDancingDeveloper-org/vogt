@@ -96,11 +96,10 @@ export function setSidebarCollapsed(collapsed: boolean): void {
   }
 }
 
-// The file the reader last selected in the Files tree. Kept in memory (not
-// persisted), same as the search query: a session update remounts the rail's
-// rows and, with them, the tree, and the browser then restores focus onto the
-// first session row. Remembering the path lets the tree put the selection and
-// the focus back where they were (WI-1682).
+// The file the reader last selected in the Files tree. Kept in memory, not
+// persisted, same as the search query. The row itself stays mounted across a
+// refetch (FileTree reuses the node object), so this only has to repaint the
+// highlight; it does not move keyboard focus (WI-1682).
 const [selectedPath, setSelectedPathSignal] = createSignal<string | null>(null);
 
 export { selectedPath as fileTreeSelectedPath };

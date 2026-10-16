@@ -566,10 +566,26 @@ const App: Component = () => {
       .map((id) => sessionsStore.sessions[id])
       .filter((s): s is SessionSummary => Boolean(s));
     const sorted = sortSessionsForRail(sessions, new Set(bookmarks()));
-    if (openMenuId() !== null && prev.length > 0) {
-      return holdRailOrder(prev, sorted);
-    }
-    return sorted;
+    const ordered = openMenuId() !== null && prev.length > 0
+      ? holdRailOrder(prev, sorted)
+      : sorted;
+    // A session-list refresh builds new objects for the same ids. <For> keys
+    // on reference, so handing it a new object replaces the row — and a row
+    // that held focus takes the keyboard with it, off the Files tree and onto
+    // the Sessions list (WI-1682). Reuse the previous object unless something
+    // the row renders changed.
+    const prior = new Map(prev.map((s) => [s.id, s]));
+    return ordered.map((s) => {
+      const old = prior.get(s.id);
+      if (!old) return s;
+      return old.name === s.name
+        && old.activity === s.activity
+        && old.exit_code === s.exit_code
+        && old.role === s.role
+        && old.cwd === s.cwd
+        ? old
+        : s;
+    });
   }, []);
   const waitingSessionList = () =>
     sessionsStore.ready
