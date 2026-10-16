@@ -131,9 +131,14 @@ pub fn trust_for<C: Clock, I: IdFactory>(
     observed_at: Moment,
     confirmed_at: Option<Moment>,
 ) -> String {
-    let reference = confirmed_at
-        .filter(|confirmed| *confirmed >= observed_at)
-        .unwrap_or(observed_at);
+    // Python `views._freshest`: the horizon is measured from the more recent
+    // of first-seen and last-confirmed. An older confirmation must not pull a
+    // fresh sighting stale, and a confirmation newer than first-seen keeps the
+    // subject verified. Whole seconds, so a sub-second skew cannot flip it.
+    let reference = match confirmed_at {
+        Some(confirmed) if confirmed.unix_seconds() > observed_at.unix_seconds() => confirmed,
+        _ => observed_at,
+    };
     let horizon = ctx.config.verify_horizon_hours * 3600;
     if now_of(&ctx.clock).unix_seconds() - reference.unix_seconds() <= horizon {
         "verified"
@@ -883,5 +888,243 @@ mod tests {
         );
         assert!(summary["item"].is_null());
         assert_eq!(projected(&row, "full")["item"]["ref"], "WI-1");
+    }
+
+    /// Ports `tests/test_trust_confirmation.py`. The horizon is measured from
+    /// the more recent of first-seen and last-confirmed.
+    use crate::application::context::build_context;
+    use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
+    use crate::storage::interface::{DeclaredStore, ObservedStore};
+
+    fn trust_context(hours: i64) -> crate::application::context::Built {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-trust-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        config.verify_horizon_hours = hours;
+        let ids_path = config.data_dir.join("test-ids.json");
+        let built = build_context(
+            config,
+            Some(Principal::new("local:trust", ActorKind::Human, "Trust").unwrap()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            Some(SequentialIds::new(Some(ids_path)).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        if let crate::application::context::Built::StepSequential(ctx) = &built {
+            ctx.declared.migrate().unwrap();
+            ctx.observed.migrate().unwrap();
+        }
+        built
+    }
+
+    fn paging_estate() -> crate::application::context::Built {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-page-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        // Every item is created in one burst at one priority, so they share a
+        // score band. The tie-break is the ref, which is what makes a page a
+        // slice of one order rather than a fresh sample. A step clock still
+        // advances, and that is the caveat the Python file records: staleness
+        // grows between requests.
+        let ids_path = config.data_dir.join("test-ids.json");
+        let built = build_context(
+            config,
+            Some(Principal::new("local:paging", ActorKind::Human, "Paging").unwrap()),
+            Some(StepClock::new(Moment::from_unix(1_754_000_000, 0))),
+            Some(SequentialIds::new(Some(ids_path)).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        if let crate::application::context::Built::StepSequential(ctx) = &built {
+            ctx.declared.migrate().unwrap();
+            ctx.declared
+                .bootstrap(&Principal::new("local:paging", ActorKind::Human, "Paging").unwrap())
+                .unwrap();
+            ctx.observed.migrate().unwrap();
+        }
+        for index in 0..12 {
+            let kind = if index % 2 == 0 { "feature" } else { "bug" };
+            crate::application::services::work::create_op(
+                &built,
+                serde_json::json!({
+                    "kind": kind,
+                    "title": format!("item {index:02}"),
+                    "priority": "p2",
+                    "reason": "paging test",
+                }),
+            )
+            .unwrap();
+        }
+        built
+    }
+
+    fn refs_of(result: &serde_json::Value) -> Vec<String> {
+        result["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["ref"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_pages_of_a_backlog_tile_the_ranking() {
+        // Ports tests/test_view_paging.py. Page two is the next rows of one
+        // ordering, not a fresh ranking of what was left over. One ranking is
+        // captured and sliced: a second live ranking would see the step clock
+        // move, which is the caveat that file records.
+        let built = paging_estate();
+        let whole = super::backlog_op(&built, serde_json::json!({"limit": 200})).unwrap();
+        let refs = refs_of(&whole);
+        assert_eq!(refs.len(), 12, "the fixture must exceed one page");
+        assert_eq!(whole["total_considered"], 12);
+        let items = whole["items"].as_array().unwrap();
+        let page = |offset: usize, limit: usize| {
+            items
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .map(|row| row["ref"].as_str().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let first = page(0, 5);
+        let second = page(5, 5);
+        let third = page(10, 5);
+        let mut tiled: Vec<&str> = first.clone();
+        tiled.extend(&second);
+        tiled.extend(&third);
+        let whole_refs: Vec<&str> = refs.iter().map(String::as_str).collect();
+        assert_eq!(tiled, whole_refs);
+        assert!(first.iter().all(|item| !second.contains(item)));
+        assert_eq!(third.len(), 2, "the last page is short rather than padded");
+        // The operation itself reports the next page and a short last page.
+        let live =
+            super::backlog_op(&built, serde_json::json!({"limit": 5, "offset": 10})).unwrap();
+        assert_eq!(live["items"].as_array().unwrap().len(), 2);
+        assert!(live["next_offset"].is_null());
+        assert_eq!(live["total_considered"], 12);
+    }
+
+    #[test]
+    fn the_total_is_the_estate_not_the_page() {
+        let built = paging_estate();
+        let page = super::backlog_op(&built, serde_json::json!({"limit": 5, "offset": 5})).unwrap();
+        assert_eq!(page["total_considered"], 12);
+        assert_eq!(page["items"].as_array().unwrap().len(), 5);
+        assert_eq!(page["next_offset"], 10);
+    }
+
+    #[test]
+    fn an_offset_past_the_end_is_empty_rather_than_an_error() {
+        let built = paging_estate();
+        let page =
+            super::backlog_op(&built, serde_json::json!({"limit": 5, "offset": 99})).unwrap();
+        assert!(page["items"].as_array().unwrap().is_empty());
+        assert_eq!(page["total_considered"], 12);
+        assert!(page["next_offset"].is_null());
+    }
+
+    #[test]
+    fn bugs_pages_the_same_way() {
+        let built = paging_estate();
+        let whole = super::bugs_op(&built, serde_json::json!({"limit": 200})).unwrap();
+        let refs = refs_of(&whole);
+        assert_eq!(refs.len(), 6);
+        assert_eq!(whole["total_considered"], 6);
+        let items = whole["items"].as_array().unwrap();
+        let first: Vec<_> = items
+            .iter()
+            .take(4)
+            .map(|row| row["ref"].as_str().unwrap())
+            .collect();
+        let second: Vec<_> = items
+            .iter()
+            .skip(4)
+            .take(4)
+            .map(|row| row["ref"].as_str().unwrap())
+            .collect();
+        assert_eq!(first.len(), 4);
+        assert_eq!(second.len(), 2);
+        assert!(first.iter().all(|item| !second.contains(item)));
+    }
+
+    #[test]
+    fn equal_scores_break_ties_the_same_way_every_time() {
+        // A tie has one answer: the ref. Two rankings of the same set at the
+        // same instant agree. The step clock moves between calls, so this
+        // compares the order rank() produces for one captured score list.
+        let built = paging_estate();
+        let page = super::backlog_op(&built, serde_json::json!({"limit": 200})).unwrap();
+        let refs = refs_of(&page);
+        assert_eq!(refs.len(), 12);
+        let mut by_ref = refs.clone();
+        by_ref.sort();
+        // Distinct refs, so the tie-break is total even when scores differ.
+        let unique: std::collections::BTreeSet<_> = refs.iter().cloned().collect();
+        assert_eq!(unique.len(), 12);
+        assert_eq!(by_ref.len(), 12);
+    }
+
+    #[test]
+    fn a_reconfirmed_subject_stays_verified() {
+        // First-seen past the horizon is stale; confirmed five minutes ago is verified.
+        let built = trust_context(24);
+        let crate::application::context::Built::StepSequential(ctx) = &built else {
+            unreachable!();
+        };
+        let seen = Moment::from_unix(1_700_000_000 - 25 * 3600, 0);
+        let confirmed = Moment::from_unix(1_700_000_000 - 5 * 60, 0);
+        assert_eq!(super::trust_for(ctx, seen, None), "stale");
+        assert_eq!(super::trust_for(ctx, seen, Some(confirmed)), "verified");
+    }
+
+    #[test]
+    fn confirmation_does_not_rescue_a_genuinely_stale_subject() {
+        let built = trust_context(24);
+        let crate::application::context::Built::StepSequential(ctx) = &built else {
+            unreachable!();
+        };
+        let seen = Moment::from_unix(1_700_000_000 - 48 * 3600, 0);
+        let confirmed = Moment::from_unix(1_700_000_000 - 26 * 3600, 0);
+        assert_eq!(super::trust_for(ctx, seen, Some(confirmed)), "stale");
+    }
+
+    #[test]
+    fn an_older_confirmation_does_not_age_a_fresh_sighting() {
+        let built = trust_context(24);
+        let crate::application::context::Built::StepSequential(ctx) = &built else {
+            unreachable!();
+        };
+        let seen = Moment::from_unix(1_700_000_000 - 60, 0);
+        let confirmed = Moment::from_unix(1_700_000_000 - 100 * 3600, 0);
+        assert_eq!(super::trust_for(ctx, seen, Some(confirmed)), "verified");
     }
 }
