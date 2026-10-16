@@ -573,6 +573,9 @@ def _digest_of(
         attention=attention,
         ready=ready,
         blocked_reason=_clip(blocked),
+        blocked_detail=(
+            None if blocked is None or len(blocked) <= _DIGEST_CLIP else blocked
+        ),
         turn_started_at=summary.turn_started_at,
         last_reply_excerpt=_clip(summary.last_reply_excerpt),
         template=summary.template,

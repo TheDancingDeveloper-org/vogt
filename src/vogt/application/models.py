@@ -1087,6 +1087,14 @@ class SessionDigest(Result):
         default=None,
         description="First 120 characters of the blocked report (engine reason).",
     )
+    blocked_detail: str | None = Field(
+        default=None,
+        description=(
+            "The blocked report in full (engine reason). `blocked_reason` keeps "
+            "the 120-character head so a row stays one line; this carries the "
+            "rest of what the guard said (WI-1670)."
+        ),
+    )
     turn_started_at: datetime | None = None
     last_reply_excerpt: str | None = Field(
         default=None,
