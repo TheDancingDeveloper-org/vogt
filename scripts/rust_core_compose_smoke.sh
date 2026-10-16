@@ -87,11 +87,13 @@ fi
 # The event follower polls every 5s, starting at the head. Write an event
 # after it has started, then look for it on the engine's stream.
 echo "writing an event through the core and reading it from the engine"
+# No project: an empty slug is looked up and refused ("no project with slug ''").
+# A create with the field omitted is a native item, which is all the event needs.
 # The core token lives on the shared volume. curl is in the engine image,
 # so the call runs there and reads the file the core adopted at init.
 if ! "${COMPOSE[@]}" exec -T engine \
   sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -sS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
-    -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\",\"project\":\"\"}" \
+    -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\"}" \
     -o /tmp/work.json -w "%{http_code}" http://vogt:8000/api/work' | grep -qx 201; then
   echo "creating the work item was refused" >&2
   "${COMPOSE[@]}" exec -T engine cat /tmp/work.json >&2 || true
