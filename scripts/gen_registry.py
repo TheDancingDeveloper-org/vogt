@@ -54,12 +54,27 @@ use super::{CliBinding, HttpMethod, HttpRoute, Operation, Scope};
 """
 
 
+def _validates_line() -> str:
+    # Kept as one Rust comment. Building it avoids a source line ruff format
+    # rewrites into single quotes, which would change the generated file.
+    sample = "`" + '"  xy  "' + "`"
+    result = "`" + '"xy"' + "`"
+    return f"//! validating {sample} against its annotation returns {result}:\n"
+
+
+def _rust_array(decl: str, rows: list[str]) -> str:
+    """One Rust static: the declaration, then the rows, then the closer."""
+    return decl + " = &[\n" + "".join(rows) + "];\n"
+
+
 def _operations() -> list[dict[str, object]]:
     """Read the operation set from source, so this runs without importing it."""
-    tree = ast.parse((REPO_ROOT / "src" / "vogt" / "registry" / "operations.py").read_text())
+    source = REPO_ROOT / "src" / "vogt" / "registry" / "operations.py"
+    tree = ast.parse(source.read_text())
     found: list[dict[str, object]] = []
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Operation"):
+        is_call = isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        if not (is_call and node.func.id == "Operation"):  # type: ignore[union-attr]
             continue
         kw = {keyword.arg: keyword.value for keyword in node.keywords}
         found.append(
@@ -79,14 +94,17 @@ def _operations() -> list[dict[str, object]]:
 def render_operations_rs(operations: list[dict[str, object]]) -> str:
     lines = [HEADER, "pub fn build_operations() -> Vec<Operation> {\n    vec![\n"]
     for operation in operations:
-        cli = ", ".join(json.dumps(part) for part in operation["cli"])  # type: ignore[union-attr]
+        parts = operation["cli"]
+        assert isinstance(parts, list)
+        cli = ", ".join(json.dumps(part) for part in parts)
         lines.append(
             "        Operation::new(\n"
             f"            {json.dumps(operation['name'])},\n"
             f"            {json.dumps(operation['summary'])},\n"
             f"            Scope::{SCOPES[operation['scope']]},\n"  # type: ignore[index]
             f"            {str(operation['mutating']).lower()},\n"
-            f"            HttpRoute::new(HttpMethod::{METHODS[operation['method']]}, "  # type: ignore[index]
+            "            HttpRoute::new("
+            f"HttpMethod::{METHODS[operation['method']]}, "  # type: ignore[index]
             f"{json.dumps(operation['path'])}),\n"
             f"            CliBinding::new(&[{cli}]),\n"
             "        ),\n"
@@ -108,8 +126,8 @@ def record_golden() -> tuple[str, str]:
     fails. Re-deriving the schemas from ported Rust types, and dropping this
     table, is WI-1060's remaining work.
     """
-    from vogt.application.models import RegistryDumpParams  # noqa: E402
-    from vogt.application.services.instance import registry_dump  # noqa: E402
+    from vogt.application.models import RegistryDumpParams
+    from vogt.application.services.instance import registry_dump
 
     dump = registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
     entries = []
@@ -117,8 +135,8 @@ def record_golden() -> tuple[str, str]:
         entries.append(
             "    (\n"
             f"        {json.dumps(operation['name'])},\n"
-            f"        {json.dumps(json.dumps(operation['params_schema'], separators=(',', ':')))},\n"
-            f"        {json.dumps(json.dumps(operation['result_schema'], separators=(',', ':')))},\n"
+            f"        {json.dumps(json.dumps(operation['params_schema'], separators=(',', ':')))},\n"  # noqa: E501
+            f"        {json.dumps(json.dumps(operation['result_schema'], separators=(',', ':')))},\n"  # noqa: E501
             "    ),\n"
         )
     module = (
@@ -136,9 +154,7 @@ def record_golden() -> tuple[str, str]:
         "//! because after that nothing can regenerate the table.\n"
         "\n"
         "/// `(operation name, params schema, result schema)`, in registry order.\n"
-        "pub static SCHEMAS: &[(&str, &str, &str)] = &[\n"
-        + "".join(entries)
-        + "];\n"
+        + _rust_array("pub static SCHEMAS: &[(&str, &str, &str)]", entries)
     )
     golden = json.dumps(dump, indent=2, ensure_ascii=False) + "\n"
     return golden, module
@@ -154,9 +170,9 @@ def record_strips() -> str:
     ``Name | None`` and a constraint written out by hand all come out the same
     way, and a regex over the file would miss each of them.
     """
-    import pydantic  # noqa: E402
+    import pydantic
 
-    from vogt.registry.operations import build_operations  # noqa: E402
+    from vogt.registry.operations import build_operations
 
     rows = []
     for operation in build_operations():
@@ -173,15 +189,13 @@ def record_strips() -> str:
         "//! Parameter fields that strip whitespace, recorded from the models.\n"
         "//!\n"
         "//! Produced by `scripts/gen_registry.py`. A field is here exactly when\n"
-        "//! validating `\"  xy  \"` against its annotation returns `\"xy\"`:\n"
-        "//! `Name` and `Reason` do, a plain `str` does not. A field of the same\n"
+        + _validates_line()
+        + "//! `Name` and `Reason` do, a plain `str` does not. A field of the same\n"
         "//! name typed `str` is absent, and must stay absent: stripping it would\n"
         "//! change stored text, and with it the audit digest.\n"
         "\n"
         "/// `(operation, field)`, in registry order.\n"
-        "pub static STRIPS: &[(&str, &str)] = &[\n"
-        + "".join(rows)
-        + "];\n"
+        + _rust_array("pub static STRIPS: &[(&str, &str)]", rows)
     )
 
 

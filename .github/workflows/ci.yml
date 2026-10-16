@@ -311,10 +311,16 @@ jobs:
           # RUSTSEC-2023-0071 has no fixed rsa release. rsa is compiled only
           # through web-push -> jwt-simple -> superboring. Vogt's VAPID path
           # signs ES256 (P-256 ECDSA), never RSA; see web-push's VapidKey and
-          # engine/server/src/push.rs. Keep this one explicit exception while
-          # denying future vulnerabilities, unsound advisories, and yanks.
+          # engine/server/src/push.rs.
+          # RUSTSEC-2025-0134: rustls-pemfile is unmaintained and has no
+          # successor release. It arrives through rustls-native-certs and
+          # axum-server, which still depend on it, so dropping our direct use
+          # does not remove it from the lock. Both ignores stay explicit while
+          # the audit denies future vulnerabilities, unsound advisories, and yanks.
           cargo audit --no-fetch --db "$advisory_db" \
-            --deny warnings --ignore RUSTSEC-2023-0071
+            --deny warnings \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2025-0134
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         with:
