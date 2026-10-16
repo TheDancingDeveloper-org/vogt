@@ -94,13 +94,13 @@ fi
 # exist inside the core container and be writable: create scaffolds into it.
 # The same path is mounted into the engine, which is what opens the session.
 echo "project.create on the Rust core"
-if ! "${COMPOSE[@]}" exec -T vogt mkdir -p /var/lib/vogt/repos/smoke; then
+if ! "${COMPOSE[@]}" exec -T vogt mkdir -p /home/sprooty/Working/smoke; then
   echo "could not make the project checkout" >&2
   exit 1
 fi
 if ! "${COMPOSE[@]}" exec -T engine \
   sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -sS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
-    -d "{\"name\":\"smoke\",\"root_path\":\"/var/lib/vogt/repos/smoke\",\"reason\":\"compose smoke\"}" \
+    -d "{\"name\":\"smoke\",\"root_path\":\"/home/sprooty/Working/smoke\",\"reason\":\"compose smoke\"}" \
     -o /tmp/project.json -w "%{http_code}" http://vogt:8000/api/projects' | grep -Eq '^(200|201)$'; then
   echo "creating the project was refused" >&2
   "${COMPOSE[@]}" exec -T engine cat /tmp/project.json >&2 || true
@@ -114,8 +114,8 @@ echo "writing an event through the core and reading it from the engine"
 # an item with no project ("a session needs a project or a work item") and a
 # project whose root_path is empty ("no checkout to open a session in").
 # project.create scaffolds into its root, so the root is a fresh directory
-# under the default import root (<data_dir>/repos), which is on the writable
-# data volume. The data dir itself is the store and must not be scaffolded.
+# under the engine's workspace root (/home/sprooty/Working), shared with the core.
+# A checkout under the data dir escapes that root through a symlink and the engine refuses it.
 # The core token lives on the shared volume. curl is in the engine image,
 # so the call runs there and reads the file the core adopted at init.
 if ! "${COMPOSE[@]}" exec -T engine \

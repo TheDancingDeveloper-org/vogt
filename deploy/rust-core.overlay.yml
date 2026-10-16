@@ -54,10 +54,10 @@ services:
       VOGT_BOOTSTRAP_CORE_TOKEN_FILE: /run/rust-tokens/vogt_core_token
     volumes:
       - rust_core_tokens:/run/rust-tokens:ro
-      # The engine opens a session in the project's checkout, which has to be
-      # the same directory the core registered. Sharing the data volume gives
-      # both containers /var/lib/vogt.
-      - vogt-data:/var/lib/vogt
+      # The engine opens a session in the project's checkout, and its
+      # workspace root is /home/sprooty/Working. The checkout lives there so
+      # the path does not escape the workspace through the data-dir symlink.
+      - smoke-work:/home/sprooty/Working
 
   engine:
     build:
@@ -72,7 +72,10 @@ services:
       ENGINE_TOKEN: "${ENGINE_TOKEN_VALUE:-}"
     volumes:
       - rust_core_tokens:/run/rust-tokens:ro
-      - vogt-data:/var/lib/vogt:ro
+      # The session's cwd has to be inside the engine's workspace root
+      # (/home/sprooty/Working). Share the checkout at that path.
+      - smoke-work:/home/sprooty/Working
 
 volumes:
   rust_core_tokens:
+  smoke-work:
