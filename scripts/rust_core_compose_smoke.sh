@@ -88,8 +88,10 @@ fi
 # The event follower polls every 5s, starting at the head. Write an event
 # after it has started, then look for it on the engine's stream.
 echo "writing an event through the core and reading it from the engine"
-"${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/rust-tokens/vogt_core_token engine \
-  sh -c 'tok=$(cat "$VOGT_CORE_TOKEN_FILE"); curl -fsS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
+# The core token lives on the core's volume. The engine image does not have
+# curl's bearer there, so the call is made from the core container itself.
+"${COMPOSE[@]}" exec -T engine \
+  sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -fsS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
     -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\",\"project\":\"\"}" \
     http://vogt:8000/api/work' >/dev/null
 
@@ -116,8 +118,8 @@ echo "event follower saw the Rust core"
 # and require the core's answer to name that same id. Matching the word
 # "sessions" would pass against the empty unconfigured list.
 echo "session.start on the Rust core"
-started="$("${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/rust-tokens/vogt_core_token engine \
-  sh -c 'tok=$(cat "$VOGT_CORE_TOKEN_FILE"); curl -fsS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
+started="$("${COMPOSE[@]}" exec -T engine \
+  sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -fsS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
     -d "{\"name\":\"rust-core-smoke\",\"reason\":\"compose smoke\"}" \
     http://vogt:8000/api/sessions')"
 engine_id="$(printf '%s' "$started" | sed -n 's/.*"engine_session_id":"\([^"]*\)".*/\1/p')"
@@ -126,8 +128,8 @@ if [ -z "$engine_id" ]; then
   exit 1
 fi
 echo "session.list on the Rust core against the real engine"
-body="$("${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/rust-tokens/vogt_core_token engine \
-  sh -c 'tok=$(cat "$VOGT_CORE_TOKEN_FILE"); curl -fsS -H "Authorization: Bearer $tok" http://vogt:8000/api/sessions')"
+body="$("${COMPOSE[@]}" exec -T engine \
+  sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -fsS -H "Authorization: Bearer $tok" http://vogt:8000/api/sessions')"
 # An unconfigured core returns {"sessions": []} with an engine note. A core
 # that reached the real engine returns a row naming the engine's own id.
 printf '%s\n' "$body" | grep -q "\"$engine_id\"" || {
