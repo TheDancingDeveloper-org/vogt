@@ -2,7 +2,7 @@
 #
 #   docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
 #   docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml \
-#     -f deploy/rust-core.overlay.yml up --build -d
+#     -f deploy/rust-core.overlay.yml up -d
 #
 # The `vogt` service is the core the engine fronts. The engine image also
 # carries its own core (CORE_IMAGE), and a stack whose two halves are
@@ -11,22 +11,63 @@
 #
 # VOGT_ENGINE_URL is what makes session.* on the core a call to the real
 # engine rather than an empty list with "no session engine is configured".
-# The token file is the engine's own break-glass token, which the engine
-# overlay already mounts for the engine service.
+# ENGINE_TOKEN_VALUE is the engine's break-glass bearer; the core reads it
+# from a file (VOGT_ENGINE_TOKEN_FILE) and the engine reads the same value
+# from ENGINE_TOKEN.
+#
+# Tokens are NOT Compose file-secrets. The self-hosted runner's filesystem is
+# not the docker daemon's, so a `file:` secret fails with "bind source path
+# does not exist" (deploy/e2e.overlay.yml). A one-shot writes the tokens into
+# a named volume from environment variables. Layered after e2e.overlay.yml
+# this keeps that overlay's `secrets: !override []` — it does not put a file
+# secret back on `vogt`.
 
 services:
+  token-init:
+    image: ${VOGT_IMAGE:-vogt-core:rust}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        umask 022
+        printf '%s' "$${VOGT_CORE_TOKEN_VALUE}" > /tokens/vogt_core_token
+        printf '%s' "$${ENGINE_TOKEN_VALUE}" > /tokens/engine_token
+        chmod 0644 /tokens/vogt_core_token /tokens/engine_token
+    environment:
+      VOGT_CORE_TOKEN_VALUE: "${VOGT_CORE_TOKEN_VALUE:-}"
+      ENGINE_TOKEN_VALUE: "${ENGINE_TOKEN_VALUE:-}"
+    volumes:
+      - rust_core_tokens:/tokens
+    restart: "no"
+
   vogt:
     image: ${VOGT_IMAGE:-vogt-core:rust}
+    depends_on:
+      token-init:
+        condition: service_completed_successfully
+    # Drop the file secret the base overlay wires in. The token is on the volume.
+    secrets: !override []
     environment:
       VOGT_ENGINE_URL: http://engine:8910
-      VOGT_ENGINE_TOKEN_FILE: /run/secrets/engine_token
-    secrets:
-      - engine_token
+      VOGT_ENGINE_TOKEN_FILE: /run/rust-tokens/engine_token
+      VOGT_BOOTSTRAP_CORE_TOKEN_FILE: /run/rust-tokens/vogt_core_token
+    volumes:
+      - rust_core_tokens:/run/rust-tokens:ro
+
   engine:
     build:
       args:
         CORE_IMAGE: ${VOGT_IMAGE:-vogt-core:rust}
+    depends_on:
+      token-init:
+        condition: service_completed_successfully
+    secrets: !override []
+    environment:
+      VOGT_CORE_TOKEN_FILE: /run/rust-tokens/vogt_core_token
+      ENGINE_TOKEN: "${ENGINE_TOKEN_VALUE:-}"
+    volumes:
+      - rust_core_tokens:/run/rust-tokens:ro
 
-secrets:
-  engine_token:
-    file: ./engine-token
+volumes:
+  rust_core_tokens:
