@@ -51,14 +51,8 @@ export VOGT_PORT="18080"
 echo "building the Rust core image"
 docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
 
-# The engine image copies /opt/vogt and .venv/bin/vogt out of CORE_IMAGE
-# (engine/Dockerfile). The Rust core image has neither, so this build fails
-# before it compiles anything. That is the contract gap
-# `the_engine_image_cannot_take_the_rust_core_as_core_image` records.
-if ! docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:rust .; then
-  echo "engine image refused the Rust core (COPY --from=core /opt/vogt). Contract gap; not an engine change this item owns." >&2
-  exit 2
-fi
+echo "building the engine image with the Rust core in its core slot"
+docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:rust .
 
 echo "starting the stack"
 "${COMPOSE[@]}" up -d

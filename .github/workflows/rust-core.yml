@@ -90,6 +90,16 @@ jobs:
           # not. --offline uses the cache the job already warmed.
           ( cd "$stage/engine" && cargo check --offline -p vogt-core )
 
+  compose:
+    name: compose smoke against the Rust core
+    runs-on: [self-hosted, docker]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: build the Rust core image and walk the stack
+        run: bash scripts/rust_core_compose_smoke.sh
+
   parity:
     name: parity
     # Proves the harness against both cores. The Rust binary is built in this
