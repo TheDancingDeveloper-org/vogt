@@ -85,7 +85,7 @@ pub fn board_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
 /// item. A linked project without `local_only` is the forge write-through,
 /// which is not ported and fails typed. An unlinked project without
 /// `local_only` is the decision-10 refusal.
-fn create_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+pub(crate) fn create_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
