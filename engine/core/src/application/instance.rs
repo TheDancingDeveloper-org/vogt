@@ -21,6 +21,9 @@ pub struct InitOutcome {
     pub observed: MigrationReport,
     pub created: bool,
     pub instance_id: String,
+    /// `not_configured`, `already_present`, or `adopted`. Python reports the
+    /// same three, and the CLI prints this rather than a hardcoded value.
+    pub bootstrap_core_token: String,
 }
 
 /// `clock` and `ids` are resolved once by the caller from the hook environment.
@@ -82,12 +85,13 @@ pub fn init(
     // The stack secret the engine presents. Python adopts it inside init; a
     // Rust core that skips it answers every engine call with 401. A missing
     // file is not an error; a short secret or an unknown scope refuses to start.
-    adopt_bootstrap_core_token(data_dir, clock, ids)?;
+    let bootstrap_core_token = adopt_bootstrap_core_token(data_dir, clock, ids)?;
     Ok(InitOutcome {
         created: !declared_existed,
         declared,
         observed,
         instance_id,
+        bootstrap_core_token,
     })
 }
 
@@ -459,7 +463,7 @@ fn adopt_bootstrap_core_token(
     data_dir: &Path,
     clock: &mut Option<crate::core::StepClock>,
     ids: &mut Option<SequentialIds>,
-) -> Result<(), migrator::MigrateError> {
+) -> Result<String, migrator::MigrateError> {
     use rusqlite::params;
 
     // `init` was given this data directory explicitly. Config still names the
@@ -474,14 +478,14 @@ fn adopt_bootstrap_core_token(
         migrator::MigrateError::Message(format!("bootstrap_core_token: {error}"))
     })?;
     let Some(configured) = config.bootstrap_core_token_file else {
-        return Ok(());
+        return Ok("not_configured".to_string());
     };
     let secret = match std::fs::read_to_string(&configured) {
         Ok(text) => text.trim().to_string(),
-        Err(_) => return Ok(()),
+        Err(_) => return Ok("not_configured".to_string()),
     };
     if secret.is_empty() {
-        return Ok(());
+        return Ok("not_configured".to_string());
     }
     let scopes =
         crate::auth::parse_scopes(&config.bootstrap_core_token_scopes).map_err(|error| {
@@ -647,9 +651,14 @@ fn adopt_bootstrap_core_token(
         Ok(true)
     })();
     match written {
-        Ok(_) => {
+        Ok(changed) => {
             conn.execute("COMMIT", []).map(|_| ())?;
-            Ok(())
+            Ok(if changed {
+                "adopted"
+            } else {
+                "already_present"
+            }
+            .to_string())
         }
         Err(err) => {
             let _ = conn.execute("ROLLBACK", []);
