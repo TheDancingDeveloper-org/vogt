@@ -303,9 +303,10 @@ async fn the_event_follower_reads_the_rust_core_with_the_stack_secret() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK, "{response:?}");
     let body: Value = response.json().await.unwrap();
+    let events = body["events"].as_array().expect("events array");
     assert!(
-        body.get("events").is_some() || body.get("items").is_some() || body.is_object(),
-        "{body}"
+        events.iter().any(|event| event["kind"] == "token.adopted"),
+        "the adoption event must be on the feed the follower reads: {body}"
     );
     // And the door still answers a proxied events read with the same secret.
     let proxied = client
@@ -338,4 +339,55 @@ async fn mcp_reaches_the_rust_core() {
     assert_eq!(response.status(), StatusCode::OK, "{response:?}");
     let text = response.text().await.unwrap();
     assert!(text.contains("vogt"), "{text}");
+}
+
+#[tokio::test]
+async fn vogt_tools_lists_and_calls_the_real_rust_core() {
+    // The assistant's tool client, pointed at a real vogt-core rather than
+    // the stub in vogt_tools::stub. tools/list has to come back with the
+    // curated reads, and a tools/call has to be answered by the core.
+    let core = boot_core();
+    wait_ready(&core.url).await;
+    let mut cfg = config_against(&core.url);
+    let tools = vogt_engine_server::vogt_tools::VogtTools::from_config(&cfg).expect("tools client");
+    let _ = &mut cfg;
+    let caller = vogt_engine_server::vogt_tools::Caller {
+        token_name: "stack".into(),
+        core_token: Some(SECRET.to_string()),
+        person: false,
+    };
+    let listed = tools.tools_for(&caller).await;
+    assert!(
+        listed.iter().any(|tool| tool.mcp_name == "status"),
+        "tools/list against the Rust core curated nothing: {listed:?}"
+    );
+    let (answer, is_error) = tools
+        .call(SECRET, "status", &serde_json::json!({}))
+        .await
+        .expect("tools/call status");
+    assert!(!is_error, "{answer}");
+    assert!(
+        answer.contains("data_dir") || answer.contains("principal"),
+        "{answer}"
+    );
+}
+
+#[test]
+fn the_engine_image_cannot_take_the_rust_core_as_core_image() {
+    // engine/Dockerfile copies `/opt/vogt` and `.venv/bin/vogt` out of the
+    // CORE_IMAGE stage. The Rust core image has neither: it installs a
+    // static binary. Pointing CORE_IMAGE at vogt-core:rust fails the build
+    // at `COPY --from=core /opt/vogt`. That is an engine contract gap, and
+    // this test is the record of it. Closing it means changing the engine
+    // Dockerfile, which this item does not own.
+    let dockerfile = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Dockerfile");
+    let text = std::fs::read_to_string(&dockerfile).expect("engine Dockerfile");
+    assert!(
+        text.contains("COPY --from=core /opt/vogt /opt/vogt"),
+        "the gap closed; the compose smoke can then use CORE_IMAGE=vogt-core:rust"
+    );
+    assert!(
+        text.contains(".venv/bin/vogt"),
+        "the engine image still assumes a Python venv inside the core stage"
+    );
 }
