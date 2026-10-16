@@ -134,13 +134,12 @@ def record_golden() -> tuple[str, str]:
     fails. Re-deriving the schemas from ported Rust types, and dropping this
     table, is WI-1060's remaining work.
     """
-    from vogt.application import models as app_models  # type: ignore[import-untyped]
-    from vogt.application.services import (  # type: ignore[import-untyped]
-        instance as app_instance,
-    )
+    from vogt.application.models import RegistryDumpParams
+    from vogt.application.services.instance import registry_dump
 
-    params_model = app_models.RegistryDumpParams
-    dump = app_instance.registry_dump(None, params_model()).model_dump()
+    # registry_dump reads no store. The signature still asks for a context
+    # because every service does; this call has nothing to give it.
+    dump = registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
     entries = []
     for operation in dump["operations"]:
         entries.append(
@@ -183,9 +182,7 @@ def record_strips() -> str:
     """
     import pydantic
 
-    from vogt.registry.operations import (  # type: ignore[import-untyped]
-        build_operations,
-    )
+    from vogt.registry.operations import build_operations
 
     rows = []
     for operation in build_operations():
