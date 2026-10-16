@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,7 +17,13 @@ from vogt.application.models import (
     StartSessionParams,
 )
 from vogt.application.services import register_project, session_input, start_session
-from vogt.core.delivery import Observation, composer_holds, judge
+from vogt.core.delivery import (
+    Observation,
+    codex_composer,
+    composer_holds,
+    judge,
+    safe_to_resubmit,
+)
 
 WHY = "delivery test"
 ROOT = "/srv/estate/vogt"
@@ -45,75 +52,82 @@ def test_nothing_seen_is_said_as_unconfirmed() -> None:
     assert "session_screen" in found.evidence
 
 
-#: A resumed Codex after an Enter it swallowed: the status line reads as
-#: working, but the text is still after the composer's prompt (WI-1669).
-CODEX_RESUMED_HELD = (
-    "\u203a fix the flaky retry test",
-    "",
-    "\u2022 Ran cargo test -p vogt-engine",
-    "  \u2514 ok",
-    "",
-    "\u2022 Working (2s \u2022 esc to interrupt)",
-    "",
-    "\u203a review the WI-1537 branch and report blockers",
-    "",
-    "  gpt-5-codex high \u00b7 92% context left",
-)
-
-#: The same screen once the submit landed: the text moved into the
-#: transcript and the composer shows only its placeholder.
-CODEX_RESUMED_CLEARED = (
-    "\u203a fix the flaky retry test",
-    "",
-    "\u203a review the WI-1537 branch and report blockers",
-    "",
-    "\u2022 Working (1s \u2022 esc to interrupt)",
-    "",
-    "\u203a Ask Codex to do anything",
-    "",
-    "  gpt-5-codex high \u00b7 92% context left",
-)
-
-SENT = "review the WI-1537 branch and report blockers"
+#: Codex screens captured live on 2026-10-16 (WI-1669); the dialog is the
+#: one synthetic screen, as its file says.
+CODEX = {
+    path.stem: json.loads(path.read_text())
+    for path in (Path(__file__).parent / "fixtures" / "codex_screens").glob("*.json")
+}
+#: The text the live captures hold in the composer.
+SENT = "reply with the single word two"
 
 
-def test_a_codex_composer_still_holding_the_text_is_unconfirmed() -> None:
-    held = [Observation("running", CODEX_RESUMED_HELD)]
-    found = judge(submitted=True, before="waiting-for-input", after=held, pending=SENT)
+def _seen(name: str) -> Observation:
+    shot = CODEX[name]
+    return Observation(shot["activity"], tuple(shot["lines"]))
+
+
+def test_the_composer_is_the_prompt_line_above_the_footer() -> None:
+    assert codex_composer(_seen("resumed_swallowed").lines) == SENT
+    assert codex_composer(_seen("resumed_stuck_ready").lines) == SENT
+    assert codex_composer(_seen("resumed_cleared").lines) == "Ask Codex to do anything"
+    assert codex_composer(_seen("approval_dialog").lines) is None, "no composer drawn"
+
+
+def test_a_transcript_copy_of_the_text_is_not_a_held_composer() -> None:
+    """After the submit the text is still on screen, as a transcript line."""
+    cleared = _seen("resumed_cleared")
+    assert "\u203a reply with the single word ok" in cleared.lines
+    assert not composer_holds(cleared.lines, "reply with the single word ok")
+
+
+def test_a_swallowed_enter_reading_as_working_is_unconfirmed() -> None:
+    """Live: `running`, yet the text never left the composer."""
+    found = judge(
+        submitted=True,
+        before="waiting-for-input",
+        after=[_seen("resumed_swallowed")],
+        pending=SENT,
+    )
     assert found.delivery == "unconfirmed"
     assert "composer" in found.evidence
 
 
-def test_a_cleared_codex_composer_with_a_turn_is_delivered() -> None:
-    cleared = [Observation("running", CODEX_RESUMED_CLEARED)]
+def test_a_cleared_composer_with_a_turn_is_delivered() -> None:
     found = judge(
-        submitted=True, before="waiting-for-input", after=cleared, pending=SENT
+        submitted=True,
+        before="waiting-for-input",
+        after=[_seen("resumed_swallowed"), _seen("resumed_cleared")],
+        pending=SENT,
     )
     assert found.delivery == "delivered"
 
 
-def test_only_the_latest_read_decides_the_composer() -> None:
-    after = [
-        Observation("running", CODEX_RESUMED_HELD),
-        Observation("running", CODEX_RESUMED_CLEARED),
-    ]
-    found = judge(submitted=True, before="idle", after=after, pending=SENT)
-    assert found.delivery == "delivered"
-
-
 def test_the_composer_is_ignored_without_pending_text() -> None:
-    held = [Observation("running", CODEX_RESUMED_HELD)]
-    assert judge(submitted=True, before="idle", after=held).delivery == "delivered"
+    after = [_seen("resumed_swallowed")]
+    assert judge(submitted=True, before="idle", after=after).delivery == "delivered"
 
 
-def test_composer_holds_reads_the_last_prompt_line() -> None:
-    assert composer_holds(CODEX_RESUMED_HELD, SENT)
-    assert not composer_holds(CODEX_RESUMED_CLEARED, SENT)
-    assert not composer_holds(CODEX_RESUMED_HELD, "")
-    assert not composer_holds(("> " + SENT,), SENT), "Claude's prompt is not Codex's"
+def test_another_enter_only_on_a_composer_still_holding_the_text() -> None:
+    assert safe_to_resubmit(_seen("resumed_stuck_ready"), SENT)
+    assert safe_to_resubmit(_seen("resumed_swallowed"), SENT)
+    assert not safe_to_resubmit(_seen("resumed_cleared"), SENT)
+    assert not safe_to_resubmit(_seen("approval_dialog"), SENT)
+    assert not safe_to_resubmit(Observation("idle", ("> " + SENT, "")), SENT), (
+        "no Codex composer drawn"
+    )
+
+
+def test_a_wrapped_composer_still_holds_a_long_text() -> None:
     long = "x" * 120
-    wrapped = ("\u203a " + "x" * 70, "  " + "x" * 50)
-    assert composer_holds(wrapped, long)
+    lines = (
+        "\u203a " + "x" * 70,
+        "  " + "x" * 50,
+        "",
+        "  grok high \u00b7 ~/w",
+        "  ? for shortcuts",
+    )
+    assert composer_holds(lines, long)
 
 
 class Engine:
