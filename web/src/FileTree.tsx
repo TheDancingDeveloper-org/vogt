@@ -50,6 +50,9 @@ interface Props {
   onError?: (message: string) => void;
   /** A confirmation worth a toast, such as a copied path. */
   onNotify?: (message: string) => void;
+  /** Preview a file in place instead of opening it in the editor. The Files
+   *  place uses this; the rail keeps the editor. */
+  onPreviewFile?: (path: string) => void;
   /** Outside the rail (the Files place) the tree is the whole surface: it
    *  ignores the rail's collapsed/expanded memory and shows no caret. */
   alwaysExpanded?: boolean;
@@ -438,6 +441,10 @@ const FileTree: Component<Props> = (props) => {
   });
 
   const openFile = (path: string) => {
+    if (props.onPreviewFile) {
+      props.onPreviewFile(path);
+      return;
+    }
     openEditorTab(path);
     navigate(`/e/${encodeURIComponent(path)}`);
     // Do not call onOpen here. The rail passes onOpen so opening a terminal

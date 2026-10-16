@@ -188,7 +188,7 @@ const Oversight = lazy(() => import("./Oversight"));
 const KeyboardShortcuts = lazy(() => import("./KeyboardShortcuts"));
 const Settings = lazy(() => import("./Settings"));
 const TemplateSelector = lazy(() => import("./TemplateSelector"));
-const FilesPlace = lazy(() => import("./FilesPlace"));
+import FilesPlace from "./FilesPlace";
 const FileWorkflowDialog = lazy(() => import("./FileWorkflowDialog"));
 
 
@@ -1692,9 +1692,10 @@ const App: Component = () => {
               <span class="places-group-label">Machine</span>
               <a
                 class={currentPlace("sessions") ? "active" : ""}
-                aria-current={currentPlace("sessions") && !["git", "history", "oversight", "tasks", "gui", "assistant", "chat"].includes(currentTool() ?? "") ? "page" : undefined}
+                aria-current={currentPlace("sessions") && !["git", "history", "oversight", "tasks", "gui", "assistant", "chat", "files"].includes(currentTool() ?? "") ? "page" : undefined}
                 href="#/sessions"
               ><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /></a>
+              <a class={isCurrentTool(routeOutcome(), "files") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "files") ? "page" : undefined} href="#/files">Files</a>
               <a class={isCurrentTool(routeOutcome(), "git") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "git") ? "page" : undefined} href="#/g">Git</a>
               <a class={isCurrentTool(routeOutcome(), "oversight") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "oversight") ? "page" : undefined} href="#/oversight">Oversight</a>
               <a class={isCurrentTool(routeOutcome(), "history") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "history") ? "page" : undefined} href="#/history">History</a>
@@ -2220,17 +2221,6 @@ const App: Component = () => {
           <Show when={location.pathname === "/audit"}>
             <div class="stable-place"><AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} /></div>
           </Show>
-          <Show when={location.pathname === "/files"}>
-            <div class="stable-place">
-              <FilesPlace
-                promptPath={promptUser}
-                confirmAction={confirmUser}
-                onCreatePresetHere={(path) => { void onCreate(path); }}
-                onError={(msg) => showToast(msg, { kind: "error" })}
-                onNotify={(msg) => showToast(msg)}
-              />
-            </div>
-          </Show>
           <Show when={location.pathname.startsWith("/w/") && params.ref}>
             <div class="stable-place">
               <WorkItemDetail
@@ -2295,6 +2285,17 @@ const App: Component = () => {
                       confirmAction={confirmUser}
                       onRequestCloseTab={(tabId) => void requestCloseTab(tabId)}
                       onNotify={(message, kind) => showToast(message, { kind })}
+                    />
+                  </div>
+                </Show>
+                <Show when={currentTool() === "files"}>
+                  <div class="retained-tab-pane" data-tab-kind="files" style={{ display: "flex" }}>
+                    <FilesPlace
+                      promptPath={promptUser}
+                      confirmAction={confirmUser}
+                      onCreatePresetHere={(path) => { void onCreate(path); }}
+                      onError={(msg) => showToast(msg, { kind: "error" })}
+                      onNotify={(msg) => showToast(msg)}
                     />
                   </div>
                 </Show>

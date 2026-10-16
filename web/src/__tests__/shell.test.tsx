@@ -184,6 +184,7 @@ describe("a pasted link opens the surface it names", () => {
       ["Projects", "#/projects"],
       ["Audit", "#/audit"],
       ["Sessions", "#/sessions"],
+      ["Files", "#/files"],
       ["Git", "#/g"],
       ["Oversight", "#/oversight"],
       ["History", "#/history"],
@@ -669,6 +670,50 @@ describe("Sessions owns its machine workspace", () => {
     expect(container.querySelectorAll('[data-tab-kind="tasks"]')).toHaveLength(1);
     expect(vogt.engineCalls.filter((call) => call.path.startsWith("/api/history")))
       .not.toHaveLength(0);
+  });
+
+  it("opens the file browser from the header and previews html sandboxed", async () => {
+    const { container, go } = mountShell("/sessions", {
+      engine: {
+        "GET /api/tree": { body: [
+          { name: "page.html", path: "page.html", is_dir: false },
+        ] },
+        "GET /api/files": (call) => call.query.get("path") === "page.html"
+          ? { body: {
+              path: "page.html", size: 20,
+              content: "<p>Rendered page</p>", content_base64: null, is_binary: false,
+            } }
+          : { status: 404, body: { error: "not the preview" } },
+        "GET /api/git/status": { body: {
+          repo: "", is_repo: false, branch: "", ahead: 0, behind: 0, entries: [],
+        } },
+      },
+    });
+    await waitFor(() =>
+      expect(container.querySelector('[aria-label="Places"] a[href="#/files"]')).toBeTruthy(),
+    );
+    const link = container.querySelector('[aria-label="Places"] a[href="#/files"]') as HTMLAnchorElement;
+    go("/files");
+    await waitFor(() => expect(container.querySelector(".files-place")).toBeTruthy());
+    expect(link).toHaveAttribute("aria-current", "page");
+
+    const file = await waitFor(() => {
+      const row = container.querySelector('.tree-main[title="page.html"], button.tree-main');
+      const match = [...container.querySelectorAll("button.tree-main")].find((b) =>
+        (b.getAttribute("title") ?? b.textContent ?? "").includes("page.html"),
+      );
+      expect(match ?? row).toBeTruthy();
+      return (match ?? row) as HTMLButtonElement;
+    });
+    await fireEvent.click(file);
+    await waitFor(() => expect(container.querySelector(".file-preview")).toBeTruthy());
+    const frame = await waitFor(() => {
+      const found = container.querySelector("iframe.file-preview-frame");
+      if (!found) throw new Error(`no frame; preview=${container.querySelector(".file-preview")?.innerHTML.slice(0, 240)}`);
+      return found;
+    });
+    expect(frame).toHaveAttribute("sandbox", "");
+    expect(frame?.getAttribute("sandbox")).not.toMatch(/allow-scripts|allow-same-origin/);
   });
 
   it("composes every machine tool at its existing deep link", async () => {
