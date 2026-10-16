@@ -1,15 +1,17 @@
 name: rust-core
 
-# Gate for the long-lived `rust-core` branch, where the Python core is being
-# ported into engine/core. Main's CI does not run on this branch; this
-# workflow does not run on main. The parity job is a placeholder until the
-# black-box harness (P0.3) exists.
+# Gate for the Rust core. It runs on the long-lived `rust-core` branch and on
+# the WI-1076 integration (push to wi-1076-engine-core, pull requests into
+# wi-1443-main-sync), because that is where the compose job — including the
+# existing e2e and live Playwright — has to actually execute. It does not run
+# on main. The parity job is a placeholder until the black-box harness (P0.3)
+# exists.
 
 on:
   push:
-    branches: [rust-core]
+    branches: [rust-core, wi-1076-engine-core, wi-1443-main-sync]
   pull_request:
-    branches: [rust-core]
+    branches: [rust-core, wi-1443-main-sync]
   workflow_dispatch:
 
 concurrency:
