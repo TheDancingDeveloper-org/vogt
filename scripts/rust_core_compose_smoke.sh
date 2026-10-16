@@ -90,10 +90,15 @@ fi
 echo "writing an event through the core and reading it from the engine"
 # The core token lives on the core's volume. The engine image does not have
 # curl's bearer there, so the call is made from the core container itself.
-"${COMPOSE[@]}" exec -T engine \
-  sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -fsS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
+if ! "${COMPOSE[@]}" exec -T engine \
+  sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -sS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
     -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\",\"project\":\"\"}" \
-    http://vogt:8000/api/work' >/dev/null
+    -o /tmp/work.json -w "%{http_code}" http://vogt:8000/api/work' | grep -qx 201; then
+  echo "creating the work item was refused" >&2
+  "${COMPOSE[@]}" exec -T engine cat /tmp/work.json >&2 || true
+  "${COMPOSE[@]}" logs --tail=60 vogt >&2 || true
+  exit 1
+fi
 
 found=""
 for _ in $(seq 1 12); do
