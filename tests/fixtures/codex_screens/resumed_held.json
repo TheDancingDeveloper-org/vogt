@@ -1,0 +1,6 @@
+{
+  "captured": "2026-10-16T10:59:08Z, live Codex v0.162.0+fork.03477e5e6 after hibernate + session_input draft (WI-1669)",
+  "title": "codex: working",
+  "activity": "running",
+  "lines": ["  >_ OpenAI Codex (v0.162.0+fork.03477e5e6)","     ~/Working/Active/vogt-01M525SJ8CA0VZ2M291Z80M33A","","","› Vogt started this session with a brief in /home/sprooty/.local/share/vogt-","  engine/agent-task-prompts/sessions/61edbadd-3f35-4afb-9964-c402b6d01b69.md.","  Read that file now. If it has a \"Task\" section, carry that task out;","  otherwise summarise the brief in one line and wait for instructions.","","","• Explored","  └ Read 61edbadd-3f35-4afb-9964-c402b6d01b69.md","    + Show details","","• The brief contains no Task section: it is a Vogt project policy brief for this","  session, with no work item attached.","","  Worked for 41s • 10:58","","","› reply with the single word ok","","  grok high · ~/Working/Active/vogt-01M525SJ8CA0VZ2M291Z80M33A","  tab to queue message"]
+}

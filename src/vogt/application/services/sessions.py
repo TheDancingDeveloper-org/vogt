@@ -1574,7 +1574,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             seen = None
         before = None if seen is None else seen.activity
     woke = False
-    pending: str | None = None
+    woken_verdict: delivery.Verdict | None = None
     try:
         _send_all(engine, engine_id, params.id, writes_in_order, person=person)
     except Conflict:
@@ -1605,25 +1605,21 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         # Freshly woken and at its prompt: nothing was running.
         before = "waiting-for-input"
         _send_all(engine, engine_id, params.id, writes_in_order, person=person)
-        # A resumed Codex accepts the text but swallows the Enter until its
-        # composer has settled (WI-1669). Only Codex: an `unconfirmed` read
-        # also happens when a short turn finished before Vogt saw `running`,
-        # and a second Enter on Claude, Klaudia or opencode can accept a
-        # dialog or picker the screen parser missed. Stock Codex, which sets
-        # no title, is covered here and not by the engine's titled wait.
-        # A `running` read does not settle it: the composer still holding
-        # the text does (`pending`), so the final judgement checks it too.
-        if params.confirm and submit and _is_codex(current):
-            pending = text or None
-            first = _confirm_delivery(engine, engine_id, before, pending)
-            if first.delivery == "unconfirmed":
-                _send_all(engine, engine_id, params.id, [("", True)], person=person)
+        # A resumed Codex accepts the text but swallows the Enter while it
+        # is still settling, reading as working all the while (WI-1669,
+        # captured live). Only Codex: on Claude, Klaudia or opencode a second
+        # Enter can accept a dialog or picker the screen parser missed.
+        if params.confirm and submit and text and _is_codex(current):
+            woken_verdict = _submit_until_taken(
+                engine, engine_id, params.id, before, text, person=person
+            )
 
-    verdict = (
-        _confirm_delivery(engine, engine_id, before, pending)
-        if confirming
-        else delivery.judge(submitted=submitted, before=None, after=[])
-    )
+    if woken_verdict is not None:
+        verdict = woken_verdict
+    elif confirming:
+        verdict = _confirm_delivery(engine, engine_id, before)
+    else:
+        verdict = delivery.judge(submitted=submitted, before=None, after=[])
 
     linked = target.session is not None
     audited_action(
@@ -1671,6 +1667,49 @@ _CONFIRM_PAUSE_S = 0.2
 
 def _pause(seconds: float) -> None:
     time.sleep(seconds)
+
+
+#: A resumed Codex gets at most this many Enters for one input, the first
+#: included, each after it has settled for up to `_CODEX_SETTLE_S`.
+_CODEX_MAX_ENTERS = 3
+_CODEX_SETTLE_S = 10
+
+
+def _submit_until_taken(
+    engine: EngineClient,
+    engine_id: str,
+    named: str,
+    before: str | None,
+    text: str,
+    *,
+    person: bool,
+) -> delivery.Verdict:
+    """Judge an Enter already pressed on a resumed Codex, pressing it again
+    while the composer still holds the text (WI-1669).
+
+    Bounded to `_CODEX_MAX_ENTERS`. Before each further Enter it waits for
+    the prompt to settle and reads the screen once more; it presses only
+    when the composer is drawn, still holds the text and no dialog or
+    approval shows. It stops as soon as a turn starts or the composer
+    clears.
+    """
+    verdict = _confirm_delivery(engine, engine_id, before, text)
+    for _ in range(_CODEX_MAX_ENTERS - 1):
+        if verdict.delivery != "unconfirmed":
+            break
+        try:
+            engine.wait_session(engine_id, until="ready", timeout_s=_CODEX_SETTLE_S)
+            screen = engine.session_screen(engine_id)
+        except EngineUnavailable:
+            break
+        if screen is None:
+            break
+        seen = delivery.Observation(activity=screen.activity, lines=screen.lines)
+        if not delivery.safe_to_resubmit(seen, text):
+            break
+        _send_all(engine, engine_id, named, [("", True)], person=person)
+        verdict = _confirm_delivery(engine, engine_id, before, text)
+    return verdict
 
 
 def _is_codex(session: object) -> bool:
