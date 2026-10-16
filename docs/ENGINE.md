@@ -116,7 +116,12 @@ it with a digest), and the runtime. The runtime stage starts `FROM` a
 `ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean-*`): an Ubuntu image
 carrying the toolchains an agent working *inside* a session is likely to want
 — Node, Rust, Java/Gradle, the Android SDK; its `INSTALL_FLUTTER` build
-argument adds Flutter for a pod that builds the Android app. It is a
+argument adds Flutter for a pod that builds the Android app. A third variant,
+`workbench`, is `full` plus the public session tools (Chrome and `chrome-ci`,
+Python 3.12, Terraform, sshpass, pingcli, actionlint, and the Tailscale
+client, which the image never joins). `build.yml` publishes the merged image
+built on it as `vogt-stack-workbench`; nothing in this repository deploys
+that image. It is a
 development pod rather than a hardened service image — it runs as a named
 user with `sudo`, with a writable home — which is why the core image at the
 repository root is a separate build rather than a stage of this one: it is
@@ -782,6 +787,13 @@ than these routes.
   permission prompt (`kind` `permission` or `read-outside-cwd`) is answered
   only by a person: anyone else gets `403 person required` and nothing is
   typed (WI-983, below).
+- `GET /api/sessions/changes[?since=N&ids=&limit=]` and
+  `GET /api/sessions/wait-any[?ids=&until=&cursor=&timeout_s=]` — the overseer
+  delta (WI-1246, WI-1672). `cursor` is a sequence number, or `now` to skip
+  every event already in the ring and wait only for one published after the
+  call starts. A timeout then returns that head as `next_cursor`. A numeric
+  cursor past the head is treated as the start of the ring (the sequence
+  restarts when the engine does). Requires `sessions`.
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
   only when asked) with the last N (default 8, at most 40) non-blank lines
@@ -847,13 +859,35 @@ than these routes.
   fails, or a base the remote does not have, refuses the start (`400`) rather
   than falling back to the local ref. The fetch moves only that one
   remote-tracking ref, never a local branch. The fetch runs as the engine
-  process, before the session process exists, so a private origin is reached
-  with the engine user's credentials rather than the session account's. Every other refusal (codex policy, agent launch) is checked before the
+  process, before the session process exists (WI-1666). An `https://github.com`
+  origin (host exactly `github.com`) is fetched with
+  `ENGINE_WORKTREE_GITHUB_TOKEN`, falling back to `GH_TOKEN` on the engine
+  process — the same token agent-auth aliases to `GH_TOKEN` inside a session.
+  The value is given to git only through `GIT_ASKPASS` (`vogt-git-askpass`,
+  reading `ENGINE_WORKTREE_FETCH_TOKEN` for that one command) and is never put
+  on an argument list or into an error. An https GitHub origin with neither
+  variable set refuses the start (`400`) and names
+  `ENGINE_WORKTREE_GITHUB_TOKEN`. SSH (`git@github.com:...`), a host that only
+  contains the substring `github.com`, and every non-GitHub origin keep the
+  engine user's own git credentials and are not given the token. Every other refusal (codex policy, agent launch) is checked before the
   cut, and a start that fails after it (prompt file, PTY spawn) removes the
   worktree and its branch again, so a refused start leaves neither behind.
   Absent means the session opens in `cwd`, byte-identical to a request from
   before the field existed. A wake returns to the worktree already cut and
   does not cut another.
+  `session.start`'s `cwd` (WI-1671) is the other way in: the caller names an
+  existing worktree and vogt-core sends it as this `cwd`, with no
+  `SessionSpec.worktree`. It must be an absolute path that exists, sit under
+  the workspace `Active/` directory (the parent of the project's registered
+  checkout, not any path component named `Active`), and be a git worktree of
+  the same repository as that checkout (the same git `commondir`). The
+  checkout, and any subdirectory of it, is refused: its git toplevel is
+  the checkout, so a worker cannot start inside the shared tree. A linked
+  worktree nested under the checkout has its own toplevel and is accepted. A symlink is accepted as the directory it resolves to.
+  Combining it with an explicit `worktree: true` is refused before the
+  engine is asked. A purpose whose profile would have set `worktree` (the
+  `implement` profile does) does not: `cwd` means the checkout already
+  exists, so the profile's worktree is left out.
 - `POST /api/sessions/:id/conversation` `{"agent", "id", "ended"?}` ->
   `SessionSummary` (WI-962). Links the agent conversation running in the
   session, or with `ended` unlinks it while it is still the session's. See
@@ -1735,7 +1769,16 @@ warning and the rest are kept.
   then `projects/` in the engine's own `CLAUDE_CONFIG_DIR` and in every listed
   account, so a session on another login is still found.
 - Folder-trust pre-acceptance writes to the session's own config directory
-  (above). Create a profile with `claude-profile prepare <name>`: it makes the
+  (above). Codex is pre-trusted the same way (WI-1667): before a Codex
+  session starts, the engine records `trust_level = "trusted"` for that
+  session's cwd under `[projects."<cwd>"]` in `$CODEX_HOME/config.toml`
+  (`~/.codex/config.toml` when `CODEX_HOME` is unset). The rewrite holds the
+  same lock the MCP bootstrap uses, leaves a config that does not parse
+  untouched, and does not overwrite a `trust_level` an operator already
+  set. `ENGINE_AGENT_QUIET_ONBOARDING=0` skips it, as it skips Claude's.
+  Codex's "Trust this folder?" screen is also a startup gate
+  (`approval.kind` `folder-trust`), so a session that still reaches it can
+  be answered with `session_answer`. Create a profile with `claude-profile prepare <name>`: it makes the
   directory, links the main account's settings, skills and agents in, sets the
   auto-mode flag, and registers the MCP servers there by running
   `vogt-mcp-bootstrap` with `CLAUDE_CONFIG_DIR` set. Then log in once with

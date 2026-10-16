@@ -194,7 +194,7 @@ jobs:
       - run: uv sync --locked
 
       - name: canonical product version is aligned
-        run: uv run --no-sync python scripts/check_product_version.py 0.7.16
+        run: uv run --no-sync python scripts/check_product_version.py 0.7.17
 
       - name: ruff (lint)
         run: uv run --no-sync ruff check .
@@ -269,9 +269,13 @@ jobs:
 
       # Caches where this CI already keeps state; a build cache that can take
       # CI down is a worse trade here, where runners are the scarce resource.
+      # The post-job save is itself ~2 min (build-cycle review, 2026-10-15),
+      # and a pull request's cache is never reused by another ref, so only
+      # main writes it back. Every ref still restores the cache main saved.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: engine
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # First: it needs nothing built, so it is the cheapest failure to reach.
       - name: cargo fmt
@@ -291,15 +295,42 @@ jobs:
         if: always() && !cancelled()
         run: uv run --no-project python scripts/check_rust_version.py engine
 
+      # cargo-audit is a fixed version, and compiling it from crates.io is
+      # most of the audit step (build-cycle review, 2026-10-15). The binary
+      # is cached by that version, so a run installs it only on a cold cache.
+      # The path is a literal, not `~` and not ${{ env.CARGO_HOME }}: the job's
+      # CARGO_HOME (/root/.cargo, set by rust-toolchain) is not the home
+      # actions/cache expands `~` against, and a step env var is invisible to
+      # the workflow env context, so either form restores where cargo never
+      # looks. /root/.cargo is where `cargo install` writes on these runners.
+      - name: restore the cargo-audit binary
+        id: cargo-audit
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: /root/.cargo/bin/cargo-audit
+          key: cargo-audit-0.22.2-${{ runner.os }}-${{ runner.arch }}
+
+      - name: install cargo-audit
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled() && steps.cargo-audit.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-audit --version 0.22.2 --force
+
       - name: audit Rust dependencies
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled()
         working-directory: engine
         run: |
           set -euo pipefail
-          if ! cargo audit --version 2>/dev/null | grep -Fx 'cargo-audit 0.22.2'; then
-            cargo install --locked cargo-audit --version 0.22.2 --force
-          fi
+          # cargo-audit 0.22 prints "cargo-audit-audit 0.22.2": its clap name
+          # is "cargo-audit" and the cargo shim prepends "cargo-", so an exact
+          # "cargo-audit 0.22.2" match never holds. Accept either form.
+          got="$(cargo audit --version 2>&1 || true)"
+          case "$got" in
+            "cargo-audit 0.22.2"|"cargo-audit-audit 0.22.2") ;;
+            *) echo "cargo audit --version returned: $got" >&2; exit 1 ;;
+          esac
 
           # The self-hosted runner carries a global gitconfig that injects this
           # org's credentials for github.com. RustSec/advisory-db is a different
@@ -333,6 +364,8 @@ jobs:
         if: always() && !cancelled()
         with:
           node-version: "22"
+          # The pnpm store, keyed on web/pnpm-lock.yaml, so a warm run does
+          # not re-download the PWA's dependencies.
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
@@ -554,9 +587,12 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Same as the engine job: only main writes the cache back. A pull
+      # request still restores what main saved, and skips the post-job save.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: voice
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: install native voice build dependencies
         run: |
@@ -627,6 +663,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22"
+          # The pnpm store, keyed on mobile/pnpm-lock.yaml.
           cache: pnpm
           cache-dependency-path: mobile/pnpm-lock.yaml
 

@@ -34,6 +34,10 @@ import FeedbackCenter, {
 } from "./FeedbackCenter";
 import { getLayoutMode, setLayoutMode } from "./layout";
 import { createResizablePane } from "./resizablePane";
+import {
+  SESSION_AREA_MIN_HEIGHT,
+  createSessionAreaHeight,
+} from "./sessionAreaHeight";
 import { createNarrow } from "./narrow";
 import {
   buildDefaultSessionName,
@@ -184,7 +188,7 @@ const Oversight = lazy(() => import("./Oversight"));
 const KeyboardShortcuts = lazy(() => import("./KeyboardShortcuts"));
 const Settings = lazy(() => import("./Settings"));
 const TemplateSelector = lazy(() => import("./TemplateSelector"));
-const FilesPlace = lazy(() => import("./FilesPlace"));
+import FilesPlace from "./FilesPlace";
 const FileWorkflowDialog = lazy(() => import("./FileWorkflowDialog"));
 
 
@@ -506,6 +510,26 @@ const App: Component = () => {
     min: 180,
     max: 420,
   });
+  // Height of the running-session block. 0 is "auto": the area flexes to
+  // fill leftover rail space, which is how the rail shipped. A drag pins an
+  // explicit height; double-click / Home puts auto back.
+  const sessionArea = createSessionAreaHeight();
+  let sessionAreaEl: HTMLDivElement | undefined;
+  /** Largest height that still leaves the places list (nav, files, footer) visible. */
+  const sessionAreaMax = (): number => {
+    const area = sessionAreaEl;
+    const rail = area?.closest(".places-rail");
+    if (!area || !(rail instanceof HTMLElement)) return 480;
+    // Room the rail still has, plus the height this area already occupies.
+    // 160px stays with everything under the list (recent places, files, footer)
+    // so the rail itself never becomes the scroller.
+    // What sits strictly below the area (files, recent places, footer) must
+    // keep about 160px. Measuring from the area's top, not from its current
+    // height, is what lets a key step grow an auto-sized list.
+    const top = area.getBoundingClientRect().top - rail.getBoundingClientRect().top;
+    const room = rail.clientHeight - top - 160;
+    return Math.max(SESSION_AREA_MIN_HEIGHT, Math.floor(room));
+  };
   // The rail's resize/collapse is a desktop feature layered on the *desktop*
   // grid. Below the shell's own narrow breakpoint the rail is not a grid
   // column at all — it is `display: none`, replaced by the bottom nav — and
@@ -542,10 +566,26 @@ const App: Component = () => {
       .map((id) => sessionsStore.sessions[id])
       .filter((s): s is SessionSummary => Boolean(s));
     const sorted = sortSessionsForRail(sessions, new Set(bookmarks()));
-    if (openMenuId() !== null && prev.length > 0) {
-      return holdRailOrder(prev, sorted);
-    }
-    return sorted;
+    const ordered = openMenuId() !== null && prev.length > 0
+      ? holdRailOrder(prev, sorted)
+      : sorted;
+    // A session-list refresh builds new objects for the same ids. <For> keys
+    // on reference, so handing it a new object replaces the row — and a row
+    // that held focus takes the keyboard with it, off the Files tree and onto
+    // the Sessions list (WI-1682). Reuse the previous object unless something
+    // the row renders changed.
+    const prior = new Map(prev.map((s) => [s.id, s]));
+    return ordered.map((s) => {
+      const old = prior.get(s.id);
+      if (!old) return s;
+      return old.name === s.name
+        && old.activity === s.activity
+        && old.exit_code === s.exit_code
+        && old.role === s.role
+        && old.cwd === s.cwd
+        ? old
+        : s;
+    });
   }, []);
   const waitingSessionList = () =>
     sessionsStore.ready
@@ -1668,9 +1708,10 @@ const App: Component = () => {
               <span class="places-group-label">Machine</span>
               <a
                 class={currentPlace("sessions") ? "active" : ""}
-                aria-current={currentPlace("sessions") && !["git", "history", "oversight", "tasks", "gui", "assistant", "chat"].includes(currentTool() ?? "") ? "page" : undefined}
+                aria-current={currentPlace("sessions") && !["git", "history", "oversight", "tasks", "gui", "assistant", "chat", "files"].includes(currentTool() ?? "") ? "page" : undefined}
                 href="#/sessions"
               ><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /></a>
+              <a class={isCurrentTool(routeOutcome(), "files") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "files") ? "page" : undefined} href="#/files">Files</a>
               <a class={isCurrentTool(routeOutcome(), "git") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "git") ? "page" : undefined} href="#/g">Git</a>
               <a class={isCurrentTool(routeOutcome(), "oversight") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "oversight") ? "page" : undefined} href="#/oversight">Oversight</a>
               <a class={isCurrentTool(routeOutcome(), "history") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "history") ? "page" : undefined} href="#/history">History</a>
@@ -1680,7 +1721,12 @@ const App: Component = () => {
               <Show when={publicCfg()?.assistant_enabled}><a class={isCurrentTool(routeOutcome(), "assistant") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "assistant") ? "page" : undefined} href="#/assistant">Assistant</a></Show>
             </div>
           </nav>
-          <div class="places-rail-session-area">
+          <div
+            class="places-rail-session-area"
+            classList={{ "places-rail-session-area--sized": sessionArea.height() > 0 }}
+            style={sessionArea.height() > 0 ? { height: `${sessionArea.height()}px` } : undefined}
+            ref={sessionAreaEl}
+          >
             <button
               type="button"
               class="places-section-toggle places-section-label places-section-label--counted"
@@ -1953,6 +1999,41 @@ const App: Component = () => {
               )}
             </For>
             </div>
+            <Show when={!shellNarrow()}>
+              <span
+                class="session-area-resize-handle"
+                classList={{ dragging: sessionArea.dragging() }}
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Resize the running session list"
+                aria-valuenow={Math.max(sessionArea.height(), SESSION_AREA_MIN_HEIGHT)}
+                aria-valuemin={SESSION_AREA_MIN_HEIGHT}
+                aria-valuemax={sessionAreaMax()}
+                tabIndex={0}
+                onPointerDown={(event) => {
+                  const current = sessionAreaEl?.getBoundingClientRect().height ?? SESSION_AREA_MIN_HEIGHT;
+                  sessionArea.beginResize(event, current, sessionAreaMax());
+                }}
+                onDblClick={() => sessionArea.reset()}
+                onKeyDown={(event) => {
+                  // Step from the value the handle reports. The drawn box can
+                  // be shorter than that when the rail has no room left, and
+                  // stepping from the box would never move.
+                  const current = Math.max(sessionArea.height(), SESSION_AREA_MIN_HEIGHT);
+                  const max = sessionAreaMax();
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    sessionArea.setHeight(current - 24, max);
+                  } else if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    sessionArea.setHeight(current + 24, max);
+                  } else if (event.key === "Home") {
+                    event.preventDefault();
+                    sessionArea.reset();
+                  }
+                }}
+              ></span>
+            </Show>
           </div>
           <Show when={recentPlacesStore.places.length > 0}>
             <div class="places-recent" aria-label="Recent places">
@@ -2156,17 +2237,6 @@ const App: Component = () => {
           <Show when={location.pathname === "/audit"}>
             <div class="stable-place"><AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} /></div>
           </Show>
-          <Show when={location.pathname === "/files"}>
-            <div class="stable-place">
-              <FilesPlace
-                promptPath={promptUser}
-                confirmAction={confirmUser}
-                onCreatePresetHere={(path) => { void onCreate(path); }}
-                onError={(msg) => showToast(msg, { kind: "error" })}
-                onNotify={(msg) => showToast(msg)}
-              />
-            </div>
-          </Show>
           <Show when={location.pathname.startsWith("/w/") && params.ref}>
             <div class="stable-place">
               <WorkItemDetail
@@ -2231,6 +2301,17 @@ const App: Component = () => {
                       confirmAction={confirmUser}
                       onRequestCloseTab={(tabId) => void requestCloseTab(tabId)}
                       onNotify={(message, kind) => showToast(message, { kind })}
+                    />
+                  </div>
+                </Show>
+                <Show when={currentTool() === "files"}>
+                  <div class="retained-tab-pane" data-tab-kind="files" style={{ display: "flex" }}>
+                    <FilesPlace
+                      promptPath={promptUser}
+                      confirmAction={confirmUser}
+                      onCreatePresetHere={(path) => { void onCreate(path); }}
+                      onError={(msg) => showToast(msg, { kind: "error" })}
+                      onNotify={(msg) => showToast(msg)}
                     />
                   </div>
                 </Show>

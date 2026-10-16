@@ -96,6 +96,18 @@ export function setSidebarCollapsed(collapsed: boolean): void {
   }
 }
 
+// The file the reader last selected in the Files tree. Kept in memory, not
+// persisted, same as the search query. The row itself stays mounted across a
+// refetch (FileTree reuses the node object), so this only has to repaint the
+// highlight; it does not move keyboard focus (WI-1682).
+const [selectedPath, setSelectedPathSignal] = createSignal<string | null>(null);
+
+export { selectedPath as fileTreeSelectedPath };
+
+export function setFileTreeSelectedPath(path: string | null): void {
+  setSelectedPathSignal(path);
+}
+
 // The file-tree search query. Kept in memory (not persisted): it should survive
 // a tab switch within a session but not resurrect a stale search on next boot.
 const [searchQuery, setSearchQuerySignal] = createSignal("");
@@ -145,4 +157,5 @@ export function resetFileTreeState(): void {
   for (const [key, value] of Object.entries(fresh)) setExpandedStore(key, value);
   setSidebarCollapsedSignal(readSidebarCollapsed());
   setSearchQuerySignal("");
+  setSelectedPathSignal(null);
 }

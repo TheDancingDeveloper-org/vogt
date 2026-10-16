@@ -981,6 +981,41 @@ mod tests {
         ));
         assert!(!is_ready(ActivityState::Exited, false, &prompt, None, None));
     }
+
+    /// WI-1669: a titled Codex is ready only when its title says so. A resumed
+    /// Codex reports `waiting-for-input` from screen glyphs while its composer
+    /// is still redrawing, and an Enter typed then sits in the composer. Stock
+    /// Codex sets no title, so it stays on the activity path.
+    #[test]
+    fn a_titled_codex_is_ready_only_on_its_own_word() {
+        let plain = vec!["building".to_string()];
+        assert!(
+            !is_ready(
+                ActivityState::WaitingForInput,
+                true,
+                &plain,
+                Some("codex"),
+                Some("codex: working"),
+            ),
+            "a working title is not a prompt, however the activity reads"
+        );
+        assert!(is_ready(
+            ActivityState::WaitingForInput,
+            true,
+            &plain,
+            Some("codex"),
+            Some("codex: ready"),
+        ));
+        // Stock Codex never sets a title this engine reads, so it keeps the
+        // activity answer. The Rust wait change does not help it (WI-1669).
+        assert!(is_ready(
+            ActivityState::WaitingForInput,
+            true,
+            &plain,
+            Some("codex"),
+            None,
+        ));
+    }
 }
 
 /// Klaudia's screens as the engine sees them (WI-1090), shared by the

@@ -26,7 +26,9 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -124,6 +126,7 @@ from vogt.application.services._brief import (
 from vogt.application.services.preferences import dispatch_settings
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
+from vogt.collectors.base import CollectorError
 from vogt.core import delivery, oversight, runtime
 from vogt.core.auth import Scope, hash_token, issue, parse_scopes
 from vogt.core.branches import default_branch_name
@@ -251,7 +254,18 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # Resolved only after both guards above, and a profile carries neither a
     # role nor a permission posture, so naming a purpose can never raise a
     # start past what the caller could ask for directly (WI-1323).
+    # Before the profile fills unset fields (WI-1671). Only a worktree the
+    # caller asked for conflicts with `cwd`: the implement profile sets
+    # `worktree` itself, and that is the case `cwd` exists for.
+    if params.cwd and "worktree" in params.model_fields_set and params.worktree:
+        msg = (
+            "cwd and worktree cannot be combined: worktree cuts a new "
+            "checkout, cwd opens one that already exists"
+        )
+        raise InvalidRequest(msg)
     params, overrides, read_only = _resolve_purpose(ctx, params)
+    if params.cwd and params.worktree:
+        params = params.model_copy(update={"worktree": None})
     # After the profile fills the model, before anything reaches the engine:
     # a project's review policy is a rule, and a start that would run a model
     # it forbids is refused rather than spawned (WI-1590).
@@ -259,6 +273,8 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     started_by_session, started_by_kind = _started_by(ctx, engine)
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
+    if params.cwd:
+        subject.cwd = _existing_worktree_cwd(params.cwd, subject.cwd)
     actor_ref = f"agent:session:{session_id}"
     session_scopes = _session_scopes(ctx)
     credential = issue(session_scopes)
@@ -333,7 +349,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # at the registry's root, which is what the engine reports back anyway.
     cwd = (
         started.cwd
-        if started.cwd and (params.resume or params.worktree)
+        if started.cwd and (params.resume or params.worktree or params.cwd)
         else subject.cwd
     )
 
@@ -557,6 +573,9 @@ def _digest_of(
         attention=attention,
         ready=ready,
         blocked_reason=_clip(blocked),
+        blocked_detail=(
+            None if blocked is None or len(blocked) <= _DIGEST_CLIP else blocked
+        ),
         turn_started_at=summary.turn_started_at,
         last_reply_excerpt=_clip(summary.last_reply_excerpt),
         template=summary.template,
@@ -842,6 +861,20 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
     return SessionSweepResult(rows=rows, counts=counts, swept_at=now, engine=None)
 
 
+def _starter_engine_id(view: ReadView, named: str | None) -> str | None:
+    """The engine id a `started_by_session` filter matches, or None for no filter.
+
+    The column stores the starter's engine session id. A caller may name
+    either that id or the starter's Vogt `ses_…` id.
+    """
+    if named is None:
+        return None
+    session = view.session_by_id(named) or view.session_by_engine_id(named)
+    if session is not None:
+        return session.engine_session_id
+    return named
+
+
 def _rows(
     ctx: AppContext,
     params: ListSessionsParams,
@@ -868,9 +901,11 @@ def _rows(
             if params.work_item is None
             else _resolve.work_item(view, params.work_item).id
         )
+        starter = _starter_engine_id(view, params.started_by_session)
         sessions = view.list_sessions(
             project_id=project_id,
             work_item_id=work_item_id,
+            started_by_session=starter,
             include_stopped=params.include_stopped,
             # The page is cut after the state filter, so the declared half
             # has to be the whole filtered set. One past the operation's own
@@ -901,7 +936,7 @@ def _rows(
         # An unlinked session whose process has exited is the engine's
         # leftover, not a running terminal: it is listed only when stopped
         # sessions were asked for, as a linked one Vogt stopped would be.
-        unfiltered = project_id is None and work_item_id is None
+        unfiltered = project_id is None and work_item_id is None and starter is None
         if unfiltered:
             for engine_session in live.values():
                 # A hibernated session is asleep, not stopped: listed always.
@@ -1539,6 +1574,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             seen = None
         before = None if seen is None else seen.activity
     woke = False
+    woken_verdict: delivery.Verdict | None = None
     try:
         _send_all(engine, engine_id, params.id, writes_in_order, person=person)
     except Conflict:
@@ -1569,12 +1605,21 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         # Freshly woken and at its prompt: nothing was running.
         before = "waiting-for-input"
         _send_all(engine, engine_id, params.id, writes_in_order, person=person)
+        # A resumed Codex accepts the text but swallows the Enter while it
+        # is still settling, reading as working all the while (WI-1669,
+        # captured live). Only Codex: on Claude, Klaudia or opencode a second
+        # Enter can accept a dialog or picker the screen parser missed.
+        if params.confirm and submit and text and _is_codex(current):
+            woken_verdict = _submit_until_taken(
+                engine, engine_id, params.id, before, text, person=person
+            )
 
-    verdict = (
-        _confirm_delivery(engine, engine_id, before)
-        if confirming
-        else delivery.judge(submitted=submitted, before=None, after=[])
-    )
+    if woken_verdict is not None:
+        verdict = woken_verdict
+    elif confirming:
+        verdict = _confirm_delivery(engine, engine_id, before)
+    else:
+        verdict = delivery.judge(submitted=submitted, before=None, after=[])
 
     linked = target.session is not None
     audited_action(
@@ -1624,14 +1669,69 @@ def _pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
+#: A resumed Codex gets at most this many Enters for one input, the first
+#: included, each after it has settled for up to `_CODEX_SETTLE_S`.
+_CODEX_MAX_ENTERS = 3
+_CODEX_SETTLE_S = 10
+
+
+def _submit_until_taken(
+    engine: EngineClient,
+    engine_id: str,
+    named: str,
+    before: str | None,
+    text: str,
+    *,
+    person: bool,
+) -> delivery.Verdict:
+    """Judge an Enter already pressed on a resumed Codex, pressing it again
+    while the composer still holds the text (WI-1669).
+
+    Bounded to `_CODEX_MAX_ENTERS`. Before each further Enter it waits for
+    the prompt to settle and reads the screen once more; it presses only
+    when the composer is drawn, still holds the text and no dialog or
+    approval shows. It stops as soon as a turn starts or the composer
+    clears.
+    """
+    verdict = _confirm_delivery(engine, engine_id, before, text)
+    for _ in range(_CODEX_MAX_ENTERS - 1):
+        if verdict.delivery != "unconfirmed":
+            break
+        try:
+            engine.wait_session(engine_id, until="ready", timeout_s=_CODEX_SETTLE_S)
+            screen = engine.session_screen(engine_id)
+        except EngineUnavailable:
+            break
+        if screen is None:
+            break
+        seen = delivery.Observation(activity=screen.activity, lines=screen.lines)
+        if not delivery.safe_to_resubmit(seen, text):
+            break
+        _send_all(engine, engine_id, named, [("", True)], person=person)
+        verdict = _confirm_delivery(engine, engine_id, before, text)
+    return verdict
+
+
+def _is_codex(session: object) -> bool:
+    """Whether a session the engine reported runs Codex."""
+    agent = getattr(session, "conversation_agent", None)
+    return agent == "codex"
+
+
 def _confirm_delivery(
-    engine: EngineClient, engine_id: str, before: str | None
+    engine: EngineClient,
+    engine_id: str,
+    before: str | None,
+    pending: str | None = None,
 ) -> delivery.Verdict:
     """Read the session a few times after a submit and judge, stopping at
     the first decisive read. An engine that cannot be read leaves the
-    judgement to what was seen before."""
+    judgement to what was seen before. `pending` is the submitted text
+    when a Codex composer should be checked for it."""
     observed: list[delivery.Observation] = []
-    verdict = delivery.judge(submitted=True, before=before, after=observed)
+    verdict = delivery.judge(
+        submitted=True, before=before, after=observed, pending=pending
+    )
     if verdict.delivery != "unconfirmed":
         return verdict
     for _ in range(_CONFIRM_READS):
@@ -1645,7 +1745,9 @@ def _confirm_delivery(
         observed.append(
             delivery.Observation(activity=screen.activity, lines=screen.lines)
         )
-        verdict = delivery.judge(submitted=True, before=before, after=observed)
+        verdict = delivery.judge(
+            submitted=True, before=before, after=observed, pending=pending
+        )
         if verdict.delivery != "unconfirmed":
             break
     return verdict
@@ -3092,6 +3194,131 @@ class _Subject:
         if self.is_scratch:
             return f"scratch/{self.project_slug}"
         return self.work_item_ref or self.project_slug
+
+
+def _git_probe(root: Path, flag: str) -> str:
+    """One `git rev-parse` question, with nothing the repo can run.
+
+    `rev-parse` runs no hooks. `core.fsmonitor` and `core.hooksPath` are
+    overridden so a repo's monitor and hooks are not consulted, and
+    `GIT_CONFIG_NOSYSTEM` drops the system gitconfig. Inherited `GIT_DIR`,
+    `GIT_WORK_TREE` and `GIT_COMMON_DIR` are removed so the engine's own
+    environment cannot point the probe at a different repository.
+    """
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG_COUNT"}
+    }
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    try:
+        completed = subprocess.run(  # fixed argv, never a shell
+            [
+                "git",
+                "-C",
+                str(root),
+                "-c",
+                "core.fsmonitor=",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "rev-parse",
+                flag,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        msg = f"git could not be run against {root}: {exc}"
+        raise CollectorError(msg) from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit {completed.returncode}"
+        msg = f"git rev-parse could not be read in {root}: {detail}"
+        raise CollectorError(msg)
+    return completed.stdout.strip()
+
+
+def _existing_worktree_cwd(raw: str, project_root: str) -> str:
+    """The directory a `cwd` start opens in, or a refusal (WI-1671).
+
+    Four checks, in the order a wrong path fails them: it exists, it sits
+    under the workspace's real `Active/` directory (the parent of the
+    project's registered checkout, not any path component named `Active`),
+    it is not inside that checkout (its git toplevel differs, so a linked
+    worktree nested under the checkout still passes), and it is a git
+    worktree of the same repository. The comparison is git's `commondir`,
+    which a linked worktree and the main checkout of one repository share
+    and two repositories do not.
+    """
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        msg = f"cwd {raw!r} must be an absolute path"
+        raise InvalidRequest(msg)
+    if not path.is_dir():
+        msg = f"cwd {raw!r} does not exist"
+        raise InvalidRequest(msg)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        msg = f"cwd {raw!r} cannot be resolved: {exc}"
+        raise InvalidRequest(msg) from exc
+    checkout = Path(project_root)
+    if not checkout.is_dir():
+        msg = (
+            f"the project's checkout {project_root!r} does not exist, so "
+            "cwd cannot be checked against it"
+        )
+        raise InvalidRequest(msg)
+    checkout_resolved = checkout.resolve()
+    active = checkout_resolved.parent
+    if active.name != "Active" or not resolved.is_relative_to(active):
+        msg = f"cwd {resolved} is not under the workspace Active/ directory ({active})"
+        raise InvalidRequest(msg)
+    try:
+        asked = _git_probe(resolved, "--git-common-dir")
+        owned = _git_probe(checkout_resolved, "--git-common-dir")
+        # A subdirectory of the shared checkout shares its commondir and is
+        # under Active/, so the path comparison above misses it. Its
+        # toplevel is the checkout, which a linked worktree's is not.
+        toplevel = _git_probe(resolved, "--show-toplevel")
+    except CollectorError as exc:
+        msg = (
+            f"cwd {resolved} is not a git worktree of the project's "
+            f"repository ({project_root}): {exc}"
+        )
+        raise InvalidRequest(msg) from exc
+    asked_dir = Path(asked)
+    owned_dir = Path(owned)
+    if not asked_dir.is_absolute():
+        asked_dir = resolved / asked_dir
+    if not owned_dir.is_absolute():
+        owned_dir = checkout / owned_dir
+    try:
+        same = asked_dir.resolve() == owned_dir.resolve()
+    except OSError as exc:
+        msg = f"cwd {raw!r} is not a git worktree of the project's repository: {exc}"
+        raise InvalidRequest(msg) from exc
+    if not same:
+        msg = (
+            f"cwd {resolved} is not a git worktree of the project's "
+            f"repository ({project_root})"
+        )
+        raise InvalidRequest(msg)
+    try:
+        top = Path(toplevel).resolve()
+    except OSError as exc:
+        msg = f"cwd {resolved} is not a git worktree: {exc}"
+        raise InvalidRequest(msg) from exc
+    if top == checkout_resolved:
+        msg = (
+            f"cwd {resolved} is inside the project's shared checkout; name a "
+            "worktree of it instead"
+        )
+        raise InvalidRequest(msg)
+    return str(resolved)
 
 
 def _worktree_branch(subject: _Subject, session_id: str) -> str:

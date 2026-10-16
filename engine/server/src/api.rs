@@ -95,10 +95,26 @@ pub struct WaitAnyQuery {
     pub ids: Option<String>,
     /// Kinds to wait for, comma separated. Defaults to the overseer set.
     pub until: Option<String>,
-    /// Ignore changes at or before this sequence.
-    pub cursor: Option<u64>,
+    /// A sequence to ignore up to, or `now` to skip everything already
+    /// published. Absent replays from the start of the ring.
+    pub cursor: Option<String>,
     /// Seconds to wait at most; default 120, at most 600.
     pub timeout_s: Option<u64>,
+}
+
+/// `now` means the bus head at the start of the wait. Anything else is a seq.
+fn parse_wait_cursor(raw: Option<&str>, head: u64) -> crate::error::Result<u64> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(0);
+    };
+    if raw.eq_ignore_ascii_case("now") {
+        return Ok(head);
+    }
+    raw.parse::<u64>().map_err(|_| {
+        crate::error::ApiError::BadRequest(
+            "cursor is a sequence number, or 'now' to skip events already published".into(),
+        )
+    })
 }
 
 /// Block until one of the named sessions changes in a way `until` names, or
@@ -114,7 +130,7 @@ pub async fn session_wait_any(
             &state.bus,
             q.ids.as_deref(),
             &until,
-            q.cursor.unwrap_or(0),
+            parse_wait_cursor(q.cursor.as_deref(), state.bus.head())?,
             timeout,
         )
         .await?,

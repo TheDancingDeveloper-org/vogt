@@ -605,19 +605,21 @@ impl SessionRegistry {
         // Claude Code asks, per directory, whether to trust it and whether to
         // allow a CLAUDE.md that imports from outside it. Answer both before
         // it starts, so a woken or driven session does not sit at a modal.
-        if base_command
-            .as_deref()
-            .and_then(agent_cli::agent_name)
-            .as_deref()
-            == Some("claude")
-        {
+        let agent = base_command.as_deref().and_then(agent_cli::agent_name);
+        // Claude Code and Codex each ask, per directory, whether to trust
+        // it. Answer both before the CLI starts, so a woken or driven
+        // session does not sit at a modal (WI-917, WI-1667).
+        if matches!(agent.as_deref(), Some("claude" | "codex")) {
             let cwd = spec
                 .cwd
                 .clone()
                 .unwrap_or_else(|| self.cfg.default_cwd.to_string_lossy().into_owned());
-            self.cfg
-                .agent_onboarding
-                .prepare(spec.env.as_deref().unwrap_or_default(), &cwd);
+            let env = spec.env.as_deref().unwrap_or_default();
+            if agent.as_deref() == Some("claude") {
+                self.cfg.agent_onboarding.prepare(env, &cwd);
+            } else {
+                self.cfg.agent_onboarding.prepare_codex(env, &cwd);
+            }
         }
 
         // Names need not be unique — duplicates are merely confusing, not invalid.

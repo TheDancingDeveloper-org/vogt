@@ -149,7 +149,9 @@ class Engine:
                 return 404, b""
             self.wait_any_queries.append(url.partition("?")[2])
             query = url.partition("?")[2]
-            if "timeout" in query and "until=exited" in query:
+            if "cursor=now" in query or (
+                "timeout" in query and "until=exited" in query
+            ):
                 return 200, json.dumps(
                     {"outcome": "timeout", "next_cursor": 8}
                 ).encode()
@@ -754,6 +756,17 @@ def test_wait_any_on_an_engine_without_the_route_says_so(
 def test_wait_any_bounds_its_timeout() -> None:
     with pytest.raises(ValueError):
         SessionWaitAnyParams(timeout_s=601)
+
+
+def test_wait_any_cursor_now_is_sent_as_now(wired: AppContext, engine: Engine) -> None:
+    waited = session_wait_any(wired, SessionWaitAnyParams(cursor="now", timeout_s=5))
+    assert "cursor=now" in engine.wait_any_queries[-1]
+    assert waited.outcome == "timeout"
+
+
+def test_wait_any_rejects_a_cursor_that_is_neither_a_seq_nor_now() -> None:
+    with pytest.raises(ValueError, match="cursor"):
+        SessionWaitAnyParams(cursor="yesterday")
 
 
 def test_a_session_reports_itself_blocked_without_naming_itself(

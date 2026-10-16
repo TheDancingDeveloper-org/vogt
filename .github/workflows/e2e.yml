@@ -154,6 +154,23 @@ jobs:
             exit 1
           fi
           echo "vogt-core is ready"
+          # The core being ready says nothing about the engine's own listener:
+          # it binds :8910 a few seconds after its container starts, and the
+          # smoke below fired into that gap on every run (connection refused on
+          # the first six checks). Gate on the engine's /readyz as well.
+          ok=""
+          for _ in $(seq 1 60); do
+            if dc exec -T engine curl -fsS http://localhost:8910/readyz >/dev/null 2>&1; then
+              ok=yes; break
+            fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "vogt-engine did not report ready within 120s" >&2
+            dc logs --tail=200 engine || true
+            exit 1
+          fi
+          echo "vogt-engine is ready"
 
       - name: stack smoke — walk the stranger's path (in-network)
         env:
@@ -234,9 +251,16 @@ jobs:
         run: bash -n scripts/clean_consumer_smoke.sh
 
       - name: both images resolve and pull over an anonymous token
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/vogt/__init__.py)"
+          # The latest *published* release, not main's __version__: main carries
+          # the next version's bump before its tag (and images) exist, so the
+          # source version 404s on GHCR between bump and release.
+          version="$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin)["tag_name"].lstrip("v"))')"
           for repo in vogt-stack vogt-voice; do
             image="ghcr.io/thedancingdeveloper-org/${repo}:${version}"
             token="$(curl -sS "https://ghcr.io/token?scope=repository:thedancingdeveloper-org/${repo}:pull" \
@@ -275,11 +299,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: build the example FROM the current published stack
+      - name: build the example FROM the latest published stack
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/vogt/__init__.py)"
-          # Override the pinned digest with the current published tag so the
+          # The latest *published* release, not main's __version__: main carries
+          # the next version's bump before its tag (and images) exist, so the
+          # source version 404s on GHCR between bump and release.
+          version="$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin)["tag_name"].lstrip("v"))')"
+          # Override the pinned digest with the latest published tag so the
           # example does not rot the CI signal as releases move.
           docker build \
             --build-arg "STACK_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-stack:${version}" \

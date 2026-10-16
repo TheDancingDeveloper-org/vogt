@@ -427,4 +427,18 @@ mod tests {
         let too_long = wait_any(&bus, None, &until, 0, Duration::from_secs(601)).await;
         assert!(too_long.is_err());
     }
+
+    #[tokio::test]
+    async fn a_cursor_at_the_head_does_not_replay_what_is_already_there() {
+        let bus = EventBus::new(16);
+        bus.publish(activity(ActivityState::AwaitingApproval));
+        let until = all_kinds();
+        let head = bus.head();
+        let timed = wait_any(&bus, None, &until, head, Duration::from_millis(30))
+            .await
+            .unwrap();
+        assert_eq!(timed.outcome, "timeout");
+        assert!(timed.change.is_none());
+        assert_eq!(timed.next_cursor, head);
+    }
 }
