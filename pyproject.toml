@@ -118,6 +118,9 @@ known-local-folder = ["tests"]
 "scripts/fixture_reset.py" = ["ANN401"]
 # The parity harness walks arbitrary recorded JSON. `Any` is the boundary.
 "scripts/parity.py" = ["ANN401"]
+# The corpus generator reads pydantic models through the registry. The model
+# type is the boundary, the same reason the harness above carries this ignore.
+"scripts/gen_validator_corpus.py" = ["ANN401"]
 "src/vogt/adapters/forge/forgejo.py" = ["ANN401"]
 "src/vogt/adapters/github/collectors.py" = ["ANN401"]
 "src/vogt/collectors/dep_refs.py" = ["ANN401"]

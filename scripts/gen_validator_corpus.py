@@ -19,7 +19,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 Json = dict[str, Any]
 
@@ -183,29 +183,18 @@ def probes_for(schema: Json) -> list[tuple[str, Json]]:
     return probes
 
 
-class _Validated(Protocol):
-    def model_dump(self, mode: str) -> Json: ...
-
-
-class _Model(Protocol):
-    def model_validate(self, raw: Json) -> _Validated: ...
-    def model_json_schema(self) -> Json: ...
-
-
-class _Operation(Protocol):
-    name: str
-    params_model: _Model
-
-
-def verdict(operation: _Operation, raw: Json) -> Json:
+def verdict(operation: object, raw: Json) -> Json:
     import pydantic
 
+    probed: Any = operation
+    name = probed.name
+    params_model = probed.params_model
     try:
-        model = operation.params_model.model_validate(raw)
+        model = params_model.model_validate(raw)
     except pydantic.ValidationError as exc:
         return {
             "ok": False,
-            "text": f"invalid arguments for {operation.name}:\n{exc}".rstrip(),
+            "text": f"invalid arguments for {name}:\n{exc}".rstrip(),
             # The parameters as sent, so a number past 2^63 keeps its digits.
             # JSON parsing rounds it, and the comparison puts the digits back.
             "sent": json.dumps(raw, ensure_ascii=False),
@@ -221,13 +210,12 @@ def verdict(operation: _Operation, raw: Json) -> Json:
 
 def build() -> list[Json]:
     sys.path.insert(0, str(REPO_ROOT / "src"))
-    from vogt.registry.operations import (  # type: ignore[import-untyped]
-        build_operations,
-    )
+    from vogt.registry.operations import build_operations
 
     corpus = []
     for operation in build_operations():
-        schema = operation.params_model.model_json_schema()
+        params_model = operation.params_model
+        schema = params_model.model_json_schema()
         for tag, raw in probes_for(schema):
             corpus.append(
                 {
