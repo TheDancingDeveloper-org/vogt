@@ -119,7 +119,7 @@ echo "writing an event through the core and reading it from the engine"
 # so the call runs there and reads the file the core adopted at init.
 if ! "${COMPOSE[@]}" exec -T engine \
   sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -sS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
-    -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\",\"project\":\"smoke\"}" \
+    -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\",\"project\":\"smoke\",\"local_only\":true}" \
     -o /tmp/work.json -w "%{http_code}" http://vogt:8000/api/work' | grep -Eq '^(200|201)$'; then
   echo "creating the work item was refused" >&2
   "${COMPOSE[@]}" exec -T engine cat /tmp/work.json >&2 || true
