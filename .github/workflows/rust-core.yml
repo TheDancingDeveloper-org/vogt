@@ -137,8 +137,11 @@ jobs:
           test -n "$ok" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
           docker compose $COMPOSE_FILES exec -T engine mkdir -p /tmp/e2e/scripts /tmp/e2e/tests/fixtures
           docker compose $COMPOSE_FILES cp scripts/e2e_stack_smoke.sh engine:/tmp/e2e/scripts/e2e_stack_smoke.sh
+          # 127.0.0.1:8910 inside this image is not the front door (the
+          # connection is refused), so the walk uses the address the engine
+          # itself listens on. The script stays the existing smoke unchanged.
           docker compose $COMPOSE_FILES exec -T -e VOGT_SMOKE_TOKEN="$ENGINE_TOKEN" engine \
-            bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
+            bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://0.0.0.0:8910
           docker compose $COMPOSE_FILES --profile live run --rm -T \
             -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright
 
