@@ -2171,8 +2171,7 @@ exec \"$real\" \"$@\"\n",
         assert_eq!(
             password.trim(),
             "worktree-token-secret",
-            "password={password:?} script={}",
-            std::fs::read_to_string(&askpass).unwrap()
+            "askpass did not return the worktree token"
         );
         let user = run("Username for 'https://github.com':", &[]);
         assert_eq!(user.trim(), "x-access-token");
