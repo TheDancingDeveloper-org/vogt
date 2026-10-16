@@ -16,7 +16,7 @@ from vogt.application.models import (
     StartSessionParams,
 )
 from vogt.application.services import register_project, session_input, start_session
-from vogt.core.delivery import Observation, judge
+from vogt.core.delivery import Observation, composer_holds, judge
 
 WHY = "delivery test"
 ROOT = "/srv/estate/vogt"
@@ -43,6 +43,77 @@ def test_nothing_seen_is_said_as_unconfirmed() -> None:
     found = judge(submitted=True, before="idle", after=[Observation("idle", ())])
     assert found.delivery == "unconfirmed"
     assert "session_screen" in found.evidence
+
+
+#: A resumed Codex after an Enter it swallowed: the status line reads as
+#: working, but the text is still after the composer's prompt (WI-1669).
+CODEX_RESUMED_HELD = (
+    "\u203a fix the flaky retry test",
+    "",
+    "\u2022 Ran cargo test -p vogt-engine",
+    "  \u2514 ok",
+    "",
+    "\u2022 Working (2s \u2022 esc to interrupt)",
+    "",
+    "\u203a review the WI-1537 branch and report blockers",
+    "",
+    "  gpt-5-codex high \u00b7 92% context left",
+)
+
+#: The same screen once the submit landed: the text moved into the
+#: transcript and the composer shows only its placeholder.
+CODEX_RESUMED_CLEARED = (
+    "\u203a fix the flaky retry test",
+    "",
+    "\u203a review the WI-1537 branch and report blockers",
+    "",
+    "\u2022 Working (1s \u2022 esc to interrupt)",
+    "",
+    "\u203a Ask Codex to do anything",
+    "",
+    "  gpt-5-codex high \u00b7 92% context left",
+)
+
+SENT = "review the WI-1537 branch and report blockers"
+
+
+def test_a_codex_composer_still_holding_the_text_is_unconfirmed() -> None:
+    held = [Observation("running", CODEX_RESUMED_HELD)]
+    found = judge(submitted=True, before="waiting-for-input", after=held, pending=SENT)
+    assert found.delivery == "unconfirmed"
+    assert "composer" in found.evidence
+
+
+def test_a_cleared_codex_composer_with_a_turn_is_delivered() -> None:
+    cleared = [Observation("running", CODEX_RESUMED_CLEARED)]
+    found = judge(
+        submitted=True, before="waiting-for-input", after=cleared, pending=SENT
+    )
+    assert found.delivery == "delivered"
+
+
+def test_only_the_latest_read_decides_the_composer() -> None:
+    after = [
+        Observation("running", CODEX_RESUMED_HELD),
+        Observation("running", CODEX_RESUMED_CLEARED),
+    ]
+    found = judge(submitted=True, before="idle", after=after, pending=SENT)
+    assert found.delivery == "delivered"
+
+
+def test_the_composer_is_ignored_without_pending_text() -> None:
+    held = [Observation("running", CODEX_RESUMED_HELD)]
+    assert judge(submitted=True, before="idle", after=held).delivery == "delivered"
+
+
+def test_composer_holds_reads_the_last_prompt_line() -> None:
+    assert composer_holds(CODEX_RESUMED_HELD, SENT)
+    assert not composer_holds(CODEX_RESUMED_CLEARED, SENT)
+    assert not composer_holds(CODEX_RESUMED_HELD, "")
+    assert not composer_holds(("> " + SENT,), SENT), "Claude's prompt is not Codex's"
+    long = "x" * 120
+    wrapped = ("\u203a " + "x" * 70, "  " + "x" * 50)
+    assert composer_holds(wrapped, long)
 
 
 class Engine:

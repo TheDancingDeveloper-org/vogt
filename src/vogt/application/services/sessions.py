@@ -1574,6 +1574,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             seen = None
         before = None if seen is None else seen.activity
     woke = False
+    pending: str | None = None
     try:
         _send_all(engine, engine_id, params.id, writes_in_order, person=person)
     except Conflict:
@@ -1610,15 +1611,16 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         # and a second Enter on Claude, Klaudia or opencode can accept a
         # dialog or picker the screen parser missed. Stock Codex, which sets
         # no title, is covered here and not by the engine's titled wait.
-        # Through a helper: mypy narrows `current` to None along this path,
-        # which would delete the gate and the retry with it.
+        # A `running` read does not settle it: the composer still holding
+        # the text does (`pending`), so the final judgement checks it too.
         if params.confirm and submit and _is_codex(current):
-            first = _confirm_delivery(engine, engine_id, before)
+            pending = text or None
+            first = _confirm_delivery(engine, engine_id, before, pending)
             if first.delivery == "unconfirmed":
                 _send_all(engine, engine_id, params.id, [("", True)], person=person)
 
     verdict = (
-        _confirm_delivery(engine, engine_id, before)
+        _confirm_delivery(engine, engine_id, before, pending)
         if confirming
         else delivery.judge(submitted=submitted, before=None, after=[])
     )
@@ -1672,24 +1674,25 @@ def _pause(seconds: float) -> None:
 
 
 def _is_codex(session: object) -> bool:
-    """Whether a session the engine reported runs Codex.
-
-    A function so the caller cannot have the argument narrowed away: the
-    wake path reads the session before it is awake, and mypy decides that
-    binding is None by the time the retry is considered.
-    """
+    """Whether a session the engine reported runs Codex."""
     agent = getattr(session, "conversation_agent", None)
     return agent == "codex"
 
 
 def _confirm_delivery(
-    engine: EngineClient, engine_id: str, before: str | None
+    engine: EngineClient,
+    engine_id: str,
+    before: str | None,
+    pending: str | None = None,
 ) -> delivery.Verdict:
     """Read the session a few times after a submit and judge, stopping at
     the first decisive read. An engine that cannot be read leaves the
-    judgement to what was seen before."""
+    judgement to what was seen before. `pending` is the submitted text
+    when a Codex composer should be checked for it."""
     observed: list[delivery.Observation] = []
-    verdict = delivery.judge(submitted=True, before=before, after=observed)
+    verdict = delivery.judge(
+        submitted=True, before=before, after=observed, pending=pending
+    )
     if verdict.delivery != "unconfirmed":
         return verdict
     for _ in range(_CONFIRM_READS):
@@ -1703,7 +1706,9 @@ def _confirm_delivery(
         observed.append(
             delivery.Observation(activity=screen.activity, lines=screen.lines)
         )
-        verdict = delivery.judge(submitted=True, before=before, after=observed)
+        verdict = delivery.judge(
+            submitted=True, before=before, after=observed, pending=pending
+        )
         if verdict.delivery != "unconfirmed":
             break
     return verdict
