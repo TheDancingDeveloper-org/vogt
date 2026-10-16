@@ -87,14 +87,18 @@ fi
 # The event follower polls every 5s, starting at the head. Write an event
 # after it has started, then look for it on the engine's stream.
 echo "writing an event through the core and reading it from the engine"
-# No project: an empty slug is looked up and refused ("no project with slug ''").
-# A create with the field omitted is a native item, which is all the event needs.
 # The core answers 200 with the item, not 201, so either success status counts.
+# The project has a checkout the core container can see: session.start refuses
+# an item with no project ("a session needs a project or a work item") and a
+# project whose root_path is empty ("no checkout to open a session in").
+# project.create scaffolds into its root, so the root is a fresh directory
+# under the default import root (<data_dir>/repos), which is on the writable
+# data volume. The data dir itself is the store and must not be scaffolded.
 # The core token lives on the shared volume. curl is in the engine image,
 # so the call runs there and reads the file the core adopted at init.
 if ! "${COMPOSE[@]}" exec -T engine \
   sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -sS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
-    -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\"}" \
+    -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\",\"project\":\"smoke\"}" \
     -o /tmp/work.json -w "%{http_code}" http://vogt:8000/api/work' | grep -Eq '^(200|201)$'; then
   echo "creating the work item was refused" >&2
   "${COMPOSE[@]}" exec -T engine cat /tmp/work.json >&2 || true
@@ -124,9 +128,26 @@ echo "event follower saw the Rust core"
 # core so the row is the engine's own session, then read the engine's list
 # and require the core's answer to name that same id. Matching the word
 # "sessions" would pass against the empty unconfigured list.
+# Register the project before the item that belongs to it. root_path must
+# exist inside the core container and be writable: create scaffolds into it.
+echo "project.create on the Rust core"
+if ! "${COMPOSE[@]}" exec -T vogt mkdir -p /var/lib/vogt/repos/smoke; then
+  echo "could not make the project checkout" >&2
+  exit 1
+fi
+if ! "${COMPOSE[@]}" exec -T engine \
+  sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -sS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
+    -d "{\"name\":\"smoke\",\"root_path\":\"/var/lib/vogt/repos/smoke\",\"reason\":\"compose smoke\"}" \
+    -o /tmp/project.json -w "%{http_code}" http://vogt:8000/api/projects' | grep -Eq '^(200|201)$'; then
+  echo "creating the project was refused" >&2
+  "${COMPOSE[@]}" exec -T engine cat /tmp/project.json >&2 || true
+  exit 1
+fi
+
 echo "session.start on the Rust core"
 # A session with neither a project nor a work item is a 400 ("a session needs
-# a project or a work item to open in"). The item just created is WI-1.
+# a project or a work item to open in"), and a project with no checkout is
+# refused too. The item just created belongs to the project above.
 started="$("${COMPOSE[@]}" exec -T engine \
   sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); code=$(curl -sS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
     -d "{\"name\":\"rust-core-smoke\",\"reason\":\"compose smoke\",\"work_item\":\"WI-1\"}" \
