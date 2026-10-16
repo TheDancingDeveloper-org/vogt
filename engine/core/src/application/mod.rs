@@ -9,6 +9,8 @@ pub mod context;
 pub mod contracts;
 pub mod coverage;
 pub mod deployed;
+#[cfg(test)]
+mod disposition;
 pub mod drift;
 pub mod forge_transport;
 pub mod git_signals;
