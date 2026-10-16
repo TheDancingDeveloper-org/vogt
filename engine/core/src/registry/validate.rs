@@ -82,13 +82,21 @@ fn apply_object(
     }
     for (name, property) in &properties {
         match given.remove(name) {
-            Some(value) => match check_value(
+            Some(value) => match before_validate(
                 operation,
-                &descend(location, Loc::Field(name.clone())),
-                property,
+                name,
                 value,
-                root,
-            ) {
+                &descend(location, Loc::Field(name.clone())),
+            )
+            .and_then(|value| {
+                check_value(
+                    operation,
+                    &descend(location, Loc::Field(name.clone())),
+                    property,
+                    value,
+                    root,
+                )
+            }) {
                 Ok(checked) => {
                     resolved.insert(name.clone(), checked);
                 }
@@ -116,6 +124,77 @@ fn apply_object(
         Ok(resolved)
     } else {
         Err(problems)
+    }
+}
+
+/// Pydantic `mode="before"` validators that run ahead of the type check, for the
+/// fields that declare one. Each mirrors the Python validator it stands for:
+/// `comma_list` on `session.list` `fields`, and `_cursor_is_seq_or_now` on
+/// `session.wait_any` `cursor`.
+fn before_validate(
+    operation: &str,
+    name: &str,
+    value: Value,
+    location: &[Loc],
+) -> Result<Value, Vec<FieldError>> {
+    match (operation, name) {
+        ("session.list", "fields") => Ok(match value {
+            Value::String(text) => Value::Array(
+                text.split(',')
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .map(|part| Value::String(part.to_string()))
+                    .collect(),
+            ),
+            other => other,
+        }),
+        ("session.wait_any", "cursor") => {
+            let input = value.clone();
+            cursor_before(value).map_err(|complaint| {
+                let problem = pydantic(location, &format!("Value error, {complaint}"));
+                vec![finish(&problem, &input)]
+            })
+        }
+        _ => Ok(value),
+    }
+}
+
+const CURSOR_COMPLAINT: &str =
+    "cursor is a sequence number, or 'now' to skip events already published";
+
+fn cursor_before(value: Value) -> Result<Value, &'static str> {
+    match value {
+        // A bool is an int to Python, so it reaches the type check unchanged.
+        Value::Null | Value::Bool(_) => Ok(value),
+        Value::Number(ref number) if number.is_i64() || number.is_u64() => Ok(value),
+        // A whole number too big for i64 is kept as JSON sent it, as
+        // `check_integer` does for every int field.
+        Value::Number(ref number)
+            if number
+                .as_f64()
+                .is_some_and(|f| f.fract() == 0.0 && f.abs() >= 9.2e18) =>
+        {
+            Ok(value)
+        }
+        Value::String(text) => {
+            let text = text.trim().to_lowercase();
+            if text.is_empty() {
+                Ok(Value::Null)
+            } else if text == "now" {
+                Ok(Value::String(text))
+            } else if text.chars().all(|c| c.is_ascii_digit()) {
+                // Pydantic takes an int of any size. One past i64 cannot be
+                // held as a number here, so it passes as its digits, which the
+                // int-or-str check accepts.
+                Ok(text
+                    .parse::<i64>()
+                    .map(Value::from)
+                    .unwrap_or(Value::String(text)))
+            } else {
+                Err(CURSOR_COMPLAINT)
+            }
+        }
+        _ => Err(CURSOR_COMPLAINT),
     }
 }
 

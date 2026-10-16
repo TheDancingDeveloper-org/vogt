@@ -205,7 +205,13 @@ def main() -> int:
     operations = _operations()
     rendered = render_operations_rs(operations)
     strips = record_strips()
-    outputs = {OPERATIONS_RS: rendered, STRIPS_RS: strips}
+    golden, schemas = record_golden()
+    outputs = {
+        OPERATIONS_RS: rendered,
+        STRIPS_RS: strips,
+        SCHEMAS_RS: schemas,
+        GOLDEN: golden,
+    }
     if check:
         # Drift fails here, at the Python source, rather than waiting for
         # someone to remember to regenerate. The Rust test checks the same
