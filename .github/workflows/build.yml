@@ -708,6 +708,9 @@ jobs:
           args=(
             --file .github/stack-bake.hcl
             --metadata-file "$META_FILE"
+            # The gitguard target exports its e2e binary to E2E_DIR; newer
+            # buildx refuses a local write without an explicit entitlement.
+            --allow "fs.write=${E2E_DIR}"
             --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
             --set "*.args.CORE_IMAGE=${CORE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
