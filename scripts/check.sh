@@ -79,6 +79,10 @@ for half in "${halves[@]}"; do
         fi
         run "pnpm typecheck" pnpm --dir web typecheck
         run "pnpm test" pnpm --dir web test
+        # The PWA route map against the Rust registry manifest (WI-1077).
+        # Python-free: reads tests/parity/golden/registry.json, which the
+        # Rust core's registry.dump is proven equal to.
+        run "pwa route map" node web/scripts/check-route-map.mjs
         ;;
     *)
         echo "unknown half: $half (expected python, engine or web)" >&2
