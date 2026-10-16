@@ -297,8 +297,11 @@ FORGE_PROJECT=""
 step_forge_reset() {
     # Rebuild the fixture repo to its known state. Idempotent and
     # additive; never deletes history.
+    # The manifest is resolved from the checkout, not the working directory:
+    # the engine container's cwd is its WORKDIR, which does not hold it.
     if VOGT_FIXTURE_TOKEN="$FIXTURE_TOKEN" "${VOGT_CORE:-vogt-core}" fixture-reset \
-        --repo "$FIXTURE_REPO" >/dev/null; then
+        --repo "$FIXTURE_REPO" \
+        --manifest "${REPO_ROOT}/tests/fixtures/forge_fixture_manifest.json" >/dev/null; then
         pass "fixture repo reset to its known state (${FIXTURE_REPO})"
     else
         fail "fixture-reset failed — the fixture is not in a known state, so"
