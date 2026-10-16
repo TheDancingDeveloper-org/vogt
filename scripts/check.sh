@@ -24,10 +24,9 @@
 #   vogt-core gen-config-docs
 #   vogt-core sanitise-transcript [--check] INPUT [OUTPUT]
 #   vogt-core capture-transcript OUTPUT [--max-bytes N] -- CMD [ARG ...]
-# The engine half below runs the Rust copies. The Python originals stay
-# because the python half below and the docs, ci and release workflows still
-# call them: those jobs have no Rust toolchain, and the docs and release jobs
-# run on a core-only checkout that has no engine/core to build.
+# The engine half below runs the Rust copies. ci.yml, docs.yml and release.yml
+# call them too, each with the pinned Rust toolchain the engine job uses. The
+# Python originals stay as the reference the ports were checked against.
 #
 # Also ported (WI-1079), each a vogt-core subcommand:
 #   vogt-core load [--scale N] [--mode load|soak|deployed] [--check-baseline FILE]

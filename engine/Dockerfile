@@ -227,9 +227,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     VOGT_SOURCE_REF="$VOGT_SOURCE_REF" \
     VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" \
     VOGT_PRODUCT_VERSION="${VOGT_PRODUCT_VERSION#v}" \
-    cargo build --release -p vogt-engine-server \
+    cargo build --release -p vogt-engine-server -p vogt-core \
     && cp target/release/vogt-engine /usr/local/bin/vogt-engine \
-    && strip /usr/local/bin/vogt-engine
+    && cp target/release/vogt-core /usr/local/bin/vogt-core \
+    && strip /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
 
 FROM ${UV_IMAGE} AS uv
 
@@ -509,7 +510,8 @@ RUN set -eu; \
 # The server binary (built in stage 2 with the web bundle embedded; cache
 # mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).
 COPY --from=server-build /usr/local/bin/vogt-engine /usr/local/bin/vogt-engine
-RUN chmod +x /usr/local/bin/vogt-engine
+COPY --from=server-build /usr/local/bin/vogt-core /usr/local/bin/vogt-core
+RUN chmod +x /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
 
 # The other half. `/opt/vogt` carries the standalone interpreter *and* the
 # venv built against it — see stage 3; splitting them here is how you get a
