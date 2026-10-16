@@ -28,7 +28,14 @@ COPY engine/core core
 # from engine/core is the repository's src/vogt. This image has no engine/
 # directory, so the crate sits at core/ and the SQL has to sit five up.
 COPY src/vogt/storage/sqlite/migrations /src/vogt/storage/sqlite/migrations
-RUN printf '%s\n' \
+# A generated workspace, not engine/Cargo.lock: that lock names the engine
+# server and the contract crate, which this image does not build, and cargo
+# refuses a lock whose members are absent. The rust-version is read from the
+# workspace file so it cannot drift from engine/Cargo.toml.
+COPY engine/Cargo.toml /tmp/engine-Cargo.toml
+RUN ver=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' /tmp/engine-Cargo.toml) \
+    && test -n "$ver" \
+    && printf '%s\n' \
       '[workspace]' \
       'members = ["core"]' \
       'resolver = "2"' \
@@ -37,7 +44,7 @@ RUN printf '%s\n' \
       'edition = "2021"' \
       'license = "AGPL-3.0-only"' \
       'repository = "https://github.com/TheDancingDeveloper-org/vogt"' \
-      'rust-version = "1.94"' \
+      "rust-version = \"$ver\"" \
       > Cargo.toml
 WORKDIR /src
 RUN cargo build --release -p vogt-core
