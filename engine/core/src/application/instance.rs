@@ -79,6 +79,10 @@ pub fn init(
     } else {
         instance_id_of(data_dir)?
     };
+    // The stack secret the engine presents. Python adopts it inside init; a
+    // Rust core that skips it answers every engine call with 401. A missing
+    // file is not an error; a short secret or an unknown scope refuses to start.
+    adopt_bootstrap_core_token(data_dir, clock, ids)?;
     Ok(InitOutcome {
         created: !declared_existed,
         declared,
@@ -440,8 +444,244 @@ fn stamp_if(clock: &mut Option<crate::core::StepClock>, due: bool) -> String {
     }
 }
 
+/// Adopt the operator-supplied core token, the way Python's
+/// `adopt_bootstrap_core_token` does at init.
+///
+/// `"not_configured"` when the file is unset, unreadable or empty — the
+/// instance still boots. `"already_present"` when the hash is already stored,
+/// so the init that runs on every container start writes nothing the second
+/// time. A secret under 24 characters or an unknown scope is a startup error:
+/// a deployment that believes it supplied a credential must not come up
+/// without one.
+fn adopt_bootstrap_core_token(
+    data_dir: &Path,
+    clock: &mut Option<crate::core::StepClock>,
+    ids: &mut Option<SequentialIds>,
+) -> Result<(), migrator::MigrateError> {
+    use rusqlite::params;
+
+    // `init` was given this data directory explicitly. Config still names the
+    // default, and a token adopted into the wrong database is a token the
+    // server never sees.
+    let mut overrides = serde_json::Map::new();
+    overrides.insert(
+        "data_dir".to_string(),
+        serde_json::Value::String(data_dir.display().to_string()),
+    );
+    let config = crate::config::load_config(&overrides).map_err(|error| {
+        migrator::MigrateError::Message(format!("bootstrap_core_token: {error}"))
+    })?;
+    let Some(configured) = config.bootstrap_core_token_file else {
+        return Ok(());
+    };
+    let secret = match std::fs::read_to_string(&configured) {
+        Ok(text) => text.trim().to_string(),
+        Err(_) => return Ok(()),
+    };
+    if secret.is_empty() {
+        return Ok(());
+    }
+    let scopes =
+        crate::auth::parse_scopes(&config.bootstrap_core_token_scopes).map_err(|error| {
+            migrator::MigrateError::Message(format!("bootstrap_core_token: {error}"))
+        })?;
+    let token_hash = crate::auth::adopt(&secret).map_err(|error| {
+        migrator::MigrateError::Message(format!("bootstrap_core_token: {error}"))
+    })?;
+    let identity_ref = config.bootstrap_core_token_actor;
+    let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
+    // Bound to a person, every write the engine makes would be that person's.
+    // A missing actor is created as an agent below; an existing one must
+    // already be an agent.
+    let holder_kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM actors WHERE identity_ref = ?1",
+            params![identity_ref],
+            |row| row.get(0),
+        )
+        .ok();
+    if holder_kind.as_deref() == Some("human") || !identity_ref.starts_with("agent:") {
+        return Err(migrator::MigrateError::Message(format!(
+            "bootstrap_core_token_actor {identity_ref:?} must be an agent actor              (for example agent:vogt-engine); the token the engine presents cannot              be bound to a person"
+        )));
+    }
+
+    let present: Option<String> = conn
+        .query_row(
+            "SELECT id FROM tokens WHERE token_hash = ?1 AND revoked_at IS NULL",
+            params![token_hash],
+            |row| row.get(0),
+        )
+        .ok();
+    if present.is_some() {
+        return Ok(());
+    }
+    let next = |ids: &mut Option<SequentialIds>, prefix: &str| -> String {
+        match ids {
+            Some(factory) => factory.next(prefix),
+            None => crate::core::fresh_id(prefix),
+        }
+    };
+    let at = stamp(clock);
+    let actor_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM actors WHERE identity_ref = ?1",
+            params![identity_ref],
+            |row| row.get(0),
+        )
+        .ok();
+    let actor_id = match actor_id {
+        Some(id) => id,
+        None => next(ids, "act"),
+    };
+    let actor_exists = conn
+        .query_row(
+            "SELECT 1 FROM actors WHERE id = ?1",
+            params![actor_id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    let actor_is_new = !actor_exists;
+    let token_id = next(ids, "tok");
+    let audit_id = next(ids, "aud");
+    let txn_id = next(ids, "txn");
+    let scopes_json = crate::decisions::python_json_dumps(&serde_json::json!(scopes), false);
+    let payload = serde_json::json!({
+        "actor": identity_ref,
+        "scopes": scopes,
+        "name": "bootstrap core token",
+        "source": "operator-supplied",
+        "superseded": [],
+    });
+    let digest = crate::decisions::digest_of(&payload);
+    let summary = crate::decisions::python_json_dumps(
+        &serde_json::json!({"actor": identity_ref, "scopes": scopes}),
+        false,
+    );
+    let revision: i64 = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'revision'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+        + 1;
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let written = (|| -> rusqlite::Result<()> {
+        let still: Option<String> = conn
+            .query_row(
+                "SELECT id FROM tokens WHERE token_hash = ?1 AND revoked_at IS NULL",
+                params![token_hash],
+                |row| row.get(0),
+            )
+            .ok();
+        if still.is_some() {
+            return Ok(());
+        }
+        if actor_is_new {
+            conn.execute(
+                "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at)
+                 VALUES (?1, 'agent', ?2, ?3, 0, ?4)",
+                params![actor_id, identity_ref, identity_ref, at],
+            )?;
+        }
+        // A changed secret is a rotation. Earlier bootstrap tokens on this
+        // actor stop working in the same transaction.
+        conn.execute(
+            "UPDATE tokens SET revoked_at = ?1, revoked_reason = 'superseded by a rotated bootstrap secret'
+             WHERE actor_id = ?2 AND name = 'bootstrap core token' AND revoked_at IS NULL",
+            params![at, actor_id],
+        )?;
+        conn.execute(
+            "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, created_at)
+             VALUES (?1, ?2, 'bootstrap core token', ?3, ?4, ?5)",
+            params![token_id, actor_id, token_hash, scopes_json, at],
+        )?;
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'revision'",
+            params![revision.to_string()],
+        )?;
+        conn.execute(
+            "INSERT INTO audit (id, txn_id, revision, actor_id, operation, entity_kind,
+                                entity_id, reason, payload_digest, at)
+             VALUES (?1, ?2, ?3, ?4, 'token.adopt', 'token', ?5,
+                     'adopting the operator-supplied core token at init', ?6, ?7)",
+            params![audit_id, txn_id, revision, actor_id, token_id, digest, at],
+        )?;
+        conn.execute(
+            "INSERT INTO events (kind, entity_kind, entity_id, actor_id, audit_id, summary, at)
+             VALUES ('token.adopted', 'token', ?1, ?2, ?3, ?4, ?5)",
+            params![token_id, actor_id, audit_id, summary, at],
+        )?;
+        Ok(())
+    })();
+    match written {
+        Ok(()) => {
+            conn.execute("COMMIT", []).map(|_| ())?;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(migrator::MigrateError::Message(format!("adopt: {err}")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn init_adopts_the_stack_secret_the_engine_presents() {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-adopt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = "core-token-abcdef1234567890";
+        let secret_path = dir.join("core-token");
+        std::fs::write(&secret_path, secret).unwrap();
+        let saved = std::env::var("VOGT_BOOTSTRAP_CORE_TOKEN_FILE").ok();
+        unsafe { std::env::set_var("VOGT_BOOTSTRAP_CORE_TOKEN_FILE", &secret_path) };
+        let mut clock = None;
+        let mut ids = None;
+        let outcome = super::init(&dir, &mut clock, &mut ids).expect("init adopts");
+        assert!(outcome.created);
+        let again = super::init(&dir, &mut clock, &mut ids).expect("second init is quiet");
+        assert!(!again.created);
+        let conn = crate::storage::sqlite::connection::connect(
+            &crate::storage::sqlite::declared_path(&dir),
+        )
+        .unwrap();
+        let hash = crate::auth::hash_token(secret);
+        let (name, identity): (String, String) = conn
+            .query_row(
+                "SELECT t.name, a.identity_ref FROM tokens t
+                 JOIN actors a ON a.id = t.actor_id
+                 WHERE t.token_hash = ?1 AND t.revoked_at IS NULL",
+                rusqlite::params![hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "bootstrap core token");
+        assert_eq!(identity, "agent:vogt-engine");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tokens", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "a second init must not mint another token");
+        match saved {
+            Some(previous) => unsafe {
+                std::env::set_var("VOGT_BOOTSTRAP_CORE_TOKEN_FILE", previous)
+            },
+            None => unsafe { std::env::remove_var("VOGT_BOOTSTRAP_CORE_TOKEN_FILE") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn mcp_stdio_reports_a_session_read_from_its_input() {
         // The service owns the process stdin, so the loop it calls is what a

@@ -1,0 +1,13 @@
+# Swap the contributor stack's core for the Rust build.
+#
+#   docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
+#   docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml \
+#     -f deploy/rust-core.overlay.yml up -d
+#
+# The engine overlay still builds its own image with the Python core inside
+# it. This file only changes the `vogt` service, which is the core that
+# service fronts. Set VOGT_IMAGE to the tag built above.
+
+services:
+  vogt:
+    image: ${VOGT_IMAGE:-vogt-core:rust}
