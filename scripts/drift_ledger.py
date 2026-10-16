@@ -113,7 +113,9 @@ def _render(
     migrations: list[str] = []
     for commit in commits:
         sha = str(commit["sha"])
-        files = [str(path) for path in commit["files"]]  # type: ignore[union-attr]
+        raw_files = commit["files"]
+        assert isinstance(raw_files, list)
+        files = [str(path) for path in raw_files]
         owners = sorted({_chunk_for(path, chunks) for path in files})
         mark = previous.get(sha[:7], "no")
         lines.append(

@@ -67,14 +67,22 @@ def _rust_array(decl: str, rows: list[str]) -> str:
     return decl + " = &[\n" + "".join(rows) + "];\n"
 
 
+def _arg(node: ast.expr, index: int) -> ast.expr:
+    if not isinstance(node, ast.Call):
+        raise SystemExit(f"expected a call, got {type(node).__name__}")
+    return node.args[index]
+
+
 def _operations() -> list[dict[str, object]]:
     """Read the operation set from source, so this runs without importing it."""
     source = REPO_ROOT / "src" / "vogt" / "registry" / "operations.py"
     tree = ast.parse(source.read_text())
     found: list[dict[str, object]] = []
     for node in ast.walk(tree):
-        is_call = isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        if not (is_call and node.func.id == "Operation"):  # type: ignore[union-attr]
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Name) or func.id != "Operation":
             continue
         kw = {keyword.arg: keyword.value for keyword in node.keywords}
         found.append(
@@ -83,9 +91,9 @@ def _operations() -> list[dict[str, object]]:
                 "summary": ast.literal_eval(kw["summary"]),
                 "scope": ast.literal_eval(kw["scope"]),
                 "mutating": ast.literal_eval(kw["mutating"]),
-                "method": ast.literal_eval(kw["route"].args[0]),
-                "path": ast.literal_eval(kw["route"].args[1]),
-                "cli": list(ast.literal_eval(kw["cli"].args[0])),
+                "method": ast.literal_eval(_arg(kw["route"], 0)),
+                "path": ast.literal_eval(_arg(kw["route"], 1)),
+                "cli": list(ast.literal_eval(_arg(kw["cli"], 0))),
             }
         )
     return found
@@ -126,10 +134,13 @@ def record_golden() -> tuple[str, str]:
     fails. Re-deriving the schemas from ported Rust types, and dropping this
     table, is WI-1060's remaining work.
     """
-    from vogt.application.models import RegistryDumpParams
-    from vogt.application.services.instance import registry_dump
+    from vogt.application import models as app_models  # type: ignore[import-untyped]
+    from vogt.application.services import (  # type: ignore[import-untyped]
+        instance as app_instance,
+    )
 
-    dump = registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
+    params_model = app_models.RegistryDumpParams
+    dump = app_instance.registry_dump(None, params_model()).model_dump()
     entries = []
     for operation in dump["operations"]:
         entries.append(
@@ -172,7 +183,9 @@ def record_strips() -> str:
     """
     import pydantic
 
-    from vogt.registry.operations import build_operations
+    from vogt.registry.operations import (  # type: ignore[import-untyped]
+        build_operations,
+    )
 
     rows = []
     for operation in build_operations():

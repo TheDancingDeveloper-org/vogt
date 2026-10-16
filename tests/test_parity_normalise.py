@@ -21,12 +21,13 @@ _SPEC.loader.exec_module(parity)
 
 
 def _version_answer(version: str) -> dict[str, object]:
-    return parity._normalise(
+    normalised: dict[str, object] = parity._normalise(
         {"version": version, "status": "ok"},
         Path("/tmp/root"),
         Path("/tmp/data"),
         "http.version",
     )
+    return normalised
 
 
 def test_the_release_version_is_substituted() -> None:
