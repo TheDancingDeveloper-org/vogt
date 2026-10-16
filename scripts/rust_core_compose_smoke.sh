@@ -26,10 +26,8 @@ COMPOSE=(docker compose -p "$PROJECT"
   -f deploy/vogt.compose.yml
   -f deploy/engine.overlay.yml
   -f deploy/rust-core.overlay.yml)
-SECRET="$(mktemp)"
 cleanup() {
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -f "$SECRET"
 }
 trap cleanup EXIT
 
@@ -42,10 +40,11 @@ export VOGT_BIND_IP="127.0.0.1"
 export VOGT_PORT="18080"
 # Named-volume tokens, not host files. The runner's filesystem is not the
 # daemon's, so a Compose file-secret bind fails before the stack starts.
-export VOGT_CORE_TOKEN_VALUE="$(cat "$SECRET")"
+# The core refuses a secret under 24 characters, and an empty one is treated
+# as not configured, so this has to be a generated value, not a blank file.
+export VOGT_CORE_TOKEN_VALUE="$(openssl rand -hex 32)"
 export ENGINE_TOKEN_VALUE="engine-token-$(openssl rand -hex 16)"
 export ENGINE_TOKEN="$ENGINE_TOKEN_VALUE"
-rm -f "$SECRET"
 
 echo "building the Rust core image"
 docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
@@ -88,8 +87,8 @@ fi
 # The event follower polls every 5s, starting at the head. Write an event
 # after it has started, then look for it on the engine's stream.
 echo "writing an event through the core and reading it from the engine"
-# The core token lives on the core's volume. The engine image does not have
-# curl's bearer there, so the call is made from the core container itself.
+# The core token lives on the shared volume. curl is in the engine image,
+# so the call runs there and reads the file the core adopted at init.
 if ! "${COMPOSE[@]}" exec -T engine \
   sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -sS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
     -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\",\"project\":\"\"}" \
