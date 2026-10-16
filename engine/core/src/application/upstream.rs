@@ -99,7 +99,7 @@ pub fn build_item<C: Clock, I: IdFactory>(
         initiative_id: overlay.and_then(|overlay| overlay.initiative_id.clone()),
         origin: Origin::Observed,
         trust_state: parse_wire(
-            &trust_for(ctx, observation.observed_at, confirmed_at),
+            &trust_for(ctx, Some(observation.observed_at), confirmed_at),
             crate::core::TrustState::Unverified,
         ),
         assignee_actor_id: overlay.and_then(|overlay| overlay.assignee_actor_id.clone()),
