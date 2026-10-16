@@ -135,6 +135,17 @@ jobs:
             sleep 5
           done
           test -n "$ok" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
+          # The core being ready does not mean the engine is listening yet:
+          # the entrypoint installs CLIs before it execs the server, and the
+          # walk below runs inside the engine against its own port.
+          front=""
+          for _ in $(seq 1 60); do
+            if docker compose $COMPOSE_FILES exec -T engine curl -fsS http://127.0.0.1:8910/healthz >/dev/null 2>&1; then
+              front=yes; break
+            fi
+            sleep 5
+          done
+          test -n "$front" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
           docker compose $COMPOSE_FILES exec -T engine mkdir -p /tmp/e2e/scripts /tmp/e2e/tests/fixtures
           docker compose $COMPOSE_FILES cp scripts/e2e_stack_smoke.sh engine:/tmp/e2e/scripts/e2e_stack_smoke.sh
           docker compose $COMPOSE_FILES exec -T -e VOGT_SMOKE_TOKEN="$ENGINE_TOKEN" engine \
