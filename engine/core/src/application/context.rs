@@ -18,8 +18,8 @@ use crate::adapters::git::{
 use crate::adapters::peer::PeerClient;
 use crate::config::VogtConfig;
 use crate::core::{
-    clock_from_env, fresh_id, hooks_active, local_principal, utc_now, Clock, IdFactory, Moment,
-    Principal, SequentialIds, StepClock, Token, CLOCK_ENV, IDS_ENV,
+    clock_from_env, fresh_id, hooks_active, local_principal, utc_now, ActorKind, Clock, IdFactory,
+    Moment, Principal, SequentialIds, StepClock, Token, CLOCK_ENV, IDS_ENV,
 };
 use crate::errors::VogtError;
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
@@ -278,6 +278,21 @@ fn assemble(
     }
 }
 
+/// `VOGT_TEST_PRINCIPAL`, a parity hook and nothing else.
+///
+/// The CLI has no token to present, so a step that must run as an agent (the
+/// chat.decide person gate) names one here: `agent:parity`. Unset, the caller
+/// is the local human as before. A value that is not `agent:<name>` is ignored
+/// rather than trusted as a way to become someone else.
+fn principal_from_hook() -> Option<Principal> {
+    let value = std::env::var("VOGT_TEST_PRINCIPAL").ok()?;
+    let name = value.strip_prefix("agent:")?.trim();
+    if name.is_empty() || name.contains(':') {
+        return None;
+    }
+    Principal::new(&value, ActorKind::Agent, name).ok()
+}
+
 // The signature mirrors `build_context` in context.py; splitting it would
 // hide which argument is which.
 #[allow(clippy::too_many_arguments)]
@@ -295,7 +310,9 @@ where
     C: Clock,
     I: IdFactory,
 {
-    let resolved = principal.unwrap_or_else(|| local_principal(&crate::core::os_user()));
+    let resolved = principal.unwrap_or_else(|| {
+        principal_from_hook().unwrap_or_else(|| local_principal(&crate::core::os_user()))
+    });
     let clock = Arc::new(std::sync::Mutex::new(clock));
     let ids = Arc::new(std::sync::Mutex::new(ids));
     context_from(

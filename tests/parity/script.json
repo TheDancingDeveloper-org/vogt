@@ -550,6 +550,23 @@
     "auth": "issued",
     "body": {"reason": "done"}
    }
+  },
+  {
+   "operation": "chat.list",
+   "params": {},
+   "expect": {"exit": 1, "capture_error": true}
+  },
+  {
+   "operation": "chat.get",
+   "params": {"id": "nope"},
+   "expect": {"exit": 1, "capture_error": true}
+  }
+,
+  {
+   "operation": "chat.decide",
+   "principal": "agent:parity",
+   "params": {"id": "00000000-0000-0000-0000-000000000001", "approval_id": "a1", "allow": true, "reason": "parity"},
+   "expect": {"exit": 1, "capture_error": true}
   }
  ]
 }
