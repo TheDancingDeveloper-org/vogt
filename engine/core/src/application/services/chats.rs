@@ -221,8 +221,11 @@ where
     let reason = require_string(&params, "reason")?;
     // Asked before the call: the engine answers the same question, and a
     // refusal must not be audited as a decision that did not happen. An
-    // agent is refused here, before the engine is asked, so the gate holds
-    // with no engine configured (the parity case) as well as against a live one.
+    // agent is refused here rather than left to the engine, so the gate
+    // holds with no engine configured. Python asks the engine first and
+    // lets it refuse, which is why the offline parity script does not cover
+    // this path: the two implementations answer differently when no engine
+    // is configured. The unit test below pins this refusal.
     let person = answers_as_person(ctx)?;
     if !person {
         return Err(VogtError::PersonRequired(

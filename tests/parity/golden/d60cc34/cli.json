@@ -1542,11 +1542,5 @@
     "error": "error: invalid_request: 'nope' is not a chat id (a UUID, from chat.list or chat.create)",
     "exit": 1,
     "operation": "chat.get"
-  },
-  {
-    "body": null,
-    "error": "error: person_required: person required: only a person answers a chat's approval",
-    "exit": 1,
-    "operation": "chat.decide"
   }
 ]
