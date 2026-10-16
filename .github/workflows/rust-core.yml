@@ -55,6 +55,15 @@ jobs:
         working-directory: engine
         run: cargo test -p vogt-core
 
+      # engine/server/tests/rust_core.rs fails when this binary is absent, so
+      # the build has to happen in this job. `cargo test -p vogt-core` above
+      # does not leave the binary where that test looks.
+      - name: cargo build (vogt-core) and front-door tests
+        working-directory: engine
+        run: |
+          cargo build -p vogt-core
+          cargo test -p vogt-engine-server --test rust_core
+
       # The stack image's server-build stage copies a subset of the tree and
       # then runs cargo. rust-core.yml never builds that image, so a workspace
       # member the stage does not copy fails ci.yml and build.yml on the swap

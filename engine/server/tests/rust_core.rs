@@ -2,10 +2,10 @@
 //!
 //! `vogt_core.rs` proves the wire against a stand-in. This file proves the
 //! same door against the binary the stack runs: bearer resolution through
-//! `GET /api/auth/whoami`, a proxied read, the MCP proxy, and an outage that
-//! is 503 rather than 401. The binary is the debug build of this workspace;
-//! a tree that has not compiled `vogt-core` skips rather than failing a
-//! stand-in assertion.
+//! `GET /api/vogt/auth/whoami`, a proxied read, the MCP proxy, the event
+//! follower on the stack secret, and an outage that is 503 rather than 401.
+//! The binary is `engine/target/debug/vogt-core`. A tree that has not built
+//! it fails these tests; a silent skip would let CI pass without running them.
 
 use std::{
     path::PathBuf,
@@ -32,13 +32,18 @@ impl Drop for Core {
     }
 }
 
-fn binary() -> Option<PathBuf> {
+fn binary() -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/debug/vogt-core");
-    path.is_file().then_some(path)
+    assert!(
+        path.is_file(),
+        "vogt-core debug binary is missing at {}; build it with `cargo build -p vogt-core` before these tests",
+        path.display()
+    );
+    path
 }
 
 fn boot_core() -> Core {
-    let bin = binary().expect("vogt-core debug binary; cargo build -p vogt-core first");
+    let bin = binary();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("core-token"), SECRET).unwrap();
     let mut child = Command::new(&bin)
@@ -202,10 +207,6 @@ async fn wait_ready(url: &str) {
 
 #[tokio::test]
 async fn the_front_door_resolves_the_stack_secret_through_the_rust_core() {
-    if binary().is_none() {
-        eprintln!("skip: vogt-core debug binary is not built");
-        return;
-    }
     let core = boot_core();
     wait_ready(&core.url).await;
     let door = boot_door(config_against(&core.url)).await;
@@ -240,10 +241,6 @@ async fn the_front_door_resolves_the_stack_secret_through_the_rust_core() {
 
 #[tokio::test]
 async fn a_dead_rust_core_is_an_outage_not_a_rejected_credential() {
-    if binary().is_none() {
-        eprintln!("skip: vogt-core debug binary is not built");
-        return;
-    }
     let core = boot_core();
     wait_ready(&core.url).await;
     let door = boot_door(config_against(&core.url)).await;
@@ -262,11 +259,67 @@ async fn a_dead_rust_core_is_an_outage_not_a_rejected_credential() {
 }
 
 #[tokio::test]
+async fn a_dead_rust_core_refuses_whoami_as_an_outage() {
+    // Bearer resolution is not a proxy. A core that cannot be asked is 503,
+    // never 401: a restart must not look like a bad credential.
+    let core = boot_core();
+    wait_ready(&core.url).await;
+    let door = boot_door(config_against(&core.url)).await;
+    drop(core);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let client = reqwest::Client::new();
+    // `/api/vogt/*` is a proxy, and a dead core behind it is 502. Bearer
+    // resolution is the other path: an engine route asks whoami first, and
+    // an outage there is 503, never 401. A fresh bearer, so the cache from
+    // the ready probe cannot answer for it.
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {SECRET}-unseen").parse().unwrap(),
+    );
+    let response = client
+        .get(format!("{door}/api/sessions"))
+        .headers(headers)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_event_follower_reads_the_rust_core_with_the_stack_secret() {
+    let core = boot_core();
+    wait_ready(&core.url).await;
+    let door = boot_door(config_against(&core.url)).await;
+    let client = reqwest::Client::new();
+    // The follower is the engine's own poll, not a browser request, so this
+    // goes straight at the core with the stack secret the engine holds.
+    let response = client
+        .get(format!("{}/api/events?after=0&limit=10", core.url))
+        .headers(bearer())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{response:?}");
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body.get("events").is_some() || body.get("items").is_some() || body.is_object(),
+        "{body}"
+    );
+    // And the door still answers a proxied events read with the same secret.
+    let proxied = client
+        .get(format!("{door}/api/vogt/events?after=0&limit=10"))
+        .headers(bearer())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proxied.status(), StatusCode::OK, "{proxied:?}");
+    let _ = door;
+}
+
+#[tokio::test]
 async fn mcp_reaches_the_rust_core() {
-    if binary().is_none() {
-        eprintln!("skip: vogt-core debug binary is not built");
-        return;
-    }
     let core = boot_core();
     wait_ready(&core.url).await;
     let door = boot_door(config_against(&core.url)).await;
