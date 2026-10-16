@@ -1019,7 +1019,10 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "Open a coding session (a terminal) for a work item or a "
                 "project. With `template` (e.g. claude) it runs that agent, "
                 "and a `task` is delivered as the agent's first prompt, so it "
-                "starts working instead of opening idle. Returns both ids "
+                "starts working instead of opening idle. `cwd` opens it in an "
+                "existing worktree under the workspace Active/ directory "
+                "instead of the project's checkout; it cannot be combined "
+                "with `worktree=true`. Returns both ids "
                 "(ses_… and engine_session_id); then poll session_screen "
                 "until `ready`."
             ),
@@ -1038,7 +1041,9 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "(running / idle / waiting-for-input / exited / errored) and "
                 "`alive`, including sessions opened from the GUI (unlinked, "
                 "engine UUID only). Each row has both ids: `id` (ses_…) and "
-                "`engine_session_id`."
+                "`engine_session_id`. `started_by_session` keeps only the "
+                "sessions that one started (engine id or ses_…). `fields` "
+                "accepts a list or a comma-separated string."
             ),
             scope="read",
             mutating=False,
@@ -1537,7 +1542,10 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "in `until` (default: ready, blocked, approval, exited, "
                 "errored). Returns the delta, or `timeout`. Pass `cursor` (the "
                 "previous `next_cursor`) so a replayed page is not waited on "
-                "twice. `ids` empty waits on every session."
+                "twice. `cursor=now` skips events already published and waits "
+                "only for one that lands after the call starts; a timeout then "
+                "returns that head as `next_cursor`. `ids` empty waits on "
+                "every session."
             ),
             scope="read",
             mutating=False,

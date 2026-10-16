@@ -61,6 +61,11 @@ env:
   # somebody eventually pins the wrong one. `main` publishes `sha-<commit>`
   # and every release publishes the semver pair; nothing else pushes here.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+  # The same merged image built on the public `workbench` pod base instead of
+  # `lean`. Additive: nothing in this repository deploys it. A derivative that
+  # wants the public session tools (Chrome, Python 3.12, Terraform, sshpass,
+  # pingcli, actionlint, the Tailscale client) builds `FROM` this digest.
+  STACK_WORKBENCH_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack-workbench
   # Static public-demo image. It contains neither the engine nor the core and
   # is published from `main`; deployment is a separate digest handoff.
   DEMO_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-demo
@@ -179,24 +184,34 @@ jobs:
           # A commit and nothing else. No semver, and explicitly no `latest`:
           # a moving alias is what makes "which build is that?" unanswerable,
           # and deployed references are digest-pinned anyway (NFR-PO4).
+          # This action no longer applies the tag. The build pushes by digest
+          # and `tag the smoked digest` writes `sha-<commit>` only after the
+          # smoke passes. The line stays because release.yml and
+          # tests/test_release_workflow.py treat it as the contract for what
+          # main publishes.
           tags: |
             type=sha,enable=${{ github.ref == 'refs/heads/main' }}
           flavor: |
             latest=false
 
-      # Built and run before it is pushed. v0.1.0 shipped an image whose
-      # entrypoint did not exist and v0.1.1 one that imported no application;
-      # both builds were green and both artefacts had never been started.
+      # Built once and pushed by digest, with no tag. The smoke below pulls
+      # that digest, so what is tested is what was pushed. A failed smoke
+      # leaves an untagged orphan; ghcr-retention.yml prunes untagged
+      # versions after the pinned policy's grace period (7 days). Nothing is
+      # tagged or signed until the smoke passes, and the layer cache is
+      # written once, here.
+      #
+      # v0.1.0 shipped an image whose entrypoint did not exist and v0.1.1 one
+      # that imported no application; both builds were green and both
+      # artefacts had never been started.
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        id: candidate
+        id: push
         with:
           context: .
-          load: true
-          tags: ${{ env.IMAGE }}:smoke-test
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
-          # Layer cache on the operator's registry. `cache-to` here
-          # and `cache-from` on the push below share one ref, so the push
-          # rebuilds nothing the smoke-tested candidate already produced.
+          provenance: true
+          sbom: true
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }}
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }},mode=max
           build-args: |
@@ -204,9 +219,13 @@ jobs:
 
       - name: the image runs
         env:
-          CANDIDATE: ${{ env.IMAGE }}:smoke-test
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
+          # The digest just pushed, never a tag: the tag does not exist yet.
+          # The pull is local; this runner built it.
+          docker pull "${IMAGE}@${DIGEST}"
+          CANDIDATE="${IMAGE}@${DIGEST}"
           docker run --rm "$CANDIDATE" --version
           # git is a runtime dependency and nothing else is red when it is
           # missing: `project.import` shells out to it, and the `git-local`
@@ -221,22 +240,18 @@ jobs:
           fi
           echo "image runs, has git, and still refuses to guess an address"
 
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        id: push
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: true
-          sbom: true
-          # Same cache ref as the candidate build above: every layer is a hit,
-          # so the pushed image is the bytes the smoke test just ran rather
-          # than a fresh recompile.
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }}
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }},mode=max
-          build-args: |
-            PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+      # Registry-side manifest write. `release.yml` finds the image by this
+      # `sha-<commit>` tag, and only a digest that passed the smoke gets one.
+      # `--prefer-index=false` keeps buildx from wrapping the manifest in a
+      # new index, which would change the digest release.yml pins.
+      - name: tag the smoked digest
+        if: github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${IMAGE}:sha-${GITHUB_SHA:0:7}" "${IMAGE}@${DIGEST}"
 
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
@@ -429,7 +444,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=main
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.16
+            VOGT_PRODUCT_VERSION=0.7.17
           cache-from: |
             type=registry,ref=${{ env.CACHE_IMAGE }}:stack-main
             type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main
@@ -545,7 +560,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=main
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.16
+            VOGT_PRODUCT_VERSION=0.7.17
           provenance: true
           sbom: true
           cache-from: |
@@ -655,43 +670,77 @@ jobs:
         id: meta
         with:
           images: ${{ env.STACK_IMAGE }}
+          # The tag is not applied here. The bake pushes by digest and
+          # `tag the smoked digest` writes `sha-<commit>` only after the
+          # smoke and the gitguard e2e pass. The line stays because
+          # release.yml and tests/test_release_workflow.py treat it as the
+          # contract for what main publishes.
           tags: |
             type=sha,enable=${{ github.ref == 'refs/heads/main' }}
           flavor: |
             latest=false
 
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        id: candidate
-        with:
-          # The repository root, not `engine/`: the Dockerfile reaches for
-          # `web/dist`, `pyproject.toml` and `src/` as well as the crates.
-          context: .
-          file: engine/Dockerfile
-          load: true
-          tags: ${{ env.STACK_IMAGE }}:smoke-test
-          labels: ${{ steps.meta.outputs.labels }}
-          # POD_BASE_IMAGE is the digest `pod-base` just resolved. Flutter is
-          # not a build arg here: it is the `lean` pod variant selected
-          # above. INSTALL_AI_CLIENTS bakes the agent CLIs into the published
-          # image so a release carries them rather than depending on a
-          # self-hoster's opt-in.
-          build-args: |
-            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
-            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
-            VOGT_SOURCE_REF=${{ github.ref_name }}
-            VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.16
-            INSTALL_AI_CLIENTS=true
-          # Layer cache on the operator's registry, its own tag so the
-          # stack and core streams cannot evict each other.
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }},mode=max
+      # One BuildKit invocation (`.github/stack-bake.hcl`), two targets.
+      # `stack` is pushed by digest with provenance and an SBOM and no tag.
+      # `gitguard` is the `codex-gitguard-e2e` binary from the same graph, so
+      # there is no third build and no second cache import. The smoke below
+      # pulls the digest; the tag and the signature come only after it and
+      # the gitguard e2e pass. A failed smoke leaves an untagged orphan,
+      # which ghcr-retention.yml prunes after the pinned policy's 7-day grace.
+      - name: build the stack once, by digest
+        id: push
+        env:
+          POD_BASE_IMAGE: ${{ needs.pod-base.outputs.image }}
+          CORE_IMAGE: ${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+          VOGT_SOURCE_REF: ${{ github.ref_name }}
+          VOGT_SOURCE_SHA: ${{ github.sha }}
+          # metadata-action's `labels` output is newline-separated key=value
+          # (no sep-labels). Do not split it on commas.
+          LABELS: ${{ steps.meta.outputs.labels }}
+          # The bake file's CACHE_REF. Without this, cache-from and cache-to
+          # are an empty ref and the stack layer cache is lost.
+          CACHE_REF: ${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
+          META_FILE: ${{ runner.temp }}/stack-bake-meta.json
+          E2E_DIR: ${{ runner.temp }}/codex-gitguard-e2e
+        run: |
+          set -euo pipefail
+          mkdir -p "$E2E_DIR"
+          args=(
+            --file .github/stack-bake.hcl
+            --metadata-file "$META_FILE"
+            # The gitguard target exports its e2e binary to E2E_DIR; newer
+            # buildx refuses a local write without an explicit entitlement.
+            --allow "fs.write=${E2E_DIR}"
+            --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
+            --set "*.args.CORE_IMAGE=${CORE_IMAGE}"
+            --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
+            --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
+            --set "*.args.VOGT_PRODUCT_VERSION=0.7.17"
+          )
+          # One label per line. A value is a url, a revision or a timestamp.
+          while IFS= read -r pair || [ -n "$pair" ]; do
+            [ -n "$pair" ] || continue
+            args+=(--set "stack.labels.${pair%%=*}=${pair#*=}")
+          done <<< "$LABELS"
+          docker buildx bake "${args[@]}" stack gitguard
+          python3 - "$META_FILE" <<'PY'
+          import json, os, sys
+          meta = json.load(open(sys.argv[1]))
+          digest = meta["stack"]["containerimage.digest"]
+          if not isinstance(digest, str) or not digest.startswith("sha256:"):
+              raise SystemExit(f"stack bake produced no digest: {digest!r}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"digest={digest}\n")
+          print(digest)
+          PY
 
       - name: the merged image runs both halves
         env:
-          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
+          docker pull "${STACK_IMAGE}@${DIGEST}"
+          CANDIDATE="${STACK_IMAGE}@${DIGEST}"
           # The same lesson the core-only smoke test records: two releases
           # shipped images that had never been started. This one has two
           # processes, so it is asked about both — and about the seam, which
@@ -714,33 +763,17 @@ jobs:
 
       # The Codex gitguard e2e (WI-1356) can only run where
       # /etc/codex/requirements.toml is the shipped file and the real Codex
-      # fork and klaudia are installed: this image. Everywhere else it skips,
-      # so it is built as its own Dockerfile target and run inside the
-      # candidate with VOGT_CODEX_GITGUARD_E2E=1, which turns a missing
-      # prerequisite into a failure instead of a skip.
-      - timeout-minutes: 30
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        with:
-          context: .
-          file: engine/Dockerfile
-          target: codex-gitguard-e2e
-          outputs: type=local,dest=${{ runner.temp }}/codex-gitguard-e2e
-          # The candidate's build args, so server-build is a cache hit.
-          build-args: |
-            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
-            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
-            VOGT_SOURCE_REF=${{ github.ref_name }}
-            VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.16
-            INSTALL_AI_CLIENTS=true
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
-
+      # fork and klaudia are installed: this image. Everywhere else it skips.
+      # The binary was built by the same bake as the image above and is run
+      # inside the pushed digest with VOGT_CODEX_GITGUARD_E2E=1, which turns a
+      # missing prerequisite into a failure instead of a skip.
       - name: Codex refuses destructive git with the shipped requirements
         env:
-          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
+          DIGEST: ${{ steps.push.outputs.digest }}
           E2E_DIR: ${{ runner.temp }}/codex-gitguard-e2e
         run: |
           set -euo pipefail
+          CANDIDATE="${STACK_IMAGE}@${DIGEST}"
           test -x "$E2E_DIR/codex_gitguard_e2e"
           # The runner's dockerd lives in a sidecar that cannot see the job
           # workspace, so a bind mount of $E2E_DIR arrives as an empty
@@ -753,31 +786,17 @@ jobs:
           docker cp "$E2E_DIR/codex_gitguard_e2e" "$cid:/usr/local/bin/codex_gitguard_e2e"
           docker start --attach "$cid"
 
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        id: push
-        with:
-          context: .
-          file: engine/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # Identical to the candidate build's, so the pushed image is the
-          # layers the smoke test just ran, not a rebuild that happens to
-          # look similar. `INSTALL_AI_CLIENTS=true` bakes the agent CLIs in so
-          # a release carries them rather than leaving them to a
-          # self-hoster's opt-in.
-          build-args: |
-            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
-            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
-            VOGT_SOURCE_REF=${{ github.ref_name }}
-            VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.16
-            INSTALL_AI_CLIENTS=true
-          provenance: true
-          sbom: true
-          # Same cache ref as the candidate: every layer is a hit, so the push
-          # is a re-tag of the smoke-tested bytes rather than a recompile.
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
+      # Registry-side manifest write, and only after the smoke and the
+      # gitguard e2e passed. `release.yml` finds the stack by this tag.
+      # `--prefer-index=false` keeps the tag on the digest that was smoked.
+      - name: tag the smoked digest
+        if: github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${STACK_IMAGE}:sha-${GITHUB_SHA:0:7}" "${STACK_IMAGE}@${DIGEST}"
 
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
@@ -802,4 +821,150 @@ jobs:
             echo "See \`docs/DEPLOYMENT.md\` before the first deploy: the"
             echo "smoke test above proves the halves start, not that the front"
             echo "door reaches a core."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The workbench pod base, built (or found already published) only for the
+  # workbench stack below. Separate from `pod-base` so the lean stack keeps
+  # the prerequisite it has always had and the two variants do not share a
+  # concurrency group.
+  pod-base-workbench:
+    name: the workbench pod base is in GHCR
+    needs: base-images
+    uses: ./.github/workflows/pod-base.yml
+    with:
+      variant: workbench
+    permissions:
+      contents: read
+      packages: write
+
+  stack-workbench-image:
+    name: build and publish the workbench stack image
+    needs: [base-images, pod-base-workbench, image]
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        id: meta
+        with:
+          images: ${{ env.STACK_WORKBENCH_IMAGE }}
+          # The tag is not applied here. The bake pushes by digest and
+          # `tag the smoked digest` writes `sha-<commit>` only after the
+          # smoke passes. release.yml finds the image by this tag.
+          tags: |
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+          flavor: |
+            latest=false
+
+      # Same shape as the lean stack's bake (`.github/stack-bake.hcl`), its
+      # own file so the two jobs do not share a bake definition while S2 is
+      # in flight. Pushed by digest with provenance and an SBOM; the tag and
+      # the signature come only after the smoke. A failed smoke leaves an
+      # untagged orphan, which ghcr-retention.yml prunes after the policy's
+      # 7-day grace — that policy lists this package below.
+      - name: build the workbench stack once, by digest
+        id: push
+        env:
+          POD_BASE_IMAGE: ${{ needs.pod-base-workbench.outputs.image }}
+          CORE_IMAGE: ${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+          VOGT_SOURCE_REF: ${{ github.ref_name }}
+          VOGT_SOURCE_SHA: ${{ github.sha }}
+          LABELS: ${{ steps.meta.outputs.labels }}
+          CACHE_REF: ${{ env.CACHE_IMAGE }}:stack-workbench-${{ github.ref_name }}
+          META_FILE: ${{ runner.temp }}/workbench-bake-meta.json
+        run: |
+          set -euo pipefail
+          args=(
+            --file .github/workbench-bake.hcl
+            --metadata-file "$META_FILE"
+            --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
+            --set "*.args.CORE_IMAGE=${CORE_IMAGE}"
+            --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
+            --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
+            --set "*.args.VOGT_PRODUCT_VERSION=0.7.17"
+          )
+          # metadata-action's labels are newline-separated key=value.
+          while IFS= read -r pair || [ -n "$pair" ]; do
+            [ -n "$pair" ] || continue
+            args+=(--set "stack.labels.${pair%%=*}=${pair#*=}")
+          done <<< "$LABELS"
+          docker buildx bake "${args[@]}" stack
+          python3 - "$META_FILE" <<'PY'
+          import json, os, sys
+          meta = json.load(open(sys.argv[1]))
+          digest = meta["stack"]["containerimage.digest"]
+          if not isinstance(digest, str) or not digest.startswith("sha256:"):
+              raise SystemExit(f"workbench bake produced no digest: {digest!r}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"digest={digest}\n")
+          print(digest)
+          PY
+
+      - name: the workbench image runs, and carries the workbench tools
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image="${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+          docker pull "$image"
+          docker run --rm --entrypoint vogt "$image" --version >/dev/null
+          docker run --rm --entrypoint vogt-engine "$image" --help >/dev/null
+          docker run --rm --entrypoint vogt-verify-agent-clis "$image"
+          for tool in claude codex google-chrome chrome-ci python3.12 terraform pingcli actionlint tailscale; do
+            docker run --rm --entrypoint "$tool" "$image" --version >/dev/null \
+              || { echo "the workbench image is missing $tool" >&2; exit 1; }
+          done
+          # sshpass has no --version; -V prints its version and exits 0.
+          docker run --rm --entrypoint sshpass "$image" -V >/dev/null \
+            || { echo "the workbench image is missing sshpass" >&2; exit 1; }
+          echo "workbench image runs both halves and carries its tools"
+
+      - name: tag the smoked digest
+        if: github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${STACK_WORKBENCH_IMAGE}:sha-${GITHUB_SHA:0:7}" \
+            "${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: sign the image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Workbench stack image from \`${GITHUB_SHA:0:7}\`"
+            echo
+            echo "Nothing in this repository deploys this image. A derivative"
+            echo "that wants the public workbench tools pins this digest:"
+            echo
+            echo '```yaml'
+            echo "    image: ${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

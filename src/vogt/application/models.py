@@ -102,6 +102,18 @@ DIGEST_LIVE_STATES: frozenset[str] = frozenset(
 _DIGEST_ROW_BUDGET = 300
 
 
+def comma_list(value: object) -> object:
+    """Split one comma-separated string into a list.
+
+    MCP and HTTP callers often send `fields` as `"a,b"` rather than
+    `["a", "b"]`. A list is left as it is. A lone value with no comma stays
+    a one-element list.
+    """
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return value
+
+
 def apply_aliases(data: object, aliases: dict[str, str], *, model: str) -> object:
     """Rename a tolerated parameter alias to the field it means.
 
@@ -1074,6 +1086,14 @@ class SessionDigest(Result):
     blocked_reason: str | None = Field(
         default=None,
         description="First 120 characters of the blocked report (engine reason).",
+    )
+    blocked_detail: str | None = Field(
+        default=None,
+        description=(
+            "The blocked report in full (engine reason). `blocked_reason` keeps "
+            "the 120-character head so a row stays one line; this carries the "
+            "rest of what the guard said (WI-1670)."
+        ),
     )
     turn_started_at: datetime | None = None
     last_reply_excerpt: str | None = Field(
@@ -4226,7 +4246,26 @@ class StartSessionParams(Params):
             "disturb it. Requires a project, or a work item that belongs to "
             "one. Unset, the purpose's dispatch profile decides (WI-1323), and "
             "with no purpose the session opens in the project's checkout, as "
-            "`false` does. Recorded on the audit row."
+            "`false` does. Cannot be combined with `cwd` (WI-1671). Recorded "
+            "on the audit row."
+        ),
+    )
+    cwd: str | None = Field(
+        default=None,
+        description=(
+            "Open the session in this existing directory instead of the "
+            "project's registered checkout (WI-1671). Use it when a worktree "
+            "already exists and `worktree=true` cannot cut a new one — a "
+            "private origin the engine cannot fetch, for example. The path "
+            "must exist, must sit under the workspace's `Active/` directory "
+            "(the parent of the project's checkout), must not be inside "
+            "that checkout (a subdirectory shares its git toplevel; a "
+            "linked worktree nested under it does not), and must be a "
+            "git worktree of the same "
+            "repository (the same `commondir`). Anything else is refused, "
+            "and so is combining it with an explicit `worktree=true`. A "
+            "purpose profile that would have set `worktree` does not, when "
+            "`cwd` is given. Recorded as the session's cwd."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
@@ -4809,7 +4848,18 @@ class ListSessionsParams(Params):
     )
     fields: list[str] = Field(
         default=[],
-        description="Extra SessionSummary attribute names on each digest row.",
+        description=(
+            "Extra SessionSummary attribute names on each digest row. A "
+            "comma-separated string is accepted as well as a list."
+        ),
+    )
+    started_by_session: str | None = Field(
+        default=None,
+        description=(
+            "Keep only sessions this one started: the starter's engine "
+            "session id, or its Vogt `ses_…` id. Unlinked engine sessions "
+            "(no starter) never match."
+        ),
     )
     states: list[str] | None = Field(
         default=None,
@@ -4838,6 +4888,19 @@ class ListSessionsParams(Params):
     )
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
+
+    @field_validator("fields", mode="before")
+    @classmethod
+    def _fields_may_be_csv(cls, value: object) -> object:
+        return comma_list(value)
+
+    @field_validator("started_by_session")
+    @classmethod
+    def _starter_is_an_id(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or len(value) > 200):
+            msg = "started_by_session is 1-200 characters"
+            raise ValueError(msg)
+        return None if value is None else value.strip()
 
 
 class SessionResult(Result):
@@ -5493,12 +5556,14 @@ class SessionWaitAnyParams(Params):
             "default (ready, blocked, approval, exited, errored)."
         ),
     )
-    cursor: int | None = Field(
+    cursor: int | str | None = Field(
         default=None,
-        ge=0,
         description=(
             "Ignore deltas at or before this seq, so a replayed page is not "
-            "waited on twice. Omit to accept the next match."
+            "waited on twice. Omit to accept the next match. `now` skips "
+            "everything already published and waits only for a change that "
+            "lands after this call starts; the result's `next_cursor` is "
+            "that head when nothing new arrives."
         ),
     )
     timeout_s: int = Field(
@@ -5507,6 +5572,28 @@ class SessionWaitAnyParams(Params):
         le=600,
         description="Seconds to wait at most (1-600). Answers `timeout` then.",
     )
+
+    @field_validator("cursor", mode="before")
+    @classmethod
+    def _cursor_is_seq_or_now(cls, value: object) -> object:
+        if value is None or isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"", "now"}:
+                return "now" if text == "now" else None
+            if text.isdigit():
+                return int(text)
+        msg = "cursor is a sequence number, or 'now' to skip events already published"
+        raise ValueError(msg)
+
+    @field_validator("cursor")
+    @classmethod
+    def _cursor_not_negative(cls, value: int | str | None) -> int | str | None:
+        if isinstance(value, int) and value < 0:
+            msg = "cursor is at least 0"
+            raise ValueError(msg)
+        return value
 
 
 class SessionWaitAnyResult(Result):

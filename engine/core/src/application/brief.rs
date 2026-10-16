@@ -342,3 +342,18 @@ fn g(number: f64) -> String {
         text
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::brief_for_project;
+
+    #[test]
+    fn a_project_brief_names_the_session_and_the_bind_call() {
+        let brief = brief_for_project("beta", "ses_0001");
+        assert!(brief.contains("# beta"), "{brief}");
+        assert!(brief.contains("ses_0001"), "{brief}");
+        assert!(brief.contains("session_bind_work"), "{brief}");
+        assert!(brief.contains("VOGT_HTTP_TOKEN"), "{brief}");
+        assert!(brief.contains("No work item is attached"), "{brief}");
+    }
+}

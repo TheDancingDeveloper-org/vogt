@@ -236,6 +236,38 @@ def test_digest_drops_hibernated_keeps_counts_and_fits_fifteen_k(
     assert all(digest.budget is None for key, digest in by_id.items() if key != metered)
 
 
+def test_digest_keeps_the_full_blocked_reason(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1670: the head stays, and the guard's full reason rides along."""
+    blocked, blocked_engine = _start(wired)
+    reason = "the commit guard refuses git add: " + "x" * 200
+    engine.rows[blocked_engine].update(
+        activity="waiting-for-input",
+        blocked={"reason": reason, "items": [], "since": "2026-10-05T00:00:00Z"},
+    )
+    result = sweep_sessions(wired, SweepSessionsParams())
+    row = next(r for r in result.rows if r.digest and r.digest.id == blocked)
+    assert row.digest is not None
+    assert row.digest.blocked_reason == reason[:120]
+    assert row.digest.blocked_detail == reason
+
+    short, short_engine = _start(wired)
+    engine.rows[short_engine].update(
+        activity="waiting-for-input",
+        blocked={
+            "reason": "short reason",
+            "items": [],
+            "since": "2026-10-05T00:00:00Z",
+        },
+    )
+    again = sweep_sessions(wired, SweepSessionsParams())
+    row = next(r for r in again.rows if r.digest and r.digest.id == short)
+    assert row.digest is not None
+    assert row.digest.blocked_reason == "short reason"
+    assert row.digest.blocked_detail is None
+
+
 def test_digest_attention_needs_you_and_limit(
     wired: AppContext, engine: Engine
 ) -> None:

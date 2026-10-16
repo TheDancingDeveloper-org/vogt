@@ -8,13 +8,14 @@ name: release
 # ── Build once, promote by digest ─────────────────────────────────────────
 #
 # A release does NOT build images. `build.yml` builds, smoke-tests, signs and
-# publishes `vogt`, `vogt-stack` and `vogt-voice` once, for the commit on
+# publishes `vogt`, `vogt-stack`, `vogt-stack-workbench` and `vogt-voice`
+# once, for the commit on
 # `main`, tagged `sha-<7-char commit>`, with the product version already baked
 # from the bump on `main`. The dev lane deploys and validates exactly those
 # digests. Tagging `vX.Y.Z` on that commit then makes this workflow:
 #
 #   1. prove the tag is on main and names the version the source carries;
-#   2. prove `build.yml` ran for this commit on main and its three image jobs
+#   2. prove `build.yml` ran for this commit on main and its four image jobs
 #      succeeded, resolve each `sha-<commit>` tag to its digest, and verify
 #      the digest carries build.yml's own signature for this exact commit plus
 #      its SBOM and provenance attestations — anything missing FAILS the
@@ -47,7 +48,7 @@ permissions:
 env:
   # The core alone — the verifiable build input of the product (the stack
   # image copies `/opt/vogt` out of it by digest), not the product. Promoted
-  # and release-signed with the pair so the manifest records all three.
+  # and release-signed with the pair so the manifest records all four.
   # Nothing tells an operator to deploy it (DEPLOYMENT.md).
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
   # The product: core plus session engine, PWA and agent CLIs in one
@@ -55,6 +56,9 @@ env:
   # from the `lean` pod base with INSTALL_AI_CLIENTS=true and proves `claude`
   # and `codex` run, which is the shape every release has shipped since 0.5.0.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+  # The merged image on the public workbench pod base. Promoted with the
+  # others; nothing in this repository deploys it.
+  STACK_WORKBENCH_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack-workbench
   # The first-party voice sidecar, versioned in lockstep with the stack and
   # named by that version in `deploy/stack.compose.yml`.
   VOICE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-voice
@@ -100,6 +104,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      # The version check runs from the Rust port (WI-1079). The pin matches ci.yml.
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+
       # Exact pin: setup-uv stopped publishing major tags at v8, so
       # `@v9` does not resolve. Renovate bumps this line.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
@@ -116,12 +123,12 @@ jobs:
             echo "tag $TAG does not match vogt.__version__ ($version)"
             exit 1
           fi
-          uv run --no-sync python scripts/check_product_version.py "${TAG#v}"
+          cargo run --quiet --manifest-path engine/core/Cargo.toml --bin vogt-core -- check-product-version "${TAG#v}"
 
   # build.yml is the only thing that builds images, so a release starts by
   # proving it did so for this commit. Its run *conclusion* is deliberately not
   # the test: the run also builds the public demo image, whose Trivy scan can
-  # fail on a stale base package without touching the three product images.
+  # fail on a stale base package without touching the four product images.
   # What must have succeeded is each job that publishes one of them, in the
   # latest attempt of some build.yml run for this exact commit on main.
   build-run:
@@ -141,12 +148,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_SHA: ${{ github.sha }}
-          # The `name:` of build.yml's three publishing jobs. tests/
+          # The `name:` of build.yml's four publishing jobs. tests/
           # test_release_workflow.py fails if build.yml renames one.
           REQUIRED_JOBS: |
             build and publish a commit image
             build and publish the voice sidecar
             build and publish the merged image
+            build and publish the workbench stack image
         run: |
           set -euo pipefail
           api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
@@ -174,19 +182,19 @@ jobs:
             done <<<"$REQUIRED_JOBS"
             url="$(jq -r --argjson id "$id" '.workflow_runs[] | select(.id == $id) | .html_url' <<<"$runs")"
             if [ -z "$missing" ]; then
-              echo "build.yml run ${url} published all three images for ${TAG_SHA}"
+              echo "build.yml run ${url} published every image for ${TAG_SHA}"
               echo "run_id=${id}" >> "$GITHUB_OUTPUT"
               echo "run_url=${url}" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             printf 'build.yml run %s did not publish every image:\n%s' "$url" "$missing"
           done
-          echo "::error::No build.yml run for ${TAG_SHA} on main published all three images (see above). Nothing is rebuilt here: re-run the failed build.yml jobs (gh run rerun <id> --failed) and then re-run this workflow."
+          echo "::error::No build.yml run for ${TAG_SHA} on main published every image (see above). Nothing is rebuilt here: re-run the failed build.yml jobs (gh run rerun <id> --failed) and then re-run this workflow."
           exit 1
 
   # The promotion itself: resolve, verify, retag, release-sign. One job, so
-  # the three digests leave it together and a partial promotion is visible as
-  # one red job rather than three half-done ones.
+  # the digests leave it together and a partial promotion is visible as
+  # one red job rather than half-done ones.
   promote:
     name: promote the built images by digest
     needs: [distribution, build-run]
@@ -204,6 +212,7 @@ jobs:
     outputs:
       core: ${{ steps.resolve.outputs.core }}
       stack: ${{ steps.resolve.outputs.stack }}
+      workbench: ${{ steps.resolve.outputs.workbench }}
       voice: ${{ steps.resolve.outputs.voice }}
       tags: ${{ steps.tags.outputs.tags }}
     steps:
@@ -247,7 +256,7 @@ jobs:
           # short tag it was found by.
           build_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/build.yml@refs/heads/main"
           fail=""
-          for pair in "core=${IMAGE}" "stack=${STACK_IMAGE}" "voice=${VOICE_IMAGE}"; do
+          for pair in "core=${IMAGE}" "stack=${STACK_IMAGE}" "workbench=${STACK_WORKBENCH_IMAGE}" "voice=${VOICE_IMAGE}"; do
             name="${pair%%=*}"; repo="${pair#*=}"
             ref="${repo}:${build_tag}"
             err="${RUNNER_TEMP}/inspect-${name}.err"
@@ -291,10 +300,11 @@ jobs:
           TAGS: ${{ steps.tags.outputs.tags }}
           CORE_DIGEST: ${{ steps.resolve.outputs.core }}
           STACK_DIGEST: ${{ steps.resolve.outputs.stack }}
+          WORKBENCH_DIGEST: ${{ steps.resolve.outputs.workbench }}
           VOICE_DIGEST: ${{ steps.resolve.outputs.voice }}
         run: |
           set -euo pipefail
-          for pair in "${IMAGE}@${CORE_DIGEST}" "${STACK_IMAGE}@${STACK_DIGEST}" "${VOICE_IMAGE}@${VOICE_DIGEST}"; do
+          for pair in "${IMAGE}@${CORE_DIGEST}" "${STACK_IMAGE}@${STACK_DIGEST}" "${STACK_WORKBENCH_IMAGE}@${WORKBENCH_DIGEST}" "${VOICE_IMAGE}@${VOICE_DIGEST}"; do
             repo="${pair%@*}"; digest="${pair#*@}"
             args=()
             for t in $TAGS; do args+=(-t "${repo}:${t}"); done
@@ -322,6 +332,7 @@ jobs:
         env:
           CORE_DIGEST: ${{ steps.resolve.outputs.core }}
           STACK_DIGEST: ${{ steps.resolve.outputs.stack }}
+          WORKBENCH_DIGEST: ${{ steps.resolve.outputs.workbench }}
           VOICE_DIGEST: ${{ steps.resolve.outputs.voice }}
         run: |
           set -euo pipefail
@@ -331,6 +342,7 @@ jobs:
           # verify the release identity (DEPLOYMENT.md §6).
           cosign sign --yes "${IMAGE}@${CORE_DIGEST}"
           cosign sign --yes "${STACK_IMAGE}@${STACK_DIGEST}"
+          cosign sign --yes "${STACK_WORKBENCH_IMAGE}@${WORKBENCH_DIGEST}"
           cosign sign --yes "${VOICE_IMAGE}@${VOICE_DIGEST}"
 
       - name: report what to pin
@@ -338,6 +350,7 @@ jobs:
           TAGS: ${{ steps.tags.outputs.tags }}
           CORE_DIGEST: ${{ steps.resolve.outputs.core }}
           STACK_DIGEST: ${{ steps.resolve.outputs.stack }}
+          WORKBENCH_DIGEST: ${{ steps.resolve.outputs.workbench }}
           VOICE_DIGEST: ${{ steps.resolve.outputs.voice }}
           BUILD_RUN: ${{ needs.build-run.outputs.run_url }}
         run: |
@@ -348,6 +361,7 @@ jobs:
             echo
             echo '```'
             echo "VOGT_STACK_IMAGE=${STACK_IMAGE}@${STACK_DIGEST}"
+            echo "VOGT_STACK_WORKBENCH_IMAGE=${STACK_WORKBENCH_IMAGE}@${WORKBENCH_DIGEST}"
             echo "VOGT_VOICE_IMAGE=${VOICE_IMAGE}@${VOICE_DIGEST}"
             echo "# build input, not a deployment target:"
             echo "${IMAGE}@${CORE_DIGEST}"
@@ -481,7 +495,7 @@ jobs:
 
   # The stack and its voice sidecar are one release pair, with the core they
   # were built from. An independent read-back after promotion: every semver
-  # tag of all three images resolves to the digest promoted (and therefore to
+  # tag of every image resolves to the digest promoted (and therefore to
   # the one commit's build), so a deployment pinning `X.Y.Z` of each gets the
   # pair the dev lane ran together.
   release-pair:
@@ -505,15 +519,16 @@ jobs:
           TAGS: ${{ needs.promote.outputs.tags }}
           CORE_DIGEST: ${{ needs.promote.outputs.core }}
           STACK_DIGEST: ${{ needs.promote.outputs.stack }}
+          WORKBENCH_DIGEST: ${{ needs.promote.outputs.workbench }}
           VOICE_DIGEST: ${{ needs.promote.outputs.voice }}
         run: |
           set -euo pipefail
-          case "$CORE_DIGEST:$STACK_DIGEST:$VOICE_DIGEST" in
-            sha256:*:sha256:*:sha256:*) ;;
-            *) echo "::error::release image digests are missing (core/stack/voice)" >&2; exit 1;;
+          case "$CORE_DIGEST:$STACK_DIGEST:$WORKBENCH_DIGEST:$VOICE_DIGEST" in
+            sha256:*:sha256:*:sha256:*:sha256:*) ;;
+            *) echo "::error::release image digests are missing (core/stack/workbench/voice)" >&2; exit 1;;
           esac
           fail=""
-          for pair in "core|${IMAGE}|${CORE_DIGEST}" "stack|${STACK_IMAGE}|${STACK_DIGEST}" "voice|${VOICE_IMAGE}|${VOICE_DIGEST}"; do
+          for pair in "core|${IMAGE}|${CORE_DIGEST}" "stack|${STACK_IMAGE}|${STACK_DIGEST}" "workbench|${STACK_WORKBENCH_IMAGE}|${WORKBENCH_DIGEST}" "voice|${VOICE_IMAGE}|${VOICE_DIGEST}"; do
             IFS='|' read -r name repo digest <<<"$pair"
             for t in $TAGS; do
               got="$(docker buildx imagetools inspect "${repo}:${t}" --format '{{json .Manifest}}' | jq -r .digest)"
@@ -553,6 +568,7 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
           CORE_DIGEST: ${{ needs.promote.outputs.core }}
           STACK_DIGEST: ${{ needs.promote.outputs.stack }}
+          WORKBENCH_DIGEST: ${{ needs.promote.outputs.workbench }}
           VOICE_DIGEST: ${{ needs.promote.outputs.voice }}
           RELEASE_TAGS: ${{ needs.promote.outputs.tags }}
           BUILD_RUN_ID: ${{ needs.build-run.outputs.run_id }}
@@ -562,12 +578,13 @@ jobs:
           set -euo pipefail
           apk_count="$(find release-assets/android -type f -name '*.apk' | wc -l)"
           [ "$apk_count" -ge 1 ] || { echo "signed APK is required" >&2; exit 1; }
-          # All three digests must be present: the stack and its voice sidecar
+          # Every digest must be present: the stack, the workbench stack and
+          # the voice sidecar
           # are one release pair, so a manifest missing the voice half
           # is not a complete release.
-          case "$CORE_DIGEST:$STACK_DIGEST:$VOICE_DIGEST" in
-            sha256:*:sha256:*:sha256:*) ;;
-            *) echo "release image digests are missing (core/stack/voice)" >&2; exit 1;;
+          case "$CORE_DIGEST:$STACK_DIGEST:$WORKBENCH_DIGEST:$VOICE_DIGEST" in
+            sha256:*:sha256:*:sha256:*:sha256:*) ;;
+            *) echo "release image digests are missing (core/stack/workbench/voice)" >&2; exit 1;;
           esac
           [ -n "$BUILD_RUN_ID" ] || { echo "the build.yml run is unknown" >&2; exit 1; }
           build_tag="${BUILD_TAG_PREFIX}${SOURCE_SHA:0:${BUILD_TAG_SHA_LENGTH}}"
@@ -585,9 +602,11 @@ jobs:
             --arg source_sha "$SOURCE_SHA" \
             --arg core_repo "$IMAGE" \
             --arg stack_repo "$STACK_IMAGE" \
+            --arg workbench_repo "$STACK_WORKBENCH_IMAGE" \
             --arg voice_repo "$VOICE_IMAGE" \
             --arg core_digest "$CORE_DIGEST" \
             --arg stack_digest "$STACK_DIGEST" \
+            --arg workbench_digest "$WORKBENCH_DIGEST" \
             --arg voice_digest "$VOICE_DIGEST" \
             --arg tags "$RELEASE_TAGS" \
             --arg build_tag "$build_tag" \
@@ -605,10 +624,11 @@ jobs:
               images: {
                 core: "\($core_repo)@\($core_digest)",
                 merged_stack: "\($stack_repo)@\($stack_digest)",
+                workbench_stack: "\($workbench_repo)@\($workbench_digest)",
                 voice: "\($voice_repo)@\($voice_digest)"
               },
-              image_digests: {core: $core_digest, merged_stack: $stack_digest, voice: $voice_digest},
-              image_repositories: {core: $core_repo, merged_stack: $stack_repo, voice: $voice_repo},
+              image_digests: {core: $core_digest, merged_stack: $stack_digest, workbench_stack: $workbench_digest, voice: $voice_digest},
+              image_repositories: {core: $core_repo, merged_stack: $stack_repo, workbench_stack: $workbench_repo, voice: $voice_repo},
               release_tags: ($tags | split(" ") | map(select(length > 0))),
               promotion: {
                 method: "build-once-promote-by-digest",

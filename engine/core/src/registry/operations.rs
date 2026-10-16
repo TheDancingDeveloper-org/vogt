@@ -500,7 +500,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.start",
-            "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. Returns both ids (ses_\u{2026} and engine_session_id); then poll session_screen until `ready`.",
+            "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. Returns both ids (ses_\u{2026} and engine_session_id); then poll session_screen until `ready`.",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/sessions"),
@@ -508,7 +508,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.list",
-            "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_\u{2026}) and `engine_session_id`.",
+            "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_\u{2026}) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_\u{2026}). `fields` accepts a list or a comma-separated string.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/sessions"),
@@ -732,7 +732,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.wait_any",
-            "Wait for any of the named sessions instead of polling them: blocks (up to timeout_s, max 600) until one publishes a kind in `until` (default: ready, blocked, approval, exited, errored). Returns the delta, or `timeout`. Pass `cursor` (the previous `next_cursor`) so a replayed page is not waited on twice. `ids` empty waits on every session.",
+            "Wait for any of the named sessions instead of polling them: blocks (up to timeout_s, max 600) until one publishes a kind in `until` (default: ready, blocked, approval, exited, errored). Returns the delta, or `timeout`. Pass `cursor` (the previous `next_cursor`) so a replayed page is not waited on twice. `cursor=now` skips events already published and waits only for one that lands after the call starts; a timeout then returns that head as `next_cursor`. `ids` empty waits on every session.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/sessions/wait-any"),

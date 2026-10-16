@@ -565,6 +565,7 @@ class ReadView(Protocol):
         *,
         project_id: str | None = None,
         work_item_id: str | None = None,
+        started_by_session: str | None = None,
         include_stopped: bool = False,
         limit: int,
         offset: int,

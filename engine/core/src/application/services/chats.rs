@@ -72,10 +72,12 @@ where
     let q = optional_string(&params, "q")?;
     let archived = match params.get("archived") {
         None | Some(Value::Null) => "false".to_string(),
-        Some(Value::String(text)) => text.clone(),
+        Some(Value::String(text)) if matches!(text.as_str(), "false" | "true" | "all") => {
+            text.clone()
+        }
         Some(_) => {
             return Err(VogtError::InvalidRequest(
-                "archived must be a string".to_string(),
+                "archived must be one of false, true, all".to_string(),
             ))
         }
     };
@@ -218,8 +220,18 @@ where
     let message = optional_string(&params, "message")?;
     let reason = require_string(&params, "reason")?;
     // Asked before the call: the engine answers the same question, and a
-    // refusal must not be audited as a decision that did not happen.
+    // refusal must not be audited as a decision that did not happen. An
+    // agent is refused here rather than left to the engine, so the gate
+    // holds with no engine configured. Python asks the engine first and
+    // lets it refuse, which is why the offline parity script does not cover
+    // this path: the two implementations answer differently when no engine
+    // is configured. The unit test below pins this refusal.
     let person = answers_as_person(ctx)?;
+    if !person {
+        return Err(VogtError::PersonRequired(
+            "person required: only a person answers a chat's approval".to_string(),
+        ));
+    }
     let outcome =
         engine(ctx)?.chat_decide(&chat_id, &approval_id, allow, message.as_deref(), person)?;
     let Some(outcome) = outcome else {
@@ -391,7 +403,8 @@ where
 {
     ctx.engine.as_ref().ok_or_else(|| {
         VogtError::EngineUnavailable(
-            "no session engine is configured (set VOGT_ENGINE_URL)".to_string(),
+            "no session engine is configured, and chats run on it (set VOGT_ENGINE_URL)"
+                .to_string(),
         )
     })
 }
@@ -399,8 +412,6 @@ where
 /// A chat id before it is interpolated into a URL path.
 fn chat_id_of(params: &Value) -> Result<String, VogtError> {
     let chat_id = require_string(params, "id")?;
-    // `uuid.UUID(raw.strip())`: surrounding whitespace and either hex case
-    // are accepted, and the canonical form is lowercase with hyphens.
     // `uuid.UUID(raw.strip())` accepts surrounding whitespace, either hex
     // case and a missing hyphen set, and canonicalises to lowercase.
     let hex: String = chat_id
@@ -577,7 +588,9 @@ fn project(payload: &Value, fields: &[&str]) -> Map<String, Value> {
         return out;
     };
     for field in fields {
-        if let Some(value) = object.get(*field).filter(|value| !value.is_null()) {
+        if let Some(value) = object.get(*field) {
+            // Python's views keep a null field. Dropping it changes the
+            // contract: a missing key and an explicit null are different.
             out.insert((*field).to_string(), value.clone());
         }
     }
@@ -586,6 +599,11 @@ fn project(payload: &Value, fields: &[&str]) -> Map<String, Value> {
 
 fn summary_view(payload: Value) -> Value {
     let mut view = project(&payload, SUMMARY_FIELDS);
+    // Pydantic emits the model's defaults for a field the engine omitted,
+    // including an explicit null for every optional string.
+    for field in ["model", "work_item", "promoted_session", "preview"] {
+        view.entry((*field).to_string()).or_insert(Value::Null);
+    }
     view.entry("archived".to_string())
         .or_insert(Value::Bool(false));
     view.entry("message_count".to_string())
@@ -595,6 +613,9 @@ fn summary_view(payload: Value) -> Value {
 
 fn entry_view(payload: Value) -> Value {
     let mut view = project(&payload, ENTRY_FIELDS);
+    for field in ["tool_name", "tool_use_id", "by"] {
+        view.entry((*field).to_string()).or_insert(Value::Null);
+    }
     view.entry("is_error".to_string())
         .or_insert(Value::Bool(false));
     view.entry("retryable".to_string())
@@ -603,7 +624,9 @@ fn entry_view(payload: Value) -> Value {
 }
 
 fn approval_view(payload: &Value) -> Value {
-    Value::Object(project(payload, APPROVAL_FIELDS))
+    let mut view = project(payload, APPROVAL_FIELDS);
+    view.entry("decided_by".to_string()).or_insert(Value::Null);
+    Value::Object(view)
 }
 
 /// ChatDetail flattens the summary beside `entries` and `approvals`.
@@ -888,10 +911,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, VogtError::PersonRequired(_)), "{error:?}");
-        let sent = seen.lock().unwrap();
-        let body: serde_json::Value = serde_json::from_str(&sent.last().unwrap().2).unwrap();
-        assert_eq!(body["person"], false);
-        drop(sent);
+        assert!(
+            error.message().contains("only a person answers"),
+            "{}",
+            error.message()
+        );
+        // Refused before the engine is asked, so nothing is sent and nothing
+        // is audited as a decision that did not happen.
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "{:?}",
+            seen.lock().unwrap()
+        );
         assert!(!audited(&built, "chat.decide"));
         let _ = std::fs::remove_dir_all(dir);
     }

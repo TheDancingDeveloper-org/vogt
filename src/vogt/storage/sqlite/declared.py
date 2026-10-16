@@ -1306,6 +1306,7 @@ class SqliteReadView:
         *,
         project_id: str | None = None,
         work_item_id: str | None = None,
+        started_by_session: str | None = None,
         include_stopped: bool = False,
         limit: int,
         offset: int,
@@ -1315,6 +1316,7 @@ class SqliteReadView:
         for column, value in (
             ("project_id", project_id),
             ("work_item_id", work_item_id),
+            ("started_by_session", started_by_session),
         ):
             if value is not None:
                 clauses.append(f"{column} = ?")

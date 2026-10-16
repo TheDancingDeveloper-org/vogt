@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -54,6 +55,13 @@ WHY = "hibernation test"
 ROOT = "/srv/estate/vogt"
 UNLINKED = "0b0e5f0c-1111-4222-8333-944455556666"
 HIBERNATED_SCREEN = ["> what next?", ""]
+#: Codex screens captured live on 2026-10-16 (WI-1669); see each file.
+CODEX = {
+    path.stem: json.loads(path.read_text())
+    for path in (Path(__file__).parent / "fixtures" / "codex_screens").glob("*.json")
+}
+#: The text the live captures hold in the composer.
+CODEX_TEXT = "reply with the single word two"
 
 
 class Engine:
@@ -69,6 +77,20 @@ class Engine:
         self.counter = 0
         #: The outcome a wait answers with for a live session.
         self.wait_outcome = "ready"
+        #: The agent a session reports, keyed by engine id. Default claude.
+        self.agent: dict[str, str] = {}
+        #: Screen reads after a wake answer `idle` this many times before
+        #: `running`, so a submit that did not start a turn is visible
+        #: (WI-1669).
+        self.idle_reads_after_wake = 0
+        self._idle_reads_left = 0
+        #: A Codex fake (WI-1669): after a wake its first `swallow_enters`
+        #: Enters leave the text in the composer, as a resumed Codex did
+        #: live; `dialog` draws an approval dialog instead of the composer.
+        self.swallow_enters = 0
+        self._swallow_left = 0
+        self.composer = "empty"
+        self.dialog = False
         #: When set, a hibernate is refused (409) with this reason.
         self.refuse_hibernate: str | None = None
         #: When set, a wake is refused (409) with this reason and the session
@@ -86,7 +108,10 @@ class Engine:
             "alive": not asleep,
             "cwd": ROOT,
             "created_at": "2026-10-05T00:00:00Z",
-            "conversation": {"agent": "claude", "id": engine_id},
+            "conversation": {
+                "agent": self.agent.get(engine_id, "claude"),
+                "id": engine_id,
+            },
             "keep_awake": engine_id in self.keep_awake,
             **({"role": "oversight"} if engine_id in self.oversight else {}),
             **(
@@ -154,6 +179,9 @@ class Engine:
                 return 409, json.dumps({"error": self.refuse_wake}).encode()
             self.hibernated.discard(engine_id)
             self.live.add(engine_id)
+            self._idle_reads_left = self.idle_reads_after_wake
+            self._swallow_left = self.swallow_enters
+            self.composer = "empty"
             return 200, json.dumps(self.summary(engine_id)).encode()
         if method == "POST" and verb == "keep-awake":
             if payload.get("keep_awake"):
@@ -173,16 +201,39 @@ class Engine:
         if method == "POST" and verb == "input":
             if asleep:
                 return conflict[0], conflict[1].encode()
+            if payload.get("text"):
+                self.composer = "held"
+            if payload.get("submit") and self.composer == "held" and not self.dialog:
+                if self._swallow_left > 0:
+                    self._swallow_left -= 1
+                else:
+                    self.composer = "taken"
             return 200, b'{"ok":true}'
         if method == "GET" and verb == "screen":
+            if not asleep and self._idle_reads_left > 0:
+                self._idle_reads_left -= 1
+                activity = "idle"
+            elif asleep:
+                activity = "hibernated"
+            else:
+                activity = "running"
+            lines = HIBERNATED_SCREEN if asleep else ["> ", ""]
+            if not asleep and self.agent.get(engine_id) == "codex":
+                if self.dialog:
+                    shot = CODEX["approval_dialog"]
+                elif self.composer == "held":
+                    shot = CODEX["resumed_stuck_ready"]
+                else:
+                    shot = CODEX["resumed_cleared"]
+                activity, lines = shot["activity"], shot["lines"]
             return 200, json.dumps(
                 {
                     "id": engine_id,
                     "cols": 80,
                     "rows": 2,
-                    "lines": HIBERNATED_SCREEN if asleep else ["> ", ""],
+                    "lines": lines,
                     "cursor": {"row": 0, "col": 2},
-                    "activity": "hibernated" if asleep else "idle",
+                    "activity": activity,
                     "alive": not asleep,
                     "ready": not asleep,
                 }
@@ -351,6 +402,137 @@ def test_typing_into_a_hibernated_session_wakes_it_first(
         "POST input",
         "GET ",  # the digest row reads the session once more
     ]
+
+
+def _submits(engine: Engine) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in engine.sent
+        if row["path"].endswith("/input") and row["body"].get("submit")
+    ]
+
+
+def test_a_delivered_submit_is_not_pressed_again(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry exists for a swallowed Enter, not for one that landed."""
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    engine.agent[engine_id] = "codex"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.idle_reads_after_wake = 0
+    engine.sent.clear()
+
+    result = session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+    assert len(_submits(engine)) == 1
+    assert result.delivery == "delivered"
+    assert result.woke is True
+
+
+def test_a_non_codex_session_never_gets_the_retry(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude stays on one Enter even when the confirm reads stay idle.
+
+    A second Enter there can accept a dialog the screen parser missed.
+    """
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    assert engine.agent.get(engine_id, "claude") == "claude"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.idle_reads_after_wake = 2
+    engine.sent.clear()
+
+    result = session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+    assert len(_submits(engine)) == 1
+    assert result.delivery == "unconfirmed"
+    assert result.woke is True
+
+
+def _send_to_resumed_codex(
+    wired: AppContext,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    swallow: int = 0,
+    dialog: bool = False,
+) -> Any:
+    """Hibernate a Codex session, then type into it with Enter (WI-1669)."""
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    engine.agent[engine_id] = "codex"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.swallow_enters = swallow
+    engine.dialog = dialog
+    engine.sent.clear()
+    return session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text=CODEX_TEXT, submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+
+def test_a_swallowed_enter_is_pressed_again_until_the_turn_starts(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed Codex swallowed the Enter and read as working (WI-1669).
+
+    Captured live: the text stayed in the composer until a later Enter.
+    """
+    result = _send_to_resumed_codex(wired, engine, monkeypatch, swallow=1)
+    assert len(_submits(engine)) == 2
+    assert result.delivery == "delivered"
+    assert result.woke is True
+
+
+def test_the_enters_stop_as_soon_as_the_composer_clears(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _send_to_resumed_codex(wired, engine, monkeypatch, swallow=2)
+    assert len(_submits(engine)) == 3
+    assert result.delivery == "delivered"
+
+
+def test_the_enters_are_bounded(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A composer that never clears gets three Enters in all, not more."""
+    result = _send_to_resumed_codex(wired, engine, monkeypatch, swallow=10)
+    assert len(_submits(engine)) == 3
+    assert result.delivery == "unconfirmed"
+    assert "composer" in result.delivery_evidence
+
+
+def test_no_enter_is_pressed_again_on_a_dialog(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An approval dialog's highlighted choice starts with the composer's
+    glyph; another Enter there would accept it."""
+    result = _send_to_resumed_codex(wired, engine, monkeypatch, dialog=True)
+    assert len(_submits(engine)) == 1
+    assert result.delivery == "delivered", "the agent is asking for approval"
 
 
 def test_a_woken_session_that_is_not_ready_is_not_typed_into(

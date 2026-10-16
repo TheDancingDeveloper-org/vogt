@@ -3877,17 +3877,33 @@ async fn warm_attach_within_budget_stays_a_byte_exact_delta() {
         .await
         .unwrap();
     let _ = collect_binary_until(&mut ws, b"before-cursor", Duration::from_secs(2)).await;
+    // The bytes arriving on the socket is not the ring having absorbed them:
+    // the reader commits the scrollback after the broadcast, so a cursor read
+    // in that gap still points before "before-cursor" and the resume then
+    // includes it (seen failing in CI on an otherwise unrelated change). Wait
+    // until the recorded position has moved past the priming output.
     let cursor = {
-        let detail: Value = client
-            .get(format!("{base}/api/sessions/{id}"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        detail["scrollback_pos"].as_u64().unwrap()
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let detail: Value = client
+                .get(format!("{base}/api/sessions/{id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let pos = detail["scrollback_pos"].as_u64().unwrap();
+            if pos > 0 || std::time::Instant::now() >= deadline {
+                break pos;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     };
+    assert!(
+        cursor > 0,
+        "the priming output never reached the scrollback"
+    );
     ws.send(Message::Binary(b"after-cursor\n".to_vec().into()))
         .await
         .unwrap();

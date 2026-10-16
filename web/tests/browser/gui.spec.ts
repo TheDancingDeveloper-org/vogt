@@ -4407,6 +4407,73 @@ test("A long session list scrolls inside the session area, not the rail", async 
 });
 
 /**
+ * WI-1664: the running-session block is drag-resizable from a handle on its
+ * bottom edge. The list keeps scrolling inside the area, the rail does not
+ * scroll with it, and the height survives a reload. Double-click returns the
+ * shipped auto height.
+ */
+test("The running session list resizes by drag and remembers the height", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+  const crowd = Array.from({ length: 30 }, (_, index) => ({
+    ...liveSession,
+    id: `resize-${index}`,
+    name: `resize-session-${index}`,
+  }));
+  await installFixtures(page, {}, crowd);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/#/sessions");
+
+  const area = page.locator(".places-rail-session-area");
+  const handle = page.getByRole("separator", { name: "Resize the running session list" });
+  await expect(handle).toBeVisible();
+  const before = (await area.boundingBox())!;
+  const box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  // The shipped height already fills the leftover column, so a drag down is
+  // clamped. Dragging up is the useful direction: more of the places list shows.
+  await page.mouse.move(box.x + box.width / 2, box.y - 140, { steps: 6 });
+  await page.mouse.up();
+
+  const shorter = (await area.boundingBox())!;
+  expect(shorter.height).toBeLessThan(before.height - 100);
+  expect(shorter.height).toBeGreaterThan(120);
+
+  const scrolled = await area.evaluate((node) => {
+    const list = node.querySelector(":scope > div");
+    const rail = node.closest(".places-rail");
+    if (!list || !rail) return { listScrolls: false, railScrolls: true };
+    list.scrollTop = list.scrollHeight;
+    return {
+      listScrolls: list.scrollHeight > list.clientHeight + 1,
+      railScrolls: rail.scrollHeight > rail.clientHeight + 1,
+      moved: list.scrollTop > 0,
+    };
+  });
+  expect(scrolled.listScrolls).toBe(true);
+  expect(scrolled.railScrolls).toBe(false);
+  expect(scrolled.moved).toBe(true);
+
+  await page.reload();
+  await expect.poll(async () => (await area.boundingBox())?.height ?? 0)
+    .toBeLessThan(before.height - 100);
+
+  const again = (await handle.boundingBox())!;
+  await page.mouse.dblclick(again.x + again.width / 2, again.y + again.height / 2);
+  await expect.poll(async () => page.evaluate(
+    () => localStorage.getItem("vogt.pane.places-session-area.height.v1"),
+  )).toBeNull();
+
+  // Arrow keys step the stored height, clamped at the three-row minimum.
+  await handle.focus();
+  await page.keyboard.press("ArrowDown");
+  const raised = Number(await handle.getAttribute("aria-valuenow"));
+  expect(raised).toBeGreaterThan(132);
+  await page.keyboard.press("ArrowUp");
+  expect(Number(await handle.getAttribute("aria-valuenow"))).toBe(raised - 24);
+});
+
+/**
  * The other half of the chunk split, learned the hard way on the dev instance: a lazy
  * component that is *always mounted* fetches its chunk at boot anyway. Three
  * dialogs did — Settings, the template selector and the shortcut help — so

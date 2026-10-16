@@ -16,7 +16,6 @@ import re
 import subprocess
 import tomllib
 from pathlib import Path
-from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 OWNERSHIP = REPO / "tests" / "parity" / "ownership.toml"
@@ -24,6 +23,7 @@ LEDGER = REPO / "docs" / "local" / "RUST_PORT_DRIFT.md"
 WATCHED = (
     "src/vogt/",
     "tests/",
+    "scripts/",
     "docs/CONFIG.md",
     "config.example.toml",
 )
@@ -35,17 +35,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true", help=f"update {LEDGER}")
     parser.add_argument("--base", default="origin/main")
-    parser.add_argument("--head", default="rust-core")
+    # HEAD, not the branch name. On a pull request the checkout is a detached
+    # commit and the local repo has no ref named rust-core, so merge-base
+    # against that name fails before it can report anything.
+    parser.add_argument("--head", default="HEAD")
+    # Once the branch contains main, the merge base is main itself and the
+    # range is empty. --since names the port base explicitly (the last
+    # commit rust-core was synced to) so the ledger covers that span.
+    parser.add_argument("--since", default=None)
     args = parser.parse_args()
 
-    # A checkout of a PR branch has origin/main but no local rust-core ref, and
-    # this step only reports. Fall back to the commit being built.
-    head = args.head
-    if subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", head], cwd=REPO, check=False
-    ).returncode:
-        head = "HEAD"
-    base = _git("merge-base", args.base, head).strip()
+    base = args.since or _git("merge-base", args.base, args.head).strip()
     commits = _commits(base, args.base)
     previous = _previous_marks()
     table = _render(commits, previous, base, args.base)
@@ -72,8 +72,8 @@ def _commits(base: str, tip: str) -> list[dict[str, object]]:
         "--",
         *WATCHED,
     )
-    commits: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
+    commits: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
     for line in log.splitlines():
         if "\t" in line:
             sha, subject = line.split("\t", 1)
@@ -100,7 +100,7 @@ def _previous_marks() -> dict[str, str]:
 
 
 def _render(
-    commits: list[dict[str, Any]], previous: dict[str, str], base: str, tip: str
+    commits: list[dict[str, object]], previous: dict[str, str], base: str, tip: str
 ) -> str:
     chunks = [
         (item["name"], list(item["paths"]))
@@ -118,7 +118,9 @@ def _render(
     migrations: list[str] = []
     for commit in commits:
         sha = str(commit["sha"])
-        files = [str(path) for path in commit["files"]]
+        raw_files = commit["files"]
+        assert isinstance(raw_files, list)
+        files = [str(path) for path in raw_files]
         owners = sorted({_chunk_for(path, chunks) for path in files})
         mark = previous.get(sha[:7], "no")
         lines.append(

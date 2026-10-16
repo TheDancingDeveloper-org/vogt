@@ -10,6 +10,12 @@
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PY=${FAKE_AGENT_PYTHON:-python3}
 
+# The Rust port (WI-1079) when the binary is on PATH; the Python core beside
+# this script otherwise, so a checkout without a built vogt-core still runs.
+if command -v vogt-core >/dev/null 2>&1; then
+    exec vogt-core fake-agent "$@"
+fi
+
+PY=${FAKE_AGENT_PYTHON:-python3}
 exec "$PY" "$here/fake_agent_core.py" "$@"

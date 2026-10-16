@@ -21,6 +21,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+Json = dict[str, Any]
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CORPUS = REPO_ROOT / "tests" / "parity" / "validator_corpus.json"
 
@@ -30,7 +32,7 @@ TAIL = re.compile(r" \[type=.*?\]")
 DOC_LINK = re.compile(r"\n {4}For further information visit.*")
 
 
-def base_value(prop: dict[str, Any], defs: dict[str, Any]) -> object:
+def base_value(prop: Json, defs: Json) -> object:
     if "$ref" in prop:
         return base_obj(defs.get(prop["$ref"].split("/")[-1], {}), defs)
     if "anyOf" in prop:
@@ -61,7 +63,7 @@ def base_value(prop: dict[str, Any], defs: dict[str, Any]) -> object:
     return "x"
 
 
-def base_obj(schema: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
+def base_obj(schema: Json, defs: Json) -> Json:
     required = schema.get("required", [])
     return {
         name: base_value(field, defs)
@@ -70,10 +72,12 @@ def base_obj(schema: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def scalar(prop: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
+def scalar(prop: Json, defs: Json) -> Json:
     """The branch of a field that describes the value, past a null union or a ref."""
     if "$ref" in prop:
-        return dict(defs.get(prop["$ref"].split("/")[-1], {}))
+        found = defs.get(prop["$ref"].split("/")[-1], {})
+        assert isinstance(found, dict)
+        return found
     if "anyOf" in prop:
         for branch in prop["anyOf"]:
             if branch.get("type") != "null":
@@ -81,23 +85,19 @@ def scalar(prop: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
     return prop
 
 
-def probes_for(schema: dict[str, Any]) -> list[tuple[str, Any]]:
+def probes_for(schema: Json) -> list[tuple[str, Json]]:
     defs = schema.get("$defs", {})
     props = schema.get("properties", {})
     required = schema.get("required", [])
     good = base_obj(schema, defs)
-    probes = [
+    probes: list[tuple[str, Json]] = [
         ("valid-minimal", good),
         ("empty", {}),
         ("extra-key", {**good, "zz_extra": 1}),
     ]
     for name in required:
-        probes.append(
-            (
-                f"missing:{name}",
-                {key: value for key, value in good.items() if key != name},
-            )
-        )
+        missing = {key: value for key, value in good.items() if key != name}
+        probes.append((f"missing:{name}", missing))
     for name, prop in props.items():
         field = scalar(prop, defs)
         kind = field.get("type")
@@ -183,19 +183,18 @@ def probes_for(schema: dict[str, Any]) -> list[tuple[str, Any]]:
     return probes
 
 
-def verdict(operation: object, raw: dict[str, Any]) -> dict[str, Any]:
+def verdict(operation: object, raw: Json) -> Json:
     import pydantic
 
-    from vogt.registry.operation import Operation
-
-    if not isinstance(operation, Operation):
-        raise TypeError(type(operation).__name__)
+    probed: Any = operation
+    name = probed.name
+    params_model = probed.params_model
     try:
-        model = operation.params_model.model_validate(raw)
+        model = params_model.model_validate(raw)
     except pydantic.ValidationError as exc:
         return {
             "ok": False,
-            "text": f"invalid arguments for {operation.name}:\n{exc}".rstrip(),
+            "text": f"invalid arguments for {name}:\n{exc}".rstrip(),
             # The parameters as sent, so a number past 2^63 keeps its digits.
             # JSON parsing rounds it, and the comparison puts the digits back.
             "sent": json.dumps(raw, ensure_ascii=False),
@@ -209,13 +208,14 @@ def verdict(operation: object, raw: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "dump": model.model_dump(mode="json")}
 
 
-def build() -> list[dict[str, Any]]:
+def build() -> list[Json]:
     sys.path.insert(0, str(REPO_ROOT / "src"))
     from vogt.registry.operations import build_operations
 
     corpus = []
     for operation in build_operations():
-        schema = operation.params_model.model_json_schema()
+        params_model = operation.params_model
+        schema = params_model.model_json_schema()
         for tag, raw in probes_for(schema):
             corpus.append(
                 {

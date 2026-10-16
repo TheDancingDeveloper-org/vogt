@@ -21,14 +21,13 @@ load-bearing and neither is its position.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 import pytest
 
 from vogt.adapters.http.app import API_PREFIX
-from vogt.application.context import build_context
-from vogt.registry import default_registry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_SRC = REPO_ROOT / "web" / "src"
@@ -62,18 +61,33 @@ def source(path: Path) -> str:
     return "\n".join(kept)
 
 
+def manifest_operations() -> dict[str, dict[str, object]]:
+    """HTTP operations from the Rust registry manifest, keyed by name."""
+    manifest = json.loads(
+        (REPO_ROOT / "tests" / "parity" / "golden" / "registry.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return {
+        operation["name"]: operation
+        for operation in manifest["operations"]
+        if "http" in operation["transports"]
+    }
+
+
 def operation_routes() -> dict[str, str]:
-    """Operation name to HTTP path, from the registry manifest.
+    """Operation name to HTTP path, from the Rust registry manifest.
 
-    The PWA's route table is checked against this rather than against the
-    registry objects directly, so the same assertion can later take a Rust
-    core's `registry.dump` in place of the in-process one.
+    The golden is `vogt-core`'s `registry.dump` (`engine/core` proves it
+    equals Python's dump while Python still exists). Reading the file rather
+    than importing the Python registry is what lets this assertion outlive
+    the Python core; `web/scripts/check-route-map.mjs` is the same check with
+    no Python at all, and `scripts/check.sh` runs it on the web half.
     """
-    from vogt.application.models import RegistryDumpParams
-    from vogt.application.services.instance import registry_dump
-
-    manifest = registry_dump(build_context(), RegistryDumpParams())
-    return {operation.name: operation.http_path for operation in manifest.operations}
+    return {
+        name: str(operation["http_path"])
+        for name, operation in manifest_operations().items()
+    }
 
 
 def client_routes() -> dict[str, str]:
@@ -90,12 +104,15 @@ def client_routes() -> dict[str, str]:
 
 
 def test_every_vogt_path_in_the_pwa_is_a_registered_operation() -> None:
-    registry = default_registry()
-    registered = {op.name: op for op in registry.for_transport("http")}
+    # The manifest, not the in-process Python registry: an operation the Rust
+    # core does not serve is not one the PWA may name. `web/scripts/
+    # check-route-map.mjs` is the same assertion with no Python.
     manifest_routes = operation_routes()
 
     for name, path in client_routes().items():
-        assert name in registered, f"the PWA names {name}, which is not an operation"
+        assert name in manifest_routes, (
+            f"the PWA names {name}, which is not an HTTP operation"
+        )
         assert manifest_routes[name] == path, (
             f"{name} is served at {manifest_routes[name]}, but the PWA asks for {path}"
         )
@@ -128,9 +145,9 @@ def test_every_vogt_write_the_pwa_offers_collects_a_reason() -> None:
     smallest checkable proxy is that no exported write can be called without
     it.
     """
-    registry = default_registry()
+    operations = manifest_operations()
     mutating = {
-        name for name, _ in client_routes().items() if registry.get(name).mutating
+        name for name, _ in client_routes().items() if operations[name]["mutating"]
     }
     assert mutating, "the PWA names no writes; this check would prove nothing"
 

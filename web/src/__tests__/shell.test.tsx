@@ -33,11 +33,13 @@ import { replaceTabs, tabsStore } from "../tabs";
 import {
   fakeVogt,
   INBOX_RESULT,
+  liveStream,
   stopLiveStream,
   workItem,
   type FakeVogt,
   type Routes,
 } from "./harness";
+import { setRailSection } from "../railSections";
 
 /** A session the engine knows about, as `GET /api/sessions` lists them. */
 const SESSION = {
@@ -184,6 +186,7 @@ describe("a pasted link opens the surface it names", () => {
       ["Projects", "#/projects"],
       ["Audit", "#/audit"],
       ["Sessions", "#/sessions"],
+      ["Files", "#/files"],
       ["Git", "#/g"],
       ["Oversight", "#/oversight"],
       ["History", "#/history"],
@@ -671,6 +674,50 @@ describe("Sessions owns its machine workspace", () => {
       .not.toHaveLength(0);
   });
 
+  it("opens the file browser from the header and previews html sandboxed", async () => {
+    const { container, go } = mountShell("/sessions", {
+      engine: {
+        "GET /api/tree": { body: [
+          { name: "page.html", path: "page.html", is_dir: false },
+        ] },
+        "GET /api/files": (call) => call.query.get("path") === "page.html"
+          ? { body: {
+              path: "page.html", size: 20,
+              content: "<p>Rendered page</p>", content_base64: null, is_binary: false,
+            } }
+          : { status: 404, body: { error: "not the preview" } },
+        "GET /api/git/status": { body: {
+          repo: "", is_repo: false, branch: "", ahead: 0, behind: 0, entries: [],
+        } },
+      },
+    });
+    await waitFor(() =>
+      expect(container.querySelector('[aria-label="Places"] a[href="#/files"]')).toBeTruthy(),
+    );
+    const link = container.querySelector('[aria-label="Places"] a[href="#/files"]') as HTMLAnchorElement;
+    go("/files");
+    await waitFor(() => expect(container.querySelector(".files-place")).toBeTruthy());
+    expect(link).toHaveAttribute("aria-current", "page");
+
+    const file = await waitFor(() => {
+      const row = container.querySelector('.tree-main[title="page.html"], button.tree-main');
+      const match = [...container.querySelectorAll("button.tree-main")].find((b) =>
+        (b.getAttribute("title") ?? b.textContent ?? "").includes("page.html"),
+      );
+      expect(match ?? row).toBeTruthy();
+      return (match ?? row) as HTMLButtonElement;
+    });
+    await fireEvent.click(file);
+    await waitFor(() => expect(container.querySelector(".file-preview")).toBeTruthy());
+    const frame = await waitFor(() => {
+      const found = container.querySelector("iframe.file-preview-frame");
+      if (!found) throw new Error(`no frame; preview=${container.querySelector(".file-preview")?.innerHTML.slice(0, 240)}`);
+      return found;
+    });
+    expect(frame).toHaveAttribute("sandbox", "");
+    expect(frame?.getAttribute("sandbox")).not.toMatch(/allow-scripts|allow-same-origin/);
+  });
+
   it("composes every machine tool at its existing deep link", async () => {
     const { container, go } = mountShell("/g/vogt", {
       config: {
@@ -749,6 +796,70 @@ describe("Sessions owns its machine workspace", () => {
     await waitFor(() => expect(
       surfaceValue(container, '.agent-task-field input[type="text"]'),
     ).toBe("keep this task draft"));
+  });
+});
+
+
+describe("Files keeps its selection across a session update (WI-1682)", () => {
+  const session = {
+    id: "eng-1",
+    name: "alpha-build",
+    cwd: "/srv/alpha",
+    activity: "idle",
+    exit_code: null,
+  };
+
+  it("a session-created refresh keeps the selected file row and its focus", async () => {
+    setRailSection("files", true);
+    // The list grows when the event arrives, so the refresh the store does
+    // for an unknown session-created is answered with a genuinely new list.
+    let listed = [session];
+    const shell = mountShell("/board", {
+      sessions: [session],
+      engine: {
+        "GET /api/tree": () => ({ body: [{ name: "README.md", path: "README.md", is_dir: false }] }),
+        "GET /api/sessions": () => ({ body: listed.map((row) => ({ ...row })) }),
+      },
+    });
+    await liveStream(shell.vogt);
+    const file = await waitFor(() => shell.container.querySelector<HTMLElement>('[aria-label="Open README.md"]'));
+    expect(file).toBeTruthy();
+    file!.focus();
+    fireEvent.click(file!);
+    expect(file!.closest(".tree-row")).toHaveClass("tree-row--selected");
+
+    listed = [session, { ...session, id: "eng-2", name: "other" }];
+    shell.vogt.stream.push({ type: "session-created", id: "eng-2", name: "other" });
+    await waitFor(() => expect(shell.container.textContent).toContain("other"));
+
+    const again = shell.container.querySelector<HTMLElement>('[aria-label="Open README.md"]');
+    expect(again, "the session refresh replaced the selected row").toBe(file);
+    expect(again?.closest(".tree-row")).toHaveClass("tree-row--selected");
+    expect(document.activeElement).toBe(again);
+  });
+
+  it("a session-created refresh does not pull focus back from the Sessions list", async () => {
+    setRailSection("files", true);
+    let listed = [session];
+    const shell = mountShell("/board", {
+      sessions: [session],
+      engine: {
+        "GET /api/tree": () => ({ body: [{ name: "README.md", path: "README.md", is_dir: false }] }),
+        "GET /api/sessions": () => ({ body: listed.map((row) => ({ ...row })) }),
+      },
+    });
+    await liveStream(shell.vogt);
+    const file = await waitFor(() => shell.container.querySelector<HTMLElement>('[aria-label="Open README.md"]'));
+    fireEvent.click(file!);
+    const row = await waitFor(() => shell.container.querySelector<HTMLElement>(".session-row"));
+    row!.focus();
+
+    listed = [session, { ...session, id: "eng-2", name: "other" }];
+    shell.vogt.stream.push({ type: "session-created", id: "eng-2", name: "other" });
+    await waitFor(() => expect(shell.container.textContent).toContain("other"));
+
+    expect(document.activeElement?.closest(".session-row")).not.toBeNull();
+    expect(document.activeElement?.closest(".file-tree")).toBeNull();
   });
 });
 

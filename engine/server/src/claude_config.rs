@@ -531,6 +531,21 @@ impl Onboarding {
             .map(|dir| dir.join(".claude.json"))
     }
 
+    /// [`accept_codex_project`] for a Codex session about to start in
+    /// `cwd`, logging rather than failing: the session starts either way.
+    /// Codex reads `~/.codex/config.toml` (`CODEX_HOME` overrides it).
+    pub fn prepare_codex(&self, env: &[(String, String)], cwd: &str) {
+        if !self.enabled {
+            return;
+        }
+        let Some(path) = codex_config_path(env) else {
+            return;
+        };
+        if let Err(e) = accept_codex_project(&path, cwd) {
+            tracing::info!(path = %path.display(), error = %e, "could not pre-trust the Codex folder; it may ask");
+        }
+    }
+
     /// [`accept_project`] for a Claude session about to start in `cwd`,
     /// logging rather than failing: the session starts either way.
     pub fn prepare(&self, env: &[(String, String)], cwd: &str) {
@@ -597,6 +612,169 @@ pub fn accept_project(path: &Path, cwd: &str) -> std::io::Result<bool> {
         let _ = std::fs::remove_file(&tmp);
     }
     result.map(|()| true)
+}
+
+/// Codex's config file: `$CODEX_HOME/config.toml` when the session sets it,
+/// otherwise `$HOME/.codex/config.toml`.
+fn codex_config_path(env: &[(String, String)]) -> Option<PathBuf> {
+    if let Some((_, home)) = env.iter().rev().find(|(k, _)| k == "CODEX_HOME") {
+        return Some(PathBuf::from(home).join("config.toml"));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex").join("config.toml"))
+}
+
+/// A path Codex will accept as a `[projects."<path>"]` key: absolute, UTF-8,
+/// with no control characters and no quote. Anything else is left untrusted
+/// rather than written into a config the session shares.
+fn codex_project_key(cwd: &str) -> Option<String> {
+    let path = Path::new(cwd);
+    if !path.is_absolute() || cwd.chars().any(|c| c.is_control() || c == '"') {
+        return None;
+    }
+    Some(cwd.to_string())
+}
+
+/// Record `trust_level = "trusted"` for `cwd` in Codex's `config.toml`
+/// (WI-1667).
+///
+/// Codex stops at "Trust this folder?" the first time it is started in a
+/// directory it has not seen, and that screen is a startup gate a driven
+/// session used to sit at — or exit from, when "1" was typed into a menu
+/// whose first option Enter alone selects. The workspace the engine launches
+/// into is one the operator trusts by deploying, so the session's own cwd is
+/// recorded before it starts.
+///
+/// The rewrite is the same shape the MCP bootstrap uses on this file: one
+/// flock, a config that does not parse is left byte for byte, and the new
+/// text is renamed over the old one. Only the one project table is added or
+/// completed. An operator's `trust_level` of anything other than `trusted`
+/// is left as they set it, and every other table is untouched.
+pub fn accept_codex_project(path: &Path, cwd: &str) -> std::io::Result<bool> {
+    let Some(key) = codex_project_key(cwd) else {
+        return Ok(false);
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let lock_path = parent.join(".config.toml.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    flock_exclusive(&lock)?;
+
+    let existing = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    let text = String::from_utf8(existing.clone()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "config.toml is not UTF-8; left alone",
+        )
+    })?;
+    if !text.trim().is_empty() && toml::from_str::<toml::Value>(&text).is_err() {
+        return Ok(false);
+    }
+    let Some(new) = codex_trust_edit(&text, &key) else {
+        return Ok(false);
+    };
+    let tmp = parent.join(format!(".config.toml.vogt-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        std::fs::write(&tmp, new.as_bytes())?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            std::fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map(|()| true)
+}
+
+/// `LOCK_EX` on `file`, the same lock the MCP bootstrap holds while it
+/// rewrites this config.
+fn flock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    let fd = std::os::unix::io::AsRawFd::as_raw_fd(file);
+    // SAFETY: `fd` is a live file descriptor and `LOCK_EX` only waits for
+    // the advisory lock on it.
+    let rc = unsafe { libc_flock(fd, 2) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+unsafe fn libc_flock(fd: i32, op: i32) -> i32 {
+    libc::flock(fd, op)
+}
+
+/// The text with `[projects."<key>"]` trusted, or `None` when the project is
+/// already present under any TOML spelling, or the edit would not parse.
+///
+/// Presence is decided on the parsed document, not on one header spelling.
+/// A literal-string key, a dotted key or an inline `[projects]` entry is the
+/// same project, and appending a second table for it would make the file
+/// invalid — Codex would then refuse to load its config at all, and an
+/// operator's `trust_level` would be shadowed (WI-1667 review).
+fn codex_trust_edit(text: &str, key: &str) -> Option<String> {
+    let parsed: toml::Value = if text.trim().is_empty() {
+        toml::Value::Table(toml::Table::new())
+    } else {
+        toml::from_str(text).ok()?
+    };
+    if parsed
+        .get("projects")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|projects| projects.contains_key(key))
+    {
+        return None;
+    }
+    let header = format!("[projects.{}]", toml_basic_string(key));
+    let mut body = text.to_string();
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    if !body.is_empty() && !body.ends_with("\n\n") {
+        body.push('\n');
+    }
+    body.push_str(&header);
+    body.push_str("\ntrust_level = \"trusted\"\n");
+    // Never rename a file that does not parse, or that did not record the
+    // trust the caller asked for.
+    let written: toml::Value = toml::from_str(&body).ok()?;
+    let trusted = written
+        .get("projects")
+        .and_then(|p| p.get(key))
+        .and_then(|entry| entry.get("trust_level"))
+        .and_then(toml::Value::as_str)
+        == Some("trusted");
+    trusted.then_some(body)
+}
+
+/// A TOML basic string for `value`, so the header key round-trips through
+/// the parser. Rust's `Debug` writes some characters as `\u{..}`, which
+/// TOML does not accept.
+fn toml_basic_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{:04X}", u32::from(c)));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -692,6 +870,84 @@ mod tests {
         assert!(err.contains("a, b"), "{err}");
         let none = Onboarding::default().account_dir("a").unwrap_err();
         assert!(none.contains("no accounts are configured"), "{none}");
+    }
+
+    #[test]
+    fn codex_trust_is_recorded_once_and_everything_else_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "model = \"grok\"\n\n[projects.\"/w/other\"]\ntrust_level = \"trusted\"\n\n[mcp_servers.vogt]\ncommand = \"vogt-mcp\"\n",
+        )
+        .unwrap();
+        assert!(accept_codex_project(&path, "/w/repo").unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(parsed["model"].as_str(), Some("grok"));
+        assert_eq!(
+            parsed["projects"]["/w/other"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        assert_eq!(
+            parsed["projects"]["/w/repo"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["vogt"]["command"].as_str(),
+            Some("vogt-mcp")
+        );
+        assert!(!accept_codex_project(&path, "/w/repo").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn an_operator_trust_choice_and_a_broken_config_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let chosen = "[projects.\"/w/repo\"]\ntrust_level = \"untrusted\"\n";
+        std::fs::write(&path, chosen).unwrap();
+        assert!(!accept_codex_project(&path, "/w/repo").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), chosen);
+
+        let broken = dir.path().join("broken.toml");
+        std::fs::write(&broken, "not = [toml").unwrap();
+        assert!(!accept_codex_project(&broken, "/w/repo").unwrap());
+        assert_eq!(std::fs::read(&broken).unwrap(), b"not = [toml");
+
+        let missing = dir.path().join("sub").join("config.toml");
+        assert!(accept_codex_project(&missing, "/w/repo").unwrap());
+        assert!(std::fs::read_to_string(&missing)
+            .unwrap()
+            .contains("trust_level = \"trusted\""));
+        // A relative path, or one that cannot be a TOML key, is not written.
+        assert!(!accept_codex_project(&missing, "relative").unwrap());
+        assert!(!accept_codex_project(&missing, "/w/\"quoted").unwrap());
+    }
+
+    #[test]
+    fn a_project_already_present_in_another_spelling_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Literal-string key, and an inline table: both name the same
+        // project the double-quoted header would. Appending a second table
+        // would make the file invalid.
+        for existing in [
+            "[projects.'/w/repo']\ntrust_level = \"untrusted\"\n",
+            "[projects]\n\"/w/repo\" = { trust_level = \"untrusted\" }\n",
+        ] {
+            std::fs::write(&path, existing).unwrap();
+            assert!(
+                !accept_codex_project(&path, "/w/repo").unwrap(),
+                "rewrote {existing:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
+            let parsed: toml::Value = toml::from_str(existing).unwrap();
+            assert_eq!(
+                parsed["projects"]["/w/repo"]["trust_level"].as_str(),
+                Some("untrusted")
+            );
+        }
     }
 
     #[test]

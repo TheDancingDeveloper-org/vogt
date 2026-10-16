@@ -518,6 +518,134 @@ def test_a_worktree_session_is_cut_from_the_integration_branch(
     assert "worktree" not in engine.last_spec
 
 
+def test_a_cwd_opens_in_an_existing_worktree(
+    wired: AppContext,
+    engine: StandInEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WI-1671: name a worktree that already exists and start in it.
+
+    The engine is handed that directory as cwd and is not asked to cut one.
+    The Active/ check is the parent of the project's checkout, so a directory
+    that merely has an `Active` component elsewhere is refused, and so is the
+    shared checkout itself. A relative path, a stranger repository, a missing
+    directory, and an explicit worktree=true are refused before any session
+    is started. A symlink is accepted as the directory it points at.
+    """
+    active_root = tmp_path / "Active"
+    checkout = active_root / "vogt"
+    checkout.mkdir(parents=True)
+    worktree = active_root / "vogt-wi-7"
+    worktree.mkdir()
+    linked = active_root / "vogt-link"
+    linked.symlink_to(worktree, target_is_directory=True)
+    stranger = active_root / "other"
+    stranger.mkdir()
+    decoy = tmp_path / "decoy" / "Active" / "evil"
+    decoy.mkdir(parents=True)
+    common = tmp_path / "common.git"
+    other = tmp_path / "other.git"
+    seen: list[Path] = []
+
+    nested = checkout / "src"
+    nested.mkdir()
+
+    def fake_git(root: Path, flag: str) -> str:
+        seen.append(root)
+        if flag == "--show-toplevel":
+            # A subdirectory of the checkout reports the checkout. A linked
+            # worktree reports itself.
+            if root.resolve() in {worktree.resolve(), linked.resolve()}:
+                return str(worktree.resolve())
+            return str(checkout.resolve())
+        if root.resolve() in {worktree.resolve(), checkout.resolve(), nested.resolve()}:
+            return str(common)
+        return str(other)
+
+    monkeypatch.setattr("vogt.application.services.sessions._git_probe", fake_git)
+    register_project(
+        wired,
+        RegisterProjectParams(name="Checkout", root_path=str(checkout), reason=WHY),
+    )
+
+    result = start_session(
+        wired,
+        StartSessionParams(project="checkout", cwd=str(worktree), reason=WHY),
+    )
+    assert engine.last_spec["cwd"] == str(worktree.resolve())
+    assert "worktree" not in engine.last_spec
+    assert result.session.cwd == str(worktree.resolve())
+
+    linked_result = start_session(
+        wired,
+        StartSessionParams(project="checkout", cwd=str(linked), reason=WHY),
+    )
+    assert linked_result.session.cwd == str(worktree.resolve())
+
+    with pytest.raises(InvalidRequest, match="absolute"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd="Active/vogt-wi-7", reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="shared checkout"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(checkout), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="shared checkout"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(nested), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="not under the workspace Active"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(decoy), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="not a git worktree"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(stranger), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="does not exist"):
+        start_session(
+            wired,
+            StartSessionParams(
+                project="checkout",
+                cwd=str(active_root / "missing"),
+                reason=WHY,
+            ),
+        )
+    with pytest.raises(InvalidRequest, match="cannot be combined"):
+        start_session(
+            wired,
+            StartSessionParams(
+                project="checkout",
+                cwd=str(worktree),
+                worktree=True,
+                reason=WHY,
+            ),
+        )
+    # The implement profile sets worktree itself. A cwd still wins, and the
+    # engine is not asked to cut one.
+    purpose = start_session(
+        wired,
+        StartSessionParams(
+            project="checkout",
+            cwd=str(worktree),
+            purpose="implement",
+            reason=WHY,
+        ),
+    )
+    assert purpose.session.cwd == str(worktree.resolve())
+    assert "worktree" not in engine.last_spec
+    # The refusals never reached the engine: two accepted starts, then the
+    # purpose start.
+    assert engine.counter == 3
+    assert decoy.resolve() not in seen
+
+
 def test_the_whole_session_clock_is_unset_unless_the_project_sets_it(
     wired: AppContext, engine: StandInEngine
 ) -> None:
@@ -2728,6 +2856,32 @@ def test_a_vogt_started_session_is_named_by_its_engine_id(
     )
     assert child.session.started_by_session == parent.session.engine_session_id
     assert child.session.started_by_kind == "worker"
+
+
+def test_session_list_filters_by_who_started_it(wired: AppContext) -> None:
+    parent = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    child = start_session(
+        _as(wired, f"agent:session:{parent.session.id}"),
+        StartSessionParams(work_item="WI-1", reason=WHY),
+    )
+    other = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    by_engine = list_sessions(
+        wired,
+        ListSessionsParams(
+            mode="full", started_by_session=parent.session.engine_session_id
+        ),
+    )
+    by_vogt = list_sessions(
+        wired, ListSessionsParams(mode="full", started_by_session=parent.session.id)
+    )
+    assert [row.id for row in by_engine.sessions] == [child.session.id]
+    assert [row.id for row in by_vogt.sessions] == [child.session.id]
+    assert other.session.id not in {row.id for row in by_engine.sessions}
+
+
+def test_session_list_fields_accept_a_comma_separated_string() -> None:
+    params = ListSessionsParams(fields="account,model")  # type: ignore[arg-type]
+    assert params.fields == ["account", "model"]
 
 
 def test_a_purpose_outside_the_six_is_refused() -> None:

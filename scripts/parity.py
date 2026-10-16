@@ -203,13 +203,27 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 )
             body = json.loads(completed.stdout) if completed.stdout.strip() else None
             seen[step["operation"]] = body
-            answers.append(
-                {
-                    "operation": step["operation"],
-                    "exit": completed.returncode,
-                    "body": _normalise(body, root, data, step["operation"]),
-                }
-            )
+            answer = {
+                "operation": step["operation"],
+                "exit": completed.returncode,
+                "body": _normalise(body, root, data, step["operation"]),
+            }
+            # A failure writes nothing to stdout, so the exit alone cannot say
+            # which refusal it was. Keep the error line, with the data
+            # directory blanked the way every other path is.
+            if completed.returncode != 0 and expect.get("capture_error"):
+                # The hooks banner is printed on every line of a parity run;
+                # the error line is the one the step is there to pin down.
+                line = next(
+                    (
+                        item
+                        for item in reversed(completed.stderr.strip().splitlines())
+                        if item.startswith("error:")
+                    ),
+                    completed.stderr.strip(),
+                )
+                answer["error"] = _normalise(line, root, data, step["operation"])
+            answers.append(answer)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     return answers
@@ -424,9 +438,8 @@ def _mark_token_hash(dumped: dict[str, Any], secrets: list[str]) -> None:
 
 def _normalise(value: Any, root: Path, data: Path, operation: str | None = None) -> Any:
     rules = _rules()
-    return _walk(
-        value, rules, {str(root): "<root>", str(data): "<data>"}, operation, True
-    )
+    paths = {str(root): "<root>", str(data): "<data>"}
+    return _walk(value, rules, paths, operation, True)
 
 
 def _rules() -> dict[str, Any]:
@@ -562,7 +575,8 @@ def _selftest(golden_dir: Path) -> int:
     http_golden = _normalise(http, root, data)
     if not _mutate(http, "instance_id"):
         print(
-            "selftest: no 'instance_id' to mutate in the HTTP golden", file=sys.stderr
+            "selftest: no 'instance_id' to mutate in the HTTP golden",
+            file=sys.stderr,
         )
         return 1
     if _diff(http_golden, _normalise(http, root, data), "") == 0:
