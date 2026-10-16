@@ -33,25 +33,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-openssl rand -hex 32 > "$SECRET"
-chmod 644 "$SECRET"
-
 export VOGT_IMAGE="vogt-core:rust"
 export VOGT_PUBLIC_URL="http://127.0.0.1:18080"
 export ENGINE_PUBLIC_URL="http://127.0.0.1:18910"
-export ENGINE_TOKEN="engine-token-$(openssl rand -hex 16)"
 export ENGINE_BIND="127.0.0.1"
 export ENGINE_PORT="18910"
 export VOGT_BIND_IP="127.0.0.1"
 export VOGT_PORT="18080"
-
-# The overlay's secret sources are relative paths beside the compose files.
-# ENGINE_TOKEN is set above: writing the file first dies under set -u, and
-# the engine would reject the session.* calls this smoke makes with it.
-cp "$SECRET" deploy/vogt-core-token
-printf '%s' "$ENGINE_TOKEN" > deploy/engine-token
-chmod 644 deploy/engine-token
-trap 'cleanup; rm -f deploy/vogt-core-token deploy/engine-token' EXIT
+# Named-volume tokens, not host files. The runner's filesystem is not the
+# daemon's, so a Compose file-secret bind fails before the stack starts.
+export VOGT_CORE_TOKEN_VALUE="$(cat "$SECRET")"
+export ENGINE_TOKEN_VALUE="engine-token-$(openssl rand -hex 16)"
+export ENGINE_TOKEN="$ENGINE_TOKEN_VALUE"
+rm -f "$SECRET"
 
 echo "building the Rust core image"
 docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
@@ -94,7 +88,7 @@ fi
 # The event follower polls every 5s, starting at the head. Write an event
 # after it has started, then look for it on the engine's stream.
 echo "writing an event through the core and reading it from the engine"
-"${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/secrets/vogt_core_token engine \
+"${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/rust-tokens/vogt_core_token engine \
   sh -c 'tok=$(cat "$VOGT_CORE_TOKEN_FILE"); curl -fsS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
     -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\",\"project\":\"\"}" \
     http://vogt:8000/api/work' >/dev/null
@@ -105,7 +99,7 @@ for _ in $(seq 1 12); do
   # pipefail pipeline would fail the smoke on the first event it saw. Bound
   # the read by line count instead, and match the event kind exactly.
   if "${COMPOSE[@]}" exec -T engine sh -c \
-      "curl -sS -N --max-time 8 -H \"Authorization: Bearer $ENGINE_TOKEN\" http://127.0.0.1:8910/api/events | head -n 40" \
+      'tok=$(cat /run/rust-tokens/engine_token); curl -sS -N --max-time 8 -H "Authorization: Bearer $tok" http://127.0.0.1:8910/api/events | head -n 40' \
       | grep -q '"kind":"work.created"'; then
     found=yes; break
   fi
@@ -122,7 +116,7 @@ echo "event follower saw the Rust core"
 # and require the core's answer to name that same id. Matching the word
 # "sessions" would pass against the empty unconfigured list.
 echo "session.start on the Rust core"
-started="$("${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/secrets/vogt_core_token engine \
+started="$("${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/rust-tokens/vogt_core_token engine \
   sh -c 'tok=$(cat "$VOGT_CORE_TOKEN_FILE"); curl -fsS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
     -d "{\"name\":\"rust-core-smoke\",\"reason\":\"compose smoke\"}" \
     http://vogt:8000/api/sessions')"
@@ -132,7 +126,7 @@ if [ -z "$engine_id" ]; then
   exit 1
 fi
 echo "session.list on the Rust core against the real engine"
-body="$("${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/secrets/vogt_core_token engine \
+body="$("${COMPOSE[@]}" exec -T -e VOGT_CORE_TOKEN_FILE=/run/rust-tokens/vogt_core_token engine \
   sh -c 'tok=$(cat "$VOGT_CORE_TOKEN_FILE"); curl -fsS -H "Authorization: Bearer $tok" http://vogt:8000/api/sessions')"
 # An unconfigured core returns {"sessions": []} with an engine note. A core
 # that reached the real engine returns a row naming the engine's own id.

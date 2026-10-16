@@ -118,12 +118,15 @@ jobs:
           docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:rust .
           docker build -t vogt-engine-e2e:local -f deploy/e2e.engine.Dockerfile .
           docker build -t vogt-e2e-playwright:local -f deploy/e2e.playwright.Dockerfile .
-          printf '%s' "$(openssl rand -hex 32)" > deploy/vogt-core-token
-          printf '%s' "$(openssl rand -hex 32)" > deploy/engine-token
-          chmod 644 deploy/vogt-core-token deploy/engine-token
+          # Tokens go through the named volume (VOGT_CORE_TOKEN_VALUE,
+          # ENGINE_TOKEN_VALUE), never a host file. A file secret's source
+          # does not exist on the daemon.
+          export VOGT_CORE_TOKEN_VALUE="$(openssl rand -hex 32)"
+          export ENGINE_TOKEN_VALUE="$(openssl rand -hex 32)"
+          export ENGINE_TOKEN="$ENGINE_TOKEN_VALUE"
           # shellcheck disable=SC2086
           docker compose $COMPOSE_FILES up -d
-          trap 'docker compose $COMPOSE_FILES down -v || true; rm -f deploy/vogt-core-token deploy/engine-token' EXIT
+          trap 'docker compose $COMPOSE_FILES down -v || true' EXIT
           ok=""
           for _ in $(seq 1 60); do
             if docker compose $COMPOSE_FILES exec -T engine curl -fsS http://vogt:8000/health/ready >/dev/null 2>&1; then
@@ -134,8 +137,10 @@ jobs:
           test -n "$ok" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
           docker compose $COMPOSE_FILES exec -T engine mkdir -p /tmp/e2e/scripts /tmp/e2e/tests/fixtures
           docker compose $COMPOSE_FILES cp scripts/e2e_stack_smoke.sh engine:/tmp/e2e/scripts/e2e_stack_smoke.sh
-          docker compose $COMPOSE_FILES exec -T engine bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
-          docker compose $COMPOSE_FILES --profile live run --rm -T playwright
+          docker compose $COMPOSE_FILES exec -T -e VOGT_SMOKE_TOKEN="$ENGINE_TOKEN" engine \
+            bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
+          docker compose $COMPOSE_FILES --profile live run --rm -T \
+            -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright
 
   parity:
     name: parity
