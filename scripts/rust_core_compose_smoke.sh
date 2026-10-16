@@ -35,11 +35,6 @@ trap cleanup EXIT
 
 openssl rand -hex 32 > "$SECRET"
 chmod 644 "$SECRET"
-# The overlay's secret sources are relative paths beside the compose files.
-cp "$SECRET" deploy/vogt-core-token
-printf '%s' "$ENGINE_TOKEN" > deploy/engine-token
-chmod 644 deploy/engine-token
-trap 'cleanup; rm -f deploy/vogt-core-token deploy/engine-token' EXIT
 
 export VOGT_IMAGE="vogt-core:rust"
 export VOGT_PUBLIC_URL="http://127.0.0.1:18080"
@@ -49,6 +44,14 @@ export ENGINE_BIND="127.0.0.1"
 export ENGINE_PORT="18910"
 export VOGT_BIND_IP="127.0.0.1"
 export VOGT_PORT="18080"
+
+# The overlay's secret sources are relative paths beside the compose files.
+# ENGINE_TOKEN is set above: writing the file first dies under set -u, and
+# the engine would reject the session.* calls this smoke makes with it.
+cp "$SECRET" deploy/vogt-core-token
+printf '%s' "$ENGINE_TOKEN" > deploy/engine-token
+chmod 644 deploy/engine-token
+trap 'cleanup; rm -f deploy/vogt-core-token deploy/engine-token' EXIT
 
 echo "building the Rust core image"
 docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
