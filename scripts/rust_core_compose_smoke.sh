@@ -89,12 +89,13 @@ fi
 echo "writing an event through the core and reading it from the engine"
 # No project: an empty slug is looked up and refused ("no project with slug ''").
 # A create with the field omitted is a native item, which is all the event needs.
+# The core answers 200 with the item, not 201, so either success status counts.
 # The core token lives on the shared volume. curl is in the engine image,
 # so the call runs there and reads the file the core adopted at init.
 if ! "${COMPOSE[@]}" exec -T engine \
   sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -sS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
     -d "{\"kind\":\"chore\",\"title\":\"rust-core smoke event\",\"reason\":\"compose smoke\"}" \
-    -o /tmp/work.json -w "%{http_code}" http://vogt:8000/api/work' | grep -qx 201; then
+    -o /tmp/work.json -w "%{http_code}" http://vogt:8000/api/work' | grep -Eq '^(200|201)$'; then
   echo "creating the work item was refused" >&2
   "${COMPOSE[@]}" exec -T engine cat /tmp/work.json >&2 || true
   "${COMPOSE[@]}" logs --tail=60 vogt >&2 || true
