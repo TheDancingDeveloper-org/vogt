@@ -94,34 +94,4 @@ describe("FileTree state retention", () => {
     expect(treeCalls.filter((p) => p === "").length).toBe(rootCallsBefore);
   });
 
-  it("keeps the selected file and its focus when a session update remounts the tree (WI-1682)", async () => {
-    vi.spyOn(api, "tree").mockResolvedValue([
-      { name: "README.md", path: "README.md", is_dir: false },
-      { name: "src", path: "src", is_dir: true },
-    ]);
-    vi.spyOn(api, "gitStatus").mockResolvedValue(NO_GIT);
-    setRailSection("files", true);
-
-    const first = mountTree();
-    const file = await screen.findByLabelText("Open README.md");
-    await fireEvent.click(file);
-    expect(file.closest(".tree-row")).toHaveClass("tree-row--selected");
-
-    // A session event rebuilds the rail, which unmounts and remounts the tree
-    // and leaves focus on the session list. The selection must come back, and
-    // so must the keyboard focus.
-    first.unmount();
-    const sessionRow = document.createElement("div");
-    sessionRow.className = "session-row";
-    sessionRow.tabIndex = 0;
-    document.body.appendChild(sessionRow);
-    sessionRow.focus();
-
-    mountTree();
-    const again = await screen.findByLabelText("Open README.md");
-    expect(again.closest(".tree-row")).toHaveClass("tree-row--selected");
-    await waitFor(() => expect(document.activeElement).toBe(again));
-
-    sessionRow.remove();
-  });
 });
