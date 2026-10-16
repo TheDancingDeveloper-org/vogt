@@ -2907,7 +2907,8 @@ pub struct SessionTokenParams {
 pub struct SessionTokenResult {
     pub engine_session_id: String,
     pub actor: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// `null` when the call revoked rather than minted, matching Python's
+    /// `EngineSessionTokenResult.token`.
     pub token: Option<String>,
     pub revoked: i64,
 }
@@ -3108,10 +3109,11 @@ where
         let holder_id = match &existing {
             Some(actor) => actor.id.clone(),
             None => {
+                let short = engine_session_id.get(..8).unwrap_or(&engine_session_id);
                 txn.insert_actor(&Actor {
                     id: actor_id_new.clone(),
                     kind: ActorKind::Agent,
-                    display_name: actor_ref.clone(),
+                    display_name: format!("Engine session {short}"),
                     identity_ref: actor_ref.clone(),
                     disabled: false,
                     created_at: minted_at,
@@ -3120,14 +3122,14 @@ where
             }
         };
         let mut revoked = 0i64;
+        // Python: "session ended" on a revoke, "superseded: <reason>" on a mint.
+        let revoke_why = if revoke {
+            "session ended".to_string()
+        } else {
+            format!("superseded: {why}")
+        };
         for token in txn.tokens_for_actor(&holder_id, false)? {
-            if token.revoked_at.is_none()
-                && txn.revoke_token(
-                    &token.id,
-                    &format!("superseded by session.token: {why}"),
-                    minted_at,
-                )?
-            {
+            if token.revoked_at.is_none() && txn.revoke_token(&token.id, &revoke_why, minted_at)? {
                 revoked += 1;
             }
         }
@@ -3135,7 +3137,7 @@ where
             txn.insert_token(
                 &Token {
                     id: token_id,
-                    actor_id: holder_id,
+                    actor_id: holder_id.clone(),
                     actor_identity_ref: Some(actor_ref.clone()),
                     name: format!("engine session {engine_session_id}"),
                     scopes: minted_scopes,
@@ -3157,13 +3159,18 @@ where
         } else {
             "session.token_issued"
         };
+        let minted = secret.is_some();
         Ok(WriteOutcome::new(
             (revoked, secret),
-            "session",
-            &engine_session_id,
-            json!({"engine_session_id": engine_session_id, "actor": actor_ref}),
+            "actor",
+            &holder_id,
+            json!({"identity_ref": actor_ref, "kind": "agent"}),
             event,
-            json!({"revoked": revoked}),
+            json!({
+                "engine_session_id": engine_session_id,
+                "minted": minted,
+                "revoked": revoked,
+            }),
         ))
     })?;
     let (revoked, secret) = revoked;
@@ -3821,8 +3828,51 @@ mod tests {
             json!({"engine_session_id": ENGINE_UUID, "revoke": true, "reason": "stop"}),
         )
         .unwrap();
-        assert!(gone.get("token").is_none() || gone["token"].is_null());
+        assert!(
+            gone["token"].is_null(),
+            "a revoke returns token: null, {gone}"
+        );
         assert_eq!(gone["revoked"], 1);
+        with_ctx!(&built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            let holder = view
+                .actor_by_identity(&format!("agent:engine:{ENGINE_UUID}"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                holder.display_name,
+                format!("Engine session {}", &ENGINE_UUID[..8])
+            );
+            let records = view
+                .list_audit(&crate::storage::interface::AuditQuery {
+                    limit: 20,
+                    offset: 0,
+                    actor_id: None,
+                    operation: Some("session.token".to_string()),
+                    entity_id: Some(holder.id.clone()),
+                    project_id: None,
+                    since: None,
+                    until: None,
+                })
+                .unwrap();
+            assert!(
+                records.iter().any(|row| row.entity_kind == "actor"),
+                "the audit row is the actor, not the session: {records:?}"
+            );
+            let events = view.list_events(0, 50, Some(&holder.id)).unwrap();
+            let revoked = events
+                .iter()
+                .find(|event| event.kind == "session.token_revoked")
+                .expect("a revoke publishes session.token_revoked");
+            assert_eq!(revoked.summary["minted"], false);
+            assert_eq!(revoked.summary["revoked"], 1);
+            let issued = events
+                .iter()
+                .find(|event| event.kind == "session.token_issued")
+                .expect("a mint publishes session.token_issued");
+            assert_eq!(issued.summary["minted"], true);
+            assert_eq!(issued.summary["engine_session_id"], ENGINE_UUID);
+        });
         let tokens = tokens_of(&built, &format!("agent:engine:{ENGINE_UUID}"));
         assert!(tokens.iter().all(|token| token.revoked_at.is_some()));
     }

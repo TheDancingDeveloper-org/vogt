@@ -35,7 +35,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true", help=f"update {LEDGER}")
     parser.add_argument("--base", default="origin/main")
-    parser.add_argument("--head", default="rust-core")
+    # HEAD, not the branch name. On a pull request the checkout is a detached
+    # commit and the local repo has no ref named rust-core, so merge-base
+    # against that name fails before it can report anything.
+    parser.add_argument("--head", default="HEAD")
     args = parser.parse_args()
 
     # A checkout of a PR branch has origin/main but no local rust-core ref, and
@@ -118,7 +121,9 @@ def _render(
     migrations: list[str] = []
     for commit in commits:
         sha = str(commit["sha"])
-        files = [str(path) for path in commit["files"]]
+        raw_files = commit["files"]
+        assert isinstance(raw_files, list)
+        files = [str(path) for path in raw_files]
         owners = sorted({_chunk_for(path, chunks) for path in files})
         mark = previous.get(sha[:7], "no")
         lines.append(

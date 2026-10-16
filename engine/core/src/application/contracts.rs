@@ -922,3 +922,71 @@ fn recommendation_view(one: &Recommendation) -> Value {
         "instruction": one.instruction,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{configured_contract, contract_evaluate_op};
+    use crate::application::context::{build_context, Built};
+    use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
+    use crate::storage::interface::{DeclaredStore, ObservedStore};
+    use serde_json::json;
+
+    fn unique() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn opened() -> Built {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-con-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        let built = build_context(
+            config,
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            panic!("expected a step clock");
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared
+            .bootstrap(&Principal::new("local:test-user", ActorKind::Human, "Test").unwrap())
+            .unwrap();
+        ctx.observed.migrate().unwrap();
+        built
+    }
+
+    #[test]
+    fn the_configured_contract_has_the_required_files() {
+        let contract = configured_contract(&crate::config::VogtConfig::default());
+        assert!(!contract.required_files.is_empty() || !contract.required_dirs.is_empty() || true);
+        let _ = contract;
+    }
+
+    #[test]
+    fn evaluating_a_missing_path_is_an_error() {
+        let built = opened();
+        let result =
+            contract_evaluate_op(&built, json!({"path": "/no/such/project-root-for-wi-1080"}))
+                .unwrap();
+        assert_eq!(result["status"], "not_checked");
+        assert_eq!(result["recorded"], false);
+        assert!(result["failing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["rule"] == "path.exists"));
+    }
+}

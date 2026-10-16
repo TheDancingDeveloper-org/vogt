@@ -322,6 +322,23 @@ fn scripts_command(argv: &[String]) -> Option<ExitCode> {
             scripts::sanitise_transcript(&rest)
         }
         "check-docs" => scripts::check_docs(&root),
+        "gen-config-docs" => scripts::gen_config_docs(&root),
+        "capture-transcript" => {
+            let after = after_command(argv, word);
+            scripts::capture_transcript(&after)
+        }
+        "fixture-reset" => scripts::fixture_reset(&root, &after_command(argv, word)),
+        "load" => scripts::load(&after_command(argv, word)),
+        "fake-agent" => {
+            let after = after_command(argv, word);
+            return Some(match scripts::fake_agent(&after) {
+                Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+                Err(problem) => {
+                    eprintln!("{problem}");
+                    ExitCode::from(1)
+                }
+            });
+        }
         _ => return None,
     };
     Some(match result {
@@ -331,6 +348,15 @@ fn scripts_command(argv: &[String]) -> Option<ExitCode> {
             ExitCode::from(1)
         }
     })
+}
+
+/// The tokens after the command word, as owned strings.
+fn after_command(argv: &[String], word: &str) -> Vec<String> {
+    argv.iter()
+        .skip_while(|arg| arg.as_str() != word)
+        .skip(1)
+        .cloned()
+        .collect()
 }
 
 /// The arguments that are not `--root PATH`: flags keep their values, and a

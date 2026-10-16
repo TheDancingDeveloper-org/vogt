@@ -9,10 +9,10 @@ against a Python tree that had grown to 134). Run this after changing the
 Python operation set; the committed golden at
 `tests/parity/golden/registry.json` is what the Rust dump is checked against.
 
-The golden is recorded from Python's own `registry.dump`, with the parameter
-and result schemas replaced by ``{"not_ported": true}``. Real schemas arrive
-with the schema emitter (WI-1060); until then the marker is honest, and it is
-deliberately not hidden by a normaliser rule.
+The golden and `schemas.rs` are recorded from Python's own `registry.dump`,
+schemas included. `--check` diffs both, so a model change that alters a
+schema fails here rather than at the next review. Deriving those schemas
+from Rust types, instead of recording pydantic's, remains WI-1060.
 """
 
 from __future__ import annotations
@@ -54,18 +54,35 @@ use super::{CliBinding, HttpMethod, HttpRoute, Operation, Scope};
 """
 
 
+def _validates_line() -> str:
+    # Kept as one Rust comment. Building it avoids a source line ruff format
+    # rewrites into single quotes, which would change the generated file.
+    sample = "`" + '"  xy  "' + "`"
+    result = "`" + '"xy"' + "`"
+    return f"//! validating {sample} against its annotation returns {result}:\n"
+
+
+def _rust_array(decl: str, rows: list[str]) -> str:
+    """One Rust static: the declaration, then the rows, then the closer."""
+    return decl + " = &[\n" + "".join(rows) + "];\n"
+
+
+def _arg(node: ast.expr, index: int) -> ast.expr:
+    if not isinstance(node, ast.Call):
+        raise SystemExit(f"expected a call, got {type(node).__name__}")
+    return node.args[index]
+
+
 def _operations() -> list[dict[str, object]]:
     """Read the operation set from source, so this runs without importing it."""
-    tree = ast.parse(
-        (REPO_ROOT / "src" / "vogt" / "registry" / "operations.py").read_text()
-    )
+    source = REPO_ROOT / "src" / "vogt" / "registry" / "operations.py"
+    tree = ast.parse(source.read_text())
     found: list[dict[str, object]] = []
     for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "Operation"
-        ):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Name) or func.id != "Operation":
             continue
         kw = {keyword.arg: keyword.value for keyword in node.keywords}
         route = kw["route"]
@@ -78,9 +95,9 @@ def _operations() -> list[dict[str, object]]:
                 "summary": ast.literal_eval(kw["summary"]),
                 "scope": ast.literal_eval(kw["scope"]),
                 "mutating": ast.literal_eval(kw["mutating"]),
-                "method": ast.literal_eval(route.args[0]),
-                "path": ast.literal_eval(route.args[1]),
-                "cli": list(ast.literal_eval(cli.args[0])),
+                "method": ast.literal_eval(_arg(kw["route"], 0)),
+                "path": ast.literal_eval(_arg(kw["route"], 1)),
+                "cli": list(ast.literal_eval(_arg(kw["cli"], 0))),
             }
         )
     return found
@@ -89,17 +106,17 @@ def _operations() -> list[dict[str, object]]:
 def render_operations_rs(operations: list[dict[str, object]]) -> str:
     lines = [HEADER, "pub fn build_operations() -> Vec<Operation> {\n    vec![\n"]
     for operation in operations:
-        cli = operation["cli"]
-        if not isinstance(cli, list):
-            raise SystemExit(f"{operation['name']} has no cli parts")
-        cli_parts = ", ".join(json.dumps(part) for part in cli)
+        parts = operation["cli"]
+        assert isinstance(parts, list)
+        cli = ", ".join(json.dumps(part) for part in parts)
         lines.append(
             "        Operation::new(\n"
             f"            {json.dumps(operation['name'])},\n"
             f"            {json.dumps(operation['summary'])},\n"
             f"            Scope::{SCOPES[operation['scope']]},\n"  # type: ignore[index]
             f"            {str(operation['mutating']).lower()},\n"
-            f"            HttpRoute::new(HttpMethod::{METHODS[operation['method']]}, "  # type: ignore[index]
+            "            HttpRoute::new("
+            f"HttpMethod::{METHODS[operation['method']]}, "  # type: ignore[index]
             f"{json.dumps(operation['path'])}),\n"
             f"            CliBinding::new(&[{cli_parts}]),\n"
             "        ),\n"
@@ -124,6 +141,8 @@ def record_golden() -> tuple[str, str]:
     from vogt.application.models import RegistryDumpParams
     from vogt.application.services.instance import registry_dump
 
+    # registry_dump reads no store. The signature still asks for a context
+    # because every service does; this call has nothing to give it.
     dump = registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
     entries = []
     for operation in dump["operations"]:
@@ -136,8 +155,8 @@ def record_golden() -> tuple[str, str]:
         entries.append(
             "    (\n"
             f"        {json.dumps(operation['name'])},\n"
-            f"        {params},\n"
-            f"        {result},\n"
+            f"        {json.dumps(json.dumps(operation['params_schema'], separators=(',', ':')))},\n"  # noqa: E501
+            f"        {json.dumps(json.dumps(operation['result_schema'], separators=(',', ':')))},\n"  # noqa: E501
             "    ),\n"
         )
     module = (
@@ -155,7 +174,7 @@ def record_golden() -> tuple[str, str]:
         "//! because after that nothing can regenerate the table.\n"
         "\n"
         "/// `(operation name, params schema, result schema)`, in registry order.\n"
-        "pub static SCHEMAS: &[(&str, &str, &str)] = &[\n" + "".join(entries) + "];\n"
+        + _rust_array("pub static SCHEMAS: &[(&str, &str, &str)]", entries)
     )
     golden = json.dumps(dump, indent=2, ensure_ascii=False) + "\n"
     return golden, module
@@ -190,13 +209,13 @@ def record_strips() -> str:
         "//! Parameter fields that strip whitespace, recorded from the models.\n"
         "//!\n"
         "//! Produced by `scripts/gen_registry.py`. A field is here exactly when\n"
-        '//! validating `"  xy  "` against its annotation returns `"xy"`:\n'
-        "//! `Name` and `Reason` do, a plain `str` does not. A field of the same\n"
+        + _validates_line()
+        + "//! `Name` and `Reason` do, a plain `str` does not. A field of the same\n"
         "//! name typed `str` is absent, and must stay absent: stripping it would\n"
         "//! change stored text, and with it the audit digest.\n"
         "\n"
         "/// `(operation, field)`, in registry order.\n"
-        "pub static STRIPS: &[(&str, &str)] = &[\n" + "".join(rows) + "];\n"
+        + _rust_array("pub static STRIPS: &[(&str, &str)]", rows)
     )
 
 
@@ -205,13 +224,15 @@ def main() -> int:
     operations = _operations()
     rendered = render_operations_rs(operations)
     strips = record_strips()
+    outputs = {OPERATIONS_RS: rendered, STRIPS_RS: strips}
+    # The schema table and the registry golden are Python's own dump. They
+    # are checked on --check as well as written, so a model change that
+    # alters a schema cannot pass CI while the Rust table still describes
+    # the old one. `record_golden` imports the registry, so it needs the
+    # package importable; the metadata check above does not.
     golden, schemas = record_golden()
-    outputs = {
-        OPERATIONS_RS: rendered,
-        STRIPS_RS: strips,
-        SCHEMAS_RS: schemas,
-        GOLDEN: golden,
-    }
+    outputs[GOLDEN] = golden
+    outputs[SCHEMAS_RS] = schemas
     if check:
         # Drift fails here, at the Python source, rather than waiting for
         # someone to remember to regenerate. The Rust test checks the same

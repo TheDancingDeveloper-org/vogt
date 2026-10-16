@@ -851,6 +851,17 @@
      "reason": "done"
     }
    }
+  },
+  {
+   "operation": "chat.list",
+   "params": {},
+   "expect": {"exit": 1, "capture_error": true}
+  },
+  {
+   "operation": "chat.get",
+   "params": {"id": "nope"},
+   "expect": {"exit": 1, "capture_error": true}
   }
+
  ]
 }
