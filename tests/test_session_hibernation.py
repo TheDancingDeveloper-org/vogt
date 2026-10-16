@@ -76,6 +76,9 @@ class Engine:
         #: (WI-1669).
         self.idle_reads_after_wake = 0
         self._idle_reads_left = 0
+        self.held_reads_after_wake = 0
+        self._held_reads_left = 0
+        self.held_text = ""
         #: When set, a hibernate is refused (409) with this reason.
         self.refuse_hibernate: str | None = None
         #: When set, a wake is refused (409) with this reason and the session
@@ -165,6 +168,7 @@ class Engine:
             self.hibernated.discard(engine_id)
             self.live.add(engine_id)
             self._idle_reads_left = self.idle_reads_after_wake
+            self._held_reads_left = self.held_reads_after_wake
             return 200, json.dumps(self.summary(engine_id)).encode()
         if method == "POST" and verb == "keep-awake":
             if payload.get("keep_awake"):
@@ -193,12 +197,19 @@ class Engine:
                 activity = "hibernated"
             else:
                 activity = "running"
+            lines = HIBERNATED_SCREEN if asleep else ["> ", ""]
+            if not asleep and self._held_reads_left > 0:
+                # Working, but the Enter was swallowed: the text is still in
+                # the composer (WI-1669).
+                self._held_reads_left -= 1
+                activity = "running"
+                lines = ["\u2022 Working (1s)", "\u203a " + self.held_text]
             return 200, json.dumps(
                 {
                     "id": engine_id,
                     "cols": 80,
                     "rows": 2,
-                    "lines": HIBERNATED_SCREEN if asleep else ["> ", ""],
+                    "lines": lines,
                     "cursor": {"row": 0, "col": 2},
                     "activity": activity,
                     "alive": not asleep,
@@ -464,6 +475,36 @@ def test_a_submit_that_does_not_start_a_turn_is_pressed_again(
     )
     assert result.delivery == "delivered"
     assert result.woke is True
+
+
+def test_a_running_codex_still_holding_the_text_is_pressed_again(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`running` is not proof the Enter landed (WI-1669).
+
+    A resumed Codex read as working while the text sat in its composer; the
+    input path used to call that delivered and never press Enter again.
+    """
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    engine.agent[engine_id] = "codex"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.held_reads_after_wake = 2
+    engine.held_text = "go on"
+    engine.sent.clear()
+
+    result = session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+    assert len(_submits(engine)) == 2
+    assert result.delivery == "delivered"
 
 
 def test_a_woken_session_that_is_not_ready_is_not_typed_into(
