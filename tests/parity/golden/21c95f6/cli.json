@@ -1964,5 +1964,17 @@
     "body": null,
     "exit": 1,
     "operation": "session.stop"
+  },
+  {
+    "body": null,
+    "error": "error: engine_unavailable: no session engine is configured, and chats run on it (set VOGT_ENGINE_URL)",
+    "exit": 1,
+    "operation": "chat.list"
+  },
+  {
+    "body": null,
+    "error": "error: invalid_request: 'nope' is not a chat id (a UUID, from chat.list or chat.create)",
+    "exit": 1,
+    "operation": "chat.get"
   }
 ]

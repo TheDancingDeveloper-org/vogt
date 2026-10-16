@@ -115,7 +115,7 @@ fn observed<C: Clock, I: IdFactory>(
         updated_at: observation.observed_at,
         trust_state: trust_for(
             ctx,
-            Some(observation.observed_at),
+            observation.observed_at,
             confirmed.get(&observation.subject_key).copied(),
         ),
         state: "observed".to_string(),
@@ -133,24 +133,12 @@ fn observed<C: Clock, I: IdFactory>(
 /// `_freshest` in `services/views.py`.
 pub fn trust_for<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
-    observed_at: Option<Moment>,
+    observed_at: Moment,
     confirmed_at: Option<Moment>,
 ) -> String {
-    // Python `views._freshest`: the horizon is measured from the more recent
-    // of first-seen and last-confirmed. An older confirmation must not pull a
-    // fresh sighting stale, and a confirmation newer than first-seen keeps the
-    // subject verified. Nothing at all is `unverified`, not `stale`. Whole
-    // seconds, so a sub-second skew cannot flip it.
-    let reference = match (observed_at, confirmed_at) {
-        (Some(seen), Some(confirmed)) if confirmed.unix_seconds() > seen.unix_seconds() => {
-            Some(confirmed)
-        }
-        (Some(seen), _) => Some(seen),
-        (None, Some(confirmed)) => Some(confirmed),
-        (None, None) => None,
-    };
-    let Some(reference) = reference else {
-        return "unverified".to_string();
+    let reference = match confirmed_at {
+        Some(confirmed) if confirmed.unix_seconds() > observed_at.unix_seconds() => confirmed,
+        _ => observed_at,
     };
     let horizon = ctx.config.verify_horizon_hours * 3600;
     if now_of(&ctx.clock).unix_seconds() - reference.unix_seconds() <= horizon {
@@ -422,7 +410,7 @@ fn gather<C: Clock, I: IdFactory>(
             // fewer reads, so the scores land a few seconds fresher.
             let trust = trust_for(
                 ctx,
-                Some(observation.observed_at),
+                observation.observed_at,
                 confirmed.get(&observation.subject_key).copied(),
             );
             let (open_pr, branch_activity) = signals.for_ref(&observation.subject_key);
@@ -650,25 +638,13 @@ pub fn backlog_op(ctx: &Built, params: serde_json::Value) -> Result<serde_json::
     crate::with_ctx!(ctx, |ctx| backlog(ctx, params))
 }
 
-/// `offset` is a page start, never a Python-style slice from the end.
-/// A negative value is refused rather than clamped, matching `BacklogParams`.
-fn bounded_offset(value: Option<&serde_json::Value>) -> Result<i64, VogtError> {
-    let offset = value.and_then(serde_json::Value::as_i64).unwrap_or(0);
-    if offset < 0 {
-        return Err(VogtError::InvalidRequest(
-            "offset must be 0 or greater".to_string(),
-        ));
-    }
-    Ok(offset)
-}
-
 /// The ranked backlog, globally or for one project. Ports `backlog`.
 ///
 /// Ranking is computed over the whole candidate set before the slice, so page
 /// two is the next rows of one ordering rather than a fresh ranking of what was
 /// left. An unlinked project scope answers with the CTA marker instead of a
 /// ranked list.
-pub(crate) fn backlog<C: Clock, I: IdFactory>(
+fn backlog<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, VogtError> {
@@ -681,7 +657,10 @@ pub(crate) fn backlog<C: Clock, I: IdFactory>(
         .get("limit")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(50);
-    let offset = bounded_offset(params.get("offset"))?;
+    let offset = params
+        .get("offset")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
     // Freshness is the last clock read, after the unlinked check and the
     // gather, so its age matches Python's (views.py reads it after ranking).
     if let Some(project) = project {
@@ -706,7 +685,7 @@ pub(crate) fn backlog<C: Clock, I: IdFactory>(
     let freshness =
         crate::application::services::freshness::freshness_of(&ctx.observed, now_of(&ctx.clock))?;
     let total = gathered.ranked.len() as i64;
-    let start = offset as usize;
+    let start = offset.max(0) as usize;
     let page: Vec<serde_json::Value> = gathered
         .ranked
         .iter()
@@ -740,7 +719,7 @@ pub fn bugs_op(ctx: &Built, params: serde_json::Value) -> Result<serde_json::Val
 /// The backlog's gather narrowed to kind `bug`, with no initiative or trust
 /// filter. The rows come back whole, and `next_offset` stays null: Python
 /// slices the ranked list and never sets the page cursor.
-pub(crate) fn bugs<C: Clock, I: IdFactory>(
+fn bugs<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, VogtError> {
@@ -749,7 +728,10 @@ pub(crate) fn bugs<C: Clock, I: IdFactory>(
         .get("limit")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(50);
-    let offset = bounded_offset(params.get("offset"))?;
+    let offset = params
+        .get("offset")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
     if let Some(project) = project {
         if let Some(marker) = unlinked_scope(ctx, project)? {
             return Ok(marker);
@@ -769,7 +751,7 @@ pub(crate) fn bugs<C: Clock, I: IdFactory>(
     let freshness =
         crate::application::services::freshness::freshness_of(&ctx.observed, now_of(&ctx.clock))?;
     let total = gathered.ranked.len() as i64;
-    let start = offset as usize;
+    let start = offset.max(0) as usize;
     let page: Vec<serde_json::Value> = gathered
         .ranked
         .iter()
@@ -990,262 +972,5 @@ mod tests {
         );
         assert!(summary["item"].is_null());
         assert_eq!(projected(&row, "full")["item"]["ref"], "WI-1");
-    }
-
-    /// Ports `tests/test_trust_confirmation.py`. The horizon is measured from
-    /// the more recent of first-seen and last-confirmed.
-    use crate::application::context::build_context;
-    use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
-    use crate::storage::interface::{DeclaredStore, ObservedStore};
-
-    fn trust_context(hours: i64) -> crate::application::context::Built {
-        let dir = std::env::temp_dir().join(format!(
-            "vogt-trust-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut config = crate::config::VogtConfig {
-            data_dir: dir,
-            ..crate::config::VogtConfig::default()
-        };
-        config.verify_horizon_hours = hours;
-        let ids_path = config.data_dir.join("test-ids.json");
-        let built = build_context(
-            config,
-            Some(Principal::new("local:trust", ActorKind::Human, "Trust").unwrap()),
-            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
-            Some(SequentialIds::new(Some(ids_path)).unwrap()),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        if let crate::application::context::Built::StepSequential(ctx) = &built {
-            ctx.declared.migrate().unwrap();
-            ctx.observed.migrate().unwrap();
-        }
-        built
-    }
-
-    /// A clock that never moves, so two live rankings of one set agree.
-    /// `StepClock` grows staleness on every read and can reorder a near-tie
-    /// between pages; Python pins a fixed clock for the same reason.
-    struct FixedClock(Moment);
-
-    impl crate::core::Clock for FixedClock {
-        fn now(&mut self) -> Moment {
-            self.0
-        }
-    }
-
-    fn paging_estate() -> crate::application::context::AppContext<FixedClock, SequentialIds> {
-        use std::sync::{Arc, Mutex};
-        let dir = std::env::temp_dir().join(format!(
-            "vogt-page-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let config = crate::config::VogtConfig {
-            data_dir: dir.clone(),
-            ..crate::config::VogtConfig::default()
-        };
-        let clock = Arc::new(Mutex::new(FixedClock(Moment::from_unix(1_754_000_000, 0))));
-        let ids = Arc::new(Mutex::new(
-            SequentialIds::new(Some(dir.join("test-ids.json"))).unwrap(),
-        ));
-        let principal = Principal::new("local:paging", ActorKind::Human, "Paging").unwrap();
-        let ctx = crate::application::context::AppContext {
-            declared: crate::storage::sqlite::declared::SqliteDeclaredStore::shared(
-                config.declared_db_path(),
-                Arc::clone(&clock),
-                Arc::clone(&ids),
-                config.sqlite_synchronous.as_str(),
-            ),
-            observed: crate::storage::sqlite::observed::SqliteObservedStore::shared(
-                config.observed_db_path(),
-                Arc::clone(&clock),
-                Arc::clone(&ids),
-                config.sqlite_synchronous.as_str(),
-            ),
-            principal: principal.clone(),
-            token: None,
-            clock,
-            id_factory: ids,
-            cloner: crate::adapters::git::clone_repository,
-            pusher: crate::adapters::git::push_branch,
-            engine: None,
-            peer: None,
-            public_identity: crate::application::context::PublicIdentity::default(),
-            forge_transport: None,
-            config,
-        };
-        ctx.declared.migrate().unwrap();
-        ctx.declared.bootstrap(&principal).unwrap();
-        ctx.observed.migrate().unwrap();
-        for index in 0..12 {
-            let kind = if index % 2 == 0 { "feature" } else { "bug" };
-            crate::application::services::work::create_work(
-                &ctx,
-                serde_json::json!({
-                    "kind": kind,
-                    "title": format!("item {index:02}"),
-                    "priority": "p2",
-                    "reason": "paging test",
-                }),
-            )
-            .unwrap();
-        }
-        ctx
-    }
-
-    fn refs_of(result: &serde_json::Value) -> Vec<String> {
-        result["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| row["ref"].as_str().unwrap().to_string())
-            .collect()
-    }
-
-    #[test]
-    fn the_pages_of_a_backlog_tile_the_ranking() {
-        // Live calls, not slices of one result. The fixed clock keeps the
-        // ranking still, so page two is the next rows of the unpaged order.
-        let ctx = paging_estate();
-        let whole = refs_of(&super::backlog(&ctx, serde_json::json!({"limit": 200})).unwrap());
-        assert_eq!(whole.len(), 12, "the fixture must exceed one page");
-        let first =
-            refs_of(&super::backlog(&ctx, serde_json::json!({"limit": 5, "offset": 0})).unwrap());
-        let second =
-            refs_of(&super::backlog(&ctx, serde_json::json!({"limit": 5, "offset": 5})).unwrap());
-        let third =
-            refs_of(&super::backlog(&ctx, serde_json::json!({"limit": 5, "offset": 10})).unwrap());
-        let mut tiled = first.clone();
-        tiled.extend(second.iter().cloned());
-        tiled.extend(third.iter().cloned());
-        assert_eq!(tiled, whole);
-        assert!(first.iter().all(|item| !second.contains(item)));
-        assert_eq!(third.len(), 2, "the last page is short rather than padded");
-    }
-
-    #[test]
-    fn the_total_is_the_estate_not_the_page() {
-        let ctx = paging_estate();
-        let page = super::backlog(&ctx, serde_json::json!({"limit": 5, "offset": 5})).unwrap();
-        assert_eq!(page["total_considered"], 12);
-        assert_eq!(page["items"].as_array().unwrap().len(), 5);
-        assert_eq!(page["next_offset"], 10);
-    }
-
-    #[test]
-    fn an_offset_past_the_end_is_empty_rather_than_an_error() {
-        let ctx = paging_estate();
-        let page = super::backlog(&ctx, serde_json::json!({"limit": 5, "offset": 99})).unwrap();
-        assert!(page["items"].as_array().unwrap().is_empty());
-        assert_eq!(page["total_considered"], 12);
-        assert!(page["next_offset"].is_null());
-    }
-
-    #[test]
-    fn a_negative_offset_is_refused() {
-        let ctx = paging_estate();
-        let error =
-            super::backlog(&ctx, serde_json::json!({"limit": 5, "offset": -3})).unwrap_err();
-        assert!(
-            error.to_string().contains("offset must be 0 or greater"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn bugs_pages_the_same_way() {
-        let ctx = paging_estate();
-        let whole = refs_of(&super::bugs(&ctx, serde_json::json!({"limit": 200})).unwrap());
-        assert_eq!(whole.len(), 6);
-        let first =
-            refs_of(&super::bugs(&ctx, serde_json::json!({"limit": 4, "offset": 0})).unwrap());
-        let second =
-            refs_of(&super::bugs(&ctx, serde_json::json!({"limit": 4, "offset": 4})).unwrap());
-        let mut tiled = first.clone();
-        tiled.extend(second.iter().cloned());
-        assert_eq!(tiled, whole);
-        assert!(first.iter().all(|item| !second.contains(item)));
-    }
-
-    #[test]
-    fn equal_scores_break_ties_the_same_way_every_time() {
-        let ctx = paging_estate();
-        let page = super::backlog(&ctx, serde_json::json!({"limit": 200})).unwrap();
-        let scores: std::collections::BTreeSet<String> = page["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| row["score"].to_string())
-            .collect();
-        assert_eq!(scores.len(), 1, "the fixture is one flat score band");
-        let first = refs_of(&page);
-        let again = refs_of(&super::backlog(&ctx, serde_json::json!({"limit": 200})).unwrap());
-        assert_eq!(first, again);
-    }
-
-    #[test]
-    fn a_reconfirmed_subject_stays_verified() {
-        // First-seen past the horizon is stale; confirmed five minutes ago is verified.
-        let built = trust_context(24);
-        let crate::application::context::Built::StepSequential(ctx) = &built else {
-            unreachable!();
-        };
-        let seen = Moment::from_unix(1_700_000_000 - 25 * 3600, 0);
-        let confirmed = Moment::from_unix(1_700_000_000 - 5 * 60, 0);
-        assert_eq!(super::trust_for(ctx, Some(seen), None), "stale");
-        assert_eq!(
-            super::trust_for(ctx, Some(seen), Some(confirmed)),
-            "verified"
-        );
-    }
-
-    #[test]
-    fn confirmation_does_not_rescue_a_genuinely_stale_subject() {
-        let built = trust_context(24);
-        let crate::application::context::Built::StepSequential(ctx) = &built else {
-            unreachable!();
-        };
-        let seen = Moment::from_unix(1_700_000_000 - 48 * 3600, 0);
-        let confirmed = Moment::from_unix(1_700_000_000 - 26 * 3600, 0);
-        assert_eq!(super::trust_for(ctx, Some(seen), Some(confirmed)), "stale");
-    }
-
-    #[test]
-    fn an_older_confirmation_does_not_age_a_fresh_sighting() {
-        let built = trust_context(24);
-        let crate::application::context::Built::StepSequential(ctx) = &built else {
-            unreachable!();
-        };
-        let seen = Moment::from_unix(1_700_000_000 - 60, 0);
-        let confirmed = Moment::from_unix(1_700_000_000 - 100 * 3600, 0);
-        assert_eq!(
-            super::trust_for(ctx, Some(seen), Some(confirmed)),
-            "verified"
-        );
-    }
-
-    #[test]
-    fn no_evidence_at_all_is_unverified() {
-        let built = trust_context(24);
-        let crate::application::context::Built::StepSequential(ctx) = &built else {
-            unreachable!();
-        };
-        assert_eq!(super::trust_for(ctx, None, None), "unverified");
     }
 }

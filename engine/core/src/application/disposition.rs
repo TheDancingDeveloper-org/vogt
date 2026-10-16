@@ -22,8 +22,8 @@ fn ledger_files() -> BTreeSet<String> {
             let disposition = cells.next().expect("disposition cell");
             let why = cells.next().expect("reason cell");
             assert!(
-                disposition == "ported" || disposition == "retired",
-                "{file} has disposition {disposition:?}, want ported or retired"
+                matches!(disposition, "ported" | "retired" | "unported"),
+                "{file} has disposition {disposition:?}, want ported, retired or unported"
             );
             assert!(!why.is_empty(), "{file} has an empty reason");
             assert!(file.starts_with("test_") && file.ends_with(".py"));

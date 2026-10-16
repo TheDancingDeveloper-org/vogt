@@ -5,7 +5,7 @@
 
 mod actors;
 #[allow(dead_code)]
-pub(crate) mod adapters;
+mod adapters;
 #[allow(dead_code)] // Consumed by the service layer (P1.10 onward).
 mod application;
 mod auth;
@@ -205,11 +205,9 @@ fn main() -> ExitCode {
             &mut |operation, params| {
                 // Parsing and pydantic validation have both succeeded, which is
                 // where Python builds the context and announces the hooks. A
-                // usage error returns before this closure runs. A bad hook value
-                // is an `InvalidRequest` here too. The banner is printed after
-                // the command, and only when it failed: printing it here puts
-                // it ahead of the error the command reports.
-                validate_hooks(None, false)?;
+                // usage error returns before this closure runs, so it carries
+                // no banner. A bad hook value is an `InvalidRequest` here too.
+                validate_hooks(None)?;
                 match operation.handler {
                     // The manifest takes no parameters and reads no store.
                     registry::Handler::RegistryDump => {
@@ -240,14 +238,6 @@ fn main() -> ExitCode {
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         );
-        // Python logs the hook warning through a logger the CLI never attaches
-        // a handler to, so `vogt` is silent. Announcing it before the command
-        // puts the banner ahead of the real error, and the parity recorder
-        // reports that banner as the reason a step failed. Say it afterwards,
-        // and only when the command itself failed, so a success stays clean.
-        if code != 0 {
-            let _ = validate_hooks(None, true);
-        }
         std::process::exit(code);
     }
     let cli = Cli::parse_from(
@@ -257,7 +247,7 @@ fn main() -> ExitCode {
                 .map(std::ffi::OsString::from),
         ),
     );
-    if let Err(error) = validate_hooks(None, true) {
+    if let Err(error) = validate_hooks(None) {
         eprintln!("{error}");
         return ExitCode::from(1);
     }
@@ -533,7 +523,7 @@ fn canonical_global(arg: &str) -> Option<&'static str> {
 /// `InvalidRequest` does. `host` is checked when serving, so a deterministic
 /// clock cannot run on a non-loopback bind. The warning is not repeated when
 /// `serve` validates again, because Python announces it once per process.
-fn validate_hooks(host: Option<&str>, announce: bool) -> Result<(), crate::errors::VogtError> {
+fn validate_hooks(host: Option<&str>) -> Result<(), crate::errors::VogtError> {
     let clock = std::env::var(core::CLOCK_ENV).ok();
     let ids = std::env::var(core::IDS_ENV).ok();
     core::clock_from_env(clock.as_deref())?;
@@ -542,7 +532,7 @@ fn validate_hooks(host: Option<&str>, announce: bool) -> Result<(), crate::error
         core::refuse_hooks_off_loopback(host, clock.as_deref(), ids.as_deref())?;
     }
     let active = core::hooks_active(clock.as_deref(), ids.as_deref());
-    if announce && !active.is_empty() && host.is_none() {
+    if !active.is_empty() && host.is_none() {
         announce_hooks(&active);
     }
     Ok(())
@@ -702,7 +692,7 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
         }
     };
     observability::configure_logging(config.log_level.as_str(), config.log_format.as_str());
-    if let Err(error) = validate_hooks(Some(host), false) {
+    if let Err(error) = validate_hooks(Some(host)) {
         eprintln!("error: invalid_request: {error}");
         return ExitCode::from(1);
     }

@@ -85,10 +85,6 @@ def _operations() -> list[dict[str, object]]:
         if not isinstance(func, ast.Name) or func.id != "Operation":
             continue
         kw = {keyword.arg: keyword.value for keyword in node.keywords}
-        route = kw["route"]
-        cli = kw["cli"]
-        if not isinstance(route, ast.Call) or not isinstance(cli, ast.Call):
-            raise SystemExit(f"{kw['name']!r} has no route or cli call")
         found.append(
             {
                 "name": ast.literal_eval(kw["name"]),
@@ -118,7 +114,7 @@ def render_operations_rs(operations: list[dict[str, object]]) -> str:
             "            HttpRoute::new("
             f"HttpMethod::{METHODS[operation['method']]}, "  # type: ignore[index]
             f"{json.dumps(operation['path'])}),\n"
-            f"            CliBinding::new(&[{cli_parts}]),\n"
+            f"            CliBinding::new(&[{cli}]),\n"
             "        ),\n"
         )
     lines.append("    ]\n}\n")
@@ -146,12 +142,6 @@ def record_golden() -> tuple[str, str]:
     dump = registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
     entries = []
     for operation in dump["operations"]:
-        params = json.dumps(
-            json.dumps(operation["params_schema"], separators=(",", ":"))
-        )
-        result = json.dumps(
-            json.dumps(operation["result_schema"], separators=(",", ":"))
-        )
         entries.append(
             "    (\n"
             f"        {json.dumps(operation['name'])},\n"
