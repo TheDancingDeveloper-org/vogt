@@ -148,15 +148,23 @@ jobs:
           test -n "$front" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
           docker compose $COMPOSE_FILES exec -T engine mkdir -p /tmp/e2e/scripts /tmp/e2e/tests/fixtures
           docker compose $COMPOSE_FILES cp scripts/e2e_stack_smoke.sh engine:/tmp/e2e/scripts/e2e_stack_smoke.sh
-          docker compose $COMPOSE_FILES exec -T -e VOGT_SMOKE_TOKEN="$ENGINE_TOKEN" engine \
+          # No VOGT_SMOKE_TOKEN: the smoke walks the stranger's path and mints
+          # the first person's token. The break-glass ENGINE_TOKEN is agent-
+          # bound and never closes first-run install mode (#903), so handing
+          # it to the smoke left the live gate showing the wizard instead.
+          docker compose $COMPOSE_FILES exec -T engine \
             bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
-          # Advisory, as it is in .github/workflows/e2e.yml: the live specs
-          # assert the Python core's fixtures, so against the Rust core they
-          # fail for reasons that are not this stack. The smoke walk above is
-          # the gate. A failure is printed, not fatal.
+          # The live specs that exercise the Rust core's sign-in gate, the
+          # demo provenance check and the terminal reattach. Gating.
           docker compose $COMPOSE_FILES --profile live run --rm -T \
             -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright \
-            || echo "live Playwright failed against the Rust core (advisory, as in e2e.yml)"
+            -g "Login and authentication errors present|stale provenance cannot activate demo mode|terminal replay budget \(live acceptance\) symptom 1"
+          # The rest of the live run stays advisory: those specs assert
+          # fixtures the live stack does not carry yet, and fail for reasons
+          # unrelated to the Rust core. A failure is printed, not fatal.
+          docker compose $COMPOSE_FILES --profile live run --rm -T \
+            -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright \
+            || echo "live Playwright (rest of the suite) failed against the Rust core (advisory)"
 
   parity:
     name: parity
