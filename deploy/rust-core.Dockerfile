@@ -68,8 +68,13 @@ RUN apt-get update \
     && chown root:0 /var/lib/vogt \
     && chmod 0770 /var/lib/vogt
 
-COPY --from=build /src/target/release/vogt-core /usr/local/bin/vogt-core
-RUN ln -s vogt-core /usr/local/bin/vogt
+# Installed where the Python image puts its CLI, plus the names `vogt` and
+# `vogt-core` on PATH. `.rust-core` tells engine/Dockerfile this is the Rust
+# layout, so it does not go looking for vogt-mcp inside the venv.
+COPY --from=build /src/target/release/vogt-core /opt/vogt/.venv/bin/vogt
+RUN ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt \
+    && ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt-core \
+    && touch /opt/vogt/.venv/bin/.rust-core
 COPY --chmod=755 vogt-lifecycle.sh /usr/local/bin/vogt-lifecycle
 
 ENV VOGT_DATA_DIR=/var/lib/vogt

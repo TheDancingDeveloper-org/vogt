@@ -611,11 +611,23 @@ RUN chmod +x /usr/local/bin/vogt-engine
 # `pip install` goes somewhere surprising. Three names, no PATH surgery — and
 # `vogt` on PATH is also what makes the core reachable from a session inside
 # this container, which is the whole point of merging the trees.
+# Two core layouts, one path. The Python image has a venv at
+# `/opt/vogt/.venv/bin/vogt` (plus `vogt-mcp` and `vogt-mcp-remote`). The Rust
+# image puts its static binary at the same path and a `.rust-core` marker
+# beside it (`deploy/rust-core.Dockerfile`), so this COPY is identical for
+# both and a Python build is unchanged. A Rust core has no Python MCP entry
+# points; the engine's own `vogt-mcp` script, copied further down, is what a
+# session runs.
 COPY --from=core /opt/vogt /opt/vogt
-RUN ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt \
-    && ln -s /opt/vogt/.venv/bin/vogt-mcp /usr/local/bin/vogt-mcp \
-    && ln -s /opt/vogt/.venv/bin/vogt-mcp-remote /usr/local/bin/vogt-mcp-remote \
-    && vogt --version
+RUN set -eu; \
+    ln -sfn /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt; \
+    if [ -e /opt/vogt/.venv/bin/.rust-core ]; then \
+        ln -sfn /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt-core; \
+    else \
+        ln -sfn /opt/vogt/.venv/bin/vogt-mcp /usr/local/bin/vogt-mcp; \
+        ln -sfn /opt/vogt/.venv/bin/vogt-mcp-remote /usr/local/bin/vogt-mcp-remote; \
+    fi; \
+    vogt --version
 
 # The core's data directory (declared.sqlite3, observed.sqlite3, backups).
 # Owned by the pod's user rather than root:0 group-writable as in the

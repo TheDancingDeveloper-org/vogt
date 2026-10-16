@@ -4,8 +4,10 @@
 //! same door against the binary the stack runs: bearer resolution through
 //! `GET /api/vogt/auth/whoami`, a proxied read, the MCP proxy, the event
 //! follower on the stack secret, and an outage that is 503 rather than 401.
-//! The binary is `engine/target/debug/vogt-core`. A tree that has not built
-//! it fails these tests; a silent skip would let CI pass without running them.
+//! The binary is the debug build of `vogt-core` in this workspace's target
+//! directory (`CARGO_TARGET_DIR` when set, otherwise `engine/target`). A tree
+//! that has not built it fails these tests; a silent skip would let CI pass
+//! without running them.
 
 use std::{
     path::PathBuf,
@@ -33,7 +35,10 @@ impl Drop for Core {
 }
 
 fn binary() -> PathBuf {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/debug/vogt-core");
+    let target = std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target"));
+    let path = target.join("debug/vogt-core");
     assert!(
         path.is_file(),
         "vogt-core debug binary is missing at {}; build it with `cargo build -p vogt-core` before these tests",
@@ -373,21 +378,28 @@ async fn vogt_tools_lists_and_calls_the_real_rust_core() {
 }
 
 #[test]
-fn the_engine_image_cannot_take_the_rust_core_as_core_image() {
-    // engine/Dockerfile copies `/opt/vogt` and `.venv/bin/vogt` out of the
-    // CORE_IMAGE stage. The Rust core image has neither: it installs a
-    // static binary. Pointing CORE_IMAGE at vogt-core:rust fails the build
-    // at `COPY --from=core /opt/vogt`. That is an engine contract gap, and
-    // this test is the record of it. Closing it means changing the engine
-    // Dockerfile, which this item does not own.
+fn the_engine_image_accepts_a_rust_core() {
+    // engine/Dockerfile branches on `/opt/vogt/.venv/bin/.rust-core`, the
+    // marker deploy/rust-core.Dockerfile writes. Without it the engine image
+    // would still demand a Python venv and CORE_IMAGE=vogt-core:rust would
+    // fail the build.
     let dockerfile = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Dockerfile");
     let text = std::fs::read_to_string(&dockerfile).expect("engine Dockerfile");
     assert!(
-        text.contains("COPY --from=core /opt/vogt /opt/vogt"),
-        "the gap closed; the compose smoke can then use CORE_IMAGE=vogt-core:rust"
+        text.contains(".rust-core"),
+        "engine/Dockerfile no longer detects the Rust core layout"
     );
+    let rust = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/rust-core.Dockerfile");
+    let rust_text = std::fs::read_to_string(&rust).expect("rust core Dockerfile");
     assert!(
-        text.contains(".venv/bin/vogt"),
-        "the engine image still assumes a Python venv inside the core stage"
+        rust_text.contains("/opt/vogt/.venv/bin/vogt"),
+        "the Rust image no longer installs where the engine image copies from"
+    );
+    let overlay =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/rust-core.overlay.yml");
+    let overlay_text = std::fs::read_to_string(&overlay).expect("overlay");
+    assert!(
+        overlay_text.contains("CORE_IMAGE"),
+        "the overlay must put the Rust core in the engine image, not only swap the vogt service"
     );
 }
