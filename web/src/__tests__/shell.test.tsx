@@ -33,11 +33,13 @@ import { replaceTabs, tabsStore } from "../tabs";
 import {
   fakeVogt,
   INBOX_RESULT,
+  liveStream,
   stopLiveStream,
   workItem,
   type FakeVogt,
   type Routes,
 } from "./harness";
+import { setRailSection } from "../railSections";
 
 /** A session the engine knows about, as `GET /api/sessions` lists them. */
 const SESSION = {
@@ -749,6 +751,73 @@ describe("Sessions owns its machine workspace", () => {
     await waitFor(() => expect(
       surfaceValue(container, '.agent-task-field input[type="text"]'),
     ).toBe("keep this task draft"));
+  });
+});
+
+
+describe("Files keeps its selection across a session update (WI-1682)", () => {
+  const session = {
+    id: "eng-1",
+    name: "alpha-build",
+    cwd: "/srv/alpha",
+    activity: "idle",
+    exit_code: null,
+  };
+  const readme = { name: "README.md", path: "README.md", is_dir: false };
+  const notes = { name: "NOTES.md", path: "NOTES.md", is_dir: false };
+
+  /** A session event makes the engine re-list the tree with fresh objects. */
+  function shellWithTree() {
+    let tree = [readme];
+    const shell = mountShell("/board", {
+      sessions: [session],
+      engine: { "GET /api/tree": () => ({ body: tree.map((node) => ({ ...node })) }) },
+    });
+    return {
+      shell,
+      grow() {
+        tree = [readme, notes];
+      },
+    };
+  }
+
+  it("a tree refetch from a session event keeps the selected file and its focus", async () => {
+    setRailSection("files", true);
+    const { shell, grow } = shellWithTree();
+    await liveStream(shell.vogt);
+    const file = await waitFor(() => shell.container.querySelector<HTMLElement>('[aria-label="Open README.md"]'));
+    expect(file).toBeTruthy();
+    file!.focus();
+    fireEvent.click(file!);
+    expect(file!.closest(".tree-row")).toHaveClass("tree-row--selected");
+
+    grow();
+    shell.vogt.stream.changed();
+    await waitFor(() => expect(shell.container.textContent).toContain("NOTES.md"));
+
+    const again = shell.container.querySelector<HTMLElement>('[aria-label="Open README.md"]');
+    // The refetch handed back a new object. The row staying the same element
+    // is what keeps the selection and the focus; a replacement is the bug.
+    expect(again, "the refetch replaced the selected row").toBe(file);
+    expect(again?.closest(".tree-row")).toHaveClass("tree-row--selected");
+    expect(document.activeElement).toBe(again);
+  });
+
+  it("a tree refetch does not pull focus back from the Sessions list", async () => {
+    setRailSection("files", true);
+    const { shell, grow } = shellWithTree();
+    await liveStream(shell.vogt);
+    const file = await waitFor(() => shell.container.querySelector<HTMLElement>('[aria-label="Open README.md"]'));
+    fireEvent.click(file!);
+    const row = await waitFor(() => shell.container.querySelector<HTMLElement>(".session-row"));
+    row!.focus();
+
+    grow();
+    shell.vogt.stream.changed();
+    await waitFor(() => expect(shell.container.textContent).toContain("NOTES.md"));
+
+    expect(document.activeElement?.closest(".session-row")).not.toBeNull();
+    expect(document.activeElement?.closest(".file-tree")).toBeNull();
   });
 });
 

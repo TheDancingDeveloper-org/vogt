@@ -109,6 +109,16 @@ export function statusForPath(
   return entries.get(path) ?? null;
 }
 
+/** Keep the previous node object when a refetch describes the same file, so a
+ *  list keyed by reference does not remount a row the reader has selected. */
+function reuseNodes(previous: TreeNode[] | null | undefined, next: TreeNode[]): TreeNode[] {
+  const prior = new Map((previous ?? []).map((node) => [node.path, node]));
+  return next.map((node) => {
+    const old = prior.get(node.path);
+    return old && old.name === node.name && old.is_dir === node.is_dir ? old : node;
+  });
+}
+
 function joinPath(dir: string, name: string): string {
   const cleanDir = dir.replace(/^\/+|\/+$/g, "");
   const cleanName = name.replace(/^\/+/, "");
@@ -143,7 +153,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     setLoadError(null);
     try {
       const tree = await api.tree(props.node.path, 0);
-      setKids(tree);
+      setKids((current) => reuseNodes(current, tree));
     } catch (cause) {
       // A failed expand must not become an unhandled rejection (the effect
       // calls this with `void`): report it in place and leave the folder open
@@ -165,28 +175,6 @@ const TreeNodeView: Component<NodeProps> = (props) => {
   });
   let rowRef: HTMLDivElement | undefined;
   let actionsRef: HTMLDivElement | undefined;
-
-  // A session update rebuilds the rail and drops this node; the path remembered
-  // here is what puts the highlight and the keyboard focus back (WI-1682).
-  createEffect(() => {
-    if (!selected()) return;
-    // The ref is assigned when the row commits, which is after this effect, so
-    // the restore waits a microtask. On a remount the old node is gone and the
-    // browser has parked focus on the first session row; this puts it back.
-    queueMicrotask(() => {
-      const row = rowRef;
-      if (!row || !selected()) return;
-      const active = document.activeElement;
-      if (
-        active instanceof HTMLElement &&
-        active !== document.body &&
-        !active.closest(".session-row, .places-rail-session-area")
-      ) {
-        return;
-      }
-      row.querySelector<HTMLElement>(".tree-main")?.focus();
-    });
-  });
 
   const openActions = () => {
     // Claim ownership before opening: were these swapped, the coordination
@@ -381,6 +369,12 @@ const FileTree: Component<Props> = (props) => {
     },
   );
   const statusMap = createMemo(() => buildStatusMap(gitStatus() ?? []));
+  // A refetch returns new objects for the same paths. Reusing the previous
+  // object for an unchanged path is what lets <For> keep that row mounted, so
+  // a selected file stays selected and keeps keyboard focus (WI-1682).
+  const stableRoot = createMemo<TreeNode[]>((prev) =>
+    reuseNodes(prev, tree.error ? [] : (tree() ?? [])),
+  []);
   // Search query is hoisted to the module store so it survives a tab switch.
   const searchQuery = fileTreeSearch;
   const setSearchQuery = setFileTreeSearch;
@@ -707,7 +701,7 @@ const FileTree: Component<Props> = (props) => {
           fallback={
             // An errored resource throws when read; the banner above says
             // why, so an empty tree stands in rather than an uncaught error.
-            <For each={tree.error ? [] : (tree() ?? [])}>
+            <For each={stableRoot()}>
               {(node) => (
                 <TreeNodeView
                   node={node}
