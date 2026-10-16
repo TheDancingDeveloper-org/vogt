@@ -92,6 +92,7 @@ fi
 # "sessions" would pass against the empty unconfigured list.
 # Register the project before the item that belongs to it. root_path must
 # exist inside the core container and be writable: create scaffolds into it.
+# The same path is mounted into the engine, which is what opens the session.
 echo "project.create on the Rust core"
 if ! "${COMPOSE[@]}" exec -T vogt mkdir -p /var/lib/vogt/repos/smoke; then
   echo "could not make the project checkout" >&2

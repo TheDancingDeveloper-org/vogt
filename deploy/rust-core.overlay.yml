@@ -54,6 +54,10 @@ services:
       VOGT_BOOTSTRAP_CORE_TOKEN_FILE: /run/rust-tokens/vogt_core_token
     volumes:
       - rust_core_tokens:/run/rust-tokens:ro
+      # The engine opens a session in the project's checkout, which has to be
+      # the same directory the core registered. Sharing the data volume gives
+      # both containers /var/lib/vogt.
+      - vogt-data:/var/lib/vogt
 
   engine:
     build:
@@ -68,6 +72,7 @@ services:
       ENGINE_TOKEN: "${ENGINE_TOKEN_VALUE:-}"
     volumes:
       - rust_core_tokens:/run/rust-tokens:ro
+      - vogt-data:/var/lib/vogt:ro
 
 volumes:
   rust_core_tokens:
