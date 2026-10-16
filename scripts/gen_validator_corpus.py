@@ -29,7 +29,7 @@ TAIL = re.compile(r" \[type=.*?\]")
 DOC_LINK = re.compile(r"\n {4}For further information visit.*")
 
 
-def base_value(prop: dict, defs: dict):
+def base_value(prop: dict, defs: dict) -> object:
     if "$ref" in prop:
         return base_obj(defs.get(prop["$ref"].split("/")[-1], {}), defs)
     if "anyOf" in prop:
@@ -85,9 +85,14 @@ def probes_for(schema: dict) -> list[tuple[str, dict]]:
     props = schema.get("properties", {})
     required = schema.get("required", [])
     good = base_obj(schema, defs)
-    probes = [("valid-minimal", good), ("empty", {}), ("extra-key", {**good, "zz_extra": 1})]
+    probes: list[tuple[str, dict]] = [
+        ("valid-minimal", good),
+        ("empty", {}),
+        ("extra-key", {**good, "zz_extra": 1}),
+    ]
     for name in required:
-        probes.append((f"missing:{name}", {key: value for key, value in good.items() if key != name}))
+        missing = {key: value for key, value in good.items() if key != name}
+        probes.append((f"missing:{name}", missing))
     for name, prop in props.items():
         field = scalar(prop, defs)
         kind = field.get("type")
@@ -106,9 +111,15 @@ def probes_for(schema: dict) -> list[tuple[str, dict]]:
             add("enum-bad", "zzz-bad")
             add("enum-case", str(field["enum"][0]).swapcase())
         if kind == "integer":
-            for tag, value in [("str5", "5"), ("float5.0", 5.0), ("float5.5", 5.5),
-                               ("bool", True), ("strjunk", "abc"), ("str-space", " 5 "),
-                               ("huge", 10**30)]:
+            for tag, value in [
+                ("str5", "5"),
+                ("float5.0", 5.0),
+                ("float5.5", 5.5),
+                ("bool", True),
+                ("strjunk", "abc"),
+                ("str-space", " 5 "),
+                ("huge", 10**30),
+            ]:
                 add(tag, value)
             if "minimum" in field:
                 add("min-1", field["minimum"] - 1)
@@ -126,8 +137,15 @@ def probes_for(schema: dict) -> list[tuple[str, dict]]:
             if "maximum" in field:
                 add("max+1", field["maximum"] + 1)
         elif kind == "boolean":
-            for tag, value in [("int1", 1), ("int0", 0), ("int2", 2), ("strtrue", "true"),
-                               ("stryes", "yes"), ("strjunk", "maybe"), ("float1", 1.0)]:
+            for tag, value in [
+                ("int1", 1),
+                ("int0", 0),
+                ("int2", 2),
+                ("strtrue", "true"),
+                ("stryes", "yes"),
+                ("strjunk", "maybe"),
+                ("float1", 1.0),
+            ]:
                 add(tag, value)
         elif kind == "string" or "enum" in field:
             add("int", 5)
@@ -160,7 +178,7 @@ def probes_for(schema: dict) -> list[tuple[str, dict]]:
     return probes
 
 
-def verdict(operation, raw: dict) -> dict:
+def verdict(operation: object, raw: dict) -> dict:
     import pydantic
 
     try:
@@ -190,7 +208,14 @@ def build() -> list[dict]:
     for operation in build_operations():
         schema = operation.params_model.model_json_schema()
         for tag, raw in probes_for(schema):
-            corpus.append({"op": operation.name, "tag": tag, "params": raw, "py": verdict(operation, raw)})
+            corpus.append(
+                {
+                    "op": operation.name,
+                    "tag": tag,
+                    "params": raw,
+                    "py": verdict(operation, raw),
+                }
+            )
     return corpus
 
 
@@ -201,7 +226,11 @@ def main() -> int:
     if check:
         current = CORPUS.read_text(encoding="utf-8") if CORPUS.exists() else ""
         if current != rendered:
-            print(f"{CORPUS.relative_to(REPO_ROOT)} is stale; re-run scripts/gen_validator_corpus.py", file=sys.stderr)
+            print(
+                f"{CORPUS.relative_to(REPO_ROOT)} is stale; "
+                "re-run scripts/gen_validator_corpus.py",
+                file=sys.stderr,
+            )
             return 1
         print(f"validator corpus matches pydantic ({len(corpus)} probes)")
         return 0

@@ -34,7 +34,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true", help=f"update {LEDGER}")
     parser.add_argument("--base", default="origin/main")
-    parser.add_argument("--head", default="rust-core")
+    # HEAD, not the branch name. On a pull request the checkout is a detached
+    # commit and the local repo has no ref named rust-core, so merge-base
+    # against that name fails before it can report anything.
+    parser.add_argument("--head", default="HEAD")
     args = parser.parse_args()
 
     base = _git("merge-base", args.base, args.head).strip()
