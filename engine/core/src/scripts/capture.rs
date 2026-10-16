@@ -10,6 +10,11 @@ use std::time::Duration;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// How long a read waits for the child to write before the capture ends.
+/// `scripts/capture_transcript.py` gives `select` the same ten seconds.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A hard ceiling so a child that writes forever cannot run past it.
+const TOTAL_BUDGET: Duration = Duration::from_secs(30);
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let (pre, cmd) = match args.iter().position(|arg| arg == "--") {
@@ -61,9 +66,8 @@ fn parse_max(value: &str) -> Result<usize, String> {
 }
 
 /// The window is 120 by 40, matching the Python script, and the child gets the
-/// same `TERM` it would there. Reading stops at EOF or the byte cap; a child
-/// that never closes its side is cut off after ten quiet seconds, which is the
-/// timeout `select` used in the Python version.
+/// same `TERM` it would there. Reading stops at EOF, the byte cap, or when the
+/// child has written nothing for [`IDLE_TIMEOUT`].
 fn capture(cmd: &[String], max_bytes: usize) -> Result<Vec<u8>, String> {
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -90,21 +94,63 @@ fn capture(cmd: &[String], max_bytes: usize) -> Result<Vec<u8>, String> {
         .try_clone_reader()
         .map_err(|err| format!("reader: {err}"))?;
     let mut out = Vec::new();
-    let mut buffer = [0u8; 65536];
     let started = std::time::Instant::now();
     loop {
-        if out.len() >= max_bytes || started.elapsed() > Duration::from_secs(30) {
+        if out.len() >= max_bytes || started.elapsed() > TOTAL_BUDGET {
             break;
         }
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => out.extend_from_slice(&buffer[..read]),
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+        let read = read_within(&mut reader, IDLE_TIMEOUT).map_err(|err| err.to_string())?;
+        if read.is_empty() {
+            break;
         }
+        out.extend_from_slice(&read);
     }
     let _ = child.kill();
     let _ = child.wait();
     out.truncate(max_bytes);
     Ok(out)
+}
+
+/// One read, or an empty buffer when nothing arrives within `wait`. An empty
+/// result ends the capture: EOF and a quiet child look the same to the caller.
+fn read_within(reader: &mut Box<dyn Read + Send>, wait: Duration) -> std::io::Result<Vec<u8>> {
+    let (send, recv) = std::sync::mpsc::channel();
+    let mut taken = std::mem::replace(reader, Box::new(std::io::empty()));
+    let handle = std::thread::spawn(move || {
+        let mut buffer = [0u8; 65536];
+        let result = taken.read(&mut buffer).map(|read| buffer[..read].to_vec());
+        let _ = send.send((result, taken));
+    });
+    match recv.recv_timeout(wait) {
+        Ok((result, returned)) => {
+            let _ = handle.join();
+            *reader = returned;
+            result
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(Vec::new()),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quiet_command_ends_without_hanging() {
+        let started = std::time::Instant::now();
+        let data = capture(&["sleep".to_string(), "30".to_string()], DEFAULT_MAX_BYTES).unwrap();
+        assert!(data.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_short_command_is_captured() {
+        let data = capture(
+            &["printf".to_string(), "hello\\n".to_string()],
+            DEFAULT_MAX_BYTES,
+        )
+        .unwrap();
+        assert!(data.windows(5).any(|window| window == b"hello"));
+    }
 }

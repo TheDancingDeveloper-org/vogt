@@ -317,29 +317,29 @@ fn scripts_command(argv: &[String]) -> Option<ExitCode> {
             let after = after_command(argv, word);
             scripts::capture_transcript(&after)
         }
+        "fixture-reset" => scripts::fixture_reset(&root, &after_command(argv, word)),
+        "load" => scripts::load(&after_command(argv, word)),
+        "fake-agent" => {
+            let after = after_command(argv, word);
+            return Some(match scripts::fake_agent(&after) {
+                Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+                Err(problem) => {
+                    eprintln!("{problem}");
+                    ExitCode::from(1)
+                }
+            });
+        }
         _ => return None,
     };
     Some(match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(problem) => {
             eprintln!("{problem}");
-            // A missing or malformed argument is a usage error, as argparse's
-            // exit 2 was. A check that ran and found drift stays exit 1.
-            let code = if problem.contains("required")
-                || problem.contains("unknown option")
-                || problem.contains("not a number")
-            {
-                2
-            } else {
-                1
-            };
-            ExitCode::from(code)
+            ExitCode::from(1)
         }
     })
 }
 
-/// The arguments that are not `--root PATH`: flags keep their values, and a
-/// bare word is positional. `--root`'s value must never be read as one.
 /// The tokens after the command word, as owned strings.
 fn after_command(argv: &[String], word: &str) -> Vec<String> {
     argv.iter()
@@ -349,6 +349,8 @@ fn after_command(argv: &[String], word: &str) -> Vec<String> {
         .collect()
 }
 
+/// The arguments that are not `--root PATH`: flags keep their values, and a
+/// bare word is positional. `--root`'s value must never be read as one.
 fn positional<'a>(args: &[&'a str]) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut index = 0;

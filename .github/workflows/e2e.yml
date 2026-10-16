@@ -165,12 +165,12 @@ jobs:
           # the layout the smoke expects (REPO_ROOT = the script dir's parent),
           # then run it from inside the network against the engine's own port.
           # The fake-agent is already baked into this image at /opt/vogt-e2e.
-          # fixture_reset.py is stdlib-only and the image carries python3+curl.
+          # The fixture reset runs from the Rust port baked into the image
+          # (WI-1079); the smoke calls it as `vogt-core fixture-reset`.
           # shellcheck disable=SC2086
           dc() { docker compose $COMPOSE_FILES "$@"; }
           dc exec -T engine mkdir -p /tmp/e2e/scripts /tmp/e2e/tests/fixtures
           dc cp scripts/e2e_stack_smoke.sh engine:/tmp/e2e/scripts/e2e_stack_smoke.sh
-          dc cp scripts/fixture_reset.py engine:/tmp/e2e/scripts/fixture_reset.py
           dc cp tests/fixtures/forge_fixture_manifest.json engine:/tmp/e2e/tests/fixtures/forge_fixture_manifest.json
           dc exec -T \
             -e VOGT_SMOKE_TOKEN="$VOGT_SMOKE_TOKEN" \
