@@ -56,8 +56,11 @@ LABEL org.opencontainers.image.title="vogt" \
       org.opencontainers.image.source="https://github.com/TheDancingDeveloper-org/vogt" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
+# python3 is not for the core. vogt-lifecycle's health mode shells out to it
+# (the same script the Python image uses), and a compose healthcheck that
+# exits 127 keeps the container unhealthy forever.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends git ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 vogt \
     && useradd --uid 1000 --gid 0 --no-create-home --shell /usr/sbin/nologin vogt \
