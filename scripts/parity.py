@@ -186,15 +186,8 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             # is the `session log` subcommand.
             words = step["cli"] if "cli" in step else step["operation"].split(".")
             argv = [binary, "--json", "--data-dir", str(data), *words, *_flags(params)]
-            step_env = env
-            # One step can run as an agent. The CLI has no credential of its
-            # own, so the hook is the only way to present one; it is set for
-            # that step alone.
-            if step.get("principal"):
-                step_env = dict(env)
-                step_env["VOGT_TEST_PRINCIPAL"] = step["principal"]
             completed = subprocess.run(
-                argv, env=step_env, capture_output=True, text=True, check=False
+                argv, env=env, capture_output=True, text=True, check=False
             )
             expect = step["expect"]
             if completed.returncode != expect.get("exit", 0):
