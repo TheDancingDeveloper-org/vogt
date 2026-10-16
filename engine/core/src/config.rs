@@ -1533,18 +1533,15 @@ pub fn config_artifacts(root: &Path) -> BTreeMap<PathBuf, String> {
 }
 
 #[cfg(test)]
-pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    tests::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-}
-
-#[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    pub(super) static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner())
+    }
 
     struct EnvGuard {
         saved: Vec<(String, Option<String>)>,
@@ -1555,7 +1552,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 saved: Vec::new(),
-                _lock: ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner()),
+                _lock: env_lock(),
             }
         }
 

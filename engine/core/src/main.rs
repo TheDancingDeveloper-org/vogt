@@ -12,7 +12,7 @@ mod auth;
 mod branches;
 mod collectors;
 #[allow(dead_code)]
-mod config;
+pub(crate) mod config;
 mod core;
 mod decisions;
 mod delivery;
@@ -487,10 +487,11 @@ fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
                     ("declared_schema_version", outcome.declared.version.into()),
                     ("observed_schema_version", outcome.observed.version.into()),
                     ("migrations_applied", applied.into()),
-                    // Rust does not mint or adopt bootstrap tokens, so both stay
-                    // at the default Python reports when neither file is set.
-                    ("bootstrap_core_token", "not_configured".into()),
-                    ("bootstrap_agent_token", "not_configured".into()),
+                    ("bootstrap_core_token", outcome.bootstrap_core_token.into()),
+                    (
+                        "bootstrap_agent_token",
+                        outcome.bootstrap_agent_token.into(),
+                    ),
                 ]
                 .into_iter()
                 .map(|(key, value)| (key.to_string(), value))
@@ -831,37 +832,6 @@ fn rustls_server_config(
 }
 
 #[cfg(test)]
-mod tls_tests {
-    use super::check_tls;
-    use std::path::Path;
-
-    #[test]
-    fn one_flag_without_the_other_is_refused() {
-        let text = check_tls(Some(Path::new("c.pem")), None).unwrap_err();
-        assert_eq!(
-            text,
-            "--tls-cert and --tls-key are given together or not at all"
-        );
-        assert!(check_tls(None, Some(Path::new("k.pem"))).is_err());
-    }
-
-    #[test]
-    fn a_missing_file_is_named() {
-        let text = check_tls(
-            Some(Path::new("no-such-cert.pem")),
-            Some(Path::new("no-such-key.pem")),
-        )
-        .unwrap_err();
-        assert_eq!(text, "--tls-cert: no such file: no-such-cert.pem");
-    }
-
-    #[test]
-    fn neither_flag_is_fine() {
-        assert!(check_tls(None, None).is_ok());
-    }
-}
-
-#[cfg(test)]
 mod data_dir_tests {
     use super::resolve_data_dir;
 
@@ -869,7 +839,7 @@ mod data_dir_tests {
     /// suite in parallel, so a test that touches the environment takes the lock
     /// those tests take. Without it these two fail intermittently.
     fn with_data_dir(value: Option<&std::path::Path>, body: impl FnOnce()) {
-        let _guard = crate::config::env_lock();
+        let _guard = crate::config::tests::env_lock();
         let saved = std::env::var("VOGT_DATA_DIR").ok();
         match value {
             Some(dir) => unsafe { std::env::set_var("VOGT_DATA_DIR", dir) },
@@ -901,5 +871,36 @@ mod data_dir_tests {
             let resolved = resolve_data_dir(Some(from_flag.clone())).unwrap();
             assert_eq!(resolved.as_path(), from_flag.as_path());
         });
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::check_tls;
+    use std::path::Path;
+
+    #[test]
+    fn one_flag_without_the_other_is_refused() {
+        let text = check_tls(Some(Path::new("c.pem")), None).unwrap_err();
+        assert_eq!(
+            text,
+            "--tls-cert and --tls-key are given together or not at all"
+        );
+        assert!(check_tls(None, Some(Path::new("k.pem"))).is_err());
+    }
+
+    #[test]
+    fn a_missing_file_is_named() {
+        let text = check_tls(
+            Some(Path::new("no-such-cert.pem")),
+            Some(Path::new("no-such-key.pem")),
+        )
+        .unwrap_err();
+        assert_eq!(text, "--tls-cert: no such file: no-such-cert.pem");
+    }
+
+    #[test]
+    fn neither_flag_is_fine() {
+        assert!(check_tls(None, None).is_ok());
     }
 }

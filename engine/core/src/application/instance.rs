@@ -441,6 +441,43 @@ fn stamp_if(clock: &mut Option<crate::core::StepClock>, due: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(test)]
+    /// Puts an environment variable back the way it was, and keeps every other
+    /// test out while it is changed: the variable is process-wide, so one test
+    /// setting it changes what every other test's `init` adopts. The lock is the
+    /// one `config` takes around its own environment changes, so a test there
+    /// cannot read this variable mid-change either.
+    struct EnvVar {
+        name: &'static str,
+        prior: Option<std::ffi::OsString>,
+        _held: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvVar {
+        fn set(name: &'static str, value: &std::path::Path) -> Self {
+            let held = crate::config::tests::env_lock();
+            let prior = std::env::var_os(name);
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self {
+                name,
+                prior,
+                _held: held,
+            }
+        }
+    }
+
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prior {
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
 
     /// A configured bootstrap secret is adopted at init, and a second init with
     /// the same secret changes nothing. The reported words are the ones Python
@@ -480,45 +517,5 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("at least 24 characters"), "{message}");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-fn env_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
-/// Puts an environment variable back the way it was, and keeps every other
-/// test out while it is changed: the variable is process-wide, so one test
-/// setting it changes what every other test's `init` adopts.
-struct EnvVar {
-    name: &'static str,
-    prior: Option<std::ffi::OsString>,
-    _held: std::sync::MutexGuard<'static, ()>,
-}
-
-impl EnvVar {
-    fn set(name: &'static str, value: &std::path::Path) -> Self {
-        let held = env_lock().lock().expect("the env lock is not poisoned");
-        let prior = std::env::var_os(name);
-        unsafe {
-            std::env::set_var(name, value);
-        }
-        Self {
-            name,
-            prior,
-            _held: held,
-        }
-    }
-}
-
-impl Drop for EnvVar {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.prior {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
-            }
-        }
     }
 }
