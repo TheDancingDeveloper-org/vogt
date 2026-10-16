@@ -192,8 +192,15 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             # is the `session log` subcommand.
             words = step["cli"] if "cli" in step else step["operation"].split(".")
             argv = [binary, "--json", "--data-dir", str(data), *words, *_flags(params)]
+            step_env = env
+            # One step can run as an agent. The CLI has no credential of its
+            # own, so the hook is the only way to present one; it is set for
+            # that step alone.
+            if step.get("principal"):
+                step_env = dict(env)
+                step_env["VOGT_TEST_PRINCIPAL"] = step["principal"]
             completed = subprocess.run(
-                argv, env=env, capture_output=True, text=True, check=False
+                argv, env=step_env, capture_output=True, text=True, check=False
             )
             expect = step["expect"]
             if completed.returncode != expect.get("exit", 0):
@@ -203,13 +210,27 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 )
             body = json.loads(completed.stdout) if completed.stdout.strip() else None
             seen[step["operation"]] = body
-            answers.append(
-                {
-                    "operation": step["operation"],
-                    "exit": completed.returncode,
-                    "body": _normalise(body, root, data, step["operation"]),
-                }
-            )
+            answer = {
+                "operation": step["operation"],
+                "exit": completed.returncode,
+                "body": _normalise(body, root, data, step["operation"]),
+            }
+            # A failure writes nothing to stdout, so the exit alone cannot say
+            # which refusal it was. Keep the error line, with the data
+            # directory blanked the way every other path is.
+            if completed.returncode != 0 and expect.get("capture_error"):
+                # The hooks banner is printed on every line of a parity run;
+                # the error line is the one the step is there to pin down.
+                line = next(
+                    (
+                        item
+                        for item in reversed(completed.stderr.strip().splitlines())
+                        if item.startswith("error:")
+                    ),
+                    completed.stderr.strip(),
+                )
+                answer["error"] = _normalise(line, root, data, step["operation"])
+            answers.append(answer)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     return answers
