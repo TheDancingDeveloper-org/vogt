@@ -5,7 +5,7 @@
 # Same contract as the root Dockerfile's runtime: user 1000:0, data at
 # /var/lib/vogt, entrypoint the lifecycle runner, and a `vogt` binary on PATH
 # that answers `init` and `serve`. The compose files call `vogt`, not
-# `vogt-core`, so the binary is installed under both names.
+# `vogt`, which is the name the compose files call.
 #
 # Build context is the repository root:
 #
@@ -73,7 +73,6 @@ RUN apt-get update \
 # layout, so it does not go looking for vogt-mcp inside the venv.
 COPY --from=build /src/target/release/vogt-core /opt/vogt/.venv/bin/vogt
 RUN ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt \
-    && ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt-core \
     && touch /opt/vogt/.venv/bin/.rust-core
 COPY --chmod=755 vogt-lifecycle.sh /usr/local/bin/vogt-lifecycle
 
