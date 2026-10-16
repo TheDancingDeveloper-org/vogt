@@ -26,12 +26,14 @@ import { railSections, setRailSection } from "./railSections";
 import {
   expandedPaths,
   fileTreeSearch,
+  fileTreeSelectedPath,
   folderVersion,
   invalidateFolder,
   isExpanded,
   parentFolder,
   setExpanded,
   setFileTreeSearch,
+  setFileTreeSelectedPath,
 } from "./fileTreeState";
 import { workspaceVersion } from "./workspaceVersion";
 import { onWake } from "./wakeCoordinator";
@@ -164,6 +166,28 @@ const TreeNodeView: Component<NodeProps> = (props) => {
   let rowRef: HTMLDivElement | undefined;
   let actionsRef: HTMLDivElement | undefined;
 
+  // A session update rebuilds the rail and drops this node; the path remembered
+  // here is what puts the highlight and the keyboard focus back (WI-1682).
+  createEffect(() => {
+    if (!selected()) return;
+    // The ref is assigned when the row commits, which is after this effect, so
+    // the restore waits a microtask. On a remount the old node is gone and the
+    // browser has parked focus on the first session row; this puts it back.
+    queueMicrotask(() => {
+      const row = rowRef;
+      if (!row || !selected()) return;
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        active !== document.body &&
+        !active.closest(".session-row, .places-rail-session-area")
+      ) {
+        return;
+      }
+      row.querySelector<HTMLElement>(".tree-main")?.focus();
+    });
+  });
+
   const openActions = () => {
     // Claim ownership before opening: were these swapped, the coordination
     // effect could observe `actionsOpen` true while the owner is still another
@@ -214,7 +238,10 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     });
   });
 
+  const selected = () => fileTreeSelectedPath() === props.node.path;
+
   const toggle = () => {
+    setFileTreeSelectedPath(props.node.path);
     if (!props.node.is_dir) {
       props.onOpenFile(props.node.path);
       return;
@@ -231,6 +258,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     <div>
       <div
         class="tree-row"
+        classList={{ "tree-row--selected": selected() }}
         title={props.node.path}
         ref={rowRef}
         onContextMenu={(event) => {

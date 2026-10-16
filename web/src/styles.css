@@ -3708,6 +3708,10 @@ textarea {
 .tree-status-conflicted,
 .tree-status-deleted { color: var(--activity-errored); }
 .tree-row:hover { background: rgba(255, 255, 255, 0.05); }
+/* The file the reader selected, kept across the rail rebuild a session update
+   triggers (WI-1682). Hover still wins while the pointer is on another row. */
+.tree-row--selected { background: rgba(255, 255, 255, 0.08); }
+.tree-row--selected:hover { background: rgba(255, 255, 255, 0.1); }
 .tree-search-meta {
   padding: 6px 8px;
   color: var(--fg-muted);
