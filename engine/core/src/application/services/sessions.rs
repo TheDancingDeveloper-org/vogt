@@ -2705,7 +2705,7 @@ where
 
 /// Whether the caller counts as a person for the engine's person gate: a human
 /// caller who is not the engine's own credential.
-fn answers_as_person<C, I>(ctx: &AppContext<C, I>) -> Result<bool, VogtError>
+pub(crate) fn answers_as_person<C, I>(ctx: &AppContext<C, I>) -> Result<bool, VogtError>
 where
     C: Clock,
     I: IdFactory,
