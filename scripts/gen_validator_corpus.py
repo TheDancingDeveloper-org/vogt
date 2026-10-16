@@ -19,6 +19,9 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any, Protocol
+
+Json = dict[str, Any]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CORPUS = REPO_ROOT / "tests" / "parity" / "validator_corpus.json"
@@ -29,7 +32,7 @@ TAIL = re.compile(r" \[type=.*?\]")
 DOC_LINK = re.compile(r"\n {4}For further information visit.*")
 
 
-def base_value(prop: dict, defs: dict) -> object:
+def base_value(prop: Json, defs: Json) -> object:
     if "$ref" in prop:
         return base_obj(defs.get(prop["$ref"].split("/")[-1], {}), defs)
     if "anyOf" in prop:
@@ -60,7 +63,7 @@ def base_value(prop: dict, defs: dict) -> object:
     return "x"
 
 
-def base_obj(schema: dict, defs: dict) -> dict:
+def base_obj(schema: Json, defs: Json) -> Json:
     required = schema.get("required", [])
     return {
         name: base_value(field, defs)
@@ -69,10 +72,12 @@ def base_obj(schema: dict, defs: dict) -> dict:
     }
 
 
-def scalar(prop: dict, defs: dict) -> dict:
+def scalar(prop: Json, defs: Json) -> Json:
     """The branch of a field that describes the value, past a null union or a ref."""
     if "$ref" in prop:
-        return defs.get(prop["$ref"].split("/")[-1], {})
+        found = defs.get(prop["$ref"].split("/")[-1], {})
+        assert isinstance(found, dict)
+        return found
     if "anyOf" in prop:
         for branch in prop["anyOf"]:
             if branch.get("type") != "null":
@@ -80,12 +85,12 @@ def scalar(prop: dict, defs: dict) -> dict:
     return prop
 
 
-def probes_for(schema: dict) -> list[tuple[str, dict]]:
+def probes_for(schema: Json) -> list[tuple[str, Json]]:
     defs = schema.get("$defs", {})
     props = schema.get("properties", {})
     required = schema.get("required", [])
     good = base_obj(schema, defs)
-    probes: list[tuple[str, dict]] = [
+    probes: list[tuple[str, Json]] = [
         ("valid-minimal", good),
         ("empty", {}),
         ("extra-key", {**good, "zz_extra": 1}),
@@ -178,7 +183,21 @@ def probes_for(schema: dict) -> list[tuple[str, dict]]:
     return probes
 
 
-def verdict(operation: object, raw: dict) -> dict:
+class _Validated(Protocol):
+    def model_dump(self, mode: str) -> Json: ...
+
+
+class _Model(Protocol):
+    def model_validate(self, raw: Json) -> _Validated: ...
+    def model_json_schema(self) -> Json: ...
+
+
+class _Operation(Protocol):
+    name: str
+    params_model: _Model
+
+
+def verdict(operation: _Operation, raw: Json) -> Json:
     import pydantic
 
     try:
@@ -200,9 +219,11 @@ def verdict(operation: object, raw: dict) -> dict:
     return {"ok": True, "dump": model.model_dump(mode="json")}
 
 
-def build() -> list[dict]:
+def build() -> list[Json]:
     sys.path.insert(0, str(REPO_ROOT / "src"))
-    from vogt.registry.operations import build_operations
+    from vogt.registry.operations import (  # type: ignore[import-untyped]
+        build_operations,
+    )
 
     corpus = []
     for operation in build_operations():
