@@ -52,6 +52,10 @@ services:
       VOGT_ENGINE_URL: http://engine:8910
       VOGT_ENGINE_TOKEN_FILE: /run/rust-tokens/engine_token
       VOGT_BOOTSTRAP_CORE_TOKEN_FILE: /run/rust-tokens/vogt_core_token
+      # A remote caller may only name a root inside the import root, and the
+      # engine only opens a session inside its workspace. Make them the same
+      # directory so the checkout satisfies both.
+      VOGT_IMPORT_ROOT: /home/sprooty/Working
     volumes:
       - rust_core_tokens:/run/rust-tokens:ro
       # The engine opens a session in the project's checkout, and its
