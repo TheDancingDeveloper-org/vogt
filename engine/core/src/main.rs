@@ -588,9 +588,8 @@ fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
                     ("declared_schema_version", outcome.declared.version.into()),
                     ("observed_schema_version", outcome.observed.version.into()),
                     ("migrations_applied", applied.into()),
-                    // Rust does not mint or adopt bootstrap tokens, so both stay
-                    // at the default Python reports when neither file is set.
-                    ("bootstrap_core_token", "not_configured".into()),
+                    ("bootstrap_core_token", outcome.bootstrap_core_token.into()),
+                    // The agent-session token is still not adopted here.
                     ("bootstrap_agent_token", "not_configured".into()),
                 ]
                 .into_iter()

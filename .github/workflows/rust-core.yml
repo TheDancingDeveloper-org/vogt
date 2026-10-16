@@ -1,15 +1,17 @@
 name: rust-core
 
-# Gate for the long-lived `rust-core` branch, where the Python core is being
-# ported into engine/core. Main's CI does not run on this branch; this
-# workflow does not run on main. The parity job is a placeholder until the
-# black-box harness (P0.3) exists.
+# Gate for the Rust core. It runs on the long-lived `rust-core` branch and on
+# the WI-1076 integration (push to wi-1076-engine-core, pull requests into
+# wi-1443-main-sync), because that is where the compose job — including the
+# existing e2e and live Playwright — has to actually execute. It does not run
+# on main. The parity job is a placeholder until the black-box harness (P0.3)
+# exists.
 
 on:
   push:
-    branches: [rust-core]
+    branches: [rust-core, wi-1076-engine-core, wi-1443-main-sync]
   pull_request:
-    branches: [rust-core]
+    branches: [rust-core, wi-1443-main-sync]
   workflow_dispatch:
 
 concurrency:
@@ -55,6 +57,15 @@ jobs:
         working-directory: engine
         run: cargo test -p vogt-core
 
+      # engine/server/tests/rust_core.rs fails when this binary is absent, so
+      # the build has to happen in this job. `cargo test -p vogt-core` above
+      # does not leave the binary where that test looks.
+      - name: cargo build (vogt-core) and front-door tests
+        working-directory: engine
+        run: |
+          cargo build -p vogt-core
+          cargo test -p vogt-engine-server --test rust_core
+
       # The stack image's server-build stage copies a subset of the tree and
       # then runs cargo. rust-core.yml never builds that image, so a workspace
       # member the stage does not copy fails ci.yml and build.yml on the swap
@@ -80,6 +91,72 @@ jobs:
           # resolves, which a missing COPY or a wrong include_str! depth would
           # not. --offline uses the cache the job already warmed.
           ( cd "$stage/engine" && cargo check --offline -p vogt-core )
+
+  compose:
+    name: compose smoke against the Rust core
+    runs-on: [self-hosted, docker]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: build the Rust core image and walk the stack
+        run: bash scripts/rust_core_compose_smoke.sh
+
+      # The existing e2e, with the Rust core in the core slot. Same files as
+      # .github/workflows/e2e.yml plus deploy/rust-core.overlay.yml, which
+      # swaps the image and points the core at the engine. The Playwright
+      # step is the same `live` project that workflow runs.
+      - name: existing compose e2e and live Playwright against the Rust core
+        env:
+          COMPOSE_FILES: "-f deploy/vogt.compose.yml -f deploy/engine.overlay.yml -f deploy/e2e.overlay.yml -f deploy/rust-core.overlay.yml"
+          VOGT_IMAGE: vogt-core:rust
+          VOGT_PUBLIC_URL: http://127.0.0.1:18080
+          ENGINE_PUBLIC_URL: http://127.0.0.1:18910
+        run: |
+          set -euo pipefail
+          docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
+          docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:rust .
+          docker build -t vogt-engine-e2e:local -f deploy/e2e.engine.Dockerfile .
+          docker build -t vogt-e2e-playwright:local -f deploy/e2e.playwright.Dockerfile .
+          # Tokens go through the named volume (VOGT_CORE_TOKEN_VALUE,
+          # ENGINE_TOKEN_VALUE), never a host file. A file secret's source
+          # does not exist on the daemon.
+          export VOGT_CORE_TOKEN_VALUE="$(openssl rand -hex 32)"
+          export ENGINE_TOKEN_VALUE="$(openssl rand -hex 32)"
+          export ENGINE_TOKEN="$ENGINE_TOKEN_VALUE"
+          # shellcheck disable=SC2086
+          docker compose $COMPOSE_FILES up -d
+          trap 'docker compose $COMPOSE_FILES down -v || true' EXIT
+          ok=""
+          for _ in $(seq 1 60); do
+            if docker compose $COMPOSE_FILES exec -T engine curl -fsS http://vogt:8000/health/ready >/dev/null 2>&1; then
+              ok=yes; break
+            fi
+            sleep 5
+          done
+          test -n "$ok" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
+          # The core being ready does not mean the engine is listening yet:
+          # the entrypoint installs CLIs before it execs the server, and the
+          # walk below runs inside the engine against its own port.
+          front=""
+          for _ in $(seq 1 60); do
+            if docker compose $COMPOSE_FILES exec -T engine curl -fsS http://127.0.0.1:8910/healthz >/dev/null 2>&1; then
+              front=yes; break
+            fi
+            sleep 5
+          done
+          test -n "$front" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
+          docker compose $COMPOSE_FILES exec -T engine mkdir -p /tmp/e2e/scripts /tmp/e2e/tests/fixtures
+          docker compose $COMPOSE_FILES cp scripts/e2e_stack_smoke.sh engine:/tmp/e2e/scripts/e2e_stack_smoke.sh
+          docker compose $COMPOSE_FILES exec -T -e VOGT_SMOKE_TOKEN="$ENGINE_TOKEN" engine \
+            bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
+          # Advisory, as it is in .github/workflows/e2e.yml: the live specs
+          # assert the Python core's fixtures, so against the Rust core they
+          # fail for reasons that are not this stack. The smoke walk above is
+          # the gate. A failure is printed, not fatal.
+          docker compose $COMPOSE_FILES --profile live run --rm -T \
+            -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright \
+            || echo "live Playwright failed against the Rust core (advisory, as in e2e.yml)"
 
   parity:
     name: parity

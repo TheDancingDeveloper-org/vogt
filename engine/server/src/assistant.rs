@@ -3449,6 +3449,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_turn_reads_a_real_vogt_core() {
+        // The stub proves the wire shape. This proves the toolbox against the
+        // binary the stack runs: the model asks for `vogt_status`, and the
+        // answer is the Rust core's, not a canned stub body.
+        let binary = {
+            let target = std::env::var("CARGO_TARGET_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target")
+                });
+            target.join("debug/vogt-core")
+        };
+        assert!(
+            binary.is_file(),
+            "build vogt-core first: {}",
+            binary.display()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let secret = "core-token-abcdef1234567890";
+        let secret_path = dir.path().join("core-token");
+        std::fs::write(&secret_path, secret).unwrap();
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let mut child = std::process::Command::new(&binary)
+            .arg("init")
+            .arg("--data-dir")
+            .arg(dir.path())
+            .env("VOGT_BOOTSTRAP_CORE_TOKEN_FILE", &secret_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("init");
+        assert!(child.wait().unwrap().success(), "init failed");
+        let mut child = std::process::Command::new(&binary)
+            .args(["serve", "--host", "127.0.0.1", "--port"])
+            .arg(port.to_string())
+            .arg("--data-dir")
+            .arg(dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("serve");
+        let base = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if client
+                .get(format!("{base}/health/ready"))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("vogt-core never became ready");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let sessions = test_registry();
+        let rt = runtime_with_vogt(
+            sessions,
+            vec![
+                tool_call_reply("vogt_status", json!({})),
+                final_reply("the core answered"),
+            ],
+            &base,
+            None,
+        );
+        let out = rt
+            .handle_message(
+                Caller::test("stack", Some(secret)),
+                "what is the status".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let reply = out.reply.unwrap_or_default();
+        assert!(
+            reply.contains("the core answered"),
+            "the turn did not complete against the real core: {reply}"
+        );
+    }
+
+    #[tokio::test]
     async fn session_input_pauses_and_approve_delivers() {
         let sessions = test_registry();
         let session = spawn_cat(&sessions);
