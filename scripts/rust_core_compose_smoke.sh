@@ -125,13 +125,21 @@ echo "event follower saw the Rust core"
 # and require the core's answer to name that same id. Matching the word
 # "sessions" would pass against the empty unconfigured list.
 echo "session.start on the Rust core"
+# A session with neither a project nor a work item is a 400 ("a session needs
+# a project or a work item to open in"). The item just created is WI-1.
 started="$("${COMPOSE[@]}" exec -T engine \
-  sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -fsS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
-    -d "{\"name\":\"rust-core-smoke\",\"reason\":\"compose smoke\"}" \
-    http://vogt:8000/api/sessions')"
-engine_id="$(printf '%s' "$started" | sed -n 's/.*"engine_session_id":"\([^"]*\)".*/\1/p')"
+  sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); code=$(curl -sS -H "Authorization: Bearer $tok" -H "content-type: application/json" \
+    -d "{\"name\":\"rust-core-smoke\",\"reason\":\"compose smoke\",\"work_item\":\"WI-1\"}" \
+    -o /tmp/session.json -w "%{http_code}" http://vogt:8000/api/sessions); echo "$code"; cat /tmp/session.json')"
+code="$(printf '%s\n' "$started" | head -n 1)"
+body="$(printf '%s\n' "$started" | tail -n +2)"
+if [ "$code" != "200" ] && [ "$code" != "201" ]; then
+  echo "session.start was refused ($code): $body" >&2
+  exit 1
+fi
+engine_id="$(printf '%s' "$body" | sed -n 's/.*"engine_session_id":"\([^"]*\)".*/\1/p')"
 if [ -z "$engine_id" ]; then
-  echo "session.start did not come back with an engine session id: $started" >&2
+  echo "session.start did not come back with an engine session id: $body" >&2
   exit 1
 fi
 echo "session.list on the Rust core against the real engine"
