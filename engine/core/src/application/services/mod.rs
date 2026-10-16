@@ -120,3 +120,6 @@ where
         &ctx.config,
     )
 }
+
+#[cfg(test)]
+mod sessions_test;

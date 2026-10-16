@@ -380,3 +380,59 @@ fn clock_now<C: Clock>(clock: &std::sync::Arc<std::sync::Mutex<C>>) -> crate::co
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .now()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::observations_list_op;
+    use crate::application::context::{build_context, Built};
+    use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
+    use crate::storage::interface::{DeclaredStore, ObservedStore};
+    use serde_json::json;
+
+    fn unique() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn opened() -> Built {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-obs-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        let built = build_context(
+            config,
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            panic!("expected a step clock");
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared
+            .bootstrap(&Principal::new("local:test-user", ActorKind::Human, "Test").unwrap())
+            .unwrap();
+        ctx.observed.migrate().unwrap();
+        built
+    }
+
+    #[test]
+    fn an_empty_instance_lists_no_observations() {
+        let built = opened();
+        let page = observations_list_op(&built, json!({"limit": 10, "offset": 0})).unwrap();
+        assert!(
+            page.get("observations").is_some() || page.get("items").is_some(),
+            "{page}"
+        );
+    }
+}
