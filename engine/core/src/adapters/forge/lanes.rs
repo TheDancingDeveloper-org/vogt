@@ -12,6 +12,9 @@
 //! whose source cannot be read records *why* in its observation rather than
 //! failing the sweep, so "not readable" never reads as "not deployed".
 
+use std::io::Read;
+use std::time::Duration;
+
 use serde_json::{Map, Value};
 
 use super::kinds::{COLLECTOR_DEPLOY_LANES, KIND_DEPLOY_LANE};
@@ -31,6 +34,42 @@ const FAILED: [&str; 5] = ["failed", "failure", "error", "errored", "red"];
 /// the caller's, because this layer does not open sockets of its own.
 pub trait VersionFetch {
     fn get(&self, url: &str) -> Result<(u16, Vec<u8>), String>;
+}
+
+/// The real fetch: one GET with the collector's ten-second timeout, reading at
+/// most 64 KiB. An error status answers with an empty body, as Python does.
+pub struct HttpVersionFetch;
+
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+const VERSION_BODY_CAP: u64 = 65_536;
+
+impl VersionFetch for HttpVersionFetch {
+    fn get(&self, url: &str) -> Result<(u16, Vec<u8>), String> {
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err("version_url must be http(s)".to_owned());
+        }
+        let agent = ureq::AgentBuilder::new().timeout(VERSION_TIMEOUT).build();
+        let request = agent
+            .get(url)
+            .set("Accept", "application/json")
+            .set("User-Agent", "vogt-deploy-lanes");
+        match request.call() {
+            Ok(response) => read_capped(response),
+            Err(ureq::Error::Status(status, _)) => Ok((status, Vec::new())),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+fn read_capped(response: ureq::Response) -> Result<(u16, Vec<u8>), String> {
+    let status = response.status();
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(VERSION_BODY_CAP)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    Ok((status, bytes))
 }
 
 /// One observation per configured deployment lane of a project.
