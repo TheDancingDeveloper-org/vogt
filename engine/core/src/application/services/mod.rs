@@ -64,6 +64,8 @@ use std::sync::Arc;
 #[cfg(test)]
 mod decisions_test;
 #[cfg(test)]
+mod forge_module_test;
+#[cfg(test)]
 mod forge_ops_test;
 #[cfg(test)]
 mod services_test;
