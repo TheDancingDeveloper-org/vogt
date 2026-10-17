@@ -2959,10 +2959,14 @@ const WORK_SELECT: &str = "SELECT w.*, p.slug AS project_slug, ac.identity_ref A
 
 const TERMINAL_STATES: [&str; 2] = ["done", "wont_do"];
 
-/// The WHERE clause every work view filters through, so a count and the page
-/// beside it describe the same set.
 /// The lowercase ref a search names when the text is one work item: `1241`,
 /// `WI-1241` or `wi-1241`. Python's `_EXACT_REF_QUERY`.
+///
+/// Digits are ASCII only. Python's `\d` also takes other Unicode decimal
+/// digits, but every ref is minted as `WI-` plus an integer counter, so no
+/// stored ref holds a non-ASCII digit. A query such as Arabic-Indic `١٢٤١`
+/// would name no item in Python either: its ORDER BY finds nothing to lead
+/// and the page keeps creation order, which is what this returns.
 fn exact_ref_query(text: &str) -> Option<String> {
     let text = text.trim();
     let digits = match text.get(..3) {
@@ -2987,6 +2991,8 @@ fn work_order(filter: &WorkFilter) -> (&'static str, Option<String>) {
     }
 }
 
+/// The WHERE clause every work view filters through, so a count and the page
+/// beside it describe the same set.
 fn work_where(filter: &WorkFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();

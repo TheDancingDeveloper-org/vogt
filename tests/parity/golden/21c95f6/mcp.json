@@ -1715,6 +1715,217 @@
   },
   {
     "body": {
+      "contributions": [
+        {
+          "contribution": 55.0,
+          "detail": "p1",
+          "input": "priority",
+          "value": 1.0,
+          "weight": 55.0
+        },
+        {
+          "contribution": 0.0,
+          "detail": "0.0 days since last change",
+          "input": "staleness",
+          "value": 0.0,
+          "weight": 0.5
+        },
+        {
+          "contribution": 0.0,
+          "detail": "0 item(s) depend on this one",
+          "input": "blocking_fan_out",
+          "value": 0.0,
+          "weight": 8.0
+        },
+        {
+          "contribution": 0.0,
+          "detail": "no initiative",
+          "input": "initiative_weight",
+          "value": 0.0,
+          "weight": 0.25
+        },
+        {
+          "contribution": -3.0,
+          "detail": "trust state unverified",
+          "input": "trust_penalty",
+          "value": 1.0,
+          "weight": -3.0
+        },
+        {
+          "contribution": 0.0,
+          "detail": "no open pull request",
+          "input": "open_pr",
+          "value": 0.0,
+          "weight": 12.0
+        },
+        {
+          "contribution": 0.0,
+          "detail": "no branch observed",
+          "input": "branch_activity",
+          "value": 0.0,
+          "weight": 8.0
+        }
+      ],
+      "inputs_not_yet_available": {
+        "ci_red_boost": "arrives with the CI check observations it reads"
+      },
+      "ref": "WI-1",
+      "title": "parity item renamed",
+      "total": 52.0
+    },
+    "is_error": false,
+    "operation": "why"
+  },
+  {
+    "body": {
+      "text": "not_found: no work item or observed subject 'WI-404'"
+    },
+    "is_error": true,
+    "operation": "why"
+  },
+  {
+    "body": {
+      "items": [
+        {
+          "body": "",
+          "created_at": "2026-01-02T03:04:29Z",
+          "id": "wrk_0001",
+          "kind": "chore",
+          "labels": [],
+          "origin": "created",
+          "priority": "p1",
+          "ref": "WI-1",
+          "relations": [],
+          "state": "in_progress",
+          "title": "parity item renamed",
+          "trust_state": "unverified",
+          "updated_at": "2026-01-02T03:04:39Z"
+        }
+      ],
+      "mode": "full",
+      "total": 1
+    },
+    "is_error": false,
+    "operation": "work.list"
+  },
+  {
+    "body": {
+      "items": [],
+      "mode": "summary",
+      "total": 1
+    },
+    "is_error": false,
+    "operation": "work.list"
+  },
+  {
+    "body": {
+      "items": [
+        {
+          "kind": "chore",
+          "priority": "p1",
+          "ref": "WI-1",
+          "state": "in_progress",
+          "title": "parity item renamed"
+        }
+      ],
+      "missing": [
+        "WI-404",
+        "WI-2"
+      ]
+    },
+    "is_error": false,
+    "operation": "work.get_many"
+  },
+  {
+    "body": {
+      "records": [
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:51Z",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
+          "id": "aud_0019",
+          "operation": "project.writeback",
+          "payload_digest": "sha256:5160587a6bd4fd6e1c8cfdfbe9e7b71a0aff7cb411b75e8ad277bea16adfdf65",
+          "reason": "parity harness",
+          "revision": 18,
+          "txn_id": "txn_0022"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:40Z",
+          "entity_id": "wrk_0001",
+          "entity_kind": "work_item",
+          "id": "aud_0018",
+          "operation": "work.transition",
+          "payload_digest": "sha256:3e2a6091aa3749e51f7d31a8e33b394a832c09657e63217835f679d979d60c0e",
+          "reason": "parity",
+          "revision": 17,
+          "txn_id": "txn_0019"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:38Z",
+          "entity_id": "cmt_0001",
+          "entity_kind": "comment",
+          "id": "aud_0017",
+          "operation": "work.comment",
+          "payload_digest": "sha256:4b2f8d9eeac24ac39262aff03628f2c1fd35cf5d69ee46e22cb9297504bac702",
+          "reason": "parity",
+          "revision": 16,
+          "txn_id": "txn_0018"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:32Z",
+          "entity_id": "wrk_0001",
+          "entity_kind": "work_item",
+          "id": "aud_0016",
+          "operation": "work.update",
+          "payload_digest": "sha256:1b7bbf5cf7c7f958e503144a57ead6668ed52a60ad818983f2b53baccbe0ff89",
+          "reason": "parity",
+          "revision": 15,
+          "txn_id": "txn_0017"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:30Z",
+          "entity_id": "wrk_0001",
+          "entity_kind": "work_item",
+          "id": "aud_0015",
+          "operation": "work.create",
+          "payload_digest": "sha256:575870b9df83c702df7cfd73d439289a2e52b7dc3f37236710df812b0664db5b",
+          "reason": "parity",
+          "revision": 14,
+          "txn_id": "txn_0016"
+        }
+      ],
+      "total": 19
+    },
+    "is_error": false,
+    "operation": "audit.list"
+  },
+  {
+    "body": {
+      "text": "invalid_request: WI-1 belongs to no project, so there is no branch to bind it to"
+    },
+    "is_error": true,
+    "operation": "work.bind_branch"
+  },
+  {
+    "body": {
+      "text": "not_found: no observed subject 'gh:parity-org/parity#404'"
+    },
+    "is_error": true,
+    "operation": "work.adopt"
+  },
+  {
+    "body": {
       "digests": [],
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
       "hidden_count": 0,
@@ -1733,7 +1944,7 @@
       },
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
       "rows": [],
-      "swept_at": "2026-01-02T03:04:53Z"
+      "swept_at": "2026-01-02T03:04:55Z"
     },
     "is_error": false,
     "operation": "session.sweep"
@@ -1838,13 +2049,13 @@
       "user": {
         "actor_id": "act_0005",
         "actor_identity_ref": "human:ada",
-        "created_at": "2026-01-02T03:04:54Z",
+        "created_at": "2026-01-02T03:04:56Z",
         "scopes": [
           "read",
           "work.write",
           "project.write"
         ],
-        "updated_at": "2026-01-02T03:04:54Z",
+        "updated_at": "2026-01-02T03:04:56Z",
         "username": "ada"
       }
     },
@@ -1857,13 +2068,13 @@
         {
           "actor_id": "act_0005",
           "actor_identity_ref": "human:ada",
-          "created_at": "2026-01-02T03:04:54Z",
+          "created_at": "2026-01-02T03:04:56Z",
           "scopes": [
             "read",
             "work.write",
             "project.write"
           ],
-          "updated_at": "2026-01-02T03:04:54Z",
+          "updated_at": "2026-01-02T03:04:56Z",
           "username": "ada"
         }
       ]
@@ -1876,13 +2087,13 @@
       "user": {
         "actor_id": "act_0005",
         "actor_identity_ref": "human:ada",
-        "created_at": "2026-01-02T03:04:54Z",
+        "created_at": "2026-01-02T03:04:56Z",
         "scopes": [
           "read",
           "work.write",
           "project.write"
         ],
-        "updated_at": "2026-01-02T03:04:56Z",
+        "updated_at": "2026-01-02T03:04:58Z",
         "username": "ada"
       }
     },
@@ -1933,7 +2144,7 @@
         "id": "tok_0002",
         "kind": "api",
         "name": "bootstrap agent token",
-        "revoked_at": "2026-01-02T03:04:58Z",
+        "revoked_at": "2026-01-02T03:05:00Z",
         "revoked_reason": "parity harness",
         "scopes": [
           "read",
@@ -1970,7 +2181,7 @@
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "path": "<root>/backup",
-      "taken_at": "2026-01-02T03:05:00Z"
+      "taken_at": "2026-01-02T03:05:02Z"
     },
     "is_error": false,
     "operation": "backup"
@@ -1983,7 +2194,7 @@
       "import_root_then": "<root>/instance/repos",
       "instance_id": "ins_0001",
       "migrations_applied": [],
-      "restored_from": "2026-01-02T03:05:00Z",
+      "restored_from": "2026-01-02T03:05:02Z",
       "source": "<root>/backup"
     },
     "is_error": false,
