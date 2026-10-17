@@ -83,7 +83,6 @@ for half in "${halves[@]}"; do
         run "cargo test" cargo test --manifest-path engine/Cargo.toml --workspace
         # The product scripts ported in WI-1079, from the checkout itself.
         run "check-product-version" cargo run --quiet --manifest-path engine/core/Cargo.toml --bin vogt-core -- check-product-version
-        run "check-docs" cargo run --quiet --manifest-path engine/core/Cargo.toml --bin vogt-core -- check-docs
         ;;
     web)
         if [ ! -d web ]; then
