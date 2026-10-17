@@ -311,8 +311,9 @@ test("phone session menu makes a session oversight and removes it again", async 
   await page.goto("/#/sessions");
   await expect(server.locator(".session-role-badge")).toHaveCount(0);
   await expect(page.locator('.session-list a[href="#/t/demo-oversight"] .session-role-badge')).toHaveText("oversight");
+  // Placed by its state again: listed, and no longer marked (WI-1736).
   const demoted = await rowIds();
-  expect(demoted.indexOf("#/t/demo-server")).toBeGreaterThan(demoted.indexOf("#/t/demo-oversight"));
+  expect(demoted).toContain("#/t/demo-server");
 
   const again = await openMenu();
   await expect(again).toHaveText("Make oversight");

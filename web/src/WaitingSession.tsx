@@ -22,7 +22,7 @@ import {
 import { api, type SessionSummary } from "./api";
 import { tailOf, TAIL_FETCH_BYTES } from "./terminalTail";
 import { createNow } from "./viewAge";
-import { sessionActivityAge } from "./sessionRowModel";
+import { pickerWaiting, sessionActivityAge } from "./sessionRowModel";
 
 /** The byte a terminal receives when somebody presses Ctrl-C (ETX, 0x03).
  *  Written as an escape: a literal control byte in a source file is a byte
@@ -93,10 +93,13 @@ export const WaitingSessionCard: Component<Props> = (props) => {
   };
 
   return (
-    <article class="session-waiting" aria-label={`${props.session.name} is waiting for input`}>
+    <article
+      class="session-waiting"
+      aria-label={`${props.session.name} is ${pickerWaiting(props.session) ? "waiting for a choice" : "waiting for input"}`}
+    >
       <header class="session-waiting-head">
         <span class="activity-dot waiting-for-input" aria-hidden="true" />
-        <span class="session-waiting-state">Waiting for input</span>
+        <span class="session-waiting-state">{pickerWaiting(props.session) ? "Waiting for a choice" : "Waiting for input"}</span>
         <span class="session-waiting-age">
           {sessionActivityAge(props.session, now())}
         </span>

@@ -2975,8 +2975,10 @@ test("Phone Sessions overview reaches idle and busy sessions, not only the waiti
   const list = page.locator(".session-list");
   await expect(list.locator('a[href="#/t/sess-idle"]')).toContainText("idle-shell");
   await expect(list.locator('a[href="#/t/sess-busy"]')).toContainText("running-build");
-  // The waiting session is not duplicated as a row: it is the card.
-  await expect(list.locator('a[href="#/t/sess-wait"]')).toHaveCount(0);
+  // The waiting session is also a row, under Needs you (WI-1736): the card
+  // answers it, the list keeps the full state of the machine.
+  await expect(list.locator('a[href="#/t/sess-wait"]')).toHaveCount(1);
+  await expect(list.locator(".session-list-head", { hasText: "Needs you" })).toBeVisible();
 
   await list.locator('a[href="#/t/sess-idle"]').click();
   await expect(page).toHaveURL(/#\/t\/sess-idle$/);
@@ -4480,6 +4482,64 @@ test("The places rail groups sessions by state, nests workers, and filters", asy
   await filter.press("Escape");
   await expect(filter).toHaveValue("");
   await expect(area.locator('.session-row[aria-label^="w-run,"]')).toBeVisible();
+});
+
+/**
+ * WI-1736, phone width: the Sessions page groups sessions the way the rail
+ * does: a Pinned strip, state headers, a worker lifted into Needs you with its
+ * parent named, and a filter, with no horizontal scroll.
+ */
+test("Phone Sessions groups by state, pins, lifts, and filters at phone width", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The phone Sessions body is the phone surface");
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  await page.addInitScript(() => {
+    localStorage.setItem("vogt.sessionBookmarks.v1", JSON.stringify(["solo"]));
+  });
+  const sessions = [
+    { ...liveSession, id: "ovs-main", name: "ovs-main", role: "oversight", activity: "idle", created_at: minutesAgo(120), last_event_at: minutesAgo(1) },
+    { ...liveSession, id: "w-run", name: "w-run", activity: "running", created_at: minutesAgo(20), last_event_at: minutesAgo(1) },
+    {
+      ...liveSession,
+      id: "w-ask",
+      name: "w-ask",
+      activity: "awaiting-approval",
+      approval: { question: "Run the tests?", command_excerpt: "npm test", detected_at: minutesAgo(2) },
+      created_at: minutesAgo(30),
+      last_event_at: minutesAgo(2),
+    },
+    { ...liveSession, id: "solo", name: "solo", activity: "idle", created_at: minutesAgo(10), last_event_at: minutesAgo(3) },
+  ];
+  await installFixtures(page, {}, sessions);
+  await page.route((url) => url.pathname.endsWith("/vogt/sessions"), (route) => route.fulfill({
+    json: {
+      sessions: [
+        { id: "ses_run", engine_session_id: "w-run", started_by_session: "ovs-main" },
+        { id: "ses_ask", engine_session_id: "w-ask", started_by_session: "ovs-main" },
+      ],
+      engine: null,
+    },
+  }));
+  await page.goto("/#/sessions");
+
+  const list = page.locator(".session-list");
+  await expect(list.locator(".session-list-head", { hasText: "Pinned" })).toBeVisible();
+  await expect(list.locator(".session-list-head", { hasText: "Needs you" })).toBeVisible();
+  await expect(list.locator(".session-list-head", { hasText: "Ready / idle" })).toBeVisible();
+  // The pinned session sits in the strip, once.
+  await expect(list.locator('.session-row[aria-label^="solo,"]')).toHaveCount(1);
+  // The worker that needs a person is lifted into Needs you, with its parent named.
+  await expect(list.locator('.session-row[aria-label^="w-ask,"]')).toContainText("↳ ovs-main");
+  await expect(list.locator('.session-row[aria-label^="ovs-main,"] .session-tally')).toContainText("1▶");
+
+  // The filter narrows the list at phone width.
+  const filter = page.getByRole("searchbox", { name: "Filter sessions" });
+  await filter.fill("w-run");
+  await expect(list.locator('.session-row[aria-label^="w-run,"]')).toBeVisible();
+  await expect(list.locator('.session-row[aria-label^="solo,"]')).toHaveCount(0);
+
+  // Nothing scrolls sideways at phone width.
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
 });
 
 /**

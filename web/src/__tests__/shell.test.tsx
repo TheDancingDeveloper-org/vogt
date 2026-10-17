@@ -295,9 +295,11 @@ describe("a pasted link opens the surface it names", () => {
     ];
     const { container } = mountShell("/sessions", { sessions });
 
+    // The accessible name is "<name>, <state>": badges (WI-1736) sit in the
+    // visible name and would otherwise leak into the comparison.
     const railRows = () =>
-      container.querySelectorAll(".places-rail-session-area .session-row .name");
-    const names = () => [...railRows()].map((node) => node.textContent);
+      container.querySelectorAll(".places-rail-session-area .session-row");
+    const names = () => [...railRows()].map((node) => node.getAttribute("aria-label")?.split(",")[0]);
     // A previous retained shell can leave a same-sized roster in the shared
     // store until this mount's list request lands; wait for identities, not
     // merely for a coincidentally equal row count.
@@ -478,10 +480,10 @@ describe("shared live steering", () => {
         expect(cards).toHaveLength(1);
         expect(cards[0]).toHaveTextContent("needs-answer");
         expect(cards[0]).not.toHaveTextContent("old-prompt");
-        expect(container.querySelector(".sessions-overview-heading"))
-          .toHaveTextContent("RUNNING — 3");
-        expect(container.querySelector(".sessions-overview-breakdown"))
-          .toHaveTextContent("1 idle · 1 exited");
+        // The list carries its own state sections (WI-1736); the duplicate
+        // "RUNNING — N" summary is gone.
+        expect(container.querySelector(".sessions-overview-heading")).toBeNull();
+        expect(container.querySelector(".session-list")).toHaveTextContent("Ready / idle");
         expect(container.querySelector('.phone-bottom-nav [aria-label="1 sessions waiting for input"]'))
           .toBeTruthy();
       });
