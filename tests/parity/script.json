@@ -1315,6 +1315,32 @@
    ]
   },
   {
+   "operation": "token.issue",
+   "params": {
+    "actor": "human:ada",
+    "name": "claude-code",
+    "scopes": "read,work.write",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "token.issue",
+   "params": {
+    "actor": "human:ada",
+    "name": "bad expiry",
+    "expires_in_days": 0,
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 2,
+    "capture_error": true
+   },
+   "why": "a non-positive expiry is a validation refusal, exit 2"
+  },
+  {
    "operation": "token.list",
    "params": {
     "include_revoked": true
@@ -1369,6 +1395,31 @@
     "exit": 0
    },
    "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+  },
+  {
+   "operation": "backup",
+   "params": {
+    "destination": "{root}/backup",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1,
+    "capture_error": true
+   },
+   "why": "a second backup over a non-empty destination is refused and writes nothing"
+  },
+  {
+   "operation": "restore",
+   "params": {
+    "source": "{root}/backup",
+    "confirm": false,
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1,
+    "capture_error": true
+   },
+   "why": "restore without --confirm is refused before anything is replaced"
   },
   {
    "operation": "restore",
