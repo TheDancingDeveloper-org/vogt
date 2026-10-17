@@ -44,7 +44,8 @@ pub fn openapi() -> Value {
     for operation in registry.for_transport(Transport::Http) {
         let path = format!("/api{}", operation.http_route().path);
         let entry = paths.entry(path).or_insert_with(|| json!({}));
-        entry[method_name(operation.http_route().method)] = operation_object(operation, &mut components);
+        entry[method_name(operation.http_route().method)] =
+            operation_object(operation, &mut components);
     }
     let hand: Value = serde_json::from_str(HAND_ROUTES).expect("openapi_hand.json is JSON");
     for (path, item) in hand["paths"].as_object().into_iter().flatten() {

@@ -1,10 +1,8 @@
 //! Parameter and result models, with the JSON Schemas derived from them.
 //!
-//! Ports the models in `src/vogt/application/models.py` one operation at a
-//! time. An operation listed in [`DERIVED`] takes its schemas from the types
-//! here: `schemars` derives them, and `scripts/gen_registry.py` leaves those
-//! operations out of the table it records from pydantic. Every other
-//! operation keeps its recorded schema until its models are ported.
+//! Ports the models in `src/vogt/application/models.py`. Every operation's
+//! parameter and result schemas are derived here: `schemars` builds them from
+//! these types, and [`DERIVED`] lists the operations they serve.
 //!
 //! The derived schemas are checked against Python's live `registry.dump` by
 //! `tests/test_rust_schemas.py`, so a Rust model that validated differently
@@ -15,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 /// The operations whose schemas are derived from the types in this module.
 ///
-/// `scripts/gen_registry.py` reads this list to decide which schemas to
-/// record, so a name added here stops being recorded on the next regeneration.
+/// The registry refuses to start if an operation has no schema here, so an
+/// operation is listed when its models are ported.
 pub const DERIVED: &[&str] = &[
     "init",
     "migrate",
@@ -74,6 +72,94 @@ pub const DERIVED: &[&str] = &[
     "restore",
     "serve",
     "connect",
+    "status",
+    "registry.dump",
+    "instance.diagnostics",
+    "engine.status",
+    "place.metrics",
+    "project.brief",
+    "work.create",
+    "work.get",
+    "work.get_many",
+    "work.list",
+    "board.list",
+    "work.update",
+    "work.transition",
+    "work.relate",
+    "work.unrelate",
+    "work.bind_branch",
+    "work.comment",
+    "backlog",
+    "bugs",
+    "initiative.create",
+    "initiative.list",
+    "initiative.update",
+    "initiative.publish",
+    "sweep",
+    "coverage",
+    "observations.list",
+    "deps",
+    "work.adopt",
+    "contract.evaluate",
+    "contract.check",
+    "contract.inapplicable",
+    "contract.applicable",
+    "compliance",
+    "drift.detect",
+    "drift.list",
+    "drift.resolve",
+    "session.start",
+    "session.list",
+    "session.stop",
+    "session.input",
+    "session.sweep",
+    "session.hibernate",
+    "session.wake",
+    "session.keep_awake",
+    "session.rename",
+    "session.remove",
+    "session.set_role",
+    "session.bind_work",
+    "session.grant_request",
+    "session.grant_decide",
+    "session.grant_revoke",
+    "session.grant_list",
+    "decision.ask",
+    "decision.answer",
+    "decision.list",
+    "decision.withdraw",
+    "session.answer",
+    "session.screen",
+    "session.last_reply",
+    "session.economics",
+    "session.digest",
+    "session.wait",
+    "session.changes",
+    "session.wait_any",
+    "session.report_blocked",
+    "session.report_unblocked",
+    "agent_cli.list",
+    "agent_cli.update",
+    "agent_activity.search",
+    "agent_activity.summary",
+    "session.history_list",
+    "session.search_output",
+    "clone",
+    "import",
+    "forge.writeback",
+    "forge.link",
+    "forge.publish",
+    "forge.repos",
+    "forge.import",
+    "forge.actions",
+    "events.list",
+    "notifications",
+    "deployed.versions",
+    "inbox.list",
+    "inbox.archive",
+    "inbox.snooze",
+    "inbox.restore",
+    "audit.list",
 ];
 
 mod access;
@@ -84,6 +170,10 @@ mod forge;
 mod project;
 mod records;
 mod session;
+mod session_ops;
+mod system;
+mod views;
+mod work;
 
 /// `(operation name, params schema, result schema)` for every name in
 /// [`DERIVED`], as `registry::dump()` emits them.
@@ -365,6 +455,446 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             schema_of::<admin::ConnectParams>(),
             schema_of::<admin::ConnectResult>(),
         ),
+        (
+            "status",
+            schema_of::<system::StatusParams>(),
+            schema_of::<system::StatusResult>(),
+        ),
+        (
+            "registry.dump",
+            schema_of::<system::RegistryDumpParams>(),
+            schema_of::<system::RegistryDumpResult>(),
+        ),
+        (
+            "instance.diagnostics",
+            schema_of::<system::DiagnosticsParams>(),
+            schema_of::<system::DiagnosticsResult>(),
+        ),
+        (
+            "engine.status",
+            schema_of::<system::EngineStatusParams>(),
+            schema_of::<system::EngineStatusResult>(),
+        ),
+        (
+            "place.metrics",
+            schema_of::<system::PlaceMetricsParams>(),
+            schema_of::<system::PlaceMetricsResult>(),
+        ),
+        (
+            "project.brief",
+            schema_of::<work::ProjectBriefParams>(),
+            schema_of::<work::ProjectBriefResult>(),
+        ),
+        (
+            "work.create",
+            schema_of::<work::CreateWorkParams>(),
+            schema_of::<work::WorkResult>(),
+        ),
+        (
+            "work.get",
+            schema_of::<work::GetWorkParams>(),
+            schema_of::<work::WorkResult>(),
+        ),
+        (
+            "work.get_many",
+            schema_of::<work::GetManyWorkParams>(),
+            schema_of::<work::WorkManyResult>(),
+        ),
+        (
+            "work.list",
+            schema_of::<work::ListWorkParams>(),
+            schema_of::<work::WorkListResult>(),
+        ),
+        (
+            "board.list",
+            schema_of::<work::BoardListParams>(),
+            schema_of::<work::BoardListResult>(),
+        ),
+        (
+            "work.update",
+            schema_of::<work::UpdateWorkParams>(),
+            schema_of::<work::WorkResult>(),
+        ),
+        (
+            "work.transition",
+            schema_of::<work::TransitionWorkParams>(),
+            schema_of::<work::WorkResult>(),
+        ),
+        (
+            "work.relate",
+            schema_of::<work::RelateWorkParams>(),
+            schema_of::<work::WorkResult>(),
+        ),
+        (
+            "work.unrelate",
+            schema_of::<work::UnrelateWorkParams>(),
+            schema_of::<work::WorkResult>(),
+        ),
+        (
+            "work.bind_branch",
+            schema_of::<work::BindBranchParams>(),
+            schema_of::<work::WorkResult>(),
+        ),
+        (
+            "work.comment",
+            schema_of::<work::CommentParams>(),
+            schema_of::<work::CommentResult>(),
+        ),
+        (
+            "backlog",
+            schema_of::<work::BacklogParams>(),
+            schema_of::<work::BacklogResult>(),
+        ),
+        (
+            "bugs",
+            schema_of::<work::BugsParams>(),
+            schema_of::<work::BacklogResult>(),
+        ),
+        (
+            "initiative.create",
+            schema_of::<work::CreateInitiativeParams>(),
+            schema_of::<work::InitiativeResult>(),
+        ),
+        (
+            "initiative.list",
+            schema_of::<work::ListInitiativesParams>(),
+            schema_of::<work::InitiativeListResult>(),
+        ),
+        (
+            "initiative.update",
+            schema_of::<work::UpdateInitiativeParams>(),
+            schema_of::<work::InitiativeResult>(),
+        ),
+        (
+            "initiative.publish",
+            schema_of::<work::PublishInitiativeParams>(),
+            schema_of::<work::PublishInitiativeResult>(),
+        ),
+        (
+            "sweep",
+            schema_of::<work::SweepParams>(),
+            schema_of::<work::SweepResult>(),
+        ),
+        (
+            "coverage",
+            schema_of::<work::CoverageParams>(),
+            schema_of::<work::CoverageResult>(),
+        ),
+        (
+            "observations.list",
+            schema_of::<work::ObservationsParams>(),
+            schema_of::<work::ObservationsResult>(),
+        ),
+        (
+            "deps",
+            schema_of::<work::DepsParams>(),
+            schema_of::<work::DepsResult>(),
+        ),
+        (
+            "work.adopt",
+            schema_of::<work::AdoptParams>(),
+            schema_of::<work::AdoptResult>(),
+        ),
+        (
+            "contract.evaluate",
+            schema_of::<work::ContractEvaluateParams>(),
+            schema_of::<work::ContractCheckResult>(),
+        ),
+        (
+            "contract.check",
+            schema_of::<work::ContractCheckParams>(),
+            schema_of::<work::ContractCheckResult>(),
+        ),
+        (
+            "contract.inapplicable",
+            schema_of::<work::ContractInapplicableParams>(),
+            schema_of::<work::ContractExemptionResult>(),
+        ),
+        (
+            "contract.applicable",
+            schema_of::<work::ContractApplicableParams>(),
+            schema_of::<work::ContractExemptionResult>(),
+        ),
+        (
+            "compliance",
+            schema_of::<work::ComplianceParams>(),
+            schema_of::<work::ComplianceResult>(),
+        ),
+        (
+            "drift.detect",
+            schema_of::<work::DriftDetectParams>(),
+            schema_of::<work::DriftDetectResult>(),
+        ),
+        (
+            "drift.list",
+            schema_of::<work::DriftListParams>(),
+            schema_of::<work::DriftListResult>(),
+        ),
+        (
+            "drift.resolve",
+            schema_of::<work::DriftResolveParams>(),
+            schema_of::<work::DriftResult>(),
+        ),
+        (
+            "session.start",
+            schema_of::<session_ops::StartSessionParams>(),
+            schema_of::<session_ops::SessionResult>(),
+        ),
+        (
+            "session.list",
+            schema_of::<session_ops::ListSessionsParams>(),
+            schema_of::<session_ops::SessionListResult>(),
+        ),
+        (
+            "session.stop",
+            schema_of::<session_ops::StopSessionParams>(),
+            schema_of::<session_ops::SessionResult>(),
+        ),
+        (
+            "session.input",
+            schema_of::<session_ops::SessionInputParams>(),
+            schema_of::<session_ops::SessionInputResult>(),
+        ),
+        (
+            "session.sweep",
+            schema_of::<session_ops::SweepSessionsParams>(),
+            schema_of::<session_ops::SessionSweepResult>(),
+        ),
+        (
+            "session.hibernate",
+            schema_of::<session_ops::HibernateSessionParams>(),
+            schema_of::<session_ops::SessionResult>(),
+        ),
+        (
+            "session.wake",
+            schema_of::<session_ops::WakeSessionParams>(),
+            schema_of::<session_ops::SessionResult>(),
+        ),
+        (
+            "session.keep_awake",
+            schema_of::<session_ops::KeepSessionAwakeParams>(),
+            schema_of::<session_ops::SessionResult>(),
+        ),
+        (
+            "session.rename",
+            schema_of::<session_ops::RenameSessionParams>(),
+            schema_of::<session_ops::SessionResult>(),
+        ),
+        (
+            "session.remove",
+            schema_of::<session_ops::RemoveSessionParams>(),
+            schema_of::<session_ops::SessionResult>(),
+        ),
+        (
+            "session.set_role",
+            schema_of::<session_ops::SetSessionRoleParams>(),
+            schema_of::<session_ops::SessionResult>(),
+        ),
+        (
+            "session.bind_work",
+            schema_of::<session_ops::BindSessionWorkParams>(),
+            schema_of::<session_ops::BindSessionWorkResult>(),
+        ),
+        (
+            "session.grant_request",
+            schema_of::<session_ops::RequestGrantParams>(),
+            schema_of::<session_ops::SessionGrantResult>(),
+        ),
+        (
+            "session.grant_decide",
+            schema_of::<session_ops::DecideGrantParams>(),
+            schema_of::<session_ops::SessionGrantResult>(),
+        ),
+        (
+            "session.grant_revoke",
+            schema_of::<session_ops::RevokeGrantParams>(),
+            schema_of::<session_ops::SessionGrantResult>(),
+        ),
+        (
+            "session.grant_list",
+            schema_of::<session_ops::ListGrantsParams>(),
+            schema_of::<session_ops::ListGrantsResult>(),
+        ),
+        (
+            "decision.ask",
+            schema_of::<session_ops::AskDecisionParams>(),
+            schema_of::<session_ops::DecisionResult>(),
+        ),
+        (
+            "decision.answer",
+            schema_of::<session_ops::AnswerDecisionParams>(),
+            schema_of::<session_ops::DecisionResult>(),
+        ),
+        (
+            "decision.list",
+            schema_of::<session_ops::ListDecisionsParams>(),
+            schema_of::<session_ops::ListDecisionsResult>(),
+        ),
+        (
+            "decision.withdraw",
+            schema_of::<session_ops::WithdrawDecisionParams>(),
+            schema_of::<session_ops::DecisionResult>(),
+        ),
+        (
+            "session.answer",
+            schema_of::<session_ops::AnswerSessionParams>(),
+            schema_of::<session_ops::SessionAnswerResult>(),
+        ),
+        (
+            "session.screen",
+            schema_of::<session_ops::SessionScreenParams>(),
+            schema_of::<views::SessionScreenResult>(),
+        ),
+        (
+            "session.last_reply",
+            schema_of::<session_ops::SessionLastReplyParams>(),
+            schema_of::<session_ops::SessionLastReplyResult>(),
+        ),
+        (
+            "session.economics",
+            schema_of::<session_ops::SessionEconomicsParams>(),
+            schema_of::<session_ops::SessionEconomicsResult>(),
+        ),
+        (
+            "session.digest",
+            schema_of::<session_ops::SessionDigestParams>(),
+            schema_of::<session_ops::SessionDigestResult>(),
+        ),
+        (
+            "session.wait",
+            schema_of::<session_ops::SessionWaitParams>(),
+            schema_of::<session_ops::SessionWaitResult>(),
+        ),
+        (
+            "session.changes",
+            schema_of::<session_ops::SessionChangesParams>(),
+            schema_of::<session_ops::SessionChangesResult>(),
+        ),
+        (
+            "session.wait_any",
+            schema_of::<session_ops::SessionWaitAnyParams>(),
+            schema_of::<session_ops::SessionWaitAnyResult>(),
+        ),
+        (
+            "session.report_blocked",
+            schema_of::<session_ops::ReportBlockedParams>(),
+            schema_of::<session_ops::SessionBlockedResult>(),
+        ),
+        (
+            "session.report_unblocked",
+            schema_of::<session_ops::ReportUnblockedParams>(),
+            schema_of::<session_ops::SessionBlockedResult>(),
+        ),
+        (
+            "agent_cli.list",
+            schema_of::<session_ops::AgentCliListParams>(),
+            schema_of::<session_ops::AgentCliListResult>(),
+        ),
+        (
+            "agent_cli.update",
+            schema_of::<session_ops::AgentCliUpdateParams>(),
+            schema_of::<session_ops::AgentCliUpdateResult>(),
+        ),
+        (
+            "agent_activity.search",
+            schema_of::<session_ops::AgentActivitySearchParams>(),
+            schema_of::<session_ops::AgentActivitySearchResult>(),
+        ),
+        (
+            "agent_activity.summary",
+            schema_of::<session_ops::AgentActivitySummaryParams>(),
+            schema_of::<session_ops::AgentActivitySummaryResult>(),
+        ),
+        (
+            "session.history_list",
+            schema_of::<session_ops::HistoryListParams>(),
+            schema_of::<session_ops::HistoryListResult>(),
+        ),
+        (
+            "session.search_output",
+            schema_of::<session_ops::SearchOutputParams>(),
+            schema_of::<session_ops::SearchOutputResult>(),
+        ),
+        (
+            "clone",
+            schema_of::<system::CloneParams>(),
+            schema_of::<system::CloneResult>(),
+        ),
+        (
+            "import",
+            schema_of::<system::ImportParams>(),
+            schema_of::<system::ImportResult>(),
+        ),
+        (
+            "forge.writeback",
+            schema_of::<system::SetWriteBackParams>(),
+            schema_of::<project::ProjectResult>(),
+        ),
+        (
+            "forge.link",
+            schema_of::<system::ForgeLinkParams>(),
+            schema_of::<system::ForgeLinkResult>(),
+        ),
+        (
+            "forge.publish",
+            schema_of::<system::ForgePublishParams>(),
+            schema_of::<system::ForgePublishResult>(),
+        ),
+        (
+            "forge.repos",
+            schema_of::<system::ForgeReposParams>(),
+            schema_of::<system::ForgeReposResult>(),
+        ),
+        (
+            "forge.import",
+            schema_of::<system::ForgeImportParams>(),
+            schema_of::<project::ImportProjectResult>(),
+        ),
+        (
+            "forge.actions",
+            schema_of::<system::WriteBackListParams>(),
+            schema_of::<system::WriteBackListResult>(),
+        ),
+        (
+            "events.list",
+            schema_of::<system::ListEventsParams>(),
+            schema_of::<system::EventListResult>(),
+        ),
+        (
+            "notifications",
+            schema_of::<system::NotificationsParams>(),
+            schema_of::<system::NotificationsResult>(),
+        ),
+        (
+            "deployed.versions",
+            schema_of::<system::DeployedVersionsParams>(),
+            schema_of::<system::DeployedVersionsResult>(),
+        ),
+        (
+            "inbox.list",
+            schema_of::<system::InboxListParams>(),
+            schema_of::<system::InboxListResult>(),
+        ),
+        (
+            "inbox.archive",
+            schema_of::<system::InboxArchiveParams>(),
+            schema_of::<system::InboxTriageResult>(),
+        ),
+        (
+            "inbox.snooze",
+            schema_of::<system::InboxSnoozeParams>(),
+            schema_of::<system::InboxTriageResult>(),
+        ),
+        (
+            "inbox.restore",
+            schema_of::<system::InboxRestoreParams>(),
+            schema_of::<system::InboxTriageResult>(),
+        ),
+        (
+            "audit.list",
+            schema_of::<system::ListAuditParams>(),
+            schema_of::<system::AuditListResult>(),
+        ),
     ]
 }
 
@@ -391,7 +921,8 @@ fn pydantic_shape(value: &mut serde_json::Value) {
         Value::Object(map) => {
             nullable_as_any_of(map);
             if let Some(Value::String(format)) = map.get("format") {
-                if format.starts_with("int") || format.starts_with("uint") {
+                // pydantic emits no format for an integer or a float.
+                if format.starts_with("int") || format.starts_with("uint") || format == "double" {
                     map.remove("format");
                 }
             }
@@ -411,7 +942,9 @@ fn pydantic_shape(value: &mut serde_json::Value) {
                         // serde's `default` always does: an empty-list default
                         // is that factory, so it is dropped.
                         let keep_default = property.remove("x-keep-default").is_some();
-                        if !keep_default && property.get("default") == Some(&json!([])) {
+                        let empty = property.get("default") == Some(&json!([]))
+                            || property.get("default") == Some(&json!({}));
+                        if !keep_default && empty {
                             property.remove("default");
                         }
                         if !refers_to_definition(property) && !property.contains_key("title") {
@@ -479,6 +1012,10 @@ fn nullable_as_any_of(map: &mut serde_json::Map<String, serde_json::Value>) {
         "maximum",
         "format",
         "items",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "minItems",
+        "maxItems",
     ] {
         if let Some(value) = map.remove(key) {
             branch.insert(key.to_string(), value);
@@ -575,6 +1112,11 @@ pub(super) fn open_object(_: &mut SchemaGenerator) -> Schema {
 /// `str | None` with no default: a string, or null, and required.
 pub(super) fn optional_string(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "anyOf": [{ "type": "string" }, { "type": "null" }] })
+}
+
+/// `dict[str, object] | None`: an object of any values, or null.
+pub(super) fn optional_open_object(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "anyOf": [{ "type": "object", "additionalProperties": true }, { "type": "null" }] })
 }
 
 /// `datetime | None`: a `date-time` string, or null.

@@ -479,3 +479,37 @@ pub struct VerificationPolicy {
     #[schemars(extend("x-keep-default" = true))]
     pub lanes: Vec<String>,
 }
+
+// `Literal["fresh", "never_swept", "partial"]` in Python; a fresh view takes never_swept.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum FreshnessStatus {
+    Fresh,
+    #[default]
+    NeverSwept,
+    Partial,
+}
+
+/// How old the evidence behind an answer is.
+///
+/// Every aggregating answer carries one. `oldest_relevant_sweep` is the
+/// honest number: an answer is exactly as fresh as the least fresh thing it
+/// depends on.
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Freshness {
+    #[serde(default)]
+    pub status: FreshnessStatus,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub oldest_relevant_sweep: Option<String>,
+    #[serde(default)]
+    pub age_seconds: Option<i64>,
+    /// Per collector: how long ago it last completed.
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub collectors: BTreeMap<String, String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}

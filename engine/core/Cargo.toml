@@ -20,8 +20,7 @@ fancy-regex = "0.14"
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
-# Derives the operation schemas from the models in `application/models.rs`,
-# which replaces the table recorded from pydantic for the operations they cover.
+# Derives every operation schema from the models in `application/models`.
 schemars = "1.2.3"
 toml = "0.8"
 sha2 = "0.10"
