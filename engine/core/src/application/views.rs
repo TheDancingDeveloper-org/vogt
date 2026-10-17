@@ -270,6 +270,63 @@ pub(crate) fn candidate_population<C: Clock, I: IdFactory>(
     Ok((gathered.ranked.len() as i64, gathered.declared))
 }
 
+/// What `project.brief` reads from the backlog gather for one project: the
+/// open-work and open-bug counts, the declared and observed split, and the top
+/// rows. Python's `brief_project` calls `_gather` with no filters and then
+/// takes these from it, so this is the same gather `backlog` ranks.
+pub(crate) struct BriefPopulation {
+    pub open_work: i64,
+    pub open_bugs: i64,
+    pub declared: i64,
+    pub observed: i64,
+    pub top: Vec<serde_json::Value>,
+}
+
+pub(crate) fn brief_population<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project: &str,
+    backlog_limit: usize,
+    mode: &str,
+) -> Result<BriefPopulation, VogtError> {
+    let query = GatherQuery {
+        project: Some(project),
+        kinds: Vec::new(),
+        priorities: Vec::new(),
+        assignee: None,
+        initiative: None,
+        label: None,
+        trust_states: Vec::new(),
+        include_prs: true,
+    };
+    let gathered = gather(ctx, &query)?;
+    let open_bugs = gathered
+        .ranked
+        .iter()
+        .filter(|row| row.value.get("kind").and_then(serde_json::Value::as_str) == Some("bug"))
+        .count() as i64;
+    Ok(BriefPopulation {
+        open_work: gathered.ranked.len() as i64,
+        open_bugs,
+        declared: gathered.declared,
+        observed: gathered.observed,
+        top: gathered
+            .ranked
+            .iter()
+            .take(backlog_limit)
+            .map(|row| projected(&row.value, mode))
+            .collect(),
+    })
+}
+
+/// `backlog(limit=1).total_considered`, the backlog badge `place.metrics`
+/// reads. It is the whole candidate population, not the page.
+pub(crate) fn backlog_total_considered<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+) -> Result<i64, VogtError> {
+    let answer = backlog(ctx, serde_json::json!({"limit": 1}))?;
+    Ok(answer["total_considered"].as_i64().unwrap_or(0))
+}
+
 /// The candidate population of a ranked view, scored and ordered. Ports
 /// `_gather`: declared rows first, then the observed subjects that name no
 /// declared work, with a PR collapsed under the item it implements.

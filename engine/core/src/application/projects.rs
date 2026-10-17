@@ -3,8 +3,6 @@
 //!
 //! `project.import` clones, registers and (with `consolidate: false`) stops there.
 //! Consolidation waits on `forge.onboard`, which has no Rust port yet.
-//! Ranked backlog is not ported, so the brief says `not_collected` for the
-//! counts that come out of the gather rather than inventing a zero.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -53,9 +51,6 @@ const PROJECT_SCAFFOLDED_EVENT: &str = "project.scaffolded";
 /// `dep_refs.py` `KIND_DEP_SCAN`. The collector itself is not ported; the kind
 /// string is what the observed store is queried by.
 const KIND_DEP_SCAN: &str = "dep_scan";
-
-/// Ranked backlog is `views._gather`, which is not ported.
-const BACKLOG_NOT_COLLECTED: &str = "ranked backlog is not ported yet";
 
 // --- parameters -------------------------------------------------------------
 
@@ -930,6 +925,15 @@ fn brief_project<C: Clock, I: IdFactory>(
     by_state.sort();
     by_kind.sort();
     let observed_version = observed_version(ctx, &project.id)?;
+    drop(view);
+    // The same population `backlog` and `bugs` rank, so the three views agree
+    // about one project at one moment.
+    let population = crate::application::views::brief_population(
+        ctx,
+        &project.slug,
+        params.backlog_limit as usize,
+        &params.mode,
+    )?;
     let version_matches = match (&observed_version, &project.current_version) {
         (Some(observed), Some(declared)) => {
             Some(observed.trim_start_matches('v') == declared.trim_start_matches('v'))
@@ -939,15 +943,13 @@ fn brief_project<C: Clock, I: IdFactory>(
     let adopted = project.contract_adopted_at.is_some();
     Ok(json!({
         "project": project,
-        // The gather that ranks open work is not ported. These are not zeros:
-        // a zero would say a sweep found nothing.
-        "open_work": "not_collected",
-        "open_bugs": "not_collected",
-        "declared_work": "not_collected",
-        "observed_work": "not_collected",
+        "open_work": population.open_work,
+        "open_bugs": population.open_bugs,
+        "declared_work": population.declared,
+        "observed_work": population.observed,
         "by_state": tally_object(&by_state),
         "by_kind": tally_object(&by_kind),
-        "top_backlog": {"status": "not_collected", "detail": BACKLOG_NOT_COLLECTED},
+        "top_backlog": population.top,
         "current_version": project.current_version,
         "declared_version": project.current_version,
         "observed_version": observed_version,
@@ -961,8 +963,6 @@ fn brief_project<C: Clock, I: IdFactory>(
         "ci_status": ci_summary(ctx, &project.id)?,
         "dependencies": dependency_summary(ctx, &project.id)?,
         "freshness": crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?,
-        "backlog_limit": params.backlog_limit,
-        "mode": params.mode,
     }))
 }
 
