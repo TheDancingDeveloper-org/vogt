@@ -42,6 +42,26 @@ pub const DERIVED: &[&str] = &[
     "session.token",
     "session.log_tail",
     "session.commit_for",
+    "workflow.list",
+    "label.list",
+    "label.create",
+    "preference.get",
+    "preference.set",
+    "why",
+    "actor.list",
+    "actor.create",
+    "user.list",
+    "user.create",
+    "user.set_password",
+    "token.issue",
+    "token.list",
+    "token.revoke",
+    "auth.whoami",
+    "auth.logout",
+    "auth.decisions",
+    "suppress",
+    "suppression.list",
+    "suppression.revoke",
     "export",
     "backup",
     "restore",
@@ -49,10 +69,13 @@ pub const DERIVED: &[&str] = &[
     "connect",
 ];
 
+mod access;
 mod admin;
 mod chat;
+mod entities;
 mod forge;
 mod project;
+mod records;
 mod session;
 
 /// `(operation name, params schema, result schema)` for every name in
@@ -176,6 +199,106 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             schema_of::<session::CommitForSessionResult>(),
         ),
         (
+            "workflow.list",
+            schema_of::<records::WorkflowListParams>(),
+            schema_of::<records::WorkflowListResult>(),
+        ),
+        (
+            "label.list",
+            schema_of::<records::ListLabelsParams>(),
+            schema_of::<records::LabelListResult>(),
+        ),
+        (
+            "label.create",
+            schema_of::<records::CreateLabelParams>(),
+            schema_of::<records::LabelResult>(),
+        ),
+        (
+            "preference.get",
+            schema_of::<records::PreferenceGetParams>(),
+            schema_of::<records::PreferenceGetResult>(),
+        ),
+        (
+            "preference.set",
+            schema_of::<records::PreferenceSetParams>(),
+            schema_of::<records::PreferenceSetResult>(),
+        ),
+        (
+            "why",
+            schema_of::<records::WhyParams>(),
+            schema_of::<records::WhyResult>(),
+        ),
+        (
+            "actor.list",
+            schema_of::<access::ListActorsParams>(),
+            schema_of::<access::ActorListResult>(),
+        ),
+        (
+            "actor.create",
+            schema_of::<access::CreateActorParams>(),
+            schema_of::<access::ActorResult>(),
+        ),
+        (
+            "user.list",
+            schema_of::<access::UserListParams>(),
+            schema_of::<access::UserListResult>(),
+        ),
+        (
+            "user.create",
+            schema_of::<access::CreateUserParams>(),
+            schema_of::<access::UserResult>(),
+        ),
+        (
+            "user.set_password",
+            schema_of::<access::SetPasswordParams>(),
+            schema_of::<access::UserResult>(),
+        ),
+        (
+            "token.issue",
+            schema_of::<access::IssueTokenParams>(),
+            schema_of::<access::IssueTokenResult>(),
+        ),
+        (
+            "token.list",
+            schema_of::<access::ListTokensParams>(),
+            schema_of::<access::TokenListResult>(),
+        ),
+        (
+            "token.revoke",
+            schema_of::<access::RevokeTokenParams>(),
+            schema_of::<access::TokenResult>(),
+        ),
+        (
+            "auth.whoami",
+            schema_of::<access::WhoamiParams>(),
+            schema_of::<access::WhoamiResult>(),
+        ),
+        (
+            "auth.logout",
+            schema_of::<access::LogoutParams>(),
+            schema_of::<access::LogoutResult>(),
+        ),
+        (
+            "auth.decisions",
+            schema_of::<access::AuthDecisionListParams>(),
+            schema_of::<access::AuthDecisionListResult>(),
+        ),
+        (
+            "suppress",
+            schema_of::<access::SuppressParams>(),
+            schema_of::<access::SuppressionResult>(),
+        ),
+        (
+            "suppression.list",
+            schema_of::<access::ListSuppressionsParams>(),
+            schema_of::<access::SuppressionListResult>(),
+        ),
+        (
+            "suppression.revoke",
+            schema_of::<access::RevokeSuppressionParams>(),
+            schema_of::<access::SuppressionResult>(),
+        ),
+        (
             "export",
             schema_of::<admin::ExportParams>(),
             schema_of::<admin::ExportResult>(),
@@ -224,18 +347,7 @@ fn pydantic_shape(value: &mut serde_json::Value) {
     use serde_json::{json, Value};
     match value {
         Value::Object(map) => {
-            if let Some(Value::Array(types)) = map.get("type") {
-                if types.iter().any(|t| t == "null") {
-                    let branches: Vec<Value> = types
-                        .iter()
-                        .filter(|t| *t != "null")
-                        .map(|t| json!({ "type": t }))
-                        .chain(std::iter::once(json!({ "type": "null" })))
-                        .collect();
-                    map.remove("type");
-                    map.insert("anyOf".into(), Value::Array(branches));
-                }
-            }
+            nullable_as_any_of(map);
             if let Some(Value::String(format)) = map.get("format") {
                 if format.starts_with("int") || format.starts_with("uint") {
                     map.remove("format");
@@ -259,7 +371,7 @@ fn pydantic_shape(value: &mut serde_json::Value) {
                         if property.get("default") == Some(&json!([])) {
                             property.remove("default");
                         }
-                        if !property.contains_key("$ref") && !property.contains_key("title") {
+                        if !refers_to_definition(property) && !property.contains_key("title") {
                             property.insert("title".into(), Value::String(pydantic_title(name)));
                         }
                     }
@@ -272,6 +384,68 @@ fn pydantic_shape(value: &mut serde_json::Value) {
         Value::Array(items) => items.iter_mut().for_each(pydantic_shape),
         _ => {}
     }
+}
+
+/// Whether a schema is a reference to a definition, or an optional one. The
+/// title pydantic gives a field is left off these.
+fn refers_to_definition(property: &serde_json::Map<String, serde_json::Value>) -> bool {
+    use serde_json::Value;
+    property.contains_key("$ref")
+        || matches!(property.get("anyOf"), Some(Value::Array(branches))
+            if branches.iter().any(|branch| branch.get("$ref").is_some()))
+}
+
+/// Rewrites a nullable schema as pydantic lays out `T | None`: an `anyOf` of
+/// the value's branch and `null`. The constraints go on the value's branch;
+/// the title, description and default stay beside the `anyOf`.
+fn nullable_as_any_of(map: &mut serde_json::Map<String, serde_json::Value>) {
+    use serde_json::Value;
+    let kinds = match map.get("type") {
+        Some(Value::Array(types)) if types.iter().any(|t| t == "null") => types
+            .iter()
+            .filter(|t| *t != "null")
+            .cloned()
+            .collect::<Vec<Value>>(),
+        _ => Vec::new(),
+    };
+    let nullable_enum =
+        matches!(map.get("enum"), Some(Value::Array(values)) if values.iter().any(Value::is_null));
+    if kinds.is_empty() && !nullable_enum {
+        return;
+    }
+    let mut branch = serde_json::Map::new();
+    map.remove("type");
+    match kinds.len() {
+        0 => {}
+        1 => {
+            branch.insert("type".to_string(), kinds[0].clone());
+        }
+        _ => {
+            branch.insert("type".to_string(), Value::Array(kinds));
+        }
+    }
+    if let Some(Value::Array(values)) = map.remove("enum") {
+        let kept: Vec<Value> = values.into_iter().filter(|v| !v.is_null()).collect();
+        branch.insert("enum".to_string(), Value::Array(kept));
+    }
+    for key in [
+        "minLength",
+        "maxLength",
+        "pattern",
+        "minimum",
+        "maximum",
+        "format",
+    ] {
+        if let Some(value) = map.remove(key) {
+            branch.insert(key.to_string(), value);
+        }
+    }
+    let mut null = serde_json::Map::new();
+    null.insert("type".to_string(), Value::String("null".to_string()));
+    map.insert(
+        "anyOf".to_string(),
+        Value::Array(vec![Value::Object(branch), Value::Object(null)]),
+    );
 }
 
 /// `str.title()` of a snake-case field name, as pydantic titles a field.
@@ -340,6 +514,16 @@ pub(super) fn integer(_: &mut SchemaGenerator) -> Schema {
 /// pydantic's `datetime`: a string in the `date-time` format.
 pub(super) fn date_time(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "string", "format": "date-time" })
+}
+
+/// pydantic's `float`: a JSON number, with no format.
+pub(super) fn number(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "number" })
+}
+
+/// pydantic's `dict[str, object]`: an object of any values.
+pub(super) fn open_object(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "object", "additionalProperties": true })
 }
 
 /// `str | None` with no default: a string, or null, and required.
