@@ -9,6 +9,7 @@ import {
   RAIL_RECENT_MS,
   buildRailModel,
   flattenRail,
+  railBadges,
   railSectionOf,
 } from "../sessionRail";
 import { startersById } from "../railStarters";
@@ -243,5 +244,47 @@ describe("picker waits", () => {
     const approval = { ...picker, approval: { ...picker.approval!, kind: "approval" as const } };
     expect(pickerWaiting(approval)).toBe(false);
     expect(sessionStateWord(approval, NOW)).toMatch(/^needs approval/);
+  });
+});
+
+describe("Older counts the engine's hidden sessions", () => {
+  it("uses hidden_count for the Older header, loaded or not", () => {
+    const model = buildRailModel([session({ id: "r", activity: "running" })], { now: NOW, hiddenCount: 480 });
+    const older = model.sections.find((section) => section.id === "older");
+    expect(older?.count).toBe(480);
+    expect(older?.rows).toEqual([]);
+    const entries = flattenRail(model, { open: () => false, expanded: () => true });
+    expect(entries).toContainEqual(expect.objectContaining({ kind: "head", id: "older", count: 480 }));
+  });
+});
+
+describe("pinned sessions that need you", () => {
+  it("counts them on the Pinned strip, not in a section", () => {
+    const model = buildRailModel([
+      session({ id: "p", activity: "awaiting-approval" }),
+      session({ id: "q", activity: "running" }),
+    ], { now: NOW, bookmarked: new Set(["p"]) });
+    expect(model.pinnedNeeds).toBe(1);
+    const entries = flattenRail(model, { open: () => true, expanded: () => true });
+    expect(entries[0]).toMatchObject({ kind: "head", id: "pinned", count: 1, needs: 1 });
+  });
+});
+
+describe("railBadges", () => {
+  it("shows a glyph and its words for each state", () => {
+    const picker = session({
+      id: "p",
+      activity: "awaiting-approval",
+      approval: { question: "Pick", command_excerpt: "", detected_at: minutesAgo(1), kind: "picker" },
+    });
+    expect(railBadges(picker, NOW)).toEqual([{ glyph: "?", label: "waiting for a choice" }]);
+    expect(railBadges(session({ id: "a", activity: "awaiting-approval" }), NOW)).toEqual([
+      { glyph: "⚠", label: "needs approval" },
+    ]);
+    expect(railBadges(session({ id: "i", activity: "idle" }), NOW)).toEqual([{ glyph: "✓", label: "ready" }]);
+    expect(railBadges(session({ id: "h", activity: "hibernated" }), NOW)).toEqual([
+      { glyph: "☾", label: "hibernated" },
+    ]);
+    expect(railBadges(session({ id: "r", activity: "running" }), NOW)).toEqual([]);
   });
 });

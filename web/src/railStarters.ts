@@ -1,19 +1,26 @@
-// Which engine session started which, for the rail's oversight nesting (WI-1736).
+// Which engine session started which, for the rail's and the session list's
+// oversight nesting (WI-1736).
 //
 // The engine's own session list does not say who started a session; Vogt's
 // `session.list` does (`started_by_session`, WI-1323), keyed by the engine id
-// it links each session to (`engine_session_id`). This reads that list on its
-// own short cycle and hands the rail a map. No core behind the front door, or
-// a read that fails, leaves the map empty: the rail then shows the sessions
-// flat, which is the behaviour before nesting existed.
+// it links each session to (`engine_session_id`). Vogt returns at most 500 links
+// a page and 50 by default, so this pages until the page says it is not
+// truncated, up to a cap. One reader serves every surface that nests (the rail,
+// the phone and overview list), so there is one poll loop, not one per surface.
+// No core, or a read that fails, leaves the map as it was: the lists then show
+// the sessions flat, the behaviour before nesting existed.
 
-import { createEffect, createSignal, on, onCleanup } from "solid-js";
+import { createSignal } from "solid-js";
 import { listSessions, VogtBusy, VogtUnavailable, type SessionSummary as VogtSessionSummary } from "./vogtApi";
 
-/** How often the starters are re-read while the rail is open. */
+/** How often the starters are re-read while a list is open. */
 const REFRESH_MS = 30_000;
 /** Coalesces a burst of session-list changes into one read. */
 const DEBOUNCE_MS = 750;
+/** Links per page: Vogt's cap for `session.list`. */
+export const STARTERS_PAGE_SIZE = 500;
+/** Pages read at most (2000 links). Past that, nesting covers what was read. */
+export const STARTERS_MAX_PAGES = 4;
 
 /** Engine session id → the engine session id of its starter, for every row
  *  Vogt links that names a starter. Pure, so the mapping is testable. */
@@ -27,48 +34,76 @@ export function startersById(sessions: readonly VogtSessionSummary[]): Map<strin
   return starters;
 }
 
-/**
- * The starters map, kept fresh while the owner is mounted. `sessionKey` changes
- * whenever the set of engine sessions changes, so a new child is linked soon
- * after it appears rather than at the next refresh. Nothing is read until the
- * engine has listed a session: before that there is nothing to nest, and a
- * read at boot would go out ahead of sign-in.
- */
-export function createRailStarters(sessionKey: () => string): () => ReadonlyMap<string, string> {
-  const [starters, setStarters] = createSignal<ReadonlyMap<string, string>>(new Map());
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let interval: ReturnType<typeof setInterval> | undefined;
-  let alive = true;
+interface StartersPage {
+  sessions: VogtSessionSummary[];
+  truncated?: boolean;
+}
 
-  const load = () => {
-    listSessions({ include_stopped: true })
-      .then((answer) => {
-        if (alive) setStarters(startersById(answer.sessions));
-      })
-      .catch((error: unknown) => {
-        // No core or a busy door: keep what we had, and read again later.
-        if (!(error instanceof VogtUnavailable) && !(error instanceof VogtBusy)) {
-          console.warn("rail starters could not be read", error);
-        }
-      });
-  };
-
-  const schedule = () => {
-    clearTimeout(timer);
-    timer = setTimeout(load, DEBOUNCE_MS);
-  };
-
-  createEffect(on(sessionKey, (key) => {
-    if (key === "") return;
-    schedule();
-    if (interval === undefined) interval = setInterval(load, REFRESH_MS);
-  }));
-
-  onCleanup(() => {
-    alive = false;
-    clearTimeout(timer);
-    clearInterval(interval);
-  });
-
+/** Read every page of the session list that names a starter. `fetchPage` is
+ *  given the offset to ask for. Pure apart from that call, so the paging is
+ *  testable without a core. */
+export async function readAllStarters(
+  fetchPage: (offset: number) => Promise<StartersPage>,
+): Promise<Map<string, string>> {
+  const starters = new Map<string, string>();
+  let offset = 0;
+  for (let page = 0; page < STARTERS_MAX_PAGES; page += 1) {
+    const answer = await fetchPage(offset);
+    for (const [child, starter] of startersById(answer.sessions)) starters.set(child, starter);
+    if (!answer.truncated || answer.sessions.length === 0) break;
+    offset += answer.sessions.length;
+  }
   return starters;
+}
+
+const [starters, setStarters] = createSignal<ReadonlyMap<string, string>>(new Map());
+let timer: ReturnType<typeof setTimeout> | undefined;
+let interval: ReturnType<typeof setInterval> | undefined;
+let loading = false;
+let pending = false;
+
+function load(): void {
+  if (loading) {
+    // A change arrived mid-read: read again once this one lands.
+    pending = true;
+    return;
+  }
+  loading = true;
+  readAllStarters((offset) =>
+    listSessions({ include_stopped: true, limit: STARTERS_PAGE_SIZE, offset }),
+  )
+    .then((map) => setStarters(map))
+    .catch((error: unknown) => {
+      // No core or a busy door: keep what we had, and read again later.
+      if (!(error instanceof VogtUnavailable) && !(error instanceof VogtBusy)) {
+        console.warn("rail starters could not be read", error);
+      }
+    })
+    .finally(() => {
+      loading = false;
+      if (pending) {
+        pending = false;
+        schedule();
+      }
+    });
+}
+
+function schedule(): void {
+  clearTimeout(timer);
+  timer = setTimeout(load, DEBOUNCE_MS);
+}
+
+/** Tell the reader the engine's session set changed. Call it with a key that
+ *  changes whenever the set does. Nothing is read for an empty set: before the
+ *  engine has listed a session there is nothing to nest, and a read at boot
+ *  would go out ahead of sign-in. The first real call starts the refresh cycle. */
+export function noteRailSessions(sessionKey: string): void {
+  if (sessionKey === "") return;
+  schedule();
+  if (interval === undefined) interval = setInterval(load, REFRESH_MS);
+}
+
+/** The current starters map (engine child id → engine starter id). */
+export function railStarters(): ReadonlyMap<string, string> {
+  return starters();
 }
