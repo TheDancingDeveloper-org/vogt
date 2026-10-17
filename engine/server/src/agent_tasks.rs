@@ -1719,7 +1719,7 @@ impl AgentTaskRegistry {
                     None => format!("workflow engine run {}", provider_run.run_id),
                 });
                 self.record_workflow_run(id, trigger, &origin.detail, &run, now)?;
-                // Track the run off its live SSE event stream (#293),
+                // Track the run off its live SSE event stream (#293 inc-2),
                 // degrading to the poller when the stream is absent or breaks.
                 // The tracker also collects each per-stage checkpoint branch the
                 // stream or poll fallback reports as a run observation (#284).
@@ -3330,7 +3330,6 @@ fn clean_workflow_engine(value: Option<WorkflowEngineConfig>) -> Option<Workflow
         workflow,
         token_file: clean_optional(cfg.token_file),
         repo_ref: clean_optional(cfg.repo_ref),
-        fabro: cfg.fabro,
     })
 }
 
@@ -3541,7 +3540,7 @@ where
 }
 
 /// Track a workflow run off its live SSE event stream, degrading to polling
-/// (#293).
+/// (#293, increment 2).
 ///
 /// Spawned once per workflow run. It first subscribes to the engine's event
 /// stream ([`WorkflowProvider::stream_events`]): each event is mirrored onto the
@@ -3696,7 +3695,6 @@ async fn finalize_workflow_run(
     let finished = OffsetDateTime::now_utc();
     let (outcome, conclusion, provider_summary) = match provider.poll(provider_run_id).await {
         Ok(status) if status.state.is_terminal() => {
-            record_workflow_checkpoints(registry, task_id, run_id, &status.checkpoints);
             record_workflow_gates(registry, run_id, &status.gates);
             if status.state == ProviderRunState::Blocked {
                 registry.block_open_gates(run_id, "workflow engine blocked the run");
@@ -5249,7 +5247,6 @@ mod tests {
                     workflow: "nightly".into(),
                     token_file: None,
                     repo_ref: None,
-                    fabro: None,
                 }),
                 enabled: None,
                 notify_on_start: None,
@@ -5549,7 +5546,6 @@ mod tests {
             workflow: "nightly-audit".into(),
             token_file: Some("/run/secrets/workflow-engine".into()),
             repo_ref: Some("main".into()),
-            fabro: None,
         });
         let json = serde_json::to_string(&task).unwrap();
         let back: AgentTask = serde_json::from_str(&json).unwrap();
