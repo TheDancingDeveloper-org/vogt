@@ -1,0 +1,2266 @@
+[
+  {
+    "body": {
+      "declared": {
+        "actors": [
+          {
+            "created_at": "2026-01-02T03:04:07+00:00",
+            "disabled": 0,
+            "display_name": "parity",
+            "id": "act_0001",
+            "identity_ref": "local:parity",
+            "kind": "human"
+          },
+          {
+            "created_at": "2026-01-02T03:04:09+00:00",
+            "disabled": 0,
+            "display_name": "agent:vogt-engine",
+            "id": "act_0002",
+            "identity_ref": "agent:vogt-engine",
+            "kind": "agent"
+          },
+          {
+            "created_at": "2026-01-02T03:04:13+00:00",
+            "disabled": 0,
+            "display_name": "agent:vogt-sessions",
+            "id": "act_0003",
+            "identity_ref": "agent:vogt-sessions",
+            "kind": "agent"
+          }
+        ],
+        "audit": [
+          {
+            "actor_id": "act_0001",
+            "at": "2026-01-02T03:04:07+00:00",
+            "entity_id": "ins_0001",
+            "entity_kind": "instance",
+            "id": "aud_0001",
+            "operation": "instance.init",
+            "payload_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "reason": "instance bootstrap",
+            "revision": 0,
+            "txn_id": "txn_0001"
+          },
+          {
+            "actor_id": "act_0001",
+            "at": "2026-01-02T03:04:12+00:00",
+            "entity_id": "tok_0001",
+            "entity_kind": "token",
+            "id": "aud_0002",
+            "operation": "token.adopt",
+            "payload_digest": "sha256:59549779aa0cda6825e03092b441cacac09d0003597ed7fd262fc918fdedf350",
+            "reason": "adopting the operator-supplied core token at init",
+            "revision": 1,
+            "txn_id": "txn_0002"
+          },
+          {
+            "actor_id": "act_0001",
+            "at": "2026-01-02T03:04:16+00:00",
+            "entity_id": "tok_0002",
+            "entity_kind": "token",
+            "id": "aud_0003",
+            "operation": "token.adopt",
+            "payload_digest": "sha256:f1942d83b32c6907f41a7053a5e2b379b085799a1b1a2bb7dd9e2a327080cefc",
+            "reason": "adopting the operator-supplied agent token at init",
+            "revision": 2,
+            "txn_id": "txn_0003"
+          }
+        ],
+        "events": [
+          {
+            "actor_id": "act_0001",
+            "at": "2026-01-02T03:04:12+00:00",
+            "audit_id": "aud_0002",
+            "entity_id": "tok_0001",
+            "entity_kind": "token",
+            "kind": "token.adopted",
+            "seq": 1,
+            "summary": "{\"actor\": \"agent:vogt-engine\", \"scopes\": [\"read\", \"work.write\", \"project.write\"]}"
+          },
+          {
+            "actor_id": "act_0001",
+            "at": "2026-01-02T03:04:16+00:00",
+            "audit_id": "aud_0003",
+            "entity_id": "tok_0002",
+            "entity_kind": "token",
+            "kind": "token.adopted",
+            "seq": 2,
+            "summary": "{\"actor\": \"agent:vogt-sessions\", \"scopes\": [\"read\", \"work.write\", \"project.write\", \"writeback\"]}"
+          }
+        ],
+        "meta": [
+          {
+            "key": "instance_id",
+            "value": "ins_0001"
+          },
+          {
+            "key": "revision",
+            "value": "2"
+          },
+          {
+            "key": "work_ref_seq",
+            "value": "0"
+          },
+          {
+            "key": "created_at",
+            "value": "2026-01-02T03:04:07+00:00"
+          }
+        ],
+        "migration_lock": [
+          {
+            "acquired_at": null,
+            "holder": null,
+            "id": 1
+          }
+        ],
+        "migrations": [
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "83cf77f4abe04e89c2efa22271c6d9275532f1dd37a270b7667226b3748ae643",
+            "id": "0001_foundation"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "f690b73e4b9523cd85b818ac11c6fecf086c020683324dccbc03ec3d7b59627d",
+            "id": "0002_work"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "9032649fc02951fe5d6340a6f9576a45b8d7197057990c68dca834a1d26f48b8",
+            "id": "0003_observed_first"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "cc588f67774949d31caf0305200e557cc666617b8f5a2469f958f511944ee3f4",
+            "id": "0004_drift"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "0e2adf0935fc90a6810710297ab3490edb430b47d9d169a2166ae189c24223b2",
+            "id": "0005_tokens"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "37b95c74c33d9d7c5ee649ab72b265b4de517b41a40cb3a2c768099f210b0f58",
+            "id": "0006_writeback"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "47c82ee427931ca7c0a3a8d047298ffe5c2b2ad49ff06f83b00acf59306a1ff6",
+            "id": "0007_sessions"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "f533369dd3625830341933caac68f4611a02d0e4055b9d37a62db9c59f731ce3",
+            "id": "0008_superseded_drift"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "b0ca1559346b05c6ef818b3b65c2ae798f05c755c7a0dd326c73227da770c226",
+            "id": "0009_inbox_triage"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "de3f70faf7ccb5fd276455a9a56eb7a731c8334fb6964ea6d5eb2407dbcb03f5",
+            "id": "0010_session_model"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "7b4ab541ce8b97e31f1871373c6400e7a6390bdc70356fe703f3aa5e29211582",
+            "id": "0011_contract_adoption"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "c819361c246e6c76035ed27c1a296d723235259c449a2ee2ce192163b8cb8a3a",
+            "id": "0012_forge_accounts"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "fa8e380cd0761fe49bf3a46fd7e9305799fe8f142fdc331c71d2a0836fa00c3f",
+            "id": "0013_upstream_truth"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "2fef3fae64abd522ef65b21eef63f5a93d2b44ded81e5836da1288639a59a70d",
+            "id": "0014_native_migration"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "6f60bd5cae2d90f79cfb72228c88b21927958bdeedc7f00da59835c3e18a928c",
+            "id": "0015_work_overlay_branches"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "e9d6f101a8d95929b51b6dd9a4d1ccc0e3a732e49fd605c60de3ee849be7a113",
+            "id": "0016_perf_indexes"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "3131bbedaed1c58d3997598f18e8f30d103ec6f1447d38dcaa2a2846f1b7d8f8",
+            "id": "0017_password_credentials"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "a04732a0b920af03fc8731b513260caf81d25216533efb8c8eac030185371c00",
+            "id": "0018_actor_preferences"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "2c307b06be247b5b5739230750785d9209dee953a22da0354952ebe1cf45811d",
+            "id": "0019_session_grants"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "e5fd2b7bd062d50c9d21a923df3176e9e5b69e9fb06b0dd6bf75b295d694b761",
+            "id": "0020_install_latch"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "9f11063cfd66c2940b21819453fa18f16123b56f59ce77f2bad74d50523d5127",
+            "id": "0021_agent_policy"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "1a86e121ab2879671fd44ee5a9276e05d4af19bb4b98e71e3426634958be7078",
+            "id": "0022_comment_kind"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "8fb4506bf7517137f5e20b26525268bda7af4bcd45057731547564d5428f615e",
+            "id": "0023_decisions"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9",
+            "id": "0024_session_started_by"
+          }
+        ],
+        "tokens": [
+          {
+            "actor_id": "act_0002",
+            "created_at": "2026-01-02T03:04:11+00:00",
+            "expires_at": null,
+            "id": "tok_0001",
+            "kind": "api",
+            "last_used_at": null,
+            "name": "bootstrap core token",
+            "revoked_at": null,
+            "revoked_reason": null,
+            "scopes": "[\"read\", \"work.write\", \"project.write\"]",
+            "token_hash": "9545b721f3788049180e1ccb546015bce1287aeb505e54d04a01344bb38fe4f6"
+          },
+          {
+            "actor_id": "act_0003",
+            "created_at": "2026-01-02T03:04:15+00:00",
+            "expires_at": null,
+            "id": "tok_0002",
+            "kind": "api",
+            "last_used_at": null,
+            "name": "bootstrap agent token",
+            "revoked_at": null,
+            "revoked_reason": null,
+            "scopes": "[\"read\", \"work.write\", \"project.write\", \"writeback\"]",
+            "token_hash": "d3ff8dd34b248fd9895c7ca25e883f4bc79b2321c11f6ebee6a619c6e702ce71"
+          }
+        ],
+        "workflow_defs": [
+          {
+            "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+            "kind": "feature",
+            "updated_at": "2026-01-02T03:04:05+00:00"
+          },
+          {
+            "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+            "kind": "bug",
+            "updated_at": "2026-01-02T03:04:05+00:00"
+          },
+          {
+            "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+            "kind": "chore",
+            "updated_at": "2026-01-02T03:04:05+00:00"
+          },
+          {
+            "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+            "kind": "question",
+            "updated_at": "2026-01-02T03:04:05+00:00"
+          }
+        ]
+      },
+      "observed": {
+        "meta": [
+          {
+            "key": "instance_id",
+            "value": "ins_0001"
+          },
+          {
+            "key": "created_at",
+            "value": "2026-01-02T03:04:08+00:00"
+          }
+        ],
+        "migration_lock": [
+          {
+            "acquired_at": null,
+            "holder": null,
+            "id": 1
+          }
+        ],
+        "migrations": [
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "c050f9e4dba983119f045b8fb4ccbe8b1ee97473170eead7d28279e99468de4b",
+            "id": "0001_foundation"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "9cdc9c9179740af96606bab0b557c7b35639eaabc78faf16630c7705f1d368f5",
+            "id": "0002_evidence"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "8bf0b8533774a156762fddc2e56bbb9656ba3b6bf0e38ec85a66c9dc9c325ed1",
+            "id": "0003_inherited_dep_refs"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "8d5cffbb2acb6ff18099ad73384eaa4ea5ebca7a6f45afb79d353fb4cbbcaee6",
+            "id": "0004_forge_sync"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "e6902e6616ab9948f9d222b2763ce9bc421a136b6acb1422240e5957683e5e45",
+            "id": "0005_perf_indexes"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "e0e959f4bf4f39db47d5e41ac11391d5f80a0b73bcce57d36168572062b1ab66",
+            "id": "0006_agent_activity"
+          }
+        ]
+      }
+    },
+    "operation": "dump.after_init"
+  },
+  {
+    "body": {
+      "counts": {
+        "actors": 3,
+        "audit": 3,
+        "events": 2,
+        "initiatives": 0,
+        "projects": 0,
+        "work_items": 0
+      },
+      "data_dir": "<volatile>",
+      "declared_schema_version": 24,
+      "instance_id": "ins_0001",
+      "observed_schema_version": 6,
+      "principal": "local:parity",
+      "revision": 2,
+      "vogt_version": "0.7.17"
+    },
+    "is_error": false,
+    "operation": "status"
+  },
+  {
+    "body": {
+      "data_dir": "<volatile>",
+      "declared_schema_expected": 24,
+      "declared_schema_version": 24,
+      "migrations_applied": [],
+      "observed_schema_expected": 6,
+      "observed_schema_version": 6
+    },
+    "is_error": false,
+    "operation": "migrate"
+  },
+  {
+    "body": {
+      "workflows": [
+        {
+          "initial_state": "open",
+          "kind": "feature",
+          "states": [
+            "blocked",
+            "done",
+            "in_progress",
+            "open",
+            "review",
+            "wont_do"
+          ],
+          "transitions": {
+            "blocked": [
+              "open",
+              "in_progress",
+              "wont_do"
+            ],
+            "done": [
+              "open"
+            ],
+            "in_progress": [
+              "review",
+              "blocked",
+              "open",
+              "wont_do"
+            ],
+            "open": [
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "review": [
+              "done",
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "wont_do": [
+              "open"
+            ]
+          }
+        },
+        {
+          "initial_state": "open",
+          "kind": "bug",
+          "states": [
+            "blocked",
+            "done",
+            "in_progress",
+            "open",
+            "review",
+            "wont_do"
+          ],
+          "transitions": {
+            "blocked": [
+              "open",
+              "in_progress",
+              "wont_do"
+            ],
+            "done": [
+              "open"
+            ],
+            "in_progress": [
+              "review",
+              "blocked",
+              "open",
+              "wont_do"
+            ],
+            "open": [
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "review": [
+              "done",
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "wont_do": [
+              "open"
+            ]
+          }
+        },
+        {
+          "initial_state": "open",
+          "kind": "chore",
+          "states": [
+            "blocked",
+            "done",
+            "in_progress",
+            "open",
+            "review",
+            "wont_do"
+          ],
+          "transitions": {
+            "blocked": [
+              "open",
+              "in_progress",
+              "wont_do"
+            ],
+            "done": [
+              "open"
+            ],
+            "in_progress": [
+              "review",
+              "blocked",
+              "open",
+              "wont_do"
+            ],
+            "open": [
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "review": [
+              "done",
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "wont_do": [
+              "open"
+            ]
+          }
+        },
+        {
+          "initial_state": "open",
+          "kind": "question",
+          "states": [
+            "blocked",
+            "done",
+            "in_progress",
+            "open",
+            "review",
+            "wont_do"
+          ],
+          "transitions": {
+            "blocked": [
+              "open",
+              "in_progress",
+              "wont_do"
+            ],
+            "done": [
+              "open"
+            ],
+            "in_progress": [
+              "review",
+              "blocked",
+              "open",
+              "wont_do"
+            ],
+            "open": [
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "review": [
+              "done",
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "wont_do": [
+              "open"
+            ]
+          }
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "workflow.list"
+  },
+  {
+    "body": {
+      "actor": {
+        "created_at": "2026-01-02T03:04:07Z",
+        "disabled": false,
+        "display_name": "Parity Agent",
+        "id": "act_0004",
+        "identity_ref": "agent:parity",
+        "kind": "agent"
+      }
+    },
+    "is_error": false,
+    "operation": "actor.create"
+  },
+  {
+    "body": {
+      "actors": [
+        {
+          "created_at": "2026-01-02T03:04:07Z",
+          "disabled": false,
+          "display_name": "Parity Agent",
+          "id": "act_0004",
+          "identity_ref": "agent:parity",
+          "kind": "agent"
+        },
+        {
+          "created_at": "2026-01-02T03:04:09Z",
+          "disabled": false,
+          "display_name": "agent:vogt-engine",
+          "id": "act_0002",
+          "identity_ref": "agent:vogt-engine",
+          "kind": "agent"
+        },
+        {
+          "created_at": "2026-01-02T03:04:13Z",
+          "disabled": false,
+          "display_name": "agent:vogt-sessions",
+          "id": "act_0003",
+          "identity_ref": "agent:vogt-sessions",
+          "kind": "agent"
+        },
+        {
+          "created_at": "2026-01-02T03:04:07Z",
+          "disabled": false,
+          "display_name": "parity",
+          "id": "act_0001",
+          "identity_ref": "local:parity",
+          "kind": "human"
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "actor.list"
+  },
+  {
+    "body": {
+      "label": {
+        "color": "#d73a4a",
+        "created_at": "2026-01-02T03:04:09Z",
+        "id": "lbl_0001",
+        "name": "parity"
+      }
+    },
+    "is_error": false,
+    "operation": "label.create"
+  },
+  {
+    "body": {
+      "labels": [
+        {
+          "color": "#d73a4a",
+          "created_at": "2026-01-02T03:04:09Z",
+          "id": "lbl_0001",
+          "name": "parity"
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "label.list"
+  },
+  {
+    "body": {
+      "contract_version": "v1",
+      "criteria": [
+        {
+          "applicable": true,
+          "detail": "directory exists",
+          "rule": "path.exists",
+          "satisfied": true,
+          "target": "<root>"
+        },
+        {
+          "applicable": true,
+          "detail": "AGENTS.md is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "AGENTS.md"
+        },
+        {
+          "applicable": true,
+          "detail": "README.md is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "README.md"
+        },
+        {
+          "applicable": true,
+          "detail": "LICENSE is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "LICENSE"
+        },
+        {
+          "applicable": true,
+          "detail": "docs/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "docs"
+        },
+        {
+          "applicable": true,
+          "detail": "design/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "design"
+        },
+        {
+          "applicable": true,
+          "detail": "src/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "src"
+        }
+      ],
+      "failing": [
+        {
+          "applicable": true,
+          "detail": "AGENTS.md is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "AGENTS.md"
+        },
+        {
+          "applicable": true,
+          "detail": "README.md is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "README.md"
+        },
+        {
+          "applicable": true,
+          "detail": "LICENSE is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "LICENSE"
+        },
+        {
+          "applicable": true,
+          "detail": "docs/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "docs"
+        },
+        {
+          "applicable": true,
+          "detail": "design/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "design"
+        },
+        {
+          "applicable": true,
+          "detail": "src/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "src"
+        }
+      ],
+      "inapplicable": [],
+      "path": "<root>",
+      "recommendations": [
+        {
+          "instruction": "`project scaffold` writes AGENTS.md into this project without overwriting anything that is already there.",
+          "remedy": "scaffold",
+          "rule": "required_file",
+          "target": "AGENTS.md"
+        },
+        {
+          "instruction": "`project scaffold` writes README.md into this project without overwriting anything that is already there.",
+          "remedy": "scaffold",
+          "rule": "required_file",
+          "target": "README.md"
+        },
+        {
+          "instruction": "choose a licence for this project and write its full text to LICENSE. Vogt deliberately does not pick one: a scaffold that silently writes MIT makes that decision for the owner.",
+          "remedy": "judgement",
+          "rule": "required_file",
+          "target": "LICENSE"
+        },
+        {
+          "instruction": "`project scaffold` writes docs/ into this project without overwriting anything that is already there.",
+          "remedy": "scaffold",
+          "rule": "required_dir",
+          "target": "docs"
+        },
+        {
+          "instruction": "decide what this project's design record is \u2014 diagrams, mockups, exploratory notes \u2014 and put it in design/. An empty directory satisfies the letter of the criterion and none of its point, and git cannot carry one anyway.",
+          "remedy": "judgement",
+          "rule": "required_dir",
+          "target": "design"
+        },
+        {
+          "instruction": "`project scaffold` writes src/ into this project without overwriting anything that is already there.",
+          "remedy": "scaffold",
+          "rule": "required_dir",
+          "target": "src"
+        }
+      ],
+      "recorded": false,
+      "status": "non_compliant"
+    },
+    "is_error": false,
+    "operation": "contract.evaluate"
+  },
+  {
+    "body": {
+      "contract_version": "v1",
+      "criteria": [
+        {
+          "applicable": true,
+          "detail": "the path does not exist or is not a directory, so no criterion below was evaluated \u2014 this is 'not checked', not 'does not comply'",
+          "rule": "path.exists",
+          "satisfied": false,
+          "target": "<root>/does-not-exist"
+        }
+      ],
+      "failing": [
+        {
+          "applicable": true,
+          "detail": "the path does not exist or is not a directory, so no criterion below was evaluated \u2014 this is 'not checked', not 'does not comply'",
+          "rule": "path.exists",
+          "satisfied": false,
+          "target": "<root>/does-not-exist"
+        }
+      ],
+      "inapplicable": [],
+      "path": "<root>/does-not-exist",
+      "recommendations": [
+        {
+          "instruction": "decide what <root>/does-not-exist should contain for this project and add it. Nothing here can write it for you.",
+          "remedy": "judgement",
+          "rule": "path.exists",
+          "target": "<root>/does-not-exist"
+        }
+      ],
+      "recorded": false,
+      "status": "not_checked"
+    },
+    "is_error": false,
+    "operation": "contract.evaluate"
+  },
+  {
+    "body": {
+      "created_paths": [
+        "<root>/proj",
+        "<root>/proj/AGENTS.md",
+        "<root>/proj/LICENSE",
+        "<root>/proj/README.md",
+        "<root>/proj/design",
+        "<root>/proj/docs",
+        "<root>/proj/src"
+      ],
+      "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "rules": [],
+          "test_recipe": ""
+        },
+        "compliance_status": "not_checked",
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "incubating",
+        "link_state": "unlinked",
+        "name": "Parity",
+        "root_path": "<root>/proj",
+        "slug": "parity",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:11Z",
+        "write_back": "none"
+      },
+      "skipped_paths": []
+    },
+    "is_error": false,
+    "operation": "project.create"
+  },
+  {
+    "body": {
+      "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "rules": [],
+          "test_recipe": ""
+        },
+        "compliance_status": "not_checked",
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "incubating",
+        "link_state": "unlinked",
+        "name": "Parity",
+        "root_path": "<root>/proj",
+        "slug": "parity",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:11Z",
+        "write_back": "none"
+      }
+    },
+    "is_error": false,
+    "operation": "project.get"
+  },
+  {
+    "body": {
+      "projects": [
+        {
+          "agent_policy": {
+            "base_branch": "",
+            "commit_identity": "",
+            "deployed_setup": "",
+            "forbidden_text": [],
+            "main_branches": [],
+            "merge_deploys_prod": false,
+            "rules": [],
+            "test_recipe": ""
+          },
+          "compliance_status": "not_checked",
+          "contract_adopted_at": "2026-01-02T03:04:11Z",
+          "created_at": "2026-01-02T03:04:11Z",
+          "exclusions": [
+            ".venv/",
+            "node_modules/",
+            "target/",
+            "dist/",
+            "build/",
+            ".git/",
+            ".claude/"
+          ],
+          "id": "prj_0001",
+          "lifecycle_state": "incubating",
+          "link_state": "unlinked",
+          "name": "Parity",
+          "root_path": "<root>/proj",
+          "slug": "parity",
+          "trust_state": "unverified",
+          "updated_at": "2026-01-02T03:04:11Z",
+          "writable": false,
+          "writable_reason": "not forge-linked: work.create refuses with project_not_linked. Pass local_only=true for a local record, or link (`forge link`) or publish (`forge publish`) the project.",
+          "write_back": "none"
+        }
+      ],
+      "total": 1
+    },
+    "is_error": false,
+    "operation": "project.list"
+  },
+  {
+    "body": {
+      "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "rules": [],
+          "test_recipe": ""
+        },
+        "compliance_status": "not_checked",
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "incubating",
+        "link_state": "unlinked",
+        "name": "Parity",
+        "repo_url": "https://example.invalid/parity.git",
+        "root_path": "<root>/proj",
+        "slug": "parity",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:13Z",
+        "write_back": "none"
+      }
+    },
+    "is_error": false,
+    "operation": "project.update"
+  },
+  {
+    "body": {
+      "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "rules": [],
+          "test_recipe": ""
+        },
+        "compliance_status": "not_checked",
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "active",
+        "link_state": "unlinked",
+        "name": "Parity",
+        "repo_url": "https://example.invalid/parity.git",
+        "root_path": "<root>/proj",
+        "slug": "parity",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:15Z",
+        "write_back": "none"
+      }
+    },
+    "is_error": false,
+    "operation": "project.transition"
+  },
+  {
+    "body": {
+      "created": [],
+      "detail": "0 written, 6 already there and left exactly as they were",
+      "project": "parity",
+      "root_path": "<root>/proj",
+      "skipped": [
+        "<root>/proj/AGENTS.md",
+        "<root>/proj/LICENSE",
+        "<root>/proj/README.md",
+        "<root>/proj/design",
+        "<root>/proj/docs",
+        "<root>/proj/src"
+      ]
+    },
+    "is_error": false,
+    "operation": "project.scaffold"
+  },
+  {
+    "body": {
+      "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "rules": [],
+          "test_recipe": ""
+        },
+        "compliance_status": "not_checked",
+        "created_at": "2026-01-02T03:04:18Z",
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0002",
+        "lifecycle_state": "active",
+        "link_state": "unlinked",
+        "name": "Second",
+        "root_path": "<root>/second",
+        "slug": "second",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:18Z",
+        "write_back": "none"
+      }
+    },
+    "is_error": false,
+    "operation": "project.register"
+  },
+  {
+    "body": {
+      "initiative": {
+        "body": "",
+        "created_at": "2026-01-02T03:04:20Z",
+        "id": "ini_0001",
+        "slug": "platform",
+        "state": "open",
+        "title": "Platform",
+        "updated_at": "2026-01-02T03:04:20Z",
+        "weight": 0
+      }
+    },
+    "is_error": false,
+    "operation": "initiative.create"
+  },
+  {
+    "body": {
+      "initiatives": [
+        {
+          "body": "",
+          "created_at": "2026-01-02T03:04:20Z",
+          "id": "ini_0001",
+          "slug": "platform",
+          "state": "open",
+          "title": "Platform",
+          "updated_at": "2026-01-02T03:04:20Z",
+          "weight": 0
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "initiative.list"
+  },
+  {
+    "body": {
+      "initiative": {
+        "body": "",
+        "created_at": "2026-01-02T03:04:20Z",
+        "id": "ini_0001",
+        "slug": "platform",
+        "state": "open",
+        "title": "Platform work",
+        "updated_at": "2026-01-02T03:04:22Z",
+        "weight": 0
+      }
+    },
+    "is_error": false,
+    "operation": "initiative.update"
+  },
+  {
+    "body": {
+      "slug": "platform",
+      "state": "open",
+      "tracking_issues": []
+    },
+    "is_error": false,
+    "operation": "initiative.publish"
+  },
+  {
+    "body": {
+      "text": "not_found: no initiative with slug 'missing'"
+    },
+    "is_error": true,
+    "operation": "initiative.publish"
+  },
+  {
+    "body": {
+      "preferences": []
+    },
+    "is_error": false,
+    "operation": "preference.get"
+  },
+  {
+    "body": {
+      "preference": {
+        "key": "inbox.filter",
+        "updated_at": "2026-01-02T03:04:25Z",
+        "value": {
+          "actor": "any",
+          "sources": [
+            "ci"
+          ],
+          "triage_states": [
+            "active"
+          ]
+        },
+        "version": 1
+      }
+    },
+    "is_error": false,
+    "operation": "preference.set"
+  },
+  {
+    "body": {
+      "text": "preference_version_conflict: preference 'inbox.filter' is at version 1, not 0; re-read it and apply the change on top of the current value"
+    },
+    "is_error": true,
+    "operation": "preference.set"
+  },
+  {
+    "body": {
+      "by_reason": {},
+      "detail": "nothing collected \u2014 either there is nothing to say, or the configured token cannot read notifications; `coverage` distinguishes the two",
+      "freshness": {
+        "collectors": "<volatile>",
+        "detail": "no collector has completed a sweep yet",
+        "status": "never_swept"
+      },
+      "notifications": [],
+      "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
+      "total": 0,
+      "unread": 0
+    },
+    "is_error": false,
+    "operation": "notifications"
+  },
+  {
+    "body": {
+      "actor_unknown_hidden": 0,
+      "counts": {
+        "active": 0,
+        "archived": 0,
+        "snoozed": 0
+      },
+      "coverage": {
+        "agent": {
+          "count": 0,
+          "detail": "no session engine is configured",
+          "projects": 0,
+          "registered": 2,
+          "source": "agent",
+          "status": "unconfigured"
+        },
+        "ci": {
+          "count": 0,
+          "detail": "this collector has not completed a sweep",
+          "projects": 0,
+          "registered": 2,
+          "source": "ci",
+          "status": "unswept"
+        },
+        "drift": {
+          "count": 0,
+          "detail": "open proposals in the declared store",
+          "projects": 0,
+          "registered": 2,
+          "source": "drift",
+          "status": "current"
+        },
+        "github": {
+          "count": 0,
+          "detail": "this collector has not completed a sweep",
+          "projects": 0,
+          "registered": 2,
+          "source": "github",
+          "status": "unswept"
+        }
+      },
+      "engine_available": false,
+      "engine_detail": "no session engine is configured",
+      "engine_status": "not_configured",
+      "entries": [],
+      "github_scope": "registered projects only",
+      "high_water": {},
+      "instance_scope": "registered projects only",
+      "snapshot_at": "2026-01-02T03:04:27Z"
+    },
+    "is_error": false,
+    "operation": "inbox.list"
+  },
+  {
+    "body": {
+      "text": "inbox_entry_not_found: no current Inbox entry 'nope'"
+    },
+    "is_error": true,
+    "operation": "inbox.archive"
+  },
+  {
+    "body": {
+      "text": "invalid_snooze: snooze deadline must be in the future"
+    },
+    "is_error": true,
+    "operation": "inbox.snooze"
+  },
+  {
+    "body": {
+      "text": "inbox_entry_not_found: no current Inbox entry 'nope'"
+    },
+    "is_error": true,
+    "operation": "inbox.restore"
+  },
+  {
+    "body": {
+      "branches": [],
+      "comments": [],
+      "item": {
+        "body": "",
+        "created_at": "2026-01-02T03:04:29Z",
+        "id": "wrk_0001",
+        "kind": "chore",
+        "labels": [],
+        "origin": "created",
+        "priority": "p2",
+        "ref": "WI-1",
+        "relations": [],
+        "state": "open",
+        "title": "parity item",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:29Z"
+      },
+      "live_sessions": [],
+      "sessions": [],
+      "walked": []
+    },
+    "is_error": false,
+    "operation": "work.create"
+  },
+  {
+    "body": {
+      "branches": [],
+      "comments": [],
+      "item": {
+        "body": "",
+        "created_at": "2026-01-02T03:04:29Z",
+        "id": "wrk_0001",
+        "kind": "chore",
+        "labels": [],
+        "origin": "created",
+        "priority": "p1",
+        "ref": "WI-1",
+        "relations": [],
+        "state": "open",
+        "title": "parity item renamed",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:31Z"
+      },
+      "live_sessions": [],
+      "sessions": [],
+      "walked": []
+    },
+    "is_error": false,
+    "operation": "work.update"
+  },
+  {
+    "body": {
+      "text": "invalid_params: labels: Input should be a valid list. work_create takes required: kind, title, reason; optional: body, priority, effort, project, initiative, assignee, labels, local_only"
+    },
+    "is_error": true,
+    "operation": "work.create"
+  },
+  {
+    "body": {
+      "text": "project_not_linked: work.create needs a forge-linked project, and 'parity' is not linked: link it (`forge link`, or re-import through `project import`) or publish it (`forge publish`) first; or pass `local_only: true` to keep a native item in this project. Native items (WI-n) on this project still take comments, transitions (including to done) and field edits by ref."
+    },
+    "is_error": true,
+    "operation": "work.create"
+  },
+  {
+    "body": {
+      "items": [
+        {
+          "kind": "chore",
+          "priority": "p1",
+          "ref": "WI-1",
+          "state": "open",
+          "title": "parity item renamed"
+        }
+      ],
+      "mode": "summary",
+      "total": 1
+    },
+    "is_error": false,
+    "operation": "work.list"
+  },
+  {
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
+    "is_error": true,
+    "operation": "work.list"
+  },
+  {
+    "body": {
+      "branches": [],
+      "comments": [],
+      "item": {
+        "body": "",
+        "created_at": "2026-01-02T03:04:29Z",
+        "id": "wrk_0001",
+        "kind": "chore",
+        "labels": [],
+        "origin": "created",
+        "priority": "p1",
+        "ref": "WI-1",
+        "relations": [],
+        "state": "open",
+        "title": "parity item renamed",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:31Z"
+      },
+      "live_sessions": [],
+      "sessions": [],
+      "walked": []
+    },
+    "is_error": false,
+    "operation": "work.get"
+  },
+  {
+    "body": {
+      "comment": {
+        "actor_display_name": "parity",
+        "actor_id": "act_0001",
+        "body": "parity note",
+        "created_at": "2026-01-02T03:04:36Z",
+        "id": "cmt_0001",
+        "kind": "note",
+        "work_item_id": "wrk_0001"
+      },
+      "write_back": "skipped"
+    },
+    "is_error": false,
+    "operation": "work.comment"
+  },
+  {
+    "body": {
+      "branches": [],
+      "comments": [],
+      "item": {
+        "body": "",
+        "created_at": "2026-01-02T03:04:29Z",
+        "id": "wrk_0001",
+        "kind": "chore",
+        "labels": [],
+        "origin": "created",
+        "priority": "p1",
+        "ref": "WI-1",
+        "relations": [],
+        "state": "in_progress",
+        "title": "parity item renamed",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:39Z"
+      },
+      "live_sessions": [],
+      "sessions": [],
+      "walked": []
+    },
+    "is_error": false,
+    "operation": "work.transition"
+  },
+  {
+    "body": {
+      "text": "not_found: no work item 'WI-2'"
+    },
+    "is_error": true,
+    "operation": "work.relate"
+  },
+  {
+    "body": {
+      "text": "not_found: no work item 'WI-2'"
+    },
+    "is_error": true,
+    "operation": "work.unrelate"
+  },
+  {
+    "body": {
+      "backlog_candidates": 1,
+      "cells": [
+        {
+          "items": [],
+          "lane_key": "",
+          "state": "open",
+          "total": 0
+        }
+      ],
+      "column_totals": {
+        "in_progress": 1
+      },
+      "declared_total": 1,
+      "excluded_unlinked": 0,
+      "lane_totals": {
+        "": 1
+      },
+      "revision": 17,
+      "snapshot": "eyJmaW5nZXJwcmludCI6InNoYTI1Njo2N2JkMGQ3MTUxN2JlYThkM2VkNmJjYWE0ZTFmZTY2YzYyNTM5MGRkNjg2ODI3MjM1Njk4MTUxMDg2ZDc0MDYzIiwiaGlnaF93YXRlciI6WyIyMDI2LTAxLTAyVDAzOjA0OjI5KzAwOjAwIiwiV0ktMSJdLCJraW5kIjoic25hcHNob3QiLCJyZXZpc2lvbiI6MTcsInNuYXBzaG90X2F0IjoiMjAyNi0wMS0wMlQwMzowNDo0MSswMDowMCJ9",
+      "snapshot_at": "2026-01-02T03:04:41Z",
+      "total": 1
+    },
+    "is_error": false,
+    "operation": "board.list"
+  },
+  {
+    "body": {
+      "closed_upstream": 0,
+      "declared": 1,
+      "excluded_unlinked": 0,
+      "freshness": {
+        "collectors": "<volatile>",
+        "detail": "no collector has completed a sweep yet",
+        "status": "never_swept"
+      },
+      "items": [
+        {
+          "classified": true,
+          "kind": "chore",
+          "labels": [],
+          "origin": "declared",
+          "priority": "p1",
+          "ref": "WI-1",
+          "score": 52.0,
+          "state": "in_progress",
+          "title": "parity item renamed",
+          "trust_state": "unverified",
+          "updated_at": "2026-01-02T03:04:39Z"
+        }
+      ],
+      "observed": 0,
+      "scope": "global",
+      "suppressed": 0,
+      "total_considered": 1
+    },
+    "is_error": false,
+    "operation": "backlog"
+  },
+  {
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
+    "is_error": true,
+    "operation": "backlog"
+  },
+  {
+    "body": {
+      "closed_upstream": 0,
+      "declared": 0,
+      "excluded_unlinked": 0,
+      "freshness": {
+        "collectors": "<volatile>",
+        "detail": "no collector has completed a sweep yet",
+        "status": "never_swept"
+      },
+      "items": [],
+      "observed": 0,
+      "scope": "global",
+      "suppressed": 0,
+      "total_considered": 0
+    },
+    "is_error": false,
+    "operation": "bugs"
+  },
+  {
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
+    "is_error": true,
+    "operation": "bugs"
+  },
+  {
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
+    "is_error": true,
+    "operation": "deps"
+  },
+  {
+    "body": {
+      "comments": 1,
+      "export_format_version": 2,
+      "path": "<root>/export.json",
+      "projects": 2,
+      "work_items": 1
+    },
+    "is_error": false,
+    "operation": "export"
+  },
+  {
+    "body": {
+      "applied": false,
+      "base": "2026-01-02T03:04:48Z",
+      "base_source": "an export of this same instance: its exported_at",
+      "by_entity": {
+        "actor": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 4,
+          "updated": 0
+        },
+        "comment": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 1,
+          "updated": 0
+        },
+        "initiative": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 1,
+          "updated": 0
+        },
+        "label": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 1,
+          "updated": 0
+        },
+        "project": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 2,
+          "updated": 0
+        },
+        "work_item": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 1,
+          "updated": 0
+        }
+      },
+      "changes": [],
+      "conflicted": 0,
+      "created": 0,
+      "detail": "Dry run: nothing was written. Pass --apply --confirm to merge.",
+      "export_format_version": 2,
+      "instance_id": "ins_0001",
+      "projects": 2,
+      "skipped": 0,
+      "source": "<root>/export.json",
+      "unchanged": 10,
+      "updated": 0,
+      "work_items": 1
+    },
+    "is_error": false,
+    "operation": "import"
+  },
+  {
+    "body": {
+      "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "rules": [],
+          "test_recipe": ""
+        },
+        "compliance_status": "not_checked",
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "active",
+        "link_state": "unlinked",
+        "name": "Parity",
+        "repo_url": "https://example.invalid/parity.git",
+        "root_path": "<root>/proj",
+        "slug": "parity",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:50Z",
+        "write_back": "full"
+      }
+    },
+    "is_error": false,
+    "operation": "forge.writeback"
+  },
+  {
+    "body": {
+      "actions": [
+        {
+          "action": "comment",
+          "at": "2026-01-02T03:04:37Z",
+          "detail": "write-back is off for this project",
+          "id": "wbk_0001",
+          "outcome": "skipped",
+          "policy": "none",
+          "reason": "parity"
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "forge.actions"
+  },
+  {
+    "body": {
+      "actions": [
+        {
+          "action": "comment",
+          "at": "2026-01-02T03:04:37Z",
+          "detail": "write-back is off for this project",
+          "id": "wbk_0001",
+          "outcome": "skipped",
+          "policy": "none",
+          "reason": "parity"
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "forge.actions"
+  },
+  {
+    "body": {
+      "text": "invalid_request: 'no.such.host' is not a configured forge host; add it to forge_token_files before listing repositories"
+    },
+    "is_error": true,
+    "operation": "forge.repos"
+  },
+  {
+    "body": {
+      "accounts": []
+    },
+    "is_error": false,
+    "operation": "forge.account_status"
+  },
+  {
+    "body": {
+      "text": "invalid_request: 'no.such.host' has no provider to validate a token against; configure the host under forge_token_files first"
+    },
+    "is_error": true,
+    "operation": "forge.account_link"
+  },
+  {
+    "body": {
+      "digests": [],
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "hidden_count": 0,
+      "sessions": [],
+      "total": 0,
+      "truncated": false
+    },
+    "is_error": false,
+    "operation": "session.list"
+  },
+  {
+    "body": {
+      "counts": {
+        "needs_you": 0,
+        "total": 0
+      },
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "rows": [],
+      "swept_at": "2026-01-02T03:04:53Z"
+    },
+    "is_error": false,
+    "operation": "session.sweep"
+  },
+  {
+    "body": {
+      "bytes": 0,
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "text": "",
+      "total_bytes": 0,
+      "truncated": false
+    },
+    "is_error": false,
+    "operation": "session.log_tail"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.start"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.input"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.screen"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.wait"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.answer"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.hibernate"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.keep_awake"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.set_role"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.wake"
+  },
+  {
+    "body": {
+      "text": "not_found: no session 'ses_00000000000000000000000000'"
+    },
+    "is_error": true,
+    "operation": "session.stop"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, and chats run on it (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "chat.list"
+  },
+  {
+    "body": {
+      "text": "invalid_request: 'nope' is not a chat id (a UUID, from chat.list or chat.create)"
+    },
+    "is_error": true,
+    "operation": "chat.get"
+  },
+  {
+    "body": {
+      "user": {
+        "actor_id": "act_0005",
+        "actor_identity_ref": "human:ada",
+        "created_at": "2026-01-02T03:04:54Z",
+        "scopes": [
+          "read",
+          "work.write",
+          "project.write"
+        ],
+        "updated_at": "2026-01-02T03:04:54Z",
+        "username": "ada"
+      }
+    },
+    "is_error": false,
+    "operation": "user.create"
+  },
+  {
+    "body": {
+      "users": [
+        {
+          "actor_id": "act_0005",
+          "actor_identity_ref": "human:ada",
+          "created_at": "2026-01-02T03:04:54Z",
+          "scopes": [
+            "read",
+            "work.write",
+            "project.write"
+          ],
+          "updated_at": "2026-01-02T03:04:54Z",
+          "username": "ada"
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "user.list"
+  },
+  {
+    "body": {
+      "user": {
+        "actor_id": "act_0005",
+        "actor_identity_ref": "human:ada",
+        "created_at": "2026-01-02T03:04:54Z",
+        "scopes": [
+          "read",
+          "work.write",
+          "project.write"
+        ],
+        "updated_at": "2026-01-02T03:04:56Z",
+        "username": "ada"
+      }
+    },
+    "is_error": false,
+    "operation": "user.set_password"
+  },
+  {
+    "body": {
+      "tokens": [
+        {
+          "actor_id": "act_0003",
+          "actor_identity_ref": "agent:vogt-sessions",
+          "created_at": "2026-01-02T03:04:15Z",
+          "id": "tok_0002",
+          "kind": "api",
+          "name": "bootstrap agent token",
+          "scopes": [
+            "read",
+            "work.write",
+            "project.write",
+            "writeback"
+          ]
+        },
+        {
+          "actor_id": "act_0002",
+          "actor_identity_ref": "agent:vogt-engine",
+          "created_at": "2026-01-02T03:04:11Z",
+          "id": "tok_0001",
+          "kind": "api",
+          "name": "bootstrap core token",
+          "scopes": [
+            "read",
+            "work.write",
+            "project.write"
+          ]
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "token.list"
+  },
+  {
+    "body": {
+      "token": {
+        "actor_id": "act_0003",
+        "actor_identity_ref": "agent:vogt-sessions",
+        "created_at": "2026-01-02T03:04:15Z",
+        "id": "tok_0002",
+        "kind": "api",
+        "name": "bootstrap agent token",
+        "revoked_at": "2026-01-02T03:04:58Z",
+        "revoked_reason": "parity harness",
+        "scopes": [
+          "read",
+          "work.write",
+          "project.write",
+          "writeback"
+        ]
+      }
+    },
+    "is_error": false,
+    "operation": "token.revoke"
+  },
+  {
+    "body": {
+      "display_name": "parity",
+      "identity_ref": "local:parity",
+      "kind": "human",
+      "scopes": [
+        "admin",
+        "project.write",
+        "read",
+        "work.write",
+        "writeback"
+      ]
+    },
+    "is_error": false,
+    "operation": "auth.whoami"
+  },
+  {
+    "body": {
+      "declared_schema_version": 24,
+      "engine_state": "not configured",
+      "import_root": "<root>/instance/repos",
+      "instance_id": "ins_0001",
+      "observed_schema_version": 6,
+      "path": "<root>/backup",
+      "taken_at": "2026-01-02T03:05:00Z"
+    },
+    "is_error": false,
+    "operation": "backup"
+  },
+  {
+    "body": {
+      "declared_schema_version": 24,
+      "engine_state": "not in this backup",
+      "import_root_now": "<root>/instance/repos",
+      "import_root_then": "<root>/instance/repos",
+      "instance_id": "ins_0001",
+      "migrations_applied": [],
+      "restored_from": "2026-01-02T03:05:00Z",
+      "source": "<root>/backup"
+    },
+    "is_error": false,
+    "operation": "restore"
+  },
+  {
+    "body": {
+      "sessions_revoked": 0,
+      "username": "ada"
+    },
+    "is_error": false,
+    "operation": "user.remove"
+  },
+  {
+    "body": {
+      "events": [
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:12Z",
+          "audit_id": "aud_0002",
+          "entity_id": "tok_0001",
+          "entity_kind": "token",
+          "kind": "token.adopted",
+          "seq": 1,
+          "summary": {
+            "actor": "agent:vogt-engine",
+            "scopes": [
+              "read",
+              "work.write",
+              "project.write"
+            ]
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:16Z",
+          "audit_id": "aud_0003",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "kind": "token.adopted",
+          "seq": 2,
+          "summary": {
+            "actor": "agent:vogt-sessions",
+            "scopes": [
+              "read",
+              "work.write",
+              "project.write",
+              "writeback"
+            ]
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:08Z",
+          "audit_id": "aud_0004",
+          "entity_id": "act_0004",
+          "entity_kind": "actor",
+          "kind": "actor.created",
+          "seq": 3,
+          "summary": {
+            "identity_ref": "agent:parity",
+            "kind": "agent"
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:10Z",
+          "audit_id": "aud_0005",
+          "entity_id": "lbl_0001",
+          "entity_kind": "label",
+          "kind": "label.created",
+          "seq": 4,
+          "summary": {
+            "name": "parity"
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:12Z",
+          "audit_id": "aud_0006",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
+          "kind": "project.registered",
+          "seq": 5,
+          "summary": {
+            "name": "Parity",
+            "slug": "parity"
+          }
+        }
+      ],
+      "next_cursor": 5
+    },
+    "is_error": false,
+    "operation": "events.list"
+  },
+  {
+    "body": {
+      "events": [
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:16Z",
+          "audit_id": "aud_0003",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "kind": "token.adopted",
+          "seq": 2,
+          "summary": {
+            "actor": "agent:vogt-sessions",
+            "scopes": [
+              "read",
+              "work.write",
+              "project.write",
+              "writeback"
+            ]
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:08Z",
+          "audit_id": "aud_0004",
+          "entity_id": "act_0004",
+          "entity_kind": "actor",
+          "kind": "actor.created",
+          "seq": 3,
+          "summary": {
+            "identity_ref": "agent:parity",
+            "kind": "agent"
+          }
+        }
+      ],
+      "next_cursor": 3
+    },
+    "is_error": false,
+    "operation": "events.list"
+  },
+  {
+    "body": {
+      "records": [
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:05:05Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0023",
+          "operation": "user.remove",
+          "payload_digest": "sha256:6cb1b570d1a756565af0191ec35d1fed1dc103ed9b82afa000b68a0172b6f711",
+          "reason": "parity harness",
+          "revision": 22,
+          "txn_id": "txn_0027"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:59Z",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0022",
+          "operation": "token.revoke",
+          "payload_digest": "sha256:bfcc73a3d1e6ce27518dff7ffc9ee01b193ace2cd561679bd4aa46a4d3ba5b63",
+          "reason": "parity harness",
+          "revision": 21,
+          "txn_id": "txn_0025"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:57Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0021",
+          "operation": "user.set_password",
+          "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
+          "reason": "parity harness",
+          "revision": 20,
+          "txn_id": "txn_0024"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:55Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0020",
+          "operation": "user.create",
+          "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
+          "reason": "parity harness",
+          "revision": 19,
+          "txn_id": "txn_0023"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:51Z",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
+          "id": "aud_0019",
+          "operation": "project.writeback",
+          "payload_digest": "sha256:5160587a6bd4fd6e1c8cfdfbe9e7b71a0aff7cb411b75e8ad277bea16adfdf65",
+          "reason": "parity harness",
+          "revision": 18,
+          "txn_id": "txn_0022"
+        }
+      ],
+      "total": 23
+    },
+    "is_error": false,
+    "operation": "audit.list"
+  },
+  {
+    "body": {
+      "records": [
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:59Z",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0022",
+          "operation": "token.revoke",
+          "payload_digest": "sha256:bfcc73a3d1e6ce27518dff7ffc9ee01b193ace2cd561679bd4aa46a4d3ba5b63",
+          "reason": "parity harness",
+          "revision": 21,
+          "txn_id": "txn_0025"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:57Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0021",
+          "operation": "user.set_password",
+          "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
+          "reason": "parity harness",
+          "revision": 20,
+          "txn_id": "txn_0024"
+        }
+      ],
+      "total": 23
+    },
+    "is_error": false,
+    "operation": "audit.list"
+  },
+  {
+    "body": {
+      "text": "invalid_request: <root>/backup is a backup of this instance (ins_0001); a clone copies another instance. Use `restore` to put this one back."
+    },
+    "is_error": true,
+    "operation": "clone"
+  },
+  {
+    "body": {
+      "text": "invalid_request: <root>/backup is a backup of this instance (ins_0001); a clone copies another instance. Use `restore` to put this one back."
+    },
+    "is_error": true,
+    "operation": "clone"
+  },
+  {
+    "body": {
+      "text": "not_found: <root>/missing has no manifest.json; it is not a Vogt backup"
+    },
+    "is_error": true,
+    "operation": "clone"
+  },
+  {
+    "body": {
+      "text": "invalid_request: 'not a repo!' does not name a GitHub repository or a configured Forgejo repository; give owner/name, host/owner/name, or a repository URL"
+    },
+    "is_error": true,
+    "operation": "project.import"
+  },
+  {
+    "body": {
+      "text": "invalid_request: 'not a repo!' does not name a GitHub repository or a configured Forgejo repository; give owner/name, host/owner/name, or a repository URL"
+    },
+    "is_error": true,
+    "operation": "project.import"
+  }
+]

@@ -1199,5 +1199,105 @@
     "exit": 0
    }
   }
+,
+  {
+    "operation": "events.list",
+    "params": {
+      "after": 0,
+      "limit": 5
+    },
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "events.list",
+    "params": {
+      "after": 1,
+      "limit": 2
+    },
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "audit.list",
+    "params": {
+      "limit": 5
+    },
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "audit.list",
+    "params": {
+      "limit": 2,
+      "offset": 1
+    },
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "clone",
+    "params": {
+      "source": "{root}/backup",
+      "confirm": false,
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 1
+    },
+    "why": "a clone refuses without confirmation and touches nothing"
+  },
+  {
+    "operation": "clone",
+    "params": {
+      "source": "{root}/backup",
+      "confirm": true,
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 1
+    },
+    "why": "a backup of this instance is not a clone source"
+  },
+  {
+    "operation": "clone",
+    "params": {
+      "source": "{root}/missing",
+      "confirm": true,
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 1
+    },
+    "why": "a source with no manifest is refused"
+  },
+  {
+    "operation": "project.import",
+    "params": {
+      "repo": "not a repo!",
+      "reason": "parity harness",
+      "consolidate": false
+    },
+    "expect": {
+      "exit": 1
+    },
+    "why": "a reference that names no repository is refused before any clone"
+  },
+  {
+    "operation": "project.import",
+    "params": {
+      "repo": "not a repo!",
+      "reason": "parity harness",
+      "consolidate": true
+    },
+    "expect": {
+      "exit": 1
+    },
+    "why": "the reference check runs before the consolidate refusal, as in Python"
+  }
  ]
 }
