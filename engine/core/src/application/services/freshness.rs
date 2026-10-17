@@ -9,11 +9,22 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::core::Moment;
+use std::sync::{Arc, Mutex};
+
+use crate::core::{Clock, Moment};
 use crate::errors::VogtError;
 use crate::storage::interface::ObservedStore;
 
-pub fn freshness_of(observed: &impl ObservedStore, now: Moment) -> Result<Value, VogtError> {
+use super::now_of;
+
+/// The age of the evidence behind an aggregating answer. The clock is read only
+/// once the store has said there is evidence to age: a never-swept instance
+/// reads no tick, as Python's `freshness_of` does, so the next timestamp in the
+/// same process comes out the same.
+pub fn freshness_of<C: Clock>(
+    observed: &impl ObservedStore,
+    clock: &Arc<Mutex<C>>,
+) -> Result<Value, VogtError> {
     if !observed.has_evidence_tables()? {
         return Ok(never_swept(
             "no sweep has run; observed subjects are not collected",
@@ -23,6 +34,7 @@ pub fn freshness_of(observed: &impl ObservedStore, now: Moment) -> Result<Value,
     if newest.is_empty() {
         return Ok(never_swept("no collector has completed a sweep yet"));
     }
+    let now = now_of(clock);
     // Sorted by name, as Python's `sorted(newest.items())` does, so two runs
     // agree on the collector order.
     let mut names: Vec<&String> = newest.keys().collect();

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::adapters::forge::KIND_NOTIFICATION;
 use crate::application::context::{AppContext, Built};
 use crate::application::services::preferences::{optional_i64, optional_string};
-use crate::application::services::{context_parts, dispatch, now_of};
+use crate::application::services::{context_parts, dispatch};
 use crate::core::{Clock, IdFactory, Observation};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
@@ -47,10 +47,7 @@ where
             "by_reason": {},
             "unread": 0,
             "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
-            "freshness": crate::application::services::freshness::freshness_of(
-                observed,
-                now_of(&clock),
-            )?,
+            "freshness": crate::application::services::freshness::freshness_of(observed, &clock)?,
             "detail": "no sweep has run; notifications are not collected",
         }));
     }
@@ -119,7 +116,7 @@ where
         "by_reason": by_reason,
         "unread": unread,
         "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
-        "freshness": crate::application::services::freshness::freshness_of(observed, now_of(&clock))?,
+        "freshness": crate::application::services::freshness::freshness_of(observed, &clock)?,
         "detail": detail,
     }))
 }

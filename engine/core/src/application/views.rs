@@ -243,6 +243,33 @@ struct GatherQuery<'a> {
     include_prs: bool,
 }
 
+/// The two candidate counts a Board scope reports, as Python's
+/// `candidate_population` gives them: the observed-inclusive count of ranked
+/// candidates, and the declared-only count. It goes through `gather`, so it
+/// reads the clock the way the Backlog does.
+pub(crate) fn candidate_population<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project: Option<&str>,
+    kinds: Vec<String>,
+    priorities: Vec<String>,
+    assignee: Option<&str>,
+    initiative: Option<&str>,
+    label: Option<&str>,
+) -> Result<(i64, i64), VogtError> {
+    let query = GatherQuery {
+        project,
+        kinds,
+        priorities,
+        assignee,
+        initiative,
+        label,
+        trust_states: Vec::new(),
+        include_prs: true,
+    };
+    let gathered = gather(ctx, &query)?;
+    Ok((gathered.ranked.len() as i64, gathered.declared))
+}
+
 /// The candidate population of a ranked view, scored and ordered. Ports
 /// `_gather`: declared rows first, then the observed subjects that name no
 /// declared work, with a PR collapsed under the item it implements.
@@ -457,8 +484,6 @@ fn gather<C: Clock, I: IdFactory>(
         let scored = score_rows(&declared_rows, &observed_rows, now_of(&ctx.clock));
         (scored, observed_count, suppressed, closed)
     } else {
-        // No observed rows, so no `trust_for` reads: the scoring read is the
-        // second one, straight after the git-signals read.
         // No observed rows, so no `trust_for` reads: the scoring read is the
         // second one, straight after the git-signals read. The declared rows
         // were already filtered by kind and priority in the store query.
@@ -683,7 +708,7 @@ fn backlog<C: Clock, I: IdFactory>(
     };
     let gathered = gather(ctx, &query)?;
     let freshness =
-        crate::application::services::freshness::freshness_of(&ctx.observed, now_of(&ctx.clock))?;
+        crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?;
     let total = gathered.ranked.len() as i64;
     let start = offset.max(0) as usize;
     let page: Vec<serde_json::Value> = gathered
@@ -749,7 +774,7 @@ fn bugs<C: Clock, I: IdFactory>(
     };
     let gathered = gather(ctx, &query)?;
     let freshness =
-        crate::application::services::freshness::freshness_of(&ctx.observed, now_of(&ctx.clock))?;
+        crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?;
     let total = gathered.ranked.len() as i64;
     let start = offset.max(0) as usize;
     let page: Vec<serde_json::Value> = gathered
@@ -788,7 +813,7 @@ fn unlinked_scope<C: Clock, I: IdFactory>(
         return Ok(None);
     }
     let freshness =
-        crate::application::services::freshness::freshness_of(&ctx.observed, now_of(&ctx.clock))?;
+        crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?;
     let pending = view.count_work_items(&crate::storage::interface::WorkFilter {
         project_id: Some(project_row.id.clone()),
         exclude_terminal: true,

@@ -852,9 +852,11 @@ fn get_work<C: Clock, I: IdFactory>(
         item.body.clear();
         comments.clear();
     }
-    let sessions = sessions_for(ctx, &view, &item)?;
+    // Branches, then the git story, then the session join: the order Python's
+    // `get_work` reads the clock in, which the next timestamp depends on.
     let branches = crate::application::git_story::branch_views_for(ctx, &view, &item)?;
     let git = crate::application::git_story::git_story_for(ctx, &item, &branches)?;
+    let sessions = sessions_for(ctx, &view, &item)?;
     Ok(json!({
         "item": item,
         "comments": comments,
@@ -876,6 +878,10 @@ fn sessions_for<C: Clock, I: IdFactory>(
     if item.id.is_empty() {
         return Ok(Vec::new());
     }
+    // Python's session list reads the clock once for the attention of the
+    // linked sessions, whether or not the engine answers. Nothing here uses the
+    // value yet, but the tick is spent so the next timestamp matches.
+    let _now = super::now_of(&ctx.clock);
     let rows = view.list_sessions(None, Some(&item.id), true, 200, 0)?;
     let mut out = Vec::new();
     for session in rows {
@@ -1574,7 +1580,10 @@ fn declared_only<C: Clock, I: IdFactory>(
                     "{reference} is an upstream-truth item; relations between upstream issues are not supported in v1 of the upstream-truth model — relate them on the forge"
                 )))
             } else {
-                Err(VogtError::NotFound(format!("no work item {reference}")))
+                Err(VogtError::NotFound(format!(
+                    "no work item {}",
+                    crate::core::py_repr(reference)
+                )))
             }
         }
         Err(other) => Err(other),
@@ -1757,13 +1766,24 @@ fn list_board<C: Clock, I: IdFactory>(
         "snapshot_at": snapshot_at.to_iso(),
         "high_water": high_water.as_ref().map(|(moment, reference)| json!([moment.to_iso(), reference])),
     }));
+    // Python's `candidate_population`, read after the snapshot as Python reads
+    // the clock: the observed-inclusive count and the declared-only count.
+    let (backlog_candidates, declared_total) = crate::application::views::candidate_population(
+        ctx,
+        params.get("project").and_then(Value::as_str),
+        strings(params.get("kinds")),
+        strings(params.get("priorities")),
+        params.get("assignee").and_then(Value::as_str),
+        params.get("initiative").and_then(Value::as_str),
+        params.get("label").and_then(Value::as_str),
+    )?;
     Ok(json!({
         "cells": rendered,
         "column_totals": column_totals,
         "lane_totals": lane_totals,
         "total": total,
-        "backlog_candidates": total,
-        "declared_total": total,
+        "backlog_candidates": backlog_candidates,
+        "declared_total": declared_total,
         "link_state": project.as_ref().map(|_| "linked"),
         "excluded_unlinked": 0,
         "snapshot": snapshot,

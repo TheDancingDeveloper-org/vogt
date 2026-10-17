@@ -706,10 +706,7 @@ fn brief_project<C: Clock, I: IdFactory>(
         "compliance_checked_at": if adopted { project.compliance_checked_at } else { None },
         "ci_status": ci_summary(ctx, &project.id)?,
         "dependencies": dependency_summary(ctx, &project.id)?,
-        "freshness": crate::application::services::freshness::freshness_of(
-            &ctx.observed,
-            now_of(&ctx.clock),
-        )?,
+        "freshness": crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?,
         "backlog_limit": params.backlog_limit,
         "mode": params.mode,
     }))

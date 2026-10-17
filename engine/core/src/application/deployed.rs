@@ -45,10 +45,7 @@ fn versions<C: crate::core::Clock, I: crate::core::IdFactory>(
             "lanes": [],
             "configured": 0,
             "detail": "deploy_lanes is not configured, so deployed versions are not collected",
-            "freshness": crate::application::services::freshness::freshness_of(
-                &ctx.observed,
-                crate::application::services::now_of(&ctx.clock),
-            )?,
+            "freshness": crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?,
         }));
     }
     let mut lanes = ctx.config.deploy_lanes.clone();
@@ -84,10 +81,7 @@ fn versions<C: crate::core::Clock, I: crate::core::IdFactory>(
         "lanes": views,
         "configured": configured,
         "detail": detail,
-        "freshness": crate::application::services::freshness::freshness_of(
-            &ctx.observed,
-            crate::application::services::now_of(&ctx.clock),
-        )?,
+        "freshness": crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?,
     }))
 }
 

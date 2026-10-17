@@ -177,7 +177,7 @@ fn list<C: Clock, I: IdFactory>(
     for (kind, reason) in decisions::HUMAN_GATED_REASON {
         human_gated.insert((*kind).to_string(), Value::String((*reason).to_string()));
     }
-    let freshness = freshness_of(&ctx.observed, clock_now(&ctx.clock))?;
+    let freshness = freshness_of(&ctx.observed, &ctx.clock)?;
     Ok(json!({
         "proposals": proposals,
         "human_gated": human_gated,
@@ -923,7 +923,10 @@ fn evidence_json(evidence: &Option<EvidenceSnapshot>) -> Value {
 
 /// `views.freshness_of`. The helper in the notifications module is
 /// `pub(super)`, so the small shape is repeated here rather than widening it.
-fn freshness_of(observed: &impl ObservedStore, now: Moment) -> Result<Value, VogtError> {
+fn freshness_of<C: Clock>(
+    observed: &impl ObservedStore,
+    clock: &std::sync::Arc<std::sync::Mutex<C>>,
+) -> Result<Value, VogtError> {
     if !observed.has_evidence_tables()? {
         return Ok(json!({
             "status": "never_swept",
@@ -943,6 +946,8 @@ fn freshness_of(observed: &impl ObservedStore, now: Moment) -> Result<Value, Vog
             "detail": "no collector has completed a sweep yet",
         }));
     }
+    // Read only once there is evidence to age, as the shared helper does.
+    let now = clock_now(clock);
     let mut collectors = serde_json::Map::new();
     let mut oldest: Option<Moment> = None;
     let mut partial = false;
