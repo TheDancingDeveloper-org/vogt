@@ -230,6 +230,8 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "project.list" => Some(crate::application::projects::list_op),
         "project.update" => Some(crate::application::projects::update_op),
         "project.transition" => Some(crate::application::projects::transition_op),
+        "project.brief" => Some(crate::application::projects::brief_op),
+        "place.metrics" => Some(crate::application::place::place_metrics_op),
         "label.create" => Some(crate::application::taxonomy::create_label_op),
         "label.list" => Some(crate::application::taxonomy::list_labels_op),
         "actor.create" => Some(crate::application::taxonomy::create_actor_op),
@@ -992,13 +994,19 @@ mod tests {
     #[test]
     fn not_ported_is_a_failure() {
         let registry = registry();
-        let operation = registry.get("place.metrics").unwrap();
+        let operation = registry.get("forge.link").unwrap();
         let error = operation.run(None, serde_json::json!({})).unwrap_err();
         assert!(
             error.message().contains("not been ported"),
             "{}",
             error.message()
         );
+    }
+
+    #[test]
+    fn the_project_brief_and_place_metrics_handlers_are_wired() {
+        assert!(service_for("project.brief").is_some());
+        assert!(service_for("place.metrics").is_some());
     }
 
     #[test]
