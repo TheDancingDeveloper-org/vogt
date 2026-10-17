@@ -69,6 +69,8 @@ mod forge_module_test;
 mod forge_ops_test;
 #[cfg(test)]
 mod services_test;
+#[cfg(test)]
+mod upstream_truth_test;
 
 /// The shape the registry calls. Named operations are `fn` items, not closures,
 /// so the pointer is stable.
