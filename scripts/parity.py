@@ -20,6 +20,7 @@ timestamps. Exit status is non-zero when any step differs.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import difflib
 import json
 import os
@@ -30,6 +31,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -168,6 +170,18 @@ def _run(
     return _run_cli(binary, steps)
 
 
+@contextlib.contextmanager
+def _fixed_scratch(name: str) -> Iterator[Path]:
+    """A scratch directory at a fixed path, cleared before and after use."""
+    path = Path(tempfile.gettempdir()) / name
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drive the steps that take parameters over MCP stdio.
 
@@ -183,7 +197,11 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     the HTTP login mints is random, and nothing in this transport captures it.
     """
     steps = [step for step in steps if "params" in step or "dump" in step]
-    with tempfile.TemporaryDirectory(prefix="vogt-parity-mcp-") as scratch:
+    # The scratch root is fixed, not random: the audit payload digest covers the
+    # absolute root_path a project was registered at, so a random directory
+    # made every MCP digest differ from run to run. The output still shows it as
+    # <root>. Runs are sequential, so one fixed path is safe to clear and reuse.
+    with _fixed_scratch("vogt-parity-mcp-fixed") as scratch:
         root = Path(scratch)
         data = root / "instance"
         env = _child_env()
