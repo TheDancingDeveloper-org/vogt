@@ -169,6 +169,10 @@ pub struct Session {
     /// (WI-1519). Set when one is, cleared when the next turn starts, so a
     /// session that keeps idling does not announce readiness again.
     ready_announced: AtomicBool,
+    /// When the agent declared itself done under autopilot this turn (WI-1518),
+    /// RFC 3339. Set once per turn, so a re-render of the same screen does not
+    /// declare it again; cleared when the next turn starts.
+    done_at: Mutex<Option<String>>,
 }
 
 impl Session {
@@ -282,6 +286,28 @@ impl Session {
 
     pub fn set_autopilot(&self, on: bool) {
         self.autopilot.store(on, Ordering::Release);
+    }
+
+    /// When the agent declared itself done this turn (WI-1518), RFC 3339.
+    pub fn done_at(&self) -> Option<String> {
+        self.done_at.lock().clone()
+    }
+
+    /// Record that the agent declared itself done this turn (WI-1518). True
+    /// the first time; false when this turn already carries the declaration.
+    pub fn mark_done(&self, at: String) -> bool {
+        let mut done = self.done_at.lock();
+        if done.is_some() {
+            return false;
+        }
+        *done = Some(at);
+        true
+    }
+
+    /// Put a done declaration back onto a session that was just woken, without
+    /// announcing it (WI-1518).
+    pub fn restore_done_at(&self, at: Option<String>) {
+        *self.done_at.lock() = at;
     }
 
     /// The project policy this session enforces, when it has one (WI-1243).
@@ -506,6 +532,7 @@ impl Session {
             keep_awake: self.keep_awake(),
             autopilot: self.autopilot(),
             autopilot_nudges: self.autopilot_nudges(),
+            done_at: self.done_at(),
             role: self.role(),
             work_item: self.work_item(),
             resources: self.resources.lock().clone(),
@@ -1259,6 +1286,7 @@ pub fn spawn(
         budget_session_banked: Mutex::new(Duration::ZERO),
         budget_hold: AtomicBool::new(false),
         ready_announced: AtomicBool::new(false),
+        done_at: Mutex::new(None),
     });
 
     spawn_reader_thread(
@@ -1858,6 +1886,8 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
             *session.turn_started_at.lock() = Some(now);
             // The next rest at a prompt is a new turn's readiness (WI-1519).
             session.ready_announced.store(false, Ordering::Release);
+            // Likewise a done declaration belongs to the turn it ended (WI-1518).
+            *session.done_at.lock() = None;
         }
         if new != ActivityState::AwaitingApproval {
             *session.approval.lock() = None;

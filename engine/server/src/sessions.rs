@@ -755,6 +755,9 @@ impl SessionRegistry {
                 // — a publish is a push the operator already received. The next
                 // hibernation captures whatever the session still holds.
                 session.restore_blocked(record.blocked.take());
+                // The declaration a wake keeps: the live session carries it
+                // again, and the next hibernation copies it back (WI-1518).
+                session.restore_done_at(record.done_at.clone());
                 hibernation::remove_screen(&self.cfg.state_dir, id);
                 Some(record)
             }
@@ -1214,6 +1217,7 @@ impl SessionRegistry {
         // The report survives the stop: a wake and a restart both read it
         // back off this record (C4).
         record.blocked = session.blocked();
+        record.done_at = session.done_at();
         record.rows = Some(rows);
         record.cols = Some(cols);
         // A handoff survives a forced wake and a later hibernation that does
@@ -1766,6 +1770,29 @@ impl SessionRegistry {
         }
     }
 
+    /// Stamp that a live autopilot session's agent declared itself done
+    /// (WI-1518), in the session and in its record so a wake keeps it. False
+    /// when this turn already carries the declaration, so the caller publishes
+    /// nothing twice.
+    pub fn mark_done(&self, id: Uuid, at: String) -> bool {
+        let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) else {
+            return false;
+        };
+        if !session.mark_done(at.clone()) {
+            return false;
+        }
+        let updated = self.records.get_mut(&id).map(|mut record| {
+            record.done_at = Some(at);
+            record.clone()
+        });
+        if let Some(record) = updated.as_ref() {
+            if let Err(e) = hibernation::write(&self.cfg.state_dir, record) {
+                tracing::warn!(session = %id, error = %e, "could not write the session's hibernation record");
+            }
+        }
+        true
+    }
+
     /// Turn a session's autopilot on or off (WI-949), live and in its record
     /// so a wake keeps the answer.
     pub fn set_autopilot(&self, id: Uuid, on: bool) -> Result<()> {
@@ -2193,6 +2220,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         keep_awake: record.keep_awake,
         autopilot: record.autopilot,
         autopilot_nudges: 0,
+        done_at: record.done_at.clone(),
         role: record.role,
         work_item: record.work_item.clone(),
         resources: None,
@@ -2533,6 +2561,7 @@ mod tests {
             keep_awake: false,
             autopilot: false,
             autopilot_nudges: 0,
+            done_at: None,
             role: vogt_engine_contract::SessionRole::Worker,
             work_item: None,
             resources: None,
