@@ -15,6 +15,7 @@ pub mod agent_clis;
 pub mod auth;
 pub mod bootstrap;
 pub mod chats;
+pub mod connect;
 pub mod forge_accounts;
 pub mod forge_import;
 pub mod forge_link;
