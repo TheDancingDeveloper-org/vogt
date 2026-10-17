@@ -469,12 +469,14 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     f"{step['operation']} exited {completed.returncode}, "
                     f"wanted {expect.get('exit', 0)}: {completed.stderr.strip()}"
                 )
-            body = json.loads(completed.stdout) if completed.stdout.strip() else None
-            seen[step["operation"]] = body
+            reply: Any = (
+                json.loads(completed.stdout) if completed.stdout.strip() else None
+            )
+            seen[step["operation"]] = reply
             answer = {
                 "operation": step["operation"],
                 "exit": completed.returncode,
-                "body": _normalise(body, root, data, step["operation"]),
+                "body": _normalise(reply, root, data, step["operation"]),
             }
             # A failure writes nothing to stdout, so the exit alone cannot say
             # which refusal it was. Keep the error line, with the data
@@ -842,7 +844,13 @@ def _walk(
     if isinstance(value, str):
         for needle, token in paths.items():
             value = value.replace(needle, token)
-        return value
+        # git 2.54 prints "(null)" where 2.53 and earlier print the gitdir it
+        # could not find. The broken fixture's gitdir is always <root>/nowhere,
+        # so both spellings name the same thing; map the newer one to the golden.
+        return value.replace(
+            "not a git repository: (null)",
+            "not a git repository: <root>/nowhere",
+        )
     # Floats are rounded to 3 decimal places because ranking totals carry more
     # precision than two runs agree on once staleness is involved. Integers
     # and everything else compare verbatim.

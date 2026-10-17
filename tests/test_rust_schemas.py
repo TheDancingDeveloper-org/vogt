@@ -18,6 +18,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,7 +30,7 @@ ENGINE = REPO_ROOT / "engine"
 MODELS_RS = ENGINE / "core" / "src" / "application" / "models.rs"
 
 
-def _rust_dump() -> dict[str, object]:
+def _rust_dump() -> dict[str, Any]:
     """The Rust binary's `registry dump`, built and run through cargo."""
     completed = subprocess.run(
         [
@@ -51,40 +52,40 @@ def _rust_dump() -> dict[str, object]:
         timeout=600,
     )
     assert completed.returncode == 0, completed.stderr
-    return json.loads(completed.stdout)
+    dump: dict[str, Any] = json.loads(completed.stdout)
+    return dump
 
 
-def _python_dump() -> dict[str, object]:
+def _python_dump() -> dict[str, Any]:
     """Python's live registry dump. `registry_dump` reads no store."""
     return registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
 
 
 @pytest.fixture(scope="module")
-def dumps() -> tuple[dict[str, object], dict[str, object]]:
+def dumps() -> tuple[dict[str, Any], dict[str, Any]]:
     if shutil.which("cargo") is None:
         pytest.skip("cargo is not installed; the Rust registry cannot be dumped")
     return _rust_dump(), _python_dump()
 
 
-def _by_name(dump: dict[str, object]) -> dict[str, dict[str, object]]:
+def _by_name(dump: dict[str, Any]) -> dict[str, dict[str, Any]]:
     operations = dump["operations"]
     assert isinstance(operations, list)
     return {operation["name"]: operation for operation in operations}
 
 
 def test_rust_and_python_list_the_same_operations(
-    dumps: tuple[dict[str, object], dict[str, object]],
+    dumps: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     rust, python = dumps
 
-    assert [op["name"] for op in rust["operations"]] == [  # type: ignore[index, union-attr]
-        op["name"]
-        for op in python["operations"]  # type: ignore[index, union-attr]
+    assert [op["name"] for op in rust["operations"]] == [
+        op["name"] for op in python["operations"]
     ]
 
 
 def test_every_schema_matches_python_live(
-    dumps: tuple[dict[str, object], dict[str, object]],
+    dumps: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     rust, python = dumps
     rust_ops, python_ops = _by_name(rust), _by_name(python)
@@ -102,7 +103,7 @@ def test_every_schema_matches_python_live(
 
 
 def test_derived_operations_are_compared_against_python(
-    dumps: tuple[dict[str, object], dict[str, object]],
+    dumps: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     """The derived set is non-empty and each name is in the live comparison.
 

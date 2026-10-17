@@ -12,9 +12,16 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE_DOCKERFILE = REPO_ROOT / "engine" / "Dockerfile"
 ENTRYPOINT = REPO_ROOT / "engine" / "deploy" / "entrypoint.sh"
+
+# The core-alone CI job deletes engine/, and these checks read the engine image.
+pytestmark = pytest.mark.skipif(
+    not ENGINE_DOCKERFILE.exists(), reason="the engine tree is not in this checkout"
+)
 
 
 def _code_lines(path: Path) -> list[str]:
