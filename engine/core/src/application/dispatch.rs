@@ -15,7 +15,9 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+use crate::core::py_repr;
 
 /// The purposes a start may name, in the order the Python `Purpose` lists them.
 pub const PURPOSES: [&str; 6] = [
@@ -56,17 +58,26 @@ pub struct Profile {
 
 /// One profile as a deployment overrides it: every field optional, and no
 /// field it does not name.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_turns: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_wall_clock_minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_map: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autopilot: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
 }
 
@@ -84,6 +95,129 @@ impl DispatchSettings {
     pub fn profile(&self, purpose: &str) -> Option<&Profile> {
         self.profiles.get(purpose)
     }
+}
+
+/// The preference keys a write may name. Every other `dispatch.*` key is
+/// refused, so a typo is said rather than stored and silently ignored.
+pub const KEYS: [&str; 4] = [
+    PROFILES_KEY,
+    MAX_WORKERS_KEY,
+    ESCALATE_KEY,
+    REVIEW_BY_OVERSIGHT_KEY,
+];
+
+/// The prefix every dispatch preference key carries (Python `KEY_PREFIX`).
+pub const KEY_PREFIX: &str = "dispatch.";
+
+/// Validate a `dispatch.*` value before it is stored, and return its canonical
+/// form (Python `dispatch.validate`). `{}` clears a key back to its default and
+/// is always accepted. The messages name the key and the rule it broke; they
+/// do not reproduce pydantic's wording.
+pub fn validate(key: &str, value: &Value) -> Result<Value, String> {
+    if !KEYS.contains(&key) {
+        return Err(format!(
+            "unknown dispatch setting {}; the keys are {}",
+            py_repr(key),
+            KEYS.join(", ")
+        ));
+    }
+    let object = match value.as_object() {
+        Some(object) => object,
+        None => return Err(format!("invalid {key} value — expected an object")),
+    };
+    if object.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+    if key == PROFILES_KEY {
+        return validate_profiles(object);
+    }
+    validate_scalar(key, value)
+}
+
+fn validate_profiles(object: &Map<String, Value>) -> Result<Value, String> {
+    let mut unknown: Vec<&String> = object
+        .keys()
+        .filter(|name| !PURPOSES.contains(&name.as_str()))
+        .collect();
+    unknown.sort();
+    if !unknown.is_empty() {
+        let names: Vec<String> = unknown.iter().map(|name| py_repr(name.as_str())).collect();
+        return Err(format!(
+            "unknown purpose {} in {PROFILES_KEY}; the purposes are {}",
+            names.join(", "),
+            PURPOSES.join(", ")
+        ));
+    }
+    let mut out = Map::new();
+    for (name, fields) in object {
+        let parsed: ProfileOverride = serde_json::from_value(fields.clone()).map_err(|error| {
+            format!(
+                "invalid {PROFILES_KEY}.{name} — {}",
+                profile_problem(&error)
+            )
+        })?;
+        if let Some(problem) = profile_field_problem(&parsed) {
+            return Err(format!("invalid {PROFILES_KEY}.{name} — {problem}"));
+        }
+        out.insert(
+            name.clone(),
+            serde_json::to_value(&parsed).expect("an override serialises"),
+        );
+    }
+    Ok(Value::Object(out))
+}
+
+/// Serde's message names the bad field; pydantic's named the field too. Keep
+/// serde's text, trimmed of its position suffix.
+fn profile_problem(error: &serde_json::Error) -> String {
+    let text = error.to_string();
+    match text.rsplit_once(" at line ") {
+        Some((head, _)) => head.to_string(),
+        None => text,
+    }
+}
+
+/// The rules serde's types cannot express: strings are non-empty, budgets
+/// are positive.
+fn profile_field_problem(over: &ProfileOverride) -> Option<String> {
+    for (field, value) in [
+        ("template", &over.template),
+        ("model", &over.model),
+        ("effort", &over.effort),
+    ] {
+        if value.as_deref().is_some_and(str::is_empty) {
+            return Some(format!("{field}: must not be empty"));
+        }
+    }
+    for (field, value) in [
+        ("budget_turns", over.budget_turns),
+        ("budget_wall_clock_minutes", over.budget_wall_clock_minutes),
+    ] {
+        if value.is_some_and(|number| number <= 0) {
+            return Some(format!("{field}: must be greater than 0"));
+        }
+    }
+    None
+}
+
+fn validate_scalar(key: &str, value: &Value) -> Result<Value, String> {
+    let object = value.as_object().expect("checked by the caller");
+    let stored = object.get("value");
+    let valid = object.len() == 1
+        && match key {
+            MAX_WORKERS_KEY | ESCALATE_KEY => stored
+                .and_then(Value::as_i64)
+                .is_some_and(|number| number > 0),
+            _ => stored.and_then(Value::as_bool).is_some(),
+        };
+    if !valid {
+        let shape = match key {
+            MAX_WORKERS_KEY | ESCALATE_KEY => "a positive whole number under `value`",
+            _ => "a boolean under `value`",
+        };
+        return Err(format!("invalid {key} value — expected {shape}"));
+    }
+    Ok(value.clone())
 }
 
 /// The code defaults (design C10).
@@ -232,6 +366,60 @@ fn scalar_bool(stored: &BTreeMap<String, Value>, key: &str) -> Option<bool> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_valid_profile_override_is_stored_in_canonical_form() {
+        let stored = validate(PROFILES_KEY, &json!({"review": {"model": "sonnet"}})).unwrap();
+        assert_eq!(stored, json!({"review": {"model": "sonnet"}}));
+    }
+
+    #[test]
+    fn an_empty_value_clears_a_key_and_is_accepted() {
+        assert_eq!(validate(PROFILES_KEY, &json!({})).unwrap(), json!({}));
+        assert_eq!(validate(MAX_WORKERS_KEY, &json!({})).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn an_unknown_key_or_purpose_is_refused_and_named() {
+        let key = validate("dispatch.nope", &json!({"value": 1})).unwrap_err();
+        assert!(
+            key.starts_with("unknown dispatch setting 'dispatch.nope'"),
+            "{key}"
+        );
+        let purpose = validate(PROFILES_KEY, &json!({"ship": {"model": "x"}})).unwrap_err();
+        assert!(
+            purpose.contains("unknown purpose 'ship' in dispatch.profiles"),
+            "{purpose}"
+        );
+    }
+
+    #[test]
+    fn a_field_the_profile_cannot_hold_is_refused() {
+        let unknown =
+            validate(PROFILES_KEY, &json!({"review": {"role": "oversight"}})).unwrap_err();
+        assert!(
+            unknown.starts_with("invalid dispatch.profiles.review"),
+            "{unknown}"
+        );
+        let empty = validate(PROFILES_KEY, &json!({"review": {"model": ""}})).unwrap_err();
+        assert!(empty.contains("model: must not be empty"), "{empty}");
+        let zero = validate(PROFILES_KEY, &json!({"review": {"budget_turns": 0}})).unwrap_err();
+        assert!(
+            zero.contains("budget_turns: must be greater than 0"),
+            "{zero}"
+        );
+    }
+
+    #[test]
+    fn a_scalar_must_be_its_own_shape() {
+        assert!(validate(MAX_WORKERS_KEY, &json!({"value": 0})).is_err());
+        assert!(validate(MAX_WORKERS_KEY, &json!({"value": 3, "extra": 1})).is_err());
+        assert!(validate(REVIEW_BY_OVERSIGHT_KEY, &json!({"value": "yes"})).is_err());
+        assert_eq!(
+            validate(REVIEW_BY_OVERSIGHT_KEY, &json!({"value": false})).unwrap(),
+            json!({"value": false})
+        );
+    }
 
     #[test]
     fn every_purpose_has_a_code_default_profile() {
