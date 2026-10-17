@@ -1096,6 +1096,10 @@ class SessionDigest(Result):
         ),
     )
     turn_started_at: datetime | None = None
+    done_at: datetime | None = Field(
+        default=None,
+        description="When an autopilot session declared itself done this turn.",
+    )
     last_reply_excerpt: str | None = Field(
         default=None,
         description="First 120 characters of the last reply.",
@@ -1286,6 +1290,14 @@ class SessionSummary(Result):
     last_output_at: datetime | None = Field(
         default=None,
         description="Live from the engine: when the terminal last printed anything.",
+    )
+    done_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: when an autopilot session declared itself "
+            "done (`AUTOPILOT: DONE`) this turn. Cleared when the next turn "
+            "starts; null otherwise."
+        ),
     )
     approval: SessionApproval | None = Field(
         default=None,

@@ -34,6 +34,9 @@ def verdict(**over: object) -> tuple[str, str]:
         ({"activity": "running", "blocker": "needs a token"}, "blocked"),
         ({"activity": "waiting-for-input"}, "waiting"),
         ({"activity": "idle", "ready": True}, "waiting"),
+        ({"activity": "waiting-for-input", "done_at": NOW}, "done"),
+        ({"activity": "idle", "ready": True, "done_at": NOW}, "done"),
+        ({"activity": "running", "done_at": NOW}, "running"),
         ({"activity": "idle"}, "idle"),
         ({"activity": "running"}, "running"),
         (
@@ -63,10 +66,11 @@ def test_a_dialog_outranks_a_blocked_report_and_says_what_it_asks() -> None:
 
 
 def test_the_order_puts_what_needs_a_person_first() -> None:
-    assert sorted(ORDER, key=ORDER.__getitem__)[:4] == [
+    assert sorted(ORDER, key=ORDER.__getitem__)[:5] == [
         "approval",
         "blocked",
         "waiting",
+        "done",
         "stalled",
     ]
 

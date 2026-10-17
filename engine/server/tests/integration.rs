@@ -12613,6 +12613,121 @@ done
     assert_eq!(done.lines().count(), ITEMS);
 }
 
+/// WI-1518: an autopilot session whose agent prints `AUTOPILOT: DONE` at its
+/// prompt yields exactly one `done` change on the overseer feed, and a
+/// wait-any on the default `until` wakes for it. Autopilot is off once the
+/// marker is seen, so the change does not repeat however long it sits there.
+#[tokio::test]
+async fn an_autopilot_session_that_declares_done_yields_one_done_change() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let opencode = bin.join("opencode");
+    std::fs::write(
+        &opencode,
+        r#"#!/usr/bin/env bash
+box() { printf '  ┃\r\n  ┃  Ask anything…\r\n  ┃\r\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\r\n   tab agents  ctrl+p commands\r\n'; }
+box
+printf '     AUTOPILOT: DONE\r\n'
+box
+while IFS= read -r _; do box; done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cfg = test_config();
+    cfg.autopilot = vogt_engine_server::autopilot::Policy {
+        nudge_after: Duration::from_millis(600),
+        max_nudges: 10,
+    };
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "backlog",
+            "command": [opencode.display().to_string()],
+            "autopilot": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // An overseer's wait: the default `until`, advancing its cursor past
+    // anything else (the prompt's `ready` comes first) until `done` lands.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut cursor = 0u64;
+    let done = loop {
+        let wait: Value = client
+            .get(format!(
+                "{base}/api/sessions/wait-any?ids={id}&cursor={cursor}&timeout_s=5"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        cursor = wait["next_cursor"].as_u64().unwrap();
+        if wait["change"]["kind"] == "done" {
+            break wait["change"].clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no done change arrived: {wait}"
+        );
+    };
+    assert_eq!(done["session"], id.as_str());
+
+    // Sit past several ticks: no second `done`, and autopilot is off.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let feed: Value = client
+        .get(format!(
+            "{base}/api/sessions/changes?since=0&ids={id}&limit=500"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let dones = feed["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "done")
+        .count();
+    assert_eq!(dones, 1, "exactly one done change: {feed}");
+
+    let detail: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let summary = &detail["summary"];
+    assert!(
+        summary.get("autopilot").is_none(),
+        "autopilot is off: {summary}"
+    );
+    assert!(
+        summary["done_at"].is_string(),
+        "the summary keeps when it was declared: {summary}"
+    );
+}
+
 /// A session blocked on a person is never nudged, autopilot or not.
 #[tokio::test]
 async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {

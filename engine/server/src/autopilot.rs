@@ -37,9 +37,9 @@
 
 use std::{sync::Arc, time::Duration};
 
-use vogt_engine_contract::ActivityState;
+use vogt_engine_contract::{ActivityState, DoneSource};
 
-use crate::{app::AppState, pty::Session, screen, sessions::SessionRegistry};
+use crate::{app::AppState, events::ServerEvent, pty::Session, screen, sessions::SessionRegistry};
 
 /// The deployment's autopilot settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +204,18 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
         match step {
             Step::Leave => {}
             Step::Done => {
+                // Published once per turn: a screen that still shows the marker
+                // on the next tick finds the declaration already there (WI-1518).
+                let at = time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default();
+                if registry.mark_done(session.id, at.clone()) {
+                    bus.publish(ServerEvent::SessionDone {
+                        id: session.id,
+                        at,
+                        source: DoneSource::Marker,
+                    });
+                }
                 let _ = registry.set_autopilot(session.id, false);
                 tracing::info!(
                     session = %session.id,

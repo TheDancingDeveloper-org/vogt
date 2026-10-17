@@ -793,7 +793,11 @@ than these routes.
   every event already in the ring and wait only for one published after the
   call starts. A timeout then returns that head as `next_cursor`. A numeric
   cursor past the head is treated as the start of the ring (the sequence
-  restarts when the engine does). Requires `sessions`.
+  restarts when the engine does). The change kinds are `ready`, `approval`,
+  `exited`, `errored`, `blocked`, `unblocked`, `hibernated`, `woken`, `budget`
+  and `done` (an autopilot agent declared itself done, WI-1518); the default
+  `until` is `ready`, `blocked`, `approval`, `exited`, `errored` and `done`.
+  Requires `sessions`.
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
   only when asked) with the last N (default 8, at most 40) non-blank lines
@@ -1920,6 +1924,14 @@ agent may stop to announce its next step. So the engine re-drives it
 
 The summary's `autopilot` reads `false` once it is off. A nudge is input, so
 it restarts the quiet clock and nudges cannot stack up.
+
+Declaring itself done is a change an overseer reads (WI-1518). The first time
+the marker is seen in a turn, the engine publishes a `session-done` event
+(`source`: `marker`), which `GET /api/sessions/changes` and `wait-any` report
+as kind `done`, and the summary carries `done_at` (RFC 3339). A screen that
+still shows the marker does not declare it again; `done_at` is cleared when
+the next turn starts, and kept across a hibernation and a wake through the
+hibernation record.
 
 **When opencode is `ready`.** opencode draws no prompt glyph, so `ready`
 recognises its composer separately: the `┃` bar closed by a `╹▀` footer near

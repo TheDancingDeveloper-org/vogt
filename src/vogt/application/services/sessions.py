@@ -577,6 +577,7 @@ def _digest_of(
             None if blocked is None or len(blocked) <= _DIGEST_CLIP else blocked
         ),
         turn_started_at=summary.turn_started_at,
+        done_at=summary.done_at,
         last_reply_excerpt=_clip(summary.last_reply_excerpt),
         template=summary.template,
         budget=budget,
@@ -624,6 +625,7 @@ def _attention_of(
         last_output_at=summary.last_output_at,
         now=now,
         stall_after=stall_after,
+        done_at=summary.done_at,
     )
 
 
@@ -805,6 +807,7 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             last_output_at=summary.last_output_at,
             now=now,
             stall_after=stall_after,
+            done_at=summary.done_at,
         )
         rows.append(
             SessionSweepRow(
@@ -4141,6 +4144,7 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "conversation_agent": engine_session.conversation_agent,
         "turn_started_at": _parse_engine_timestamp(engine_session.turn_started_at),
         "last_output_at": _parse_engine_timestamp(engine_session.last_output_at),
+        "done_at": _parse_engine_timestamp(engine_session.done_at),
         "approval": _approval(engine_session.approval),
         "blocked": _blocked(engine_session.blocked),
         "hibernation": _hibernation(engine_session.hibernation),

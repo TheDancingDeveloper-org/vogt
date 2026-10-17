@@ -22,6 +22,7 @@ Attention = Literal[
     "approval",
     "blocked",
     "waiting",
+    "done",
     "stalled",
     "running",
     "idle",
@@ -36,12 +37,13 @@ ORDER: dict[Attention, int] = {
     "approval": 0,
     "blocked": 1,
     "waiting": 2,
-    "stalled": 3,
-    "running": 4,
-    "idle": 5,
-    "hibernated": 6,
-    "exited": 7,
-    "unknown": 8,
+    "done": 3,
+    "stalled": 4,
+    "running": 5,
+    "idle": 6,
+    "hibernated": 7,
+    "exited": 8,
+    "unknown": 9,
 }
 
 #: The attention classes a person (or a driver acting for one) must act on.
@@ -73,6 +75,7 @@ def classify(
     last_output_at: datetime | None,
     now: datetime,
     stall_after: timedelta,
+    done_at: datetime | None = None,
 ) -> Verdict:
     """Where one session belongs in the oversight table, and why."""
     if activity == "hibernated":
@@ -98,6 +101,8 @@ def classify(
     if blocker:
         return Verdict("blocked", f"blocked on a person: {blocker}")
     if activity == "waiting-for-input" or (activity == "idle" and ready):
+        if done_at is not None:
+            return Verdict("done", "said it is done (AUTOPILOT: DONE), at its prompt")
         return Verdict("waiting", "at its prompt, waiting for the next instruction")
     if activity == "running":
         if last_output_at is not None and now - last_output_at >= stall_after:

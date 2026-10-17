@@ -156,6 +156,9 @@ class EngineSession:
     #: `None` from an engine that predates them.
     turn_started_at: str | None = None
     last_output_at: str | None = None
+    #: When the agent declared itself done under autopilot this turn
+    #: (WI-1518); `None` when it has not, or from an engine that predates it.
+    done_at: str | None = None
     #: The permission dialog on screen, while `activity` is
     #: `awaiting-approval`.
     approval: EngineApproval | None = None
@@ -221,6 +224,7 @@ class EngineSession:
             alive=bool(alive) if isinstance(alive, bool) else exit_code is None,
             turn_started_at=_optional_str(payload.get("turn_started_at")),
             last_output_at=_optional_str(payload.get("last_output_at")),
+            done_at=_optional_str(payload.get("done_at")),
             approval=EngineApproval.from_payload(payload.get("approval")),
             command=_optional_str(payload.get("command")),
             blocked=EngineBlocked.from_payload(payload.get("blocked")),
