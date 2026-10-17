@@ -9890,12 +9890,26 @@
             "title": "Exclusion Reason"
           },
           "http_method": {
-            "title": "Http Method",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Method"
           },
           "http_path": {
-            "title": "Http Path",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Path"
           },
           "mcp_tool": {
             "title": "Mcp Tool",
