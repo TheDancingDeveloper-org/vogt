@@ -722,4 +722,119 @@ mod tests {
             .starts_with("no agent transcript found"));
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// One Claude Code assistant line, with the model the turn ran on when given.
+    fn claude_line(message_id: &str, text: &str, model: Option<&str>) -> String {
+        let mut message = json!({
+            "id": message_id,
+            "content": [{"type": "text", "text": text}],
+        });
+        if let Some(model) = model {
+            message["model"] = json!(model);
+        }
+        json!({
+            "type": "assistant",
+            "timestamp": "2024-01-02T03:04:05Z",
+            "message": message,
+        })
+        .to_string()
+    }
+
+    /// The engine as the list needs it: one live Claude session in `/work`,
+    /// answering both the list and the single-session reads.
+    fn live_claude_engine() -> EngineClient {
+        let summary = json!({
+            "id": "eng-1",
+            "name": "agent",
+            "activity": "idle",
+            "alive": true,
+            "cwd": "/work",
+            "command": "claude",
+            "conversation_agent": "claude",
+        });
+        engine(move |path, _, _| {
+            let body = if path.ends_with("/api/sessions") {
+                json!([summary])
+            } else {
+                summary.clone()
+            };
+            (200, serde_json::to_vec(&body).unwrap())
+        })
+    }
+
+    /// `eng-1.jsonl` under a Claude root, the way a session's transcript is kept.
+    fn write_transcript(dir: &std::path::Path, lines: &[String]) {
+        let root = dir.join("claude").join("proj");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("eng-1.jsonl"), lines.join("\n") + "\n").unwrap();
+    }
+
+    fn list(built: &crate::application::context::Built) -> Value {
+        default_registry()
+            .get("session.list")
+            .expect("session.list is registered")
+            .run(Some(built), json!({"mode": "full"}))
+            .unwrap()
+    }
+
+    #[test]
+    fn the_list_carries_the_latest_reply_excerpt() {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-reply-excerpt-files-{}", std::process::id()));
+        write_transcript(
+            &dir,
+            &[
+                claude_line("a", "older", None),
+                claude_line("b", "The operator list: token, HAR.", None),
+            ],
+        );
+        let built = built(
+            "excerpt",
+            vec![("claude".to_string(), dir.join("claude"))],
+            Some(live_claude_engine()),
+        );
+        seed(&built);
+        let rows = list(&built);
+        let row = rows["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "ses_0001")
+            .expect("the seeded session is listed");
+        assert_eq!(row["last_reply_excerpt"], "The operator list: token, HAR.");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_list_says_which_model_the_conversation_ran() {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-reply-model-files-{}", std::process::id()));
+        write_transcript(
+            &dir,
+            &[
+                claude_line("a", "first", None),
+                claude_line("b", "second", Some("claude-opus-5-5")),
+                claude_line("c", "", Some("<synthetic>")),
+            ],
+        );
+        let built = built(
+            "model",
+            vec![("claude".to_string(), dir.join("claude"))],
+            Some(live_claude_engine()),
+        );
+        seed(&built);
+        let rows = list(&built);
+        let row = rows["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "ses_0001")
+            .expect("the seeded session is listed");
+        assert!(row["model"].is_null(), "nothing was asked for");
+        assert_eq!(row["running"]["agent"], "claude");
+        assert_eq!(row["running"]["model"], "claude-opus-5-5");
+        assert_eq!(row["running"]["model_basis"], "transcript");
+        assert_eq!(row["template"], "claude");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

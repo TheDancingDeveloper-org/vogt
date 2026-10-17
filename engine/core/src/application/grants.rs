@@ -427,6 +427,28 @@ fn load<C: Clock, I: IdFactory>(
         .ok_or_else(|| VogtError::NotFound(format!("no grant {}", crate::core::py_repr(grant_id))))
 }
 
+#[cfg(test)]
+type RecordHook = Box<dyn FnOnce() -> Result<(), VogtError>>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: runs once, just before a decision is recorded, so a test can
+    /// make the record fail or let another person's decision land first.
+    static BEFORE_RECORD: std::cell::RefCell<Option<RecordHook>> = std::cell::RefCell::new(None);
+}
+
+/// Runs the test seam, when a test has armed one.
+fn before_record() -> Result<(), VogtError> {
+    #[cfg(test)]
+    {
+        let hook = BEFORE_RECORD.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            return hook();
+        }
+    }
+    Ok(())
+}
+
 fn record_decision<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     grant: &SessionGrant,
@@ -435,6 +457,7 @@ fn record_decision<C: Clock + 'static, I: IdFactory + 'static>(
     decided_at: Option<Moment>,
     expires_at: Option<Moment>,
 ) -> Result<Value, VogtError> {
+    before_record()?;
     let grant_id = grant.id.clone();
     let reason = reason.to_string();
     let mut write = write_of(ctx);
@@ -605,14 +628,14 @@ fn clock_now<C: Clock>(clock: &std::sync::Arc<std::sync::Mutex<C>>) -> Moment {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use crate::adapters::engine::EngineClient;
     use crate::application::context::build_context;
     use crate::application::writes::audited_write;
     use crate::core::{ActorKind, CodingSession, Moment, Principal, Project, StepClock};
     use crate::errors::VogtError;
-    use crate::storage::interface::WriteTxn;
+    use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
 
     /// A context whose engine answers every session lookup as alive and records
     /// every request it was sent.
@@ -878,5 +901,500 @@ mod tests {
         record_session(&built, "ses_0001", "eng-9");
         let asked = super::grant_request_op(&built, request("ses_0001")).unwrap();
         assert_eq!(asked["grant"]["target"], "eng-9");
+    }
+
+    // -- the rest of the grant invariants, against a stand-in engine that keeps
+    // each session's role and liveness and records what it was sent --------
+
+    const BASE: i64 = 1_700_000_000;
+    const SECRET: &str = "100.109.218.11_SSH";
+    const WHY: &str = "grant test";
+
+    #[derive(Default)]
+    struct StandIn {
+        /// Engine session id to (alive, role).
+        sessions: std::collections::BTreeMap<String, (bool, String)>,
+        /// Projects the engine refuses, as one not open to grants is.
+        closed_projects: std::collections::BTreeSet<String>,
+        applied: Vec<(String, Value)>,
+        revoked: Vec<(String, String)>,
+    }
+
+    type Shared = Arc<Mutex<StandIn>>;
+
+    fn engine_row(id: &str, alive: bool, role: &str) -> Value {
+        json!({
+            "id": id,
+            "name": id,
+            "activity": if alive { "idle" } else { "exited" },
+            "alive": alive,
+            "exit_code": if alive { Value::Null } else { json!(0) },
+            "role": role,
+            "cwd": "/srv",
+        })
+    }
+
+    fn stand_in(shared: &Shared) -> EngineClient {
+        let shared = Arc::clone(shared);
+        EngineClient::new(
+            "http://engine",
+            None,
+            Some(Arc::new(move |path, _, body, method| {
+                let route = path.split("/api/").nth(1).unwrap_or(path).to_string();
+                let payload: Value = if body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(body).unwrap_or(Value::Null)
+                };
+                let mut state = shared.lock().unwrap();
+                let parts: Vec<&str> = route.split('/').collect();
+                match (method, parts.as_slice()) {
+                    ("GET", ["sessions"]) => {
+                        let rows: Vec<Value> = state
+                            .sessions
+                            .iter()
+                            .map(|(id, (alive, role))| engine_row(id, *alive, role))
+                            .collect();
+                        (200, serde_json::to_vec(&rows).unwrap())
+                    }
+                    ("GET", ["sessions", id]) => match state.sessions.get(*id) {
+                        Some((alive, role)) => (
+                            200,
+                            serde_json::to_vec(&engine_row(id, *alive, role)).unwrap(),
+                        ),
+                        None => (404, Vec::new()),
+                    },
+                    ("POST", ["sessions", id, "grants"]) => {
+                        let closed = payload["project_id"]
+                            .as_str()
+                            .is_some_and(|project| state.closed_projects.contains(project));
+                        if closed {
+                            let refusal =
+                                json!({"error": "forbidden: project is not open to grants"});
+                            return (403, serde_json::to_vec(&refusal).unwrap());
+                        }
+                        state.applied.push((id.to_string(), payload));
+                        (200, body.to_vec())
+                    }
+                    ("DELETE", ["sessions", id, "grants", grant]) => {
+                        state.revoked.push((id.to_string(), grant.to_string()));
+                        (200, br#"{"revoked":true}"#.to_vec())
+                    }
+                    _ => (404, Vec::new()),
+                }
+            })),
+        )
+    }
+
+    /// A Vogt instance with the four engine sessions the invariants name, and
+    /// the person's context over it. `over` makes another principal's.
+    fn estate(
+        name: &str,
+    ) -> (
+        std::path::PathBuf,
+        Shared,
+        crate::application::context::Built,
+    ) {
+        let dir = std::env::temp_dir().join(format!("vogt-grant-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let mut sessions = std::collections::BTreeMap::new();
+        sessions.insert("eng-worker".to_string(), (true, "worker".to_string()));
+        sessions.insert("eng-other".to_string(), (true, "worker".to_string()));
+        sessions.insert("eng-overseer".to_string(), (true, "oversight".to_string()));
+        sessions.insert("eng-gone".to_string(), (false, "worker".to_string()));
+        let shared: Shared = Arc::new(Mutex::new(StandIn {
+            sessions,
+            ..StandIn::default()
+        }));
+        let built = over(&dir, person(), &shared, BASE);
+        (dir, shared, built)
+    }
+
+    fn over(
+        dir: &std::path::Path,
+        principal: Principal,
+        shared: &Shared,
+        start: i64,
+    ) -> crate::application::context::Built {
+        build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.to_path_buf(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(principal),
+            Some(StepClock::new(Moment::from_unix(start, 0))),
+            None,
+            None,
+            Some(stand_in(shared)),
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn try_ask(
+        built: &crate::application::context::Built,
+        target: &str,
+        overrides: Value,
+    ) -> Result<Value, VogtError> {
+        let mut params = json!({
+            "reason": "the worker needs the emulator key",
+            "target": target,
+            "kind": "credential",
+            "uses": "once",
+            "ttl_seconds": 60,
+            "secret_name": SECRET,
+            "project_id": "infra",
+        });
+        for (key, value) in overrides.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        super::grant_request_op(built, params)
+    }
+
+    fn ask(built: &crate::application::context::Built, target: &str, overrides: Value) -> String {
+        try_ask(built, target, overrides).unwrap()["grant"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn decide(
+        built: &crate::application::context::Built,
+        id: &str,
+        decision: &str,
+    ) -> Result<Value, VogtError> {
+        super::grant_decide_op(
+            built,
+            json!({"id": id, "decision": decision, "reason": WHY}),
+        )
+    }
+
+    fn revoke(built: &crate::application::context::Built, id: &str) -> Result<Value, VogtError> {
+        super::grant_revoke_op(built, json!({"id": id, "reason": WHY}))
+    }
+
+    fn list(built: &crate::application::context::Built, state: Option<&str>) -> Value {
+        let mut params = json!({"limit": 50});
+        if let Some(state) = state {
+            params["state"] = json!(state);
+        }
+        super::grant_list_op(built, params).unwrap()
+    }
+
+    fn agent_named(identity: &str) -> Principal {
+        Principal::new(identity, ActorKind::Agent, "agent").unwrap()
+    }
+
+    fn overseer_of(dir: &std::path::Path, shared: &Shared) -> crate::application::context::Built {
+        over(dir, agent_named("agent:engine:eng-overseer"), shared, BASE)
+    }
+
+    #[test]
+    fn an_engine_refusal_leaves_the_request_pending_with_its_reason() {
+        let (dir, shared, built) = estate("refusal");
+        shared
+            .lock()
+            .unwrap()
+            .closed_projects
+            .insert("infra".to_string());
+        let id = ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
+        let refused = decide(&built, &id, "approve").unwrap_err();
+        assert!(
+            matches!(refused, VogtError::GrantRefused(ref message) if message.contains("not open to grants")),
+            "{refused:?}"
+        );
+        assert_eq!(list(&built, None)["grants"][0]["state"], "pending");
+        let denied = decide(&built, &id, "deny").unwrap();
+        assert_eq!(denied["grant"]["state"], "denied");
+        assert!(shared.lock().unwrap().applied.is_empty());
+    }
+
+    #[test]
+    fn only_an_overseer_asks_on_another_sessions_behalf() {
+        let (dir, shared, built) = estate("behalf");
+        let worker_other = over(&dir, agent_named("agent:engine:eng-other"), &shared, BASE);
+        let refused = try_ask(&worker_other, "eng-worker", json!({})).unwrap_err();
+        assert!(
+            matches!(refused, VogtError::GrantRefused(ref message) if message.contains("only an oversight session")),
+            "{refused:?}"
+        );
+        // Its own session is fine; so is an overseer for a worker, and a person.
+        let worker = over(&dir, agent_named("agent:engine:eng-worker"), &shared, BASE);
+        ask(&worker, "eng-worker", json!({}));
+        ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
+        ask(&built, "eng-other", json!({}));
+        // An agent that is not a session at all, the pod's token, cannot ask.
+        let pod = over(&dir, agent_named("agent:pod:vogt"), &shared, BASE);
+        let not_a_session = try_ask(&pod, "eng-worker", json!({})).unwrap_err();
+        assert!(
+            matches!(not_a_session, VogtError::GrantRefused(ref message) if message.contains("not a session")),
+            "{not_a_session:?}"
+        );
+        assert!(shared.lock().unwrap().applied.is_empty());
+    }
+
+    #[test]
+    fn the_requester_is_the_principal_not_a_parameter() {
+        let (dir, shared, built) = estate("requester");
+        ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
+        let rows = list(&built, None);
+        assert_eq!(
+            rows["grants"][0]["requested_by"],
+            "agent:engine:eng-overseer"
+        );
+    }
+
+    #[test]
+    fn an_agent_cannot_make_itself_an_overseer() {
+        let (dir, shared, _) = estate("self-overseer");
+        for who in ["eng-other", "eng-worker"] {
+            let agent_ctx = over(
+                &dir,
+                agent_named(&format!("agent:engine:{who}")),
+                &shared,
+                BASE,
+            );
+            let refused = crate::registry::default_registry()
+                .get("session.set_role")
+                .expect("session.set_role is registered")
+                .run(
+                    Some(&agent_ctx),
+                    json!({"id": who, "role": "oversight", "reason": WHY}),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(refused, VogtError::RoleRefused(ref message) if message.contains("only a person nominates")),
+                "{refused:?}"
+            );
+        }
+        let agent_ctx = over(&dir, agent_named("agent:engine:eng-other"), &shared, BASE);
+        let refused = try_ask(&agent_ctx, "eng-worker", json!({})).unwrap_err();
+        assert!(
+            matches!(refused, VogtError::GrantRefused(ref message) if message.contains("only an oversight session")),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_approval_takes_the_grant_back_unless_another_person_approved() {
+        let (dir, shared, built) = estate("rollback");
+        let id = ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
+
+        // The record fails after the engine has applied the grant.
+        super::BEFORE_RECORD.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(|| {
+                Err(VogtError::InvalidRequest(
+                    "the record could not be written".to_string(),
+                ))
+            }))
+        });
+        let failed = decide(&built, &id, "approve").unwrap_err();
+        assert!(matches!(failed, VogtError::InvalidRequest(_)), "{failed:?}");
+        assert_eq!(
+            shared.lock().unwrap().revoked,
+            vec![("eng-worker".to_string(), id.clone())]
+        );
+        assert_eq!(list(&built, None)["grants"][0]["state"], "pending");
+
+        // Two people approve at once: the other's approval lands first and
+        // stands at the engine, so nothing is taken back.
+        shared.lock().unwrap().revoked.clear();
+        let grace = over(
+            &dir,
+            Principal::new("local:grace", ActorKind::Human, "Grace").unwrap(),
+            &shared,
+            BASE,
+        );
+        let racing = id.clone();
+        super::BEFORE_RECORD.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                decide(&grace, &racing, "approve").map(|_| ())
+            }))
+        });
+        let lost = decide(&built, &id, "approve").unwrap_err();
+        assert!(matches!(lost, VogtError::Conflict(_)), "{lost:?}");
+        assert!(
+            shared.lock().unwrap().revoked.is_empty(),
+            "the other person's approval was not taken back"
+        );
+        assert_eq!(list(&built, None)["grants"][0]["state"], "approved");
+    }
+
+    #[test]
+    fn a_grant_is_one_named_credential_for_a_live_session() {
+        let (_, _, built) = estate("one-credential");
+        let capability = try_ask(
+            &built,
+            "eng-worker",
+            json!({"kind": "capability", "capability": "bypass"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(capability, VogtError::InvalidRequest(ref message) if message.contains("capability grants are not available")),
+            "{capability:?}"
+        );
+        let no_project = try_ask(&built, "eng-worker", json!({"project_id": null})).unwrap_err();
+        assert!(
+            matches!(no_project, VogtError::InvalidRequest(ref message) if message.contains("names secret_name and project_id")),
+            "{no_project:?}"
+        );
+        let flag_as_name =
+            try_ask(&built, "eng-worker", json!({"secret_name": "--all"})).unwrap_err();
+        assert!(
+            matches!(flag_as_name, VogtError::InvalidRequest(ref message) if message.contains("plain names")),
+            "{flag_as_name:?}"
+        );
+        let bad_var = try_ask(&built, "eng-worker", json!({"var": "not a var"})).unwrap_err();
+        assert!(
+            matches!(bad_var, VogtError::InvalidRequest(ref message) if message.contains("environment variable")),
+            "{bad_var:?}"
+        );
+        let gone = try_ask(&built, "eng-gone", json!({})).unwrap_err();
+        assert!(
+            matches!(gone, VogtError::Conflict(ref message) if message.contains("not running")),
+            "{gone:?}"
+        );
+        assert_eq!(super::default_var(SECRET), "GRANT_100_109_218_11_SSH");
+    }
+
+    #[test]
+    fn an_approved_grant_reads_expired_after_its_ttl() {
+        let (dir, shared, built) = estate("ttl");
+        let id = ask(&built, "eng-worker", json!({"ttl_seconds": 60}));
+        decide(&built, &id, "approve").unwrap();
+        let later = over(&dir, person(), &shared, BASE + 120);
+        let expired = list(&later, Some("expired"));
+        assert_eq!(expired["grants"].as_array().unwrap().len(), 1);
+        assert_eq!(expired["grants"][0]["id"], id);
+        assert!(list(&later, Some("approved"))["grants"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn revoking_reaches_the_engine_and_only_a_person_or_the_asker_may() {
+        let (dir, shared, built) = estate("revoke");
+        let overseer = overseer_of(&dir, &shared);
+        let id = ask(&overseer, "eng-worker", json!({"uses": "ttl"}));
+        decide(&built, &id, "approve").unwrap();
+
+        let worker = over(&dir, agent_named("agent:engine:eng-worker"), &shared, BASE);
+        let refused = revoke(&worker, &id).unwrap_err();
+        assert!(
+            matches!(refused, VogtError::GrantRefused(ref message) if message.contains("only a person, or the session that asked")),
+            "{refused:?}"
+        );
+        let revoked = revoke(&overseer, &id).unwrap();
+        assert_eq!(revoked["grant"]["state"], "revoked");
+        assert_eq!(
+            shared.lock().unwrap().revoked,
+            vec![("eng-worker".to_string(), id.clone())]
+        );
+
+        // A pending one is withdrawn without troubling the engine.
+        let pending = ask(&built, "eng-worker", json!({}));
+        revoke(&built, &pending).unwrap();
+        assert_eq!(shared.lock().unwrap().revoked.len(), 1);
+    }
+
+    #[test]
+    fn every_step_is_audited_by_name() {
+        let (dir, shared, built) = estate("audit");
+        let id = ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
+        decide(&built, &id, "approve").unwrap();
+        revoke(&built, &id).unwrap();
+        let mut operations: Vec<String> = crate::with_ctx!(&built, |ctx| {
+            ctx.declared
+                .read()
+                .unwrap()
+                .list_audit(&crate::storage::interface::AuditQuery {
+                    limit: 20,
+                    offset: 0,
+                    actor_id: None,
+                    operation: None,
+                    entity_id: Some(id.clone()),
+                    project_id: None,
+                    since: None,
+                    until: None,
+                })
+        })
+        .unwrap()
+        .into_iter()
+        .map(|row| row.operation)
+        .collect();
+        operations.sort();
+        assert_eq!(
+            operations,
+            [
+                "session.grant_decide",
+                "session.grant_request",
+                "session.grant_revoke"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pending_grant_is_an_inbox_entry_until_it_is_decided() {
+        let (dir, shared, built) = estate("inbox");
+        let id = ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
+        let inbox = |built: &crate::application::context::Built| -> Vec<Value> {
+            crate::registry::default_registry()
+                .get("inbox.list")
+                .expect("inbox.list is registered")
+                .run(Some(built), json!({}))
+                .unwrap()["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["kind"] == "session.grant_request")
+                .cloned()
+                .collect()
+        };
+        let entries = inbox(&built);
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry["action"]["kind"], "grant");
+        assert_eq!(entry["action"]["grant_id"], id);
+        assert!(entry["title"].as_str().unwrap().contains(SECRET));
+        // The approver sees the target as they know it, and who asks for whom.
+        assert!(entry["title"]
+            .as_str()
+            .unwrap()
+            .contains("for session eng-worker"));
+        let summary = entry["summary"].as_str().unwrap();
+        assert!(
+            summary.contains("for session eng-worker (worker)"),
+            "{summary}"
+        );
+        assert!(summary.contains("agent:engine:eng-overseer"), "{summary}");
+        assert!(summary.contains("infra"), "{summary}");
+        assert_eq!(entry["actor_login"], "agent:engine:eng-overseer");
+        assert_eq!(entry["actor_kind"], "bot");
+        assert_eq!(entry["evidence_snapshot"]["target_role"], "worker");
+        assert_eq!(entry["evidence_snapshot"]["requester_is_target"], false);
+
+        // A session asking for itself reads as such.
+        let own = ask(
+            &over(&dir, agent_named("agent:engine:eng-other"), &shared, BASE),
+            "eng-other",
+            json!({}),
+        );
+        let self_entry = inbox(&built)
+            .into_iter()
+            .find(|entry| entry["action"]["grant_id"] == own)
+            .expect("the self-request is an entry");
+        let self_summary = self_entry["summary"].as_str().unwrap();
+        assert!(self_summary.contains("asks for") && self_summary.contains("for itself"));
+        assert_eq!(self_entry["evidence_snapshot"]["requester_is_target"], true);
+
+        decide(&built, &own, "deny").unwrap();
+        decide(&built, &id, "deny").unwrap();
+        assert!(inbox(&built).is_empty());
     }
 }
