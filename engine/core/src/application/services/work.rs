@@ -53,6 +53,10 @@ pub fn get_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| get_work(ctx, params))
 }
 
+pub fn get_many_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| get_many_work(ctx, params))
+}
+
 pub fn comment_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| comment_work(ctx, params))
 }
@@ -709,14 +713,7 @@ fn work_page(
             if mode == "full" {
                 serde_json::to_value(item).unwrap_or(Value::Null)
             } else {
-                json!({
-                    "ref": item.reference,
-                    "title": item.title,
-                    "kind": item.kind.to_string(),
-                    "state": item.state,
-                    "priority": item.priority.to_string(),
-                    "project_slug": item.project_slug,
-                })
+                summary_row(item)
             }
         })
         .collect();
@@ -739,6 +736,62 @@ fn work_page(
     );
     page.insert("detail".to_string(), Value::Null);
     Value::Object(page)
+}
+
+/// How many refs one `work.get_many` may name. Python's `WORK_GET_MANY_LIMIT`.
+const WORK_GET_MANY_LIMIT: usize = 200;
+
+/// The compact row a summary listing and `work.get_many` both return: what a
+/// reader scans, nothing more. Python's `WorkItemRow`.
+fn summary_row(item: &WorkItem) -> Value {
+    json!({
+        "ref": item.reference,
+        "title": item.title,
+        "kind": item.kind.to_string(),
+        "state": item.state,
+        "priority": item.priority.to_string(),
+        "project_slug": item.project_slug,
+    })
+}
+
+/// Compact rows for a set of refs, in one read: what the session rail's chips
+/// ask so a render costs one request rather than one `work.list` per ref
+/// (WI-1224). Each ref resolves as `work.get` resolves it; a repeated ref is
+/// read once, a ref that names nothing is reported in `missing`, and the rest
+/// still come back. Python's `get_many_work`.
+fn get_many_work<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let refs = strings(params.get("refs"));
+    if refs.is_empty() || refs.len() > WORK_GET_MANY_LIMIT {
+        return Err(VogtError::InvalidRequest(format!(
+            "work.get_many takes 1 to {WORK_GET_MANY_LIMIT} refs"
+        )));
+    }
+    if refs
+        .iter()
+        .any(|reference| reference.is_empty() || reference.len() > 200)
+    {
+        return Err(VogtError::InvalidRequest(
+            "each ref is 1-200 characters".into(),
+        ));
+    }
+    let view = ctx.declared.read()?;
+    let mut items = Vec::new();
+    let mut missing = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for reference in refs {
+        if !seen.insert(reference.clone()) {
+            continue;
+        }
+        match upstream::resolve_work_ref(ctx, &view, &reference) {
+            Ok(item) => items.push(summary_row(&item)),
+            Err(VogtError::NotFound(_)) => missing.push(reference),
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(json!({"items": items, "missing": missing}))
 }
 
 /// What an unlinked project's empty list is hiding, and how to reach it. An
@@ -1795,8 +1848,8 @@ fn list_board<C: Clock, I: IdFactory>(
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_branch, comment_work, create_work, get_work, list_board, relate_work, transition_work,
-        unrelate_work, update_work, work_page,
+        bind_branch, comment_work, create_work, get_many_work, get_work, list_board, list_work,
+        relate_work, transition_work, unrelate_work, update_work, work_page,
     };
     use crate::application::context::{build_context, Built};
     use crate::core::{
@@ -2185,5 +2238,124 @@ mod tests {
         let view = ctx.declared.read().unwrap();
         let again = view.work_overlay("gh:acme/beta#7").unwrap().unwrap();
         assert_eq!(again.branches, vec!["feat/upstream".to_string()]);
+    }
+
+    #[test]
+    fn get_many_reads_rows_in_the_order_asked_and_names_the_missing() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        create_work(
+            ctx,
+            json!({"kind": "feature", "title": "First", "reason": "test"}),
+        )
+        .unwrap();
+        create_work(
+            ctx,
+            json!({"kind": "feature", "title": "Second", "reason": "test"}),
+        )
+        .unwrap();
+        transition_work(
+            ctx,
+            json!({"ref": "WI-2", "to_state": "in_progress", "reason": "test"}),
+        )
+        .unwrap();
+
+        let answer =
+            get_many_work(ctx, json!({"refs": ["WI-2", "WI-404", "WI-1", "WI-2"]})).unwrap();
+
+        let refs: Vec<&str> = answer["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["ref"].as_str().unwrap())
+            .collect();
+        assert_eq!(refs, ["WI-2", "WI-1"]);
+        assert_eq!(answer["items"][0]["title"], "Second");
+        assert_eq!(answer["items"][0]["state"], "in_progress");
+        assert_eq!(answer["items"][0]["kind"], "feature");
+        assert_eq!(answer["missing"], json!(["WI-404"]));
+    }
+
+    #[test]
+    fn get_many_reads_a_finished_item_like_any_other() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        create_work(
+            ctx,
+            json!({"kind": "feature", "title": "Shipped", "reason": "test"}),
+        )
+        .unwrap();
+        transition_work(
+            ctx,
+            json!({"ref": "WI-1", "to_state": "wont_do", "reason": "test"}),
+        )
+        .unwrap();
+
+        let answer = get_many_work(ctx, json!({"refs": ["WI-1"]})).unwrap();
+
+        assert_eq!(answer["items"][0]["ref"], "WI-1");
+        assert_eq!(answer["items"][0]["state"], "wont_do");
+    }
+
+    #[test]
+    fn get_many_bounds_the_batch() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        assert!(get_many_work(ctx, json!({"refs": []})).is_err());
+        assert!(get_many_work(ctx, json!({"refs": [""]})).is_err());
+        let too_many: Vec<String> = (0..=super::WORK_GET_MANY_LIMIT)
+            .map(|n| format!("WI-{n}"))
+            .collect();
+        assert!(get_many_work(ctx, json!({"refs": too_many})).is_err());
+        let at_the_limit: Vec<String> = (0..super::WORK_GET_MANY_LIMIT)
+            .map(|n| format!("WI-{n}"))
+            .collect();
+        let answer = get_many_work(ctx, json!({"refs": at_the_limit})).unwrap();
+        assert_eq!(
+            answer["missing"].as_array().unwrap().len(),
+            super::WORK_GET_MANY_LIMIT
+        );
+    }
+
+    #[test]
+    fn an_exact_ref_query_leads_the_page_ahead_of_substring_hits() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        // WI-1 is created first and cites WI-10 in its body, so a substring
+        // match on "10" reaches it before WI-10 in creation order.
+        create_work(
+            ctx,
+            json!({"kind": "feature", "title": "An older note", "body": "see WI-10 for the real one", "reason": "test"}),
+        )
+        .unwrap();
+        for n in 2..=10 {
+            create_work(
+                ctx,
+                json!({"kind": "chore", "title": format!("Item {n}"), "reason": "test"}),
+            )
+            .unwrap();
+        }
+
+        for query in ["10", "WI-10", "wi-10"] {
+            let answer = list_work(ctx, json!({"query": query, "limit": 1})).unwrap();
+            assert_eq!(answer["items"][0]["ref"], "WI-10", "query {query}");
+            assert_eq!(answer["total"], 2, "query {query}");
+        }
+        let whole = list_work(ctx, json!({"query": "10"})).unwrap();
+        let refs: Vec<&str> = whole["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["ref"].as_str().unwrap())
+            .collect();
+        assert_eq!(refs, ["WI-10", "WI-1"]);
     }
 }

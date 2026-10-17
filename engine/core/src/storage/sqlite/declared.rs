@@ -625,12 +625,16 @@ impl ReadView for SqliteReadView {
     fn list_work_items(&self, filter: &WorkFilter) -> Result<Vec<WorkItem>, VogtError> {
         let (where_sql, params) = work_where(filter);
         let mut sql_params = params;
+        let (order_sql, exact) = work_order(filter);
+        if let Some(exact) = exact {
+            sql_params.push(Box::new(exact));
+        }
         sql_params.push(Box::new(filter.limit));
         sql_params.push(Box::new(filter.offset));
         let refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|v| v.as_ref()).collect();
         let bases = many(
             &self.conn,
-            &format!("{WORK_SELECT} {where_sql} ORDER BY w.created_at, w.ref LIMIT ? OFFSET ?"),
+            &format!("{WORK_SELECT} {where_sql} {order_sql} LIMIT ? OFFSET ?"),
             refs.as_slice(),
             row_work_base,
         )?;
@@ -2957,6 +2961,32 @@ const TERMINAL_STATES: [&str; 2] = ["done", "wont_do"];
 
 /// The WHERE clause every work view filters through, so a count and the page
 /// beside it describe the same set.
+/// The lowercase ref a search names when the text is one work item: `1241`,
+/// `WI-1241` or `wi-1241`. Python's `_EXACT_REF_QUERY`.
+fn exact_ref_query(text: &str) -> Option<String> {
+    let text = text.trim();
+    let digits = match text.get(..3) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("wi-") => &text[3..],
+        _ => text,
+    };
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| format!("wi-{digits}"))
+}
+
+/// The ordering of a work list. An exact ref leads the page, so a substring
+/// hit such as `WI-12410` or a body that cites `WI-1241` cannot push the item
+/// the number names off the first page. The filter itself is unchanged; the
+/// exact ref is bound, never interpolated. Python's `_work_order`.
+fn work_order(filter: &WorkFilter) -> (&'static str, Option<String>) {
+    match filter.text.as_deref().and_then(exact_ref_query) {
+        Some(exact) => (
+            "ORDER BY (lower(w.ref) = ?) DESC, w.created_at, w.ref",
+            Some(exact),
+        ),
+        None => ("ORDER BY w.created_at, w.ref", None),
+    }
+}
+
 fn work_where(filter: &WorkFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
