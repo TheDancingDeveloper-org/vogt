@@ -135,7 +135,9 @@ impl Collector for MirroredSourceCollector {
             })
             .collect();
         let mut found = Vec::new();
-        for path in walk_project(&root, &project.exclusions, &[], MAX_FILES) {
+        // Walked from the canonical root, so every path below it is relative to
+        // the same prefix `strip_prefix` removes (WI-1071, Python 4aa81f3).
+        for path in walk_project(&resolved_root, &project.exclusions, &[], MAX_FILES) {
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
@@ -380,6 +382,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn a_root_under_a_symlinked_parent_yields_normal_findings() {
+        // WI-1071: a /home -> /data style root used to fail the whole project.
+        let base = scratch("symlinked-parent");
+        let real = base.join("data");
+        crate_at(
+            &real.join("rustnzb").join("crates").join("nzb-core"),
+            "nzb-core",
+            "0.3.0",
+        );
+        let link = base.join("home");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let published = base.join("nzb-core");
+        crate_at(&published, "nzb-core", "0.4.0");
+
+        let found = collect(
+            vec![RegisteredProject {
+                id: "prj_published".to_string(),
+                slug: "nzb-core".to_string(),
+                root_path: published.display().to_string(),
+                repo_url: None,
+            }],
+            &link.join("rustnzb"),
+            "rustnzb",
+        );
+        assert_eq!(
+            found
+                .iter()
+                .map(|f| f.subject_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mirror:rustnzb/crates/nzb-core->nzb-core"]
+        );
+        assert_eq!(found[0].payload["local_path"], "crates/nzb-core");
+        assert_eq!(found[0].payload["manifest"], "crates/nzb-core/Cargo.toml");
+    }
+
+    #[test]
+    fn a_root_stored_with_dot_dot_yields_normal_findings() {
+        // WI-1071: a root stored non-canonically, with `..` in it.
+        let base = scratch("dot-dot");
+        let vendoring = base.join("rustnzb");
+        crate_at(
+            &vendoring.join("crates").join("nzb-core"),
+            "nzb-core",
+            "0.3.0",
+        );
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        let published = base.join("nzb-core");
+        crate_at(&published, "nzb-core", "0.4.0");
+
+        let found = collect(
+            vec![RegisteredProject {
+                id: "prj_published".to_string(),
+                slug: "nzb-core".to_string(),
+                root_path: published.display().to_string(),
+                repo_url: None,
+            }],
+            &base.join("elsewhere").join("..").join("rustnzb"),
+            "rustnzb",
+        );
+        assert_eq!(
+            found
+                .iter()
+                .map(|f| f.subject_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mirror:rustnzb/crates/nzb-core->nzb-core"]
+        );
+        assert_eq!(found[0].payload["manifest"], "crates/nzb-core/Cargo.toml");
     }
 
     #[test]
