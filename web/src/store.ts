@@ -255,8 +255,6 @@ export const EVENT_STREAM_QUIET_MS = 20_000;
  * stale-and-back read as a broken app; the actions stay enabled meanwhile.
  */
 export const DISCONNECT_GRACE_MS = 2_500;
-/** A loss shorter than this is not worth waking the app for when it reopens. */
-export const RECONNECT_WAKE_GAP_MS = 5_000;
 
 let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
 /** Last frame or keep-alive from the stream, for the quiet check. */
@@ -314,7 +312,7 @@ function armStaleTimer(): void {
     streamOpen = false;
     markDisconnected();
     reconnectAttempts = 0;
-    // Not a wake: the reopen says whether the app needs one (see onOpen).
+    // Not a wake: the reopen answers it (see onOpen).
     markLost();
     startEventStream();
   }, EVENT_STREAM_STALE_MS);
@@ -523,10 +521,10 @@ export function startEventStream(): void {
         const lostSince = lostAt;
         lostAt = null;
         noteStreamAlive();
-        if (lostSince !== null && Date.now() - lostSince > RECONNECT_WAKE_GAP_MS) {
-          // One wake for the whole gap: it re-reads the lists and the open
-          // surfaces, and the session-list reconcile below covers the
-          // refetch that a plain reopen would otherwise make.
+        if (lostSince !== null) {
+          // Any drop, however short: events sent while the stream was down
+          // are gone, so the lists and open surfaces are read again. One wake
+          // for the whole drop; the session-list reconcile covers its refetch.
           noteForeground("sse-reconnect");
         } else if (sessionListPending()) {
           // The first load is the boot wake's; this retries a list that
@@ -572,6 +570,9 @@ export function forceReconnectEventStream(): void {
   reconnectAttempts = 0;
   streamOpen = false;
   disarmStaleTimer();
+  // Events sent while this stream is torn down are lost like any drop's, so
+  // the reopen reads the lists again.
+  markLost();
   if (unsubscribeEvents) {
     unsubscribeEvents();
     unsubscribeEvents = null;
