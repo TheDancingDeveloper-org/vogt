@@ -1150,7 +1150,12 @@ fn apply_change<C: Clock + 'static, I: IdFactory + 'static>(
         let summary = if change.event == PROJECT_TRANSITIONED_EVENT {
             json!({"slug": project.slug, "from": project.lifecycle_state.to_string(), "to": change.lifecycle_state})
         } else {
-            json!({"slug": project.slug, "exclusions": updated.exclusions, "repo_url": updated.repo_url})
+            json!({
+                "slug": project.slug,
+                "exclusions": updated.exclusions,
+                "repo_url": updated.repo_url,
+                "agent_policy": serde_json::to_value(&updated.agent_policy).unwrap_or(Value::Null),
+            })
         };
         let id = project.id.clone();
         Ok(WriteOutcome::new(
