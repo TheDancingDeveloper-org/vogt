@@ -37,10 +37,11 @@ pub use collectors::{
 pub use directory::ForgeClients;
 pub use github::repo_of;
 pub use kinds::{
-    current_collector, COLLECTOR_CHECKS, COLLECTOR_ISSUES, COLLECTOR_NOTIFICATIONS,
-    COLLECTOR_PULLS, KIND_CHECK, KIND_DEPLOY_LANE, KIND_ISSUE, KIND_LABEL, KIND_NOTIFICATION,
-    KIND_PULL_REQUEST, KIND_RELEASE,
+    current_collector, COLLECTOR_CHECKS, COLLECTOR_DEPLOY_LANES, COLLECTOR_ISSUES,
+    COLLECTOR_NOTIFICATIONS, COLLECTOR_PULLS, KIND_CHECK, KIND_DEPLOY_LANE, KIND_ISSUE, KIND_LABEL,
+    KIND_NOTIFICATION, KIND_PULL_REQUEST, KIND_RELEASE,
 };
+pub use lanes::{DeployLanesCollector, HttpVersionFetch};
 pub use models::RepoRef;
 pub use provider::ForgeProvider;
 pub use registry::has_configured_forge;

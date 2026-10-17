@@ -8,9 +8,10 @@
 //! agent-activity when transcript roots are, and when a forge is configured the
 //! forge sync pair (forge-issues, forge-prs) and the five forge read collectors
 //! (forge-checks, forge-releases, forge-labels, forge-posture,
-//! forge-notifications). Contract-checker runs only when named. Deploy-lanes is
-//! not ported: a sweep refuses while a lane is configured rather than answering
-//! as if it did not exist. CI watch is not started here.
+//! forge-notifications), and deploy-lanes when a lane is configured. Contract-
+//! checker runs only when named. Once the sweep has published its events, the
+//! CI-watch announce runs after a checks collector, and its failure is logged,
+//! never returned: a sweep whose evidence landed does not fail for a nudge.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -55,16 +56,6 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
         .get("offline_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-
-    // Deploy-lanes is not ported. Python registers it whenever a lane is
-    // configured, so a sweep that quietly omitted it would answer differently
-    // from Python on every deployment that has one.
-    if !ctx.config.deploy_lanes.is_empty() {
-        return Err(VogtError::InvalidRequest(
-            "sweep cannot run while a deploy lane is configured: the deploy-lanes collector is not ported yet"
-                .to_string(),
-        ));
-    }
 
     let projects = {
         let view = ctx.declared.read()?;
@@ -122,8 +113,26 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
             .add(Registered::Indexer(Box::new(indexer)))
             .map_err(VogtError::InvalidRequest)?;
     }
-    if crate::adapters::forge::has_configured_forge(&ctx.config)? {
-        register_forge(&mut registry, ctx)?;
+    let forge = crate::adapters::forge::has_configured_forge(&ctx.config)?;
+    if forge || !ctx.config.deploy_lanes.is_empty() {
+        // One directory serves the forge reads and the lanes' receipts, opened
+        // once for the sweep, as Python's `forge_read_collectors` shares one.
+        let directory = Rc::new(crate::adapters::forge::ForgeClients::open(
+            ctx.config.clone(),
+            ctx.forge_transport(),
+        )?);
+        if forge {
+            register_forge(&mut registry, ctx, &directory)?;
+        }
+        if !ctx.config.deploy_lanes.is_empty() {
+            // Registered only when a lane is configured, so an instance without
+            // any reports deployed versions as "not configured", not "none".
+            registry
+                .add(Registered::Collector(Box::new(OwnedDeployLanes {
+                    directory: Rc::clone(&directory),
+                })))
+                .map_err(VogtError::InvalidRequest)?;
+        }
     }
     let mut selected: Vec<String> = registry
         .select(&named, offline_only)?
@@ -210,6 +219,22 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
     }
     drop(clock);
 
+    // After the feed has the sweep: a bound branch whose CI just settled is
+    // announced to its sessions. Contained, as Python contains it: a nudge that
+    // cannot be delivered must never fail a sweep whose evidence already landed.
+    if reports
+        .iter()
+        .any(|report| report.collector == crate::adapters::forge::COLLECTOR_CHECKS)
+    {
+        if let Err(error) = crate::application::ci_watch::announce_concluded(ctx) {
+            tracing::warn!(
+                target: "vogt.collect",
+                error = %format!("{}: {}", error.type_name(), error.message()),
+                "CI watch could not announce bound-branch conclusions"
+            );
+        }
+    }
+
     Ok(json!({
         "scope": project_slug.unwrap_or_else(|| "all registered projects".to_string()),
         "projects": projects.len(),
@@ -253,26 +278,54 @@ fn count_of(counts: &BTreeMap<String, i64>, key: &str) -> i64 {
 fn register_forge<C: Clock + 'static, I: IdFactory + 'static>(
     registry: &mut CollectorRegistry,
     ctx: &AppContext<C, I>,
+    directory: &Rc<crate::adapters::forge::ForgeClients>,
 ) -> Result<(), VogtError> {
-    let directory = Rc::new(crate::adapters::forge::ForgeClients::open(
-        ctx.config.clone(),
-        ctx.forge_transport(),
-    )?);
     let mut collectors = Vec::new();
     for kind in [ForgeSyncKind::Issues, ForgeSyncKind::Pulls] {
         collectors.push(Registered::Collector(Box::new(OwnedForgeSync::new(
             kind,
             ctx.observed.clone(),
-            Rc::clone(&directory),
+            Rc::clone(directory),
         ))));
     }
     for kind in ForgeReadKind::ALL {
-        collectors.push(owned_forge_read(ctx.observed.clone(), &directory, kind));
+        collectors.push(owned_forge_read(ctx.observed.clone(), directory, kind));
     }
     for collector in collectors {
         registry.add(collector).map_err(VogtError::InvalidRequest)?;
     }
     Ok(())
+}
+
+/// The deploy-lanes collector as the sweep registry holds it: one observation
+/// per configured lane, read through the sweep's shared directory and the real
+/// version fetch.
+pub(crate) struct OwnedDeployLanes {
+    directory: Rc<crate::adapters::forge::ForgeClients>,
+}
+
+impl crate::collectors::Collector for OwnedDeployLanes {
+    fn name(&self) -> &str {
+        crate::adapters::forge::COLLECTOR_DEPLOY_LANES
+    }
+
+    fn requires_network(&self) -> bool {
+        true
+    }
+
+    fn collect(
+        &mut self,
+        ctx: &mut CollectorContext<'_>,
+        project: &crate::core::Project,
+        _now: &mut dyn FnMut() -> crate::core::Moment,
+    ) -> crate::collectors::Collection {
+        use crate::adapters::forge::{DeployLanesCollector, HttpVersionFetch};
+        let directory: &dyn crate::adapters::forge::ForgeDirectory = &*self.directory;
+        let found: Result<_, VogtError> =
+            Ok(DeployLanesCollector::new(directory, &HttpVersionFetch)
+                .collect(ctx.config, project));
+        found.into()
+    }
 }
 
 /// Which provider read an [`OwnedForgeRead`] performs.
@@ -1110,18 +1163,20 @@ mod tests {
         }
     }
 
-    /// A deploy lane still refuses the whole sweep, and the refusal names the
-    /// collector that is not ported yet.
+    /// A configured lane is swept with the rest: its collector runs over the
+    /// lane's project and reports one observation, with no receipt, no version
+    /// endpoint and no forge to read.
     #[test]
-    fn a_configured_deploy_lane_refuses_the_sweep() {
+    fn a_configured_deploy_lane_is_swept_and_reports_its_lane() {
         let dir = std::env::temp_dir().join(format!(
-            "vogt-collect-refuse-{}-{}",
+            "vogt-collect-lane-{}-{}",
             std::process::id(),
             unique()
         ));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let config = VogtConfig {
-            data_dir: dir,
+            data_dir: dir.clone(),
             deploy_lanes: vec![crate::config::DeployLane {
                 name: "dev".to_string(),
                 project: "alpha".to_string(),
@@ -1132,21 +1187,27 @@ mod tests {
             }],
             ..VogtConfig::default()
         };
+        let mut clock = Some(StepClock::new(moment()));
+        let mut ids = Some(SequentialIds::new(None).unwrap());
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
         let laned = build_context(
             config,
             Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
-            Some(StepClock::new(moment())),
-            Some(SequentialIds::new(None).unwrap()),
+            clock,
+            ids,
             None,
             None,
             None,
             None,
         )
         .unwrap();
-        let refused = sweep_op(&laned, json!({})).unwrap_err();
-        let message = refused.to_string();
-        assert!(matches!(refused, VogtError::InvalidRequest(_)), "{message}");
-        assert!(message.contains("deploy-lanes"), "{message}");
+        register(&laned, "alpha", &dir, None);
+
+        let swept = sweep_op(&laned, json!({"collectors": ["deploy-lanes"]})).unwrap();
+        let report = &swept["reports"].as_array().unwrap()[0];
+        assert_eq!(report["collector"], "deploy-lanes", "{swept}");
+        assert_eq!(report["outcome"], "ok", "{swept}");
+        assert_eq!(report["new"], 1, "{swept}");
     }
 
     /// Coverage lists the unported collectors as `never_run` while a forge or a

@@ -266,7 +266,7 @@ pub fn py_repr(raw: &str) -> String {
 /// `str.isprintable`: a graphic character or a space, and the only space is
 /// U+0020. C0/C1 controls, format characters, line and paragraph separators,
 /// private-use and unassigned code points are all rejected.
-fn py_printable(ch: char) -> bool {
+pub(crate) fn py_printable(ch: char) -> bool {
     if ch.is_control() || (ch.is_whitespace() && ch != ' ') {
         return false;
     }
