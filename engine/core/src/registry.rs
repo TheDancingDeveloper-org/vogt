@@ -159,6 +159,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         }
         "session.changes" => Some(crate::application::session_changes::session_changes_op),
         "session.wait_any" => Some(crate::application::session_changes::session_wait_any_op),
+        "session.commit_for" => Some(crate::application::session_commit::commit_for_op),
         "session.last_reply" => Some(crate::application::session_reads::last_reply),
         "session.history_list" => Some(crate::application::session_reads::history_list),
         "session.search_output" => Some(crate::application::session_reads::search_output),
