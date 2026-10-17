@@ -430,28 +430,38 @@ async fn vogt_tools_lists_and_calls_the_real_rust_core() {
 }
 
 #[test]
-fn the_engine_image_accepts_a_rust_core() {
-    // engine/Dockerfile branches on `/opt/vogt/.venv/bin/.rust-core`, the
-    // marker deploy/rust-core.Dockerfile writes. Without it the engine image
-    // would still demand a Python venv and CORE_IMAGE=vogt-core:rust would
-    // fail the build.
+fn the_engine_image_builds_its_own_rust_core() {
+    // The engine image carries vogt-core from its own `server-build` stage. It
+    // no longer lifts a core from CORE_IMAGE or runs a uv venv, so neither a
+    // Python interpreter nor a second published image can reach the shipped
+    // image. The standalone Rust image (deploy/rust-core.Dockerfile) keeps its
+    // install path: the `vogt` service in the overlays still runs it.
     let dockerfile = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Dockerfile");
     let text = std::fs::read_to_string(&dockerfile).expect("engine Dockerfile");
     assert!(
-        text.contains(".rust-core"),
-        "engine/Dockerfile no longer detects the Rust core layout"
+        text.contains("-p vogt-engine-server -p vogt-core"),
+        "engine/Dockerfile no longer builds vogt-core in server-build"
     );
+    assert!(
+        text.contains("COPY --from=server-build /usr/local/bin/vogt-core /usr/local/bin/vogt-core"),
+        "engine/Dockerfile no longer copies vogt-core into the runtime image"
+    );
+    for retired in [
+        "CORE_IMAGE",
+        "UV_IMAGE",
+        "AS core",
+        "AS uv",
+        "/opt/vogt/.venv",
+    ] {
+        assert!(
+            !text.contains(retired),
+            "engine/Dockerfile still refers to the retired {retired}"
+        );
+    }
     let rust = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/rust-core.Dockerfile");
     let rust_text = std::fs::read_to_string(&rust).expect("rust core Dockerfile");
     assert!(
         rust_text.contains("/opt/vogt/.venv/bin/vogt"),
-        "the Rust image no longer installs where the engine image copies from"
-    );
-    let overlay =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/rust-core.overlay.yml");
-    let overlay_text = std::fs::read_to_string(&overlay).expect("overlay");
-    assert!(
-        overlay_text.contains("CORE_IMAGE"),
-        "the overlay must put the Rust core in the engine image, not only swap the vogt service"
+        "the Rust image no longer installs where the stack expects a core"
     );
 }
