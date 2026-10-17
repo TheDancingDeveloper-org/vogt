@@ -245,7 +245,9 @@ mod tests {
         let _guard = ENV.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("vogt-health-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        unsafe { std::env::set_var("VOGT_TEST_IDS", "sequential") };
+        // The ids are passed in, not set through VOGT_TEST_IDS: an env write
+        // here would outlive this test and make every other test's context
+        // sequential, so a second context over a store collides on actor ids.
         let mut clock = None;
         let mut ids = crate::core::ids_from_env(Some("sequential"), None).unwrap();
         crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
