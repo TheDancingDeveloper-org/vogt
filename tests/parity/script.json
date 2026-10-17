@@ -1176,6 +1176,353 @@
    }
   },
   {
+   "operation": "session.grant_request",
+   "cli": [
+    "session",
+    "grant-request"
+   ],
+   "params": {
+    "target": "ses_00000000000000000000000000",
+    "kind": "credential",
+    "secret_name": "PARITY_TOKEN",
+    "project_id": "parity-project",
+    "uses": "once",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/grants",
+    "auth": "admin",
+    "body": {
+     "target": "ses_00000000000000000000000000",
+     "kind": "credential",
+     "secret_name": "PARITY_TOKEN",
+     "project_id": "parity-project",
+     "uses": "once",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.grant_decide",
+   "cli": [
+    "session",
+    "grant-decide"
+   ],
+   "params": {
+    "id": "grt_00000000000000000000000000",
+    "decision": "approve",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/grants/decide",
+    "auth": "admin",
+    "body": {
+     "id": "grt_00000000000000000000000000",
+     "decision": "approve",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.grant_revoke",
+   "cli": [
+    "session",
+    "grant-revoke"
+   ],
+   "params": {
+    "id": "grt_00000000000000000000000000",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/grants/revoke",
+    "auth": "admin",
+    "body": {
+     "id": "grt_00000000000000000000000000",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.grant_list",
+   "cli": [
+    "session",
+    "grants"
+   ],
+   "params": {
+    "state": "pending"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/grants?state=pending",
+    "auth": "admin"
+   }
+  },
+  {
+   "operation": "session.history_list",
+   "cli": [
+    "session",
+    "history"
+   ],
+   "params": {
+    "limit": 5
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/history?limit=5",
+    "auth": "admin"
+   }
+  },
+  {
+   "operation": "session.bind_work",
+   "cli": [
+    "session",
+    "bind"
+   ],
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "work_item": "WI-1074",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/work-item",
+    "auth": "admin",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "work_item": "WI-1074",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.last_reply",
+   "cli": [
+    "session",
+    "last-reply"
+   ],
+   "params": {
+    "id": "ses_00000000000000000000000000"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/last-reply?id=ses_00000000000000000000000000",
+    "auth": "admin"
+   }
+  },
+  {
+   "operation": "session.search_output",
+   "cli": [
+    "session",
+    "search"
+   ],
+   "params": {
+    "q": "parity"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/history/search?q=parity",
+    "auth": "admin"
+   }
+  },
+  {
+   "operation": "session.report_blocked",
+   "cli": [
+    "session",
+    "blocked"
+   ],
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "blocker": "parity needs a person",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/blocked",
+    "auth": "admin",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "blocker": "parity needs a person",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.report_unblocked",
+   "cli": [
+    "session",
+    "unblocked"
+   ],
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/unblocked",
+    "auth": "admin",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.changes",
+   "params": {
+    "since": 0,
+    "limit": 10
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/changes?since=0&limit=10",
+    "auth": "admin"
+   }
+  },
+  {
+   "operation": "session.wait_any",
+   "cli": [
+    "session",
+    "wait-any"
+   ],
+   "params": {
+    "timeout_s": 1,
+    "cursor": 0
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/wait-any?timeout_s=1&cursor=0",
+    "auth": "admin"
+   }
+  },
+  {
+   "operation": "session.commit_for",
+   "cli": [
+    "session",
+    "commit"
+   ],
+   "params": {
+    "id": "ses_00000000000000000000000000",
+    "message": "parity commit",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sessions/commit",
+    "auth": "admin",
+    "body": {
+     "id": "ses_00000000000000000000000000",
+     "message": "parity commit",
+     "reason": "parity"
+    }
+   }
+  },
+  {
+   "operation": "session.economics",
+   "params": {
+    "id": "ses_00000000000000000000000000"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/economics?id=ses_00000000000000000000000000",
+    "auth": "admin"
+   }
+  },
+  {
+   "operation": "session.digest",
+   "params": {
+    "id": "ses_00000000000000000000000000"
+   },
+   "expect": {
+    "exit": 1
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/sessions/digest?id=ses_00000000000000000000000000",
+    "auth": "admin"
+   }
+  },
+  {
+   "operation": "agent_activity.search",
+   "cli": [
+    "agent-activity",
+    "search"
+   ],
+   "params": {
+    "limit": 5
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/agent-activity?limit=5",
+    "auth": "admin"
+   }
+  },
+  {
+   "operation": "agent_activity.summary",
+   "cli": [
+    "agent-activity",
+    "summary"
+   ],
+   "params": {
+    "economics": true
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/agent-activity/summary?economics=true",
+    "auth": "admin"
+   }
+  },
+  {
    "operation": "label.create",
    "http": {
     "method": "POST",
