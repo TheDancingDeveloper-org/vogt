@@ -9,6 +9,8 @@
 
 #![allow(dead_code)]
 
+pub mod session_economics;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::errors::VogtError;

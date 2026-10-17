@@ -1164,6 +1164,10 @@ pub struct EngineSession {
     pub permission_mode: Option<String>,
     pub stopped_by: Option<String>,
     pub stop_reason: Option<String>,
+    /// The named Claude Code account the session runs under, when one was.
+    pub account: Option<String>,
+    /// The engine tailer's own economics reading, when it sent an object.
+    pub economics: Option<serde_json::Map<String, Value>>,
 }
 
 impl EngineSession {
@@ -1216,6 +1220,8 @@ impl EngineSession {
             permission_mode: optional_str(get("permission_mode")),
             stopped_by: optional_str(stop.and_then(|stop| stop.get("by"))),
             stop_reason: optional_str(stop.and_then(|stop| stop.get("reason"))),
+            account: optional_str(get("account")),
+            economics: get("economics").and_then(Value::as_object).cloned(),
         }
     }
 }
