@@ -157,6 +157,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "session.report_unblocked" => {
             Some(crate::application::session_blocked::report_unblocked_op)
         }
+        "session.commit_for" => Some(crate::application::session_commit::commit_for_op),
         "session.last_reply" => Some(crate::application::session_reads::last_reply),
         "session.history_list" => Some(crate::application::session_reads::history_list),
         "session.search_output" => Some(crate::application::session_reads::search_output),
