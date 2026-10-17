@@ -219,9 +219,16 @@ where
         None => None,
         Some(slug) => {
             let project = resolve::project(&view, &slug)?;
-            Some(vec![expand_user(Path::new(&project.root_path))
+            // Path's string form: no trailing slash, except the filesystem root.
+            let root = expand_user(Path::new(&project.root_path))
                 .display()
-                .to_string()])
+                .to_string();
+            let trimmed_root = root.trim_end_matches('/');
+            Some(vec![if trimmed_root.is_empty() {
+                "/".to_string()
+            } else {
+                trimmed_root.to_string()
+            }])
         }
     };
     Ok(ActivityScope {
@@ -625,7 +632,7 @@ mod tests {
                 vec![(format!("{home}/code/proj"), "proj".to_string())]
             );
             let scope = scope_of(ctx, &json!({"project": "proj"})).unwrap();
-            assert_eq!(scope.cwd_roots, Some(vec![format!("{home}/code/proj/")]));
+            assert_eq!(scope.cwd_roots, Some(vec![format!("{home}/code/proj")]));
         });
         let _ = std::fs::remove_dir_all(&dir);
     }
