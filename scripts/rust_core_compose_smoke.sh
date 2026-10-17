@@ -32,9 +32,11 @@ cleanup() {
 trap cleanup EXIT
 
 export VOGT_IMAGE="vogt-core:rust"
-# Ports come from the caller when a job shares the daemon with another stack.
-export VOGT_PORT="${VOGT_PORT:-18080}"
-export ENGINE_PORT="${ENGINE_PORT:-18910}"
+# Host ports: the caller's, or a free one. A fixed port clashes on a runner
+# whose daemon is shared with other stacks.
+free_port() { python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }
+export VOGT_PORT="${VOGT_PORT:-$(free_port)}"
+export ENGINE_PORT="${ENGINE_PORT:-$(free_port)}"
 export VOGT_PUBLIC_URL="http://127.0.0.1:${VOGT_PORT}"
 export ENGINE_PUBLIC_URL="http://127.0.0.1:${ENGINE_PORT}"
 export ENGINE_BIND="127.0.0.1"
