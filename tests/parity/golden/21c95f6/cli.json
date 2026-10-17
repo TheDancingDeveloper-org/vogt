@@ -10,6 +10,22 @@
             "id": "act_0001",
             "identity_ref": "local:parity",
             "kind": "human"
+          },
+          {
+            "created_at": "2026-01-02T03:04:09+00:00",
+            "disabled": 0,
+            "display_name": "agent:vogt-engine",
+            "id": "act_0002",
+            "identity_ref": "agent:vogt-engine",
+            "kind": "agent"
+          },
+          {
+            "created_at": "2026-01-02T03:04:13+00:00",
+            "disabled": 0,
+            "display_name": "agent:vogt-sessions",
+            "id": "act_0003",
+            "identity_ref": "agent:vogt-sessions",
+            "kind": "agent"
           }
         ],
         "audit": [
@@ -24,6 +40,52 @@
             "reason": "instance bootstrap",
             "revision": 0,
             "txn_id": "txn_0001"
+          },
+          {
+            "actor_id": "act_0001",
+            "at": "2026-01-02T03:04:12+00:00",
+            "entity_id": "tok_0001",
+            "entity_kind": "token",
+            "id": "aud_0002",
+            "operation": "token.adopt",
+            "payload_digest": "sha256:59549779aa0cda6825e03092b441cacac09d0003597ed7fd262fc918fdedf350",
+            "reason": "adopting the operator-supplied core token at init",
+            "revision": 1,
+            "txn_id": "txn_0002"
+          },
+          {
+            "actor_id": "act_0001",
+            "at": "2026-01-02T03:04:16+00:00",
+            "entity_id": "tok_0002",
+            "entity_kind": "token",
+            "id": "aud_0003",
+            "operation": "token.adopt",
+            "payload_digest": "sha256:f1942d83b32c6907f41a7053a5e2b379b085799a1b1a2bb7dd9e2a327080cefc",
+            "reason": "adopting the operator-supplied agent token at init",
+            "revision": 2,
+            "txn_id": "txn_0003"
+          }
+        ],
+        "events": [
+          {
+            "actor_id": "act_0001",
+            "at": "2026-01-02T03:04:12+00:00",
+            "audit_id": "aud_0002",
+            "entity_id": "tok_0001",
+            "entity_kind": "token",
+            "kind": "token.adopted",
+            "seq": 1,
+            "summary": "{\"actor\": \"agent:vogt-engine\", \"scopes\": [\"read\", \"work.write\", \"project.write\"]}"
+          },
+          {
+            "actor_id": "act_0001",
+            "at": "2026-01-02T03:04:16+00:00",
+            "audit_id": "aud_0003",
+            "entity_id": "tok_0002",
+            "entity_kind": "token",
+            "kind": "token.adopted",
+            "seq": 2,
+            "summary": "{\"actor\": \"agent:vogt-sessions\", \"scopes\": [\"read\", \"work.write\", \"project.write\", \"writeback\"]}"
           }
         ],
         "meta": [
@@ -33,7 +95,7 @@
           },
           {
             "key": "revision",
-            "value": "0"
+            "value": "2"
           },
           {
             "key": "work_ref_seq",
@@ -173,6 +235,34 @@
             "id": "0024_session_started_by"
           }
         ],
+        "tokens": [
+          {
+            "actor_id": "act_0002",
+            "created_at": "2026-01-02T03:04:11+00:00",
+            "expires_at": null,
+            "id": "tok_0001",
+            "kind": "api",
+            "last_used_at": null,
+            "name": "bootstrap core token",
+            "revoked_at": null,
+            "revoked_reason": null,
+            "scopes": "[\"read\", \"work.write\", \"project.write\"]",
+            "token_hash": "9545b721f3788049180e1ccb546015bce1287aeb505e54d04a01344bb38fe4f6"
+          },
+          {
+            "actor_id": "act_0003",
+            "created_at": "2026-01-02T03:04:15+00:00",
+            "expires_at": null,
+            "id": "tok_0002",
+            "kind": "api",
+            "last_used_at": null,
+            "name": "bootstrap agent token",
+            "revoked_at": null,
+            "revoked_reason": null,
+            "scopes": "[\"read\", \"work.write\", \"project.write\", \"writeback\"]",
+            "token_hash": "d3ff8dd34b248fd9895c7ca25e883f4bc79b2321c11f6ebee6a619c6e702ce71"
+          }
+        ],
         "workflow_defs": [
           {
             "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
@@ -255,9 +345,9 @@
     "body": {
       "clone": null,
       "counts": {
-        "actors": 1,
-        "audit": 1,
-        "events": 0,
+        "actors": 3,
+        "audit": 3,
+        "events": 2,
         "initiatives": 0,
         "projects": 0,
         "work_items": 0
@@ -268,7 +358,7 @@
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "principal": "local:parity",
-      "revision": 0,
+      "revision": 2,
       "vogt_version": "0.7.17"
     },
     "exit": 0,
@@ -468,7 +558,7 @@
         "created_at": "2026-01-02T03:04:05Z",
         "disabled": false,
         "display_name": "Parity Agent",
-        "id": "act_0002",
+        "id": "act_0004",
         "identity_ref": "agent:parity",
         "kind": "agent"
       }
@@ -483,8 +573,24 @@
           "created_at": "2026-01-02T03:04:05Z",
           "disabled": false,
           "display_name": "Parity Agent",
-          "id": "act_0002",
+          "id": "act_0004",
           "identity_ref": "agent:parity",
+          "kind": "agent"
+        },
+        {
+          "created_at": "2026-01-02T03:04:09Z",
+          "disabled": false,
+          "display_name": "agent:vogt-engine",
+          "id": "act_0002",
+          "identity_ref": "agent:vogt-engine",
+          "kind": "agent"
+        },
+        {
+          "created_at": "2026-01-02T03:04:13Z",
+          "disabled": false,
+          "display_name": "agent:vogt-sessions",
+          "id": "act_0003",
+          "identity_ref": "agent:vogt-sessions",
           "kind": "agent"
         },
         {
@@ -1588,8 +1694,8 @@
         "": 2
       },
       "link_state": null,
-      "revision": 18,
-      "snapshot": "eyJmaW5nZXJwcmludCI6InNoYTI1Njo2N2JkMGQ3MTUxN2JlYThkM2VkNmJjYWE0ZTFmZTY2YzYyNTM5MGRkNjg2ODI3MjM1Njk4MTUxMDg2ZDc0MDYzIiwiaGlnaF93YXRlciI6WyIyMDI2LTAxLTAyVDAzOjA0OjA1KzAwOjAwIiwiV0ktMiJdLCJraW5kIjoic25hcHNob3QiLCJyZXZpc2lvbiI6MTgsInNuYXBzaG90X2F0IjoiMjAyNi0wMS0wMlQwMzowNDowNSswMDowMCJ9",
+      "revision": 20,
+      "snapshot": "eyJmaW5nZXJwcmludCI6InNoYTI1Njo2N2JkMGQ3MTUxN2JlYThkM2VkNmJjYWE0ZTFmZTY2YzYyNTM5MGRkNjg2ODI3MjM1Njk4MTUxMDg2ZDc0MDYzIiwiaGlnaF93YXRlciI6WyIyMDI2LTAxLTAyVDAzOjA0OjA1KzAwOjAwIiwiV0ktMiJdLCJraW5kIjoic25hcHNob3QiLCJyZXZpc2lvbiI6MjAsInNuYXBzaG90X2F0IjoiMjAyNi0wMS0wMlQwMzowNDowNSswMDowMCJ9",
       "snapshot_at": "2026-01-02T03:04:05Z",
       "total": 2
     },
@@ -1720,7 +1826,7 @@
           "conflict": 0,
           "created": 0,
           "skipped": 0,
-          "unchanged": 2,
+          "unchanged": 4,
           "updated": 0
         },
         "comment": {
@@ -1769,7 +1875,7 @@
       "projects": 2,
       "skipped": 0,
       "source": "<root>/export.json",
-      "unchanged": 9,
+      "unchanged": 11,
       "updated": 0,
       "work_items": 2
     },
@@ -1976,5 +2082,180 @@
     "error": "error: invalid_request: 'nope' is not a chat id (a UUID, from chat.list or chat.create)",
     "exit": 1,
     "operation": "chat.get"
+  },
+  {
+    "body": {
+      "user": {
+        "actor_id": "act_0005",
+        "actor_identity_ref": "human:ada",
+        "created_at": "2026-01-02T03:04:05Z",
+        "scopes": [
+          "read",
+          "work.write",
+          "project.write"
+        ],
+        "updated_at": "2026-01-02T03:04:05Z",
+        "username": "ada"
+      }
+    },
+    "exit": 0,
+    "operation": "user.create"
+  },
+  {
+    "body": {
+      "users": [
+        {
+          "actor_id": "act_0005",
+          "actor_identity_ref": "human:ada",
+          "created_at": "2026-01-02T03:04:05Z",
+          "scopes": [
+            "read",
+            "work.write",
+            "project.write"
+          ],
+          "updated_at": "2026-01-02T03:04:05Z",
+          "username": "ada"
+        }
+      ]
+    },
+    "exit": 0,
+    "operation": "user.list"
+  },
+  {
+    "body": {
+      "user": {
+        "actor_id": "act_0005",
+        "actor_identity_ref": "human:ada",
+        "created_at": "2026-01-02T03:04:05Z",
+        "scopes": [
+          "read",
+          "work.write",
+          "project.write"
+        ],
+        "updated_at": "2026-01-02T03:04:05Z",
+        "username": "ada"
+      }
+    },
+    "exit": 0,
+    "operation": "user.set_password"
+  },
+  {
+    "body": {
+      "tokens": [
+        {
+          "actor_id": "act_0003",
+          "actor_identity_ref": "agent:vogt-sessions",
+          "created_at": "2026-01-02T03:04:15Z",
+          "expires_at": null,
+          "id": "tok_0002",
+          "kind": "api",
+          "last_used_at": null,
+          "name": "bootstrap agent token",
+          "revoked_at": null,
+          "revoked_reason": null,
+          "scopes": [
+            "read",
+            "work.write",
+            "project.write",
+            "writeback"
+          ]
+        },
+        {
+          "actor_id": "act_0002",
+          "actor_identity_ref": "agent:vogt-engine",
+          "created_at": "2026-01-02T03:04:11Z",
+          "expires_at": null,
+          "id": "tok_0001",
+          "kind": "api",
+          "last_used_at": null,
+          "name": "bootstrap core token",
+          "revoked_at": null,
+          "revoked_reason": null,
+          "scopes": [
+            "read",
+            "work.write",
+            "project.write"
+          ]
+        }
+      ]
+    },
+    "exit": 0,
+    "operation": "token.list"
+  },
+  {
+    "body": {
+      "token": {
+        "actor_id": "act_0003",
+        "actor_identity_ref": "agent:vogt-sessions",
+        "created_at": "2026-01-02T03:04:15Z",
+        "expires_at": null,
+        "id": "tok_0002",
+        "kind": "api",
+        "last_used_at": null,
+        "name": "bootstrap agent token",
+        "revoked_at": "2026-01-02T03:04:05Z",
+        "revoked_reason": "parity harness",
+        "scopes": [
+          "read",
+          "work.write",
+          "project.write",
+          "writeback"
+        ]
+      }
+    },
+    "exit": 0,
+    "operation": "token.revoke"
+  },
+  {
+    "body": {
+      "display_name": "parity",
+      "identity_ref": "local:parity",
+      "kind": "human",
+      "scopes": [
+        "admin",
+        "project.write",
+        "read",
+        "work.write",
+        "writeback"
+      ],
+      "token": null
+    },
+    "exit": 0,
+    "operation": "auth.whoami"
+  },
+  {
+    "body": {
+      "declared_schema_version": 24,
+      "engine_state": "not configured",
+      "import_root": "<root>/instance/repos",
+      "instance_id": "ins_0001",
+      "observed_schema_version": 6,
+      "path": "<root>/backup",
+      "taken_at": "2026-01-02T03:04:05Z"
+    },
+    "exit": 0,
+    "operation": "backup"
+  },
+  {
+    "body": {
+      "declared_schema_version": 24,
+      "engine_state": "not in this backup",
+      "import_root_now": "<root>/instance/repos",
+      "import_root_then": "<root>/instance/repos",
+      "instance_id": "ins_0001",
+      "migrations_applied": [],
+      "restored_from": "2026-01-02T03:04:05Z",
+      "source": "<root>/backup"
+    },
+    "exit": 0,
+    "operation": "restore"
+  },
+  {
+    "body": {
+      "sessions_revoked": 0,
+      "username": "ada"
+    },
+    "exit": 0,
+    "operation": "user.remove"
   }
 ]
