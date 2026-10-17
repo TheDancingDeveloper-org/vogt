@@ -11,6 +11,10 @@ the work item that will port it.
 
 `tests/fixtures/` stays. Both cores and the harness read it.
 
+There is no `tests/test_resolve*.py`: Python's resolver has no test file of its
+own. Its cases (`WI-n`, slugs, `identity_ref`, and each not-found error) are
+pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
+
 The Python floor was `pytest --cov-fail-under=80`. On this branch
 `cargo llvm-cov -p vogt-core` measures 72.6% line coverage over the whole
 crate, so `.github/workflows/rust-core.yml` fails under 70%. The gap to 80%
