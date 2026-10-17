@@ -7,7 +7,6 @@
 //! operation this module implements itself.
 
 pub mod operations;
-mod schemas;
 mod strips;
 pub mod validate;
 
@@ -679,7 +678,7 @@ impl OperationRegistry {
         Ok(())
     }
 
-    /// Every operation has a recorded schema, and no schema names an operation
+    /// Every operation has a derived schema, and no schema names an operation
     /// that does not exist. Checked against the parsed map, which is also what
     /// the dump and the MCP tool list read, so a mismatch fails here rather
     /// than at the first call.
@@ -688,26 +687,15 @@ impl OperationRegistry {
         for operation in &self.operations {
             if !schemas.contains_key(operation.name) {
                 return Err(RegistryError(format!(
-                    "{} has no recorded schema; regenerate with scripts/gen_registry.py",
+                    "{} has no derived schema; list it in application::models::DERIVED",
                     operation.name
-                )));
-            }
-        }
-        for name in crate::application::models::DERIVED {
-            if schemas::SCHEMAS
-                .iter()
-                .any(|(recorded, _, _)| recorded == name)
-            {
-                return Err(RegistryError(format!(
-                    "{name} has both a recorded schema and a derived one; regenerate with \
-                     scripts/gen_registry.py"
                 )));
             }
         }
         for name in schemas.keys() {
             if !self.contains(name) {
                 return Err(RegistryError(format!(
-                    "schema recorded for '{name}', which is not a registered operation"
+                    "schema derived for '{name}', which is not a registered operation"
                 )));
             }
         }
@@ -751,8 +739,7 @@ pub struct OperationManifest {
     pub http_path: Option<&'static str>,
     pub mcp_tool: String,
     pub cli_path: Vec<&'static str>,
-    /// Recorded from pydantic until the models are ported to Rust. See
-    /// `schemas.rs` for why this is a generated table and not a derivation.
+    /// Derived from the operation's Rust models in `application::models`.
     pub params_schema: serde_json::Value,
     pub result_schema: serde_json::Value,
     pub transports: Vec<&'static str>,
@@ -782,28 +769,18 @@ fn exclusion_of(name: &str) -> Option<(&'static str, &'static str)> {
         .map(|(_, reason)| ("http_only", *reason))
 }
 
-/// Parameter and result schemas, parsed once. `validate_schemas` refuses a
-/// registry whose table does not match the operation set, so a lookup that
-/// misses here is a bug in that check, not a state to paper over.
+/// Parameter and result schemas, derived once from the Rust models.
+/// `validate_schemas` refuses a registry whose derived set does not match the
+/// operation set, so a lookup that misses here is a bug in that check, not a
+/// state to paper over.
 fn parsed_schemas() -> &'static HashMap<&'static str, (serde_json::Value, serde_json::Value)> {
     use std::sync::LazyLock;
     static PARSED: LazyLock<HashMap<&str, (serde_json::Value, serde_json::Value)>> =
         LazyLock::new(|| {
-            let recorded = schemas::SCHEMAS.iter().map(|(name, params, result)| {
-                (
-                    *name,
-                    (
-                        serde_json::from_str(params).expect("generated params schema is JSON"),
-                        serde_json::from_str(result).expect("generated result schema is JSON"),
-                    ),
-                )
-            });
-            // The derived schemas replace the recorded ones for their names;
-            // `validate_schemas` refuses a name in both, so this never shadows.
-            let derived = crate::application::models::derived_schemas()
+            crate::application::models::derived_schemas()
                 .into_iter()
-                .map(|(name, params, result)| (name, (params, result)));
-            recorded.chain(derived).collect()
+                .map(|(name, params, result)| (name, (params, result)))
+                .collect()
         });
     &PARSED
 }
@@ -1053,8 +1030,8 @@ mod tests {
         // The golden is unkeyed (tests/parity/golden/registry.json, not under
         // golden/<sha>/) on purpose: it describes the registry, which changes
         // with the operation set rather than with the parity script.
-        // `gen_registry.py --check` diffs it, and `schemas.rs`, against a
-        // fresh recording from the live Python.
+        // `gen_registry.py --check` diffs it against a fresh recording from the
+        // live Python.
         let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/golden/registry.json");
         let golden: serde_json::Value =

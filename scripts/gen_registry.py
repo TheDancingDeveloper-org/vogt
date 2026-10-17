@@ -9,10 +9,11 @@ against a Python tree that had grown to 134). Run this after changing the
 Python operation set; the committed golden at
 `tests/parity/golden/registry.json` is what the Rust dump is checked against.
 
-The golden and `schemas.rs` are recorded from Python's own `registry.dump`,
-schemas included. `--check` diffs both, so a model change that alters a
-schema fails here rather than at the next review. Deriving those schemas
-from Rust types, instead of recording pydantic's, remains WI-1060.
+The golden is recorded from Python's own `registry.dump`, schemas included.
+`--check` diffs it, so a model change that alters a schema fails here rather
+than at the next review. The Rust side derives every schema from its own
+types in `application::models`; `tests/test_rust_schemas.py` checks those
+against the live Python registry.
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 OPERATIONS_RS = REPO_ROOT / "engine" / "core" / "src" / "registry" / "operations.rs"
-SCHEMAS_RS = REPO_ROOT / "engine" / "core" / "src" / "registry" / "schemas.rs"
 STRIPS_RS = REPO_ROOT / "engine" / "core" / "src" / "registry" / "strips.rs"
 GOLDEN = REPO_ROOT / "tests" / "parity" / "golden" / "registry.json"
 MODELS_RS = REPO_ROOT / "engine" / "core" / "src" / "application" / "models.rs"
@@ -136,25 +136,13 @@ def render_operations_rs(operations: list[dict[str, object]]) -> str:
     return re.sub(r"\\u([0-9a-fA-F]{4})", r"\\u{\1}", "".join(lines))
 
 
-def _derived_names() -> set[str]:
-    """The operation names `models.rs` derives, read from its `DERIVED` list."""
-    text = MODELS_RS.read_text(encoding="utf-8")
-    block = re.search(r"pub const DERIVED: &\[&str\] = &\[(.*?)\];", text, re.S)
-    if block is None:
-        raise SystemExit("engine/core/src/application/models.rs has no DERIVED list")
-    return set(re.findall(r'"([^"]+)"', block.group(1)))
+def record_golden() -> str:
+    """Python's own registry dump, the golden `registry::dump()` is compared with.
 
-
-def record_golden() -> tuple[str, str]:
-    """Python's own dump, plus the Rust module that emits its schemas.
-
-    The schemas are recorded verbatim from pydantic rather than re-derived,
-    because the parameter and result models are not yet ported to Rust (they
-    arrive with the service chunks). Emitting them from a generated table
-    keeps the dump a Rust product: `registry.json` is still compared against
-    `registry::dump()` with no normaliser, so a hand edit on either side
-    fails. Re-deriving the schemas from ported Rust types, and dropping this
-    table, is WI-1060's remaining work.
+    Every schema comes straight from pydantic: the Rust side derives its own
+    schemas in `application::models`, and `tests/test_rust_schemas.py` checks
+    them against the live registry, so this file records Python's answer and
+    nothing else.
     """
     from vogt.application.models import RegistryDumpParams
     from vogt.application.services.instance import registry_dump
@@ -162,36 +150,7 @@ def record_golden() -> tuple[str, str]:
     # registry_dump reads no store. The signature still asks for a context
     # because every service does; this call has nothing to give it.
     dump = registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
-    derived = _derived_names()
-    entries = []
-    for operation in dump["operations"]:
-        # A derived operation's schema comes from its Rust model, not from here.
-        if operation["name"] in derived:
-            continue
-        entries.append(
-            "    (\n"
-            f"        {json.dumps(operation['name'])},\n"
-            f"        {json.dumps(json.dumps(operation['params_schema'], separators=(',', ':')))},\n"  # noqa: E501
-            f"        {json.dumps(json.dumps(operation['result_schema'], separators=(',', ':')))},\n"  # noqa: E501
-            "    ),\n"
-        )
-    module = (
-        "//! Parameter and result schemas, recorded from pydantic, not derived.\n"
-        "//!\n"
-        "//! Produced by `scripts/gen_registry.py`. This is a recording for every\n"
-        "//! operation except those in `application::models::DERIVED`, whose\n"
-        "//! schemas `schemars` derives from the Rust models. Those names are\n"
-        "//! left out here. `tests/test_rust_schemas.py` checks the dump, derived\n"
-        "//! and recorded alike, against Python's live `registry.dump`. Deriving\n"
-        "//! the rest is WI-1060's remaining work; the recorded rows have to\n"
-        "//! stay until then, because the Python models are removed at the swap\n"
-        "//! (WI-1082) and after that nothing can regenerate them.\n"
-        "\n"
-        "/// `(operation name, params schema, result schema)`, in registry order.\n"
-        + _rust_array("pub static SCHEMAS: &[(&str, &str, &str)]", entries)
-    )
-    golden = json.dumps(dump, indent=2, ensure_ascii=False) + "\n"
-    return golden, module
+    return json.dumps(dump, indent=2, ensure_ascii=False) + "\n"
 
 
 def record_strips() -> str:
@@ -239,14 +198,12 @@ def main() -> int:
     rendered = render_operations_rs(operations)
     strips = record_strips()
     outputs = {OPERATIONS_RS: rendered, STRIPS_RS: strips}
-    # The schema table and the registry golden are Python's own dump. They
-    # are checked on --check as well as written, so a model change that
-    # alters a schema cannot pass CI while the Rust table still describes
-    # the old one. `record_golden` imports the registry, so it needs the
-    # package importable; the metadata check above does not.
-    golden, schemas = record_golden()
-    outputs[GOLDEN] = golden
-    outputs[SCHEMAS_RS] = schemas
+    # The registry golden is Python's own dump, schemas included. It is
+    # checked on --check as well as written, so a model change that alters a
+    # schema cannot pass CI while the Rust side still derives the old one.
+    # `record_golden` imports the registry, so it needs the package
+    # importable; the metadata check above does not.
+    outputs[GOLDEN] = record_golden()
     if check:
         # Drift fails here, at the Python source, rather than waiting for
         # someone to remember to regenerate. The Rust test checks the same
