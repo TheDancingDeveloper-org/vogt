@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use crate::actors::{self, ActorClass};
 use crate::application::context::{AppContext, Built};
+use crate::application::services::preferences::InboxSavedFilter;
 use crate::application::services::{context_parts, dispatch, now_of, write_context};
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{
@@ -50,6 +51,53 @@ pub fn inbox_snooze_op(built: &Built, params: Value) -> Result<Value, VogtError>
 
 pub fn inbox_restore_op(built: &Built, params: Value) -> Result<Value, VogtError> {
     dispatch!(built, inbox_restore, params)
+}
+
+/// The Inbox badge as `place.metrics` reads it: the active count, and the
+/// count under the caller's saved filter (`filtered`). It is the length the
+/// Inbox list shows under the same filter, without the coverage and engine
+/// reads `inbox.list` adds. A snooze that has run out counts as active.
+pub(crate) fn inbox_badge<C, I>(
+    ctx: &AppContext<C, I>,
+    saved: Option<&InboxSavedFilter>,
+) -> Result<(i64, i64), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let (declared, observed, _, _, _, config) = context_parts(ctx);
+    let view = declared.read()?;
+    let mut entries = collect(ctx, observed, &view, config)?;
+    let triage = view.inbox_triage_by_keys(
+        &entries
+            .iter()
+            .map(|entry| text_of(entry, "entry_key"))
+            .collect::<Vec<_>>(),
+    )?;
+    for entry in &mut entries {
+        *entry = apply_triage(ctx, &triage, entry.clone());
+    }
+    let moment = now_of(&ctx.clock);
+    let active = ["active".to_string()];
+    let active_total = entries
+        .iter()
+        .filter(|entry| triage_matches(entry, &active, moment))
+        .count() as i64;
+    let filtered = match saved {
+        None => active_total,
+        Some(saved) => entries
+            .iter()
+            .filter(|entry| {
+                saved
+                    .sources
+                    .as_ref()
+                    .is_none_or(|wanted| wanted.contains(&text_of(entry, "source")))
+                    && triage_matches(entry, &saved.triage_states, moment)
+                    && actor_matches(entry, &saved.actor)
+            })
+            .count() as i64,
+    };
+    Ok((filtered, active_total))
 }
 
 fn inbox_list<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
