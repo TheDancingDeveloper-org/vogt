@@ -145,6 +145,23 @@ impl EngineClient {
         if let Some(work_item) = &spec.work_item {
             body.insert("work_item".to_string(), Value::String(work_item.clone()));
         }
+        if let Some(account) = &spec.account {
+            body.insert("account".to_string(), Value::String(account.clone()));
+        }
+        if let Some(companion) = &spec.companion {
+            body.insert("companion".to_string(), Value::String(companion.clone()));
+        }
+        // Policy and worktree are sent only when they carry something, as the
+        // Python client does; a budget is sent even when empty (WI-1245).
+        if let Some(policy) = spec.policy.as_ref().filter(|value| non_empty(value)) {
+            body.insert("policy".to_string(), policy.clone());
+        }
+        if let Some(budget) = &spec.budget {
+            body.insert("budget".to_string(), budget.clone());
+        }
+        if let Some(worktree) = spec.worktree.as_ref().filter(|value| non_empty(value)) {
+            body.insert("worktree".to_string(), worktree.clone());
+        }
         Ok(EngineSession::from_payload(&self.call(
             "/api/sessions",
             "POST",
@@ -155,8 +172,35 @@ impl EngineClient {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<EngineSession>, VogtError> {
-        let payload = self.call("/api/sessions", "GET", None, false, None)?;
-        Ok(rows(&payload).map(EngineSession::from_payload).collect())
+        Ok(self.list_sessions_counted(false)?.0)
+    }
+
+    /// The engine's sessions, and how many the default list hides (WI-1289).
+    /// `include_hidden` asks for the aged-out rows as well. The engine answers
+    /// `{sessions, hidden_count}`; an older engine answers a bare list and says
+    /// nothing about what it hid, so the count is 0 there.
+    pub fn list_sessions_counted(
+        &self,
+        include_hidden: bool,
+    ) -> Result<(Vec<EngineSession>, u64), VogtError> {
+        let path = if include_hidden {
+            "/api/sessions?include=hidden"
+        } else {
+            "/api/sessions"
+        };
+        let payload = self.call(path, "GET", None, false, None)?;
+        let (listed, hidden) = match payload.as_object() {
+            Some(object) => (
+                object.get("sessions").cloned().unwrap_or(Value::Null),
+                object
+                    .get("hidden_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            ),
+            None => (payload, 0),
+        };
+        let sessions = rows(&listed).map(EngineSession::from_payload).collect();
+        Ok((sessions, hidden))
     }
 
     /// Every live and hibernated session with its screen's last lines, in one
@@ -550,11 +594,18 @@ impl EngineClient {
         session_id: &str,
         reason: Option<&str>,
         allow_shell: bool,
+        superseded_by: Option<&str>,
     ) -> Result<Option<EngineSession>, VogtError> {
         let mut body = Map::new();
         body.insert("allow_shell".to_string(), Value::Bool(allow_shell));
         if let Some(reason) = reason.filter(|text| !text.is_empty()) {
             body.insert("reason".to_string(), Value::String(reason.to_string()));
+        }
+        if let Some(successor) = superseded_by.filter(|text| !text.is_empty()) {
+            body.insert(
+                "superseded_by".to_string(),
+                Value::String(successor.to_string()),
+            );
         }
         let payload = self.call(
             &session_path(session_id, "/hibernate"),
@@ -572,11 +623,15 @@ impl EngineClient {
         &self,
         session_id: &str,
         env: Option<&[(String, String)]>,
+        force: bool,
     ) -> Result<Option<EngineSession>, VogtError> {
         let mut body = Map::new();
         if let Some(env) = env.filter(|pairs| !pairs.is_empty()) {
             let pairs: Vec<Value> = env.iter().map(|(k, v)| serde_json::json!([k, v])).collect();
             body.insert("env".to_string(), Value::Array(pairs));
+        }
+        if force {
+            body.insert("force".to_string(), Value::Bool(true));
         }
         let payload = self.call(
             &session_path(session_id, "/wake"),
@@ -1030,6 +1085,17 @@ pub struct CreateSession {
     pub autopilot: bool,
     pub role: String,
     pub work_item: Option<String>,
+    /// A Claude Code account name from the engine's allowlist.
+    pub account: Option<String>,
+    /// The standing guide written beside the brief; the engine writes the text.
+    pub companion: Option<String>,
+    /// The project's agent policy object. Sent only when non-empty.
+    pub policy: Option<Value>,
+    /// The session's limits. `Some({})` is "no limits", which the engine reads
+    /// differently from `None` (a start that named no budget at all).
+    pub budget: Option<Value>,
+    /// A worktree to cut and start in. Sent only when non-empty.
+    pub worktree: Option<Value>,
 }
 
 impl CreateSession {
@@ -1048,6 +1114,11 @@ impl CreateSession {
             autopilot: false,
             role: "worker".to_string(),
             work_item: None,
+            account: None,
+            companion: None,
+            policy: None,
+            budget: None,
+            worktree: None,
         }
     }
 }
@@ -1168,6 +1239,9 @@ pub struct EngineSession {
     pub account: Option<String>,
     /// The engine tailer's own economics reading, when it sent an object.
     pub economics: Option<serde_json::Map<String, Value>>,
+    /// The session's engine-enforced limits, when it sent an object. Absent
+    /// means no budget; the core does not invent one.
+    pub budget: Option<serde_json::Map<String, Value>>,
 }
 
 impl EngineSession {
@@ -1222,6 +1296,7 @@ impl EngineSession {
             stop_reason: optional_str(stop.and_then(|stop| stop.get("reason"))),
             account: optional_str(get("account")),
             economics: get("economics").and_then(Value::as_object).cloned(),
+            budget: get("budget").and_then(Value::as_object).cloned(),
         }
     }
 }
@@ -1256,6 +1331,8 @@ pub struct EngineHibernation {
     pub trigger: String,
     pub resumable: bool,
     pub reason: Option<String>,
+    /// The session this one's work was handed to, when the hibernate named one.
+    pub superseded_by: Option<String>,
 }
 
 impl EngineHibernation {
@@ -1266,6 +1343,7 @@ impl EngineHibernation {
             trigger: string_field(object, "trigger"),
             resumable: object.get("resumable") != Some(&Value::Bool(false)),
             reason: optional_str(object.get("reason")),
+            superseded_by: optional_str(object.get("superseded_by")),
         })
     }
 }
@@ -1699,6 +1777,16 @@ fn rows(payload: &Value) -> impl Iterator<Item = &Value> {
         .into_iter()
         .flatten()
         .filter(|row| row.is_object())
+}
+
+/// True for an object or array that holds something; a scalar is not "empty".
+fn non_empty(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => !object.is_empty(),
+        Value::Array(array) => !array.is_empty(),
+        Value::Null => false,
+        _ => true,
+    }
 }
 
 fn string_list(values: &[Value]) -> Vec<String> {
@@ -2326,6 +2414,96 @@ mod tests {
         assert!(sent.contains(r#""cwd":"/proj""#));
         assert!(!sent.contains("permission_mode"));
         assert!(!sent.contains("role"));
+    }
+
+    #[test]
+    fn create_session_sends_an_empty_budget_but_no_empty_policy_or_worktree() {
+        let (seen, transport) = scripted(200, r#"{"id":"s","name":"n","cwd":"/proj"}"#);
+        let mut spec = CreateSession::new("n", "/proj");
+        spec.budget = Some(serde_json::json!({}));
+        spec.policy = Some(serde_json::json!({}));
+        spec.worktree = Some(serde_json::json!({}));
+        spec.account = Some("work".to_string());
+        spec.companion = Some("guide text".to_string());
+        client(transport).create_session(&spec).unwrap();
+        let sent = &seen.lock().unwrap()[0];
+        assert!(sent.contains(r#""budget":{}"#));
+        assert!(sent.contains(r#""account":"work""#));
+        assert!(sent.contains(r#""companion":"guide text""#));
+        assert!(!sent.contains("policy"));
+        assert!(!sent.contains("worktree"));
+    }
+
+    #[test]
+    fn create_session_sends_a_policy_and_worktree_that_carry_something() {
+        let (seen, transport) = scripted(200, r#"{"id":"s","name":"n","cwd":"/proj"}"#);
+        let mut spec = CreateSession::new("n", "/proj");
+        spec.policy = Some(serde_json::json!({"forbidden_text": ["x"]}));
+        spec.worktree = Some(serde_json::json!({"branch": "wi-1"}));
+        client(transport).create_session(&spec).unwrap();
+        let sent = &seen.lock().unwrap()[0];
+        assert!(sent.contains(r#""policy":{"forbidden_text":["x"]}"#));
+        assert!(sent.contains(r#""worktree":{"branch":"wi-1"}"#));
+    }
+
+    #[test]
+    fn a_session_list_reads_the_object_shape_and_counts_what_it_hides() {
+        let body = r#"{"sessions":[{"id":"s1","name":"one","cwd":"/w"}],"hidden_count":4}"#;
+        let (seen, transport) = scripted(200, body);
+        let (sessions, hidden) = client(transport).list_sessions_counted(false).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "s1");
+        assert_eq!(hidden, 4);
+        assert_eq!(
+            seen.lock().unwrap()[0].split(' ').nth(1),
+            Some("http://engine/api/sessions")
+        );
+    }
+
+    #[test]
+    fn the_object_shape_list_is_not_empty_and_include_hidden_asks_for_the_rows() {
+        let body = r#"{"sessions":[{"id":"s1","name":"one","cwd":"/w"}],"hidden_count":0}"#;
+        let (seen, transport) = scripted(200, body);
+        let (sessions, _) = client(transport).list_sessions_counted(true).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(seen.lock().unwrap()[0].contains("/api/sessions?include=hidden"));
+    }
+
+    #[test]
+    fn a_bare_list_from_an_older_engine_counts_nothing_hidden() {
+        let (_, transport) = scripted(200, r#"[{"id":"s1","name":"one","cwd":"/w"}]"#);
+        let (sessions, hidden) = client(transport).list_sessions_counted(false).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(hidden, 0);
+    }
+
+    #[test]
+    fn a_session_carries_its_budget_and_a_hibernation_its_successor() {
+        let (_, transport) = scripted(
+            200,
+            r#"{"id":"s1","name":"one","cwd":"/w","budget":{"max_usd":2},"hibernation":{"at":"t","trigger":"manual","superseded_by":"s2"}}"#,
+        );
+        let session = client(transport).get_session("s1").unwrap().unwrap();
+        assert_eq!(session.budget.as_ref().unwrap()["max_usd"], 2);
+        let hibernation = session.hibernation.unwrap();
+        assert_eq!(hibernation.superseded_by.as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn hibernate_sends_its_successor_and_wake_sends_force_only_when_asked() {
+        let (seen, transport) = scripted(200, r#"{"id":"s1","name":"one","cwd":"/w"}"#);
+        client(transport)
+            .hibernate_session("s1", Some("handed on"), false, Some("s2"))
+            .unwrap();
+        assert!(seen.lock().unwrap()[0].contains(r#""superseded_by":"s2""#));
+
+        let (seen, transport) = scripted(200, r#"{"id":"s1","name":"one","cwd":"/w"}"#);
+        client(transport).wake_session("s1", None, true).unwrap();
+        assert!(seen.lock().unwrap()[0].contains(r#""force":true"#));
+
+        let (seen, transport) = scripted(200, r#"{"id":"s1","name":"one","cwd":"/w"}"#);
+        client(transport).wake_session("s1", None, false).unwrap();
+        assert!(!seen.lock().unwrap()[0].contains("force"));
     }
 
     #[test]

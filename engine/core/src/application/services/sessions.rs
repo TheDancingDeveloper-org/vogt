@@ -1744,7 +1744,7 @@ where
         )));
     }
     let hibernated = engine
-        .hibernate_session(&engine_id, Some(&reason), params.allow_shell)?
+        .hibernate_session(&engine_id, Some(&reason), params.allow_shell, None)?
         .ok_or_else(|| {
             VogtError::NotFound(format!(
                 "the engine has no session {}, or predates hibernation (no POST /api/sessions/{{id}}/hibernate)",
@@ -2646,9 +2646,11 @@ where
         return Ok(SessionResult { session: summary });
     }
     let Some(session) = session else {
-        let woken = engine.wake_session(engine_id, None)?.ok_or_else(|| {
-            VogtError::NotFound(format!("the engine has no session {}", py_repr(engine_id)))
-        })?;
+        let woken = engine
+            .wake_session(engine_id, None, false)?
+            .ok_or_else(|| {
+                VogtError::NotFound(format!("the engine has no session {}", py_repr(engine_id)))
+            })?;
         let detail = json!({"engine_session_id": engine_id, "linked": false});
         let mut writing = write_of(ctx);
         audited_action(
@@ -2674,9 +2676,11 @@ where
     let scopes = session_scopes(ctx)?;
     let (secret, token_hash) = minted_token()?;
     let env = session_env(ctx, &session.id, &secret, None);
-    let woken = engine.wake_session(engine_id, Some(&env))?.ok_or_else(|| {
-        VogtError::NotFound(format!("the engine has no session {}", py_repr(engine_id)))
-    })?;
+    let woken = engine
+        .wake_session(engine_id, Some(&env), false)?
+        .ok_or_else(|| {
+            VogtError::NotFound(format!("the engine has no session {}", py_repr(engine_id)))
+        })?;
     let conversation_id = current.conversation_id.clone();
     let engine_session_id = engine_id.clone();
     let session_id = session.id.clone();
