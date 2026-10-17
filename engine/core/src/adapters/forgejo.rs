@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::adapters::forge::{ForgeResponse, ForgeTransport};
+use crate::adapters::forge::{ForgeResponse, ForgeTransport, WriteMethod};
 use crate::errors::VogtError;
 
 pub const USER_AGENT: &str = "vogt";
@@ -92,22 +92,23 @@ impl ForgejoClient {
 
     /// Make a change upstream. POST and PATCH only: every call site that
     /// changes somebody else's data is greppable, and there is no DELETE.
-    pub fn send(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, VogtError> {
-        if method != "POST" && method != "PATCH" {
-            return Err(VogtError::ForgejoUnavailable(format!(
-                "{method} is not an additive operation; write-back is forward-only"
-            )));
-        }
+    pub fn send(
+        &self,
+        method: WriteMethod,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, VogtError> {
+        let verb = method.as_str();
         let url = self.url(path, &[]);
         let encoded = body.map(|value| value.to_string()).unwrap_or_default();
         let (status, response, _) =
-            self.fetch(&url, &self.headers(true), encoded.as_bytes(), method)?;
+            self.fetch(&url, &self.headers(true), encoded.as_bytes(), verb)?;
         if status == 404 {
             return Ok(Value::Null);
         }
         if status >= 400 {
             return Err(VogtError::ForgejoUnavailable(format!(
-                "{} returned {status} for {method} {path}",
+                "{} returned {status} for {verb} {path}",
                 self.host
             )));
         }
@@ -116,7 +117,7 @@ impl ForgejoClient {
         }
         serde_json::from_slice(&response).map_err(|_| {
             VogtError::ForgejoUnavailable(format!(
-                "{} answered {method} {path} with something that is not JSON",
+                "{} answered {verb} {path} with something that is not JSON",
                 self.host
             ))
         })
@@ -236,7 +237,12 @@ impl ForgeTransport for ForgejoClient {
         ForgejoClient::identity(self)
     }
 
-    fn send(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, VogtError> {
+    fn send(
+        &self,
+        method: WriteMethod,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, VogtError> {
         ForgejoClient::send(self, method, path, body)
     }
 }
@@ -366,11 +372,11 @@ mod tests {
     }
 
     #[test]
-    fn send_refuses_anything_but_post_and_patch() {
-        let error = client(answering(200, b"{}"))
-            .send("DELETE", "/repos/a/b", None)
-            .unwrap_err();
-        assert!(error.to_string().contains("forward-only"), "{error}");
+    fn send_answers_the_verb_it_was_given() {
+        let sent = client(answering(200, b"{}"))
+            .send(WriteMethod::Patch, "/repos/a/b", None)
+            .unwrap();
+        assert_eq!(sent, serde_json::json!({}));
     }
 
     #[test]
