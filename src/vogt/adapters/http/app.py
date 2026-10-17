@@ -88,14 +88,14 @@ def build_app(
 
     for operation in active_registry.for_transport("http"):
         app.add_api_route(
-            f"{API_PREFIX}{operation.route.path}",
+            f"{API_PREFIX}{operation.http_route.path}",
             _endpoint_for(
                 operation,
                 factory,
                 authorize_request=authorize_request,
                 writes_enabled=writes_enabled,
             ),
-            methods=[operation.route.method],
+            methods=[operation.http_route.method],
             name=operation.name,
             summary=operation.summary,
             response_model=operation.result_model,
@@ -183,7 +183,7 @@ def _endpoint_for(
     """
     del writes_enabled  # the grant carries it; kept for call-site clarity
     params_model = operation.params_model
-    is_read = operation.route.method == "GET"
+    is_read = operation.http_route.method == "GET"
     annotation: Any = Annotated[params_model, Query()] if is_read else params_model
 
     # Offload the synchronous handler off the event loop. FastAPI runs
@@ -213,7 +213,7 @@ def _endpoint_for(
                 mutating=operation.mutating,
                 transport="http",
             )
-        if is_conditional_read(operation.name, method=operation.route.method):
+        if is_conditional_read(operation.name, method=operation.http_route.method):
             # This is intentionally after authentication and authorization:
             # an old validator must never turn a refused request into a 304.
             with ctx.declared.read() as view:

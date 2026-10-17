@@ -8,6 +8,7 @@ hand-written surfaces.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import textwrap
 from typing import Any
@@ -70,6 +71,17 @@ def test_the_shipped_registry_builds() -> None:
 def test_duplicate_names_are_refused() -> None:
     with pytest.raises(RegistryError, match="duplicate operation name"):
         OperationRegistry([_operation("thing"), _operation("thing")])
+
+
+def test_clone_is_local_only_and_declares_no_route() -> None:
+    assert default_registry().get("clone").route is None
+    assert "clone" not in {op.name for op in default_registry().for_transport("http")}
+
+
+def test_an_http_operation_must_declare_a_route() -> None:
+    operation = dataclasses.replace(_operation("thing"), route=None)
+    with pytest.raises(RegistryError, match="declares no route"):
+        OperationRegistry([operation])
 
 
 def test_two_operations_cannot_claim_one_route() -> None:
@@ -147,7 +159,7 @@ def test_every_operation_declares_a_scope_and_a_summary() -> None:
 
 def test_read_operations_use_get_and_writes_do_not() -> None:
     for operation in default_registry():
-        if operation.mutating:
+        if operation.mutating and operation.route is not None:
             assert operation.route.method != "GET", (
                 f"{operation.name} mutates behind GET"
             )

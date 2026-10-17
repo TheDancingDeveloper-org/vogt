@@ -1845,7 +1845,9 @@ def build_operations() -> list[Operation[Any, Any]]:
             params_model=CloneParams,
             result_model=CloneResult,
             handler=services.clone,
-            route=HttpRoute("POST", "/instance/clone"),
+            # No REST route: a clone replaces the live stores from a path on the
+            # server's filesystem, so it is an operator action at the machine.
+            route=None,
             cli=CliBinding(("clone",)),
         ),
         Operation(

@@ -906,12 +906,11 @@ pub fn build_operations() -> Vec<Operation> {
             HttpRoute::new(HttpMethod::Post, "/instance/restore"),
             CliBinding::new(&["restore"]),
         ),
-        Operation::new(
+        Operation::local_only(
             "clone",
             "Restore another instance's backup here as a copy: keep this instance's id and credentials, revoke the source's tokens, disarm forge write-back, never copy push subscriptions.",
             Scope::Admin,
             true,
-            HttpRoute::new(HttpMethod::Post, "/instance/clone"),
             CliBinding::new(&["clone"]),
         ),
         Operation::new(

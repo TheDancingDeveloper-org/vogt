@@ -85,14 +85,16 @@ def _operations() -> list[dict[str, object]]:
         if not isinstance(func, ast.Name) or func.id != "Operation":
             continue
         kw = {keyword.arg: keyword.value for keyword in node.keywords}
+        # `route=None` is an operation with no REST route, not a call to parse.
+        routeless = isinstance(kw["route"], ast.Constant) and kw["route"].value is None
         found.append(
             {
                 "name": ast.literal_eval(kw["name"]),
                 "summary": ast.literal_eval(kw["summary"]),
                 "scope": ast.literal_eval(kw["scope"]),
                 "mutating": ast.literal_eval(kw["mutating"]),
-                "method": ast.literal_eval(_arg(kw["route"], 0)),
-                "path": ast.literal_eval(_arg(kw["route"], 1)),
+                "method": None if routeless else ast.literal_eval(_arg(kw["route"], 0)),
+                "path": None if routeless else ast.literal_eval(_arg(kw["route"], 1)),
                 "cli": list(ast.literal_eval(_arg(kw["cli"], 0))),
             }
         )
@@ -105,15 +107,25 @@ def render_operations_rs(operations: list[dict[str, object]]) -> str:
         parts = operation["cli"]
         assert isinstance(parts, list)
         cli = ", ".join(json.dumps(part) for part in parts)
+        if operation["method"] is None:
+            # No REST route: the constructor takes none, so the operation cannot
+            # be mounted by accident.
+            constructor = "Operation::local_only("
+            route = ""
+        else:
+            constructor = "Operation::new("
+            route = (
+                "            HttpRoute::new("
+                f"HttpMethod::{METHODS[operation['method']]}, "  # type: ignore[index]
+                f"{json.dumps(operation['path'])}),\n"
+            )
         lines.append(
-            "        Operation::new(\n"
+            f"        {constructor}\n"
             f"            {json.dumps(operation['name'])},\n"
             f"            {json.dumps(operation['summary'])},\n"
             f"            Scope::{SCOPES[operation['scope']]},\n"  # type: ignore[index]
             f"            {str(operation['mutating']).lower()},\n"
-            "            HttpRoute::new("
-            f"HttpMethod::{METHODS[operation['method']]}, "  # type: ignore[index]
-            f"{json.dumps(operation['path'])}),\n"
+            f"{route}"
             f"            CliBinding::new(&[{cli}]),\n"
             "        ),\n"
         )

@@ -1420,8 +1420,8 @@ def _via_http(context: AppContext, name: str, params: dict[str, Any]) -> Any:
     registry = default_registry()
     operation = registry.get(name)
     client = TestClient(build_app(registry=registry, context_factory=lambda: context))
-    url = f"{API_PREFIX}{operation.route.path}"
-    if operation.route.method == "GET":
+    url = f"{API_PREFIX}{operation.http_route.path}"
+    if operation.http_route.method == "GET":
         response = client.get(url, params=params)
     else:
         response = client.post(url, json=params)
@@ -1516,7 +1516,12 @@ def test_every_operation_appears_on_exactly_its_expected_surfaces() -> None:
 
     for operation in registry:
         expected = registry.transports_for(operation.name)
-        route_key = (f"{API_PREFIX}{operation.route.path}", operation.route.method)
+        # A local-only operation may carry no route; then nothing is mounted.
+        route_key = (
+            (f"{API_PREFIX}{operation.route.path}", operation.route.method)
+            if operation.route is not None
+            else None
+        )
 
         assert (route_key in http_routes) is ("http" in expected), (
             f"{operation.name}: REST presence does not match its exclusion state"

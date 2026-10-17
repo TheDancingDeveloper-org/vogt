@@ -547,7 +547,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
     };
     let found = state.registry.for_transport(Transport::Http);
     let matched = found.iter().find(|operation| {
-        operation.route.method == wanted && operation.route.path == operation_path
+        operation.http_route().method == wanted && operation.http_route().path == operation_path
     });
     if matched.is_none() {
         // Starlette's `redirect_slashes` (FastAPI's default), and only when the
@@ -564,7 +564,10 @@ async fn dispatch<C: Clock, I: IdFactory>(
         );
         if bare.len() != operation_path.len()
             && !bare.is_empty()
-            && (hand_owned || found.iter().any(|operation| operation.route.path == bare))
+            && (hand_owned
+                || found
+                    .iter()
+                    .any(|operation| operation.http_route().path == bare))
         {
             let scheme = request_scheme(&headers_scheme);
             let mut target = format!("{scheme}://{host}{API_PREFIX}{bare}");
@@ -582,7 +585,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
         // the verbs the path does accept. An unknown path stays 404.
         if found
             .iter()
-            .any(|operation| operation.route.path == operation_path)
+            .any(|operation| operation.http_route().path == operation_path)
         {
             return method_not_allowed(&state.registry, operation_path);
         }
@@ -598,7 +601,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
     // A read takes its arguments from the query string and a write from the body,
     // and FastAPI prefixes `loc` with that source: `["query", "sources", "1"]`,
     // `["body", "bogus"]`.
-    let source = if operation.route.method == HttpMethod::Get {
+    let source = if operation.http_route().method == HttpMethod::Get {
         "query"
     } else {
         "body"
@@ -686,7 +689,7 @@ fn parse_params(
     content_type: &Option<axum::http::HeaderValue>,
     body: &[u8],
 ) -> Result<serde_json::Value, VogtError> {
-    if operation.route.method == HttpMethod::Get {
+    if operation.http_route().method == HttpMethod::Get {
         return Ok(query_object(operation.name, query));
     }
     // A write with no body is the empty object the validator fills defaults into.
@@ -1503,8 +1506,8 @@ fn method_not_allowed(registry: &OperationRegistry, operation_path: &str) -> Res
         _ => registry
             .for_transport(Transport::Http)
             .into_iter()
-            .find(|operation| operation.route.path == operation_path)
-            .map(|operation| match operation.route.method {
+            .find(|operation| operation.http_route().path == operation_path)
+            .map(|operation| match operation.http_route().method {
                 HttpMethod::Get => "GET",
                 HttpMethod::Post => "POST",
                 HttpMethod::Patch => "PATCH",
@@ -1977,6 +1980,15 @@ mod tests {
         let running = serve(false);
         let (status, _) = request(running.addr, "GET", "/api/instance/init", None);
         assert_eq!(status, 404, "init is local-only");
+    }
+
+    #[test]
+    fn clone_has_no_rest_route() {
+        // It once carried POST /instance/clone. The route is gone from the
+        // registry, so nothing answers there, not even with a 405.
+        let running = serve(false);
+        let (status, body) = post_json(running.addr, "/api/instance/clone", "{}");
+        assert_eq!(status, 404, "{body}");
     }
 
     #[test]
