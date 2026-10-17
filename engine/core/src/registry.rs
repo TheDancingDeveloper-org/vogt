@@ -266,6 +266,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
             Some(crate::application::services::forge_accounts::account_unlink_op)
         }
         "forge.account_link" => Some(crate::application::services::forge_accounts::account_link_op),
+        "forge.onboard" => Some(crate::application::services::forge_onboard::onboard_op),
         "forge.repos" => Some(crate::application::services::forge_repos::repos_op),
         "forge.writeback" => Some(crate::application::services::forge_writeback::writeback_op),
         // The public name is `forge.actions`. `forge.writeback_list` is not a
