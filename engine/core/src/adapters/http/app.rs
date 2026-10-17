@@ -539,7 +539,13 @@ async fn dispatch<C: Clock, I: IdFactory>(
         );
     }
     let Some(operation_path) = path.strip_prefix(API_PREFIX) else {
-        return not_found();
+        // Outside the API prefix nothing is registered for this path, and the
+        // Python app answers Starlette's own 404 body there (`connect` is the
+        // case the parity golden records).
+        return json_response(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"detail": "Not Found"}),
+        );
     };
     let wanted = match method {
         Method::GET => HttpMethod::Get,
