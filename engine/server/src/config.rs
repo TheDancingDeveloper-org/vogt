@@ -474,7 +474,7 @@ pub struct Config {
     /// summary (`resources`). Unset flags nothing; usage is reported either
     /// way.
     pub session_rss_warn_bytes: Option<u64>,
-    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` (off by default): when a session
+    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` (on by default, WI-1750): when a session
     /// is hibernated or stopped and its directory is a linked git worktree,
     /// remove regenerable build output there (`worktree_clean`). Never a
     /// repo's main checkout.
@@ -1203,12 +1203,14 @@ fn engine_env(name: &str) -> std::result::Result<String, std::env::VarError> {
     std::env::var(name)
 }
 
-/// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`: off unless set to a true value.
-/// Unset or blank is off; this removes files, so it is never on by accident.
+/// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`: on unless set to a false value.
+/// Unset or blank is on (WI-1750): a stopped worker's build output otherwise
+/// piles up on the host. Cleanup still fails closed, so it only removes
+/// regenerable output from a linked worktree no live session is using.
 fn parse_worktree_clean(raw: Option<&str>) -> Result<bool> {
     match raw {
         Some(v) if !v.trim().is_empty() => parse_bool_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE", v),
-        _ => Ok(false),
+        _ => Ok(true),
     }
 }
 
@@ -1960,16 +1962,17 @@ mod tests {
 mod prefix_tests {
     use super::*;
 
-    /// Worktree cleanup deletes files, so only an explicit true turns it on.
+    /// Worktree cleanup is on by default (WI-1750); an explicit false is the
+    /// only way to keep build output in place.
     #[test]
-    fn worktree_clean_is_off_unless_asked_for() {
-        assert!(!parse_worktree_clean(None).unwrap());
-        assert!(!parse_worktree_clean(Some("")).unwrap());
-        assert!(!parse_worktree_clean(Some("  ")).unwrap());
-        assert!(!parse_worktree_clean(Some("0")).unwrap());
-        assert!(!parse_worktree_clean(Some("false")).unwrap());
+    fn worktree_clean_is_on_unless_turned_off() {
+        assert!(parse_worktree_clean(None).unwrap());
+        assert!(parse_worktree_clean(Some("")).unwrap());
+        assert!(parse_worktree_clean(Some("  ")).unwrap());
         assert!(parse_worktree_clean(Some("1")).unwrap());
         assert!(parse_worktree_clean(Some("true")).unwrap());
+        assert!(!parse_worktree_clean(Some("0")).unwrap());
+        assert!(!parse_worktree_clean(Some("false")).unwrap());
         assert!(parse_worktree_clean(Some("maybe")).is_err());
     }
 

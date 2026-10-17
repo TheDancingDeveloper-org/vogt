@@ -2034,9 +2034,11 @@ sets `resources.over_threshold` on any session at or over it. The core's
 #### Worktree build output
 
 A finished worker's build output is what fills the host disk: `target/`,
-`node_modules` and `.venv` in a worktree nobody is using. With
-`ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` set, hibernating or stopping a session
-whose directory is a linked git worktree removes those directories. A repo's
+`node_modules` and `.venv` in a worktree nobody is using. Hibernating or
+stopping a session whose directory is a linked git worktree removes those
+directories. This is on by default (WI-1750); set
+`ENGINE_WORKTREE_CLEAN_ON_HIBERNATE=0` to keep them. A session that exits on
+its own, without a stop, is not cleaned until it is stopped or removed. A repo's
 main checkout is never touched — only a directory `git worktree add` created —
 and neither is a symlink or a file git tracks. A `target` directory counts only
 when a `Cargo.toml` sits beside it, so a directory of notes named `target` is
