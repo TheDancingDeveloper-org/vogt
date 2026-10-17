@@ -190,6 +190,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         Arc::clone(&agent_tasks),
         Arc::clone(&push),
         assistant_log.clone(),
+        bus.clone(),
     );
     if assistant.is_some() {
         tracing::info!(model = %cfg.assistant_model, "assistant enabled");
