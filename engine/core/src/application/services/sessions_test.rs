@@ -6,6 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use super::sessions::SessionBudget;
 use super::sessions::{
     list_sessions, start_session, stop_session, ListSessionsParams, StartSessionParams,
     StopSessionParams,
@@ -119,6 +120,10 @@ fn start_params(project: Option<&str>, task: Option<&str>, reason: &str) -> Star
         autopilot: None,
         role: "worker".to_string(),
         purpose: None,
+        review_of: None,
+        budget: None,
+        worktree: None,
+        repo_map: None,
     }
 }
 
@@ -472,4 +477,97 @@ fn a_worker_session_start_records_the_starting_session_and_its_role() {
         started.session.started_by_kind.as_deref(),
         Some("oversight")
     );
+}
+
+/// The summary of the `session.started` event: where the start's audited
+/// facts (purpose, overrides, budget, worktree, repo map) are recorded.
+fn session_start_audit(built: &Built) -> serde_json::Value {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let events = ctx
+        .declared
+        .read()
+        .unwrap()
+        .list_events(0, 100, None)
+        .unwrap();
+    events
+        .into_iter()
+        .find(|event| event.kind == "session.started")
+        .expect("a session.started event")
+        .summary
+}
+
+#[test]
+fn a_profile_sets_budget_worktree_and_repo_map_and_the_audit_records_them() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-7","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let params = with_purpose(start_params(Some("beta"), None, "because"), "implement");
+    start_session(ctx, &params).unwrap();
+    let asked = script.seen.lock().unwrap().join("\n");
+    assert!(asked.contains(r#""turns":120"#), "{asked}");
+    assert!(asked.contains(r#""wall_clock_minutes":90"#), "{asked}");
+    assert!(asked.contains(r#""base_ref":"main""#), "{asked}");
+    let audit = session_start_audit(&built);
+    assert_eq!(audit["purpose"], "implement");
+    assert_eq!(audit["overrides"], serde_json::json!([]));
+    assert_eq!(audit["worktree"], true);
+    assert_eq!(audit["repo_map"], true);
+    assert_eq!(
+        audit["budget"],
+        serde_json::json!({"turns": 120, "wall_clock_minutes": 90})
+    );
+}
+
+#[test]
+fn a_field_the_caller_set_is_listed_as_an_override_in_the_audit() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-8","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = with_purpose(start_params(Some("beta"), None, "because"), "review");
+    params.model = Some("haiku".to_string());
+    params.budget = Some(SessionBudget {
+        turns: Some(7),
+        ..SessionBudget::default()
+    });
+    start_session(ctx, &params).unwrap();
+    let audit = session_start_audit(&built);
+    assert_eq!(audit["overrides"], serde_json::json!(["model", "budget"]));
+    assert_eq!(audit["budget"], serde_json::json!({"turns": 7}));
+    assert_eq!(audit["worktree"], false);
+}
+
+#[test]
+fn a_worker_task_with_no_budget_takes_the_default_limits() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-9","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = start_params(Some("beta"), Some("check the containers"), "because");
+    params.template = Some("claude".to_string());
+    start_session(ctx, &params).unwrap();
+    let audit = session_start_audit(&built);
+    assert_eq!(
+        audit["budget"],
+        serde_json::json!({"turns": 120, "wall_clock_minutes": 90})
+    );
+    assert_eq!(audit["overrides"], serde_json::json!([]));
 }
