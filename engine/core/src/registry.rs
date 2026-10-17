@@ -693,6 +693,17 @@ impl OperationRegistry {
                 )));
             }
         }
+        for name in crate::application::models::DERIVED {
+            if schemas::SCHEMAS
+                .iter()
+                .any(|(recorded, _, _)| recorded == name)
+            {
+                return Err(RegistryError(format!(
+                    "{name} has both a recorded schema and a derived one; regenerate with \
+                     scripts/gen_registry.py"
+                )));
+            }
+        }
         for name in schemas.keys() {
             if !self.contains(name) {
                 return Err(RegistryError(format!(
@@ -778,18 +789,21 @@ fn parsed_schemas() -> &'static HashMap<&'static str, (serde_json::Value, serde_
     use std::sync::LazyLock;
     static PARSED: LazyLock<HashMap<&str, (serde_json::Value, serde_json::Value)>> =
         LazyLock::new(|| {
-            schemas::SCHEMAS
-                .iter()
-                .map(|(name, params, result)| {
+            let recorded = schemas::SCHEMAS.iter().map(|(name, params, result)| {
+                (
+                    *name,
                     (
-                        *name,
-                        (
-                            serde_json::from_str(params).expect("generated params schema is JSON"),
-                            serde_json::from_str(result).expect("generated result schema is JSON"),
-                        ),
-                    )
-                })
-                .collect()
+                        serde_json::from_str(params).expect("generated params schema is JSON"),
+                        serde_json::from_str(result).expect("generated result schema is JSON"),
+                    ),
+                )
+            });
+            // The derived schemas replace the recorded ones for their names;
+            // `validate_schemas` refuses a name in both, so this never shadows.
+            let derived = crate::application::models::derived_schemas()
+                .into_iter()
+                .map(|(name, params, result)| (name, (params, result)));
+            recorded.chain(derived).collect()
         });
     &PARSED
 }

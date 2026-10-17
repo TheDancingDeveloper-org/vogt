@@ -116,6 +116,7 @@ gain tests; it does not move down.
 | test_readonly_mcp_wrappers.py | retired | `engine/deploy/readonly-mcp.sh`. An engine deploy script, not the core. |
 | test_registry.py | ported | `registry.rs` (duplicate names, routes, a required reason, scopes). |
 | test_release_workflow.py | retired | `.github/workflows/release.yml` digest promotion. CI policy, not product behaviour. |
+| test_rust_schemas.py | ported | Derived operation schemas in `application/models.rs` and `registry.rs`, compared with Python's live `registry.dump` by this file, which runs the Rust binary under pytest. |
 | test_scheduler.py | ported | In-process collector schedule in `collectors/sweeper.rs` and `application/collect.rs`. |
 | test_schema_gate.py | ported | Readiness migration gate in `adapters/http/health.rs` and the migrator. |
 | test_serve.py | ported | Serve, health, and MCP-over-HTTP in `main.rs` and `adapters/http`. |
