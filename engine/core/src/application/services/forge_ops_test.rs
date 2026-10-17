@@ -1,17 +1,24 @@
 //! Tests for `forge.link`, `forge.publish` and `forge.import`, and the
 //! native-item gate they share.
 //!
-//! The stand-in forge answers reads only, and it answers 404 to a repository
-//! describe. So these tests cover the refusal paths, which run without a network,
-//! and the link success path, which needs only a credential and no writes. The
-//! publish and import success paths are not reachable through the stand-in.
+//! The refusal paths, the link success path, and the publish and import success
+//! paths. The success paths run against the stand-in forge, which mints the
+//! repository on create and describes `acme/widget`. The clone and the push are
+//! the production functions aimed at a local tree and a local bare remote, since
+//! the real seams carry `github.com` remotes a test cannot reach.
 
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::json;
 
+use crate::adapters::git::{push_branch, CloneOutcome, CloneRequest, PushOutcome, PushRequest};
 use crate::application::context::{build_context, Built};
-use crate::application::services::{forge_import, forge_link, forge_publish, work};
+use crate::application::forge_standin::StandInForge;
+use crate::application::services::{
+    forge_import, forge_link, forge_publish, forge_writeback, work,
+};
 use crate::config::VogtConfig;
 use crate::core::{LinkState, Project, SequentialIds, StepClock};
 use crate::errors::VogtError;
@@ -22,6 +29,12 @@ use super::services_test::{moment, opened, principal, unique};
 /// A context whose instance holds a GitHub token file, with the stand-in forge
 /// wired in, so a credential resolves and the forge answers reads.
 fn with_token() -> Built {
+    with_token_on(&StandInForge::one_of_each())
+}
+
+/// As [`with_token`], on a stand-in the test keeps, so it can read back what the
+/// forge was sent.
+fn with_token_on(standin: &StandInForge) -> Built {
     let dir = std::env::temp_dir().join(format!(
         "vogt-forge-ops-{}-{}",
         std::process::id(),
@@ -52,7 +65,7 @@ fn with_token() -> Built {
     let Built::StepSequential(ctx) = built else {
         panic!("expected a step clock");
     };
-    let transport = crate::application::forge_standin::StandInForge::one_of_each().transport();
+    let transport = standin.transport();
     Built::StepSequential(ctx.with_forge_transport(move |url, headers, body, method| {
         transport(url, headers, body, method)
     }))
@@ -294,4 +307,314 @@ fn forge_import_refuses_when_no_credential_can_clone_the_repository() {
         }
         other => panic!("unexpected {other:?}"),
     }
+}
+
+// -- the success paths: publish and import --------------------------------
+
+/// What the thread-local seams saw during one test. The production clone and push
+/// are plain functions, so they cannot capture a test's state; each test runs on
+/// its own thread, so a thread-local is that test's alone.
+#[derive(Default)]
+struct Seams {
+    bare_remote: Option<PathBuf>,
+    pushes: Vec<(String, Option<String>)>,
+    clones: Vec<(String, Option<String>)>,
+}
+
+thread_local! {
+    static SEAMS: RefCell<Seams> = RefCell::new(Seams::default());
+}
+
+/// The clone seam: writes a one-file tree where a clone would land and answers the
+/// revision and default branch a clone would report. No network.
+fn clone_to_a_tree(request: &CloneRequest) -> Result<CloneOutcome, VogtError> {
+    SEAMS.with(|seams| {
+        seams
+            .borrow_mut()
+            .clones
+            .push((request.remote.clone(), request.token.clone()));
+    });
+    std::fs::create_dir_all(&request.destination).unwrap();
+    std::fs::write(request.destination.join("README.md"), "hi\n").unwrap();
+    Ok(CloneOutcome {
+        destination: request.destination.clone(),
+        revision: Some("c".repeat(40)),
+        default_branch: Some("main".to_owned()),
+        reused: false,
+    })
+}
+
+/// The push seam: the real plain `push_branch`, aimed at the bare remote the test
+/// made. The production remote is `github.com`, which a test cannot reach.
+fn push_to_bare_remote(request: &PushRequest) -> Result<PushOutcome, VogtError> {
+    let bare = SEAMS.with(|seams| {
+        let mut seams = seams.borrow_mut();
+        seams
+            .pushes
+            .push((request.remote.clone(), request.token.clone()));
+        seams.bare_remote.clone()
+    });
+    let bare = bare.expect("a test sets its bare remote before publishing");
+    push_branch(&PushRequest {
+        root: request.root.clone(),
+        remote: bare.display().to_string(),
+        branch: request.branch.clone(),
+        token: None,
+        helper_dir: None,
+    })
+}
+
+/// The built context with the clone and push seams swapped in for the test.
+fn with_clone_and_push_seams(built: Built) -> Built {
+    let Built::StepSequential(mut ctx) = built else {
+        panic!("expected a step clock");
+    };
+    ctx.cloner = clone_to_a_tree;
+    ctx.pusher = push_to_bare_remote;
+    Built::StepSequential(ctx)
+}
+
+fn git(args: &[&str], cwd: &Path) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// A fresh checkout on `main` with one commit and a clean tree, and the revision
+/// of that commit.
+fn a_publishable_checkout(name: &str) -> (PathBuf, String) {
+    let root = std::env::temp_dir()
+        .join(format!(
+            "vogt-forge-ops-{}-{}",
+            std::process::id(),
+            unique()
+        ))
+        .join(name);
+    std::fs::create_dir_all(&root).unwrap();
+    git(&["init", "-q", "-b", "main"], &root);
+    std::fs::write(root.join("README.md"), "publish me\n").unwrap();
+    git(&["add", "."], &root);
+    git(
+        &[
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Forge Test",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        &root,
+    );
+    let revision = git(&["rev-parse", "HEAD"], &root);
+    (root, revision)
+}
+
+/// An empty bare repository to push to, standing in for the new `github.com`
+/// remote. Records it for the push seam.
+fn a_bare_remote(name: &str) -> PathBuf {
+    let bare = std::env::temp_dir()
+        .join(format!(
+            "vogt-forge-ops-{}-{}",
+            std::process::id(),
+            unique()
+        ))
+        .join(format!("{name}.git"));
+    std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+    git(
+        &["init", "-q", "--bare", &bare.display().to_string()],
+        bare.parent().unwrap(),
+    );
+    SEAMS.with(|seams| seams.borrow_mut().bare_remote = Some(bare.clone()));
+    bare
+}
+
+#[test]
+fn forge_publish_creates_the_repo_pushes_it_and_links_the_project() {
+    let standin = StandInForge::one_of_each();
+    let built = with_clone_and_push_seams(with_token_on(&standin));
+    let (root, revision) = a_publishable_checkout("demo");
+    let bare = a_bare_remote("demo");
+    insert_project(&built, "demo", None, &root.display().to_string(), false);
+
+    let published =
+        forge_publish::publish_op(&built, json!({"project": "demo", "reason": "publish it"}))
+            .unwrap();
+
+    assert_eq!(
+        published["repo"], "https://github.com/acme/demo",
+        "{published}"
+    );
+    assert_eq!(published["branch"], "main");
+    assert_eq!(published["revision"], revision);
+    assert_eq!(published["migrated"], json!([]));
+    assert_eq!(published["project"]["link_state"], "linked", "{published}");
+    assert_eq!(
+        published["project"]["repo_url"],
+        "https://github.com/acme/demo"
+    );
+    assert_eq!(project_link_state(&built, "demo"), "linked");
+    assert_eq!(git(&["rev-parse", "refs/heads/main"], &bare), revision);
+
+    let creates = standin.creates();
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert_eq!(
+        creates[0]["name"], "demo",
+        "the name defaults to the project slug"
+    );
+    assert_eq!(creates[0]["private"], true, "private by default");
+    assert_eq!(creates[0]["auto_init"], false, "no generated first commit");
+
+    let pushes = SEAMS.with(|seams| seams.borrow().pushes.clone());
+    assert_eq!(
+        pushes,
+        vec![(
+            "https://github.com/acme/demo.git".to_owned(),
+            Some("secret-token".to_owned())
+        )],
+        "one push, to the plain clone URL, authenticated per invocation"
+    );
+}
+
+#[test]
+fn forge_publish_takes_the_name_and_visibility_the_caller_gives() {
+    let standin = StandInForge::one_of_each();
+    let built = with_clone_and_push_seams(with_token_on(&standin));
+    let (root, _) = a_publishable_checkout("demo");
+    let _bare = a_bare_remote("renamed");
+    insert_project(&built, "demo", None, &root.display().to_string(), false);
+
+    let published = forge_publish::publish_op(
+        &built,
+        json!({
+            "project": "demo",
+            "name": "renamed",
+            "private": false,
+            "description": "a demo",
+            "reason": "publish it",
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        published["repo"], "https://github.com/acme/renamed",
+        "{published}"
+    );
+    assert_eq!(
+        published["project"]["repo_url"],
+        "https://github.com/acme/renamed"
+    );
+    let creates = standin.creates();
+    assert_eq!(creates[0]["name"], "renamed");
+    assert_eq!(creates[0]["private"], false);
+    assert_eq!(creates[0]["description"], "a demo");
+}
+
+/// The picker pick: named, cloned under the file token, registered linked, and
+/// its forge state read.
+#[test]
+fn forge_import_clones_registers_and_consolidates_under_the_file_token() {
+    let standin = StandInForge::one_of_each();
+    let built = with_clone_and_push_seams(with_token_on(&standin));
+
+    let imported = forge_import::import_op(
+        &built,
+        json!({"owner": "acme", "name": "widget", "reason": "import it"}),
+    )
+    .unwrap();
+
+    assert_eq!(imported["project"]["link_state"], "linked", "{imported}");
+    assert_eq!(
+        imported["project"]["repo_url"],
+        "https://github.com/acme/widget"
+    );
+    assert_eq!(imported["cloned"], true);
+    assert_eq!(imported["default_branch"], "main");
+    assert_eq!(imported["revision"], "c".repeat(40));
+    assert!(imported["consolidated"].is_object(), "{imported}");
+    assert_eq!(project_link_state(&built, "widget"), "linked");
+
+    let root = PathBuf::from(imported["root_path"].as_str().unwrap());
+    assert!(
+        root.join("README.md").is_file(),
+        "the clone landed at {root:?}"
+    );
+
+    let clones = SEAMS.with(|seams| seams.borrow().clones.clone());
+    assert_eq!(
+        clones,
+        vec![(
+            "https://github.com/acme/widget.git".to_owned(),
+            Some("secret-token".to_owned())
+        )],
+        "cloned under the file token, from the plain clone URL"
+    );
+    assert!(
+        standin
+            .requests()
+            .iter()
+            .any(|request| request.starts_with("GET ") && request.contains("/issues?")),
+        "consolidation read the repository's issues: {:?}",
+        standin.requests()
+    );
+}
+
+/// Linking a project with open native items opens each one upstream, in order,
+/// and only then records the link. The policy permits the creates, so nothing is
+/// refused.
+#[test]
+fn forge_link_migrates_open_native_items_upstream_before_it_links() {
+    let standin = StandInForge::one_of_each();
+    let built = with_token_on(&standin);
+    insert_project(
+        &built,
+        "widget",
+        Some("https://github.com/acme/widget"),
+        "/tmp",
+        false,
+    );
+    forge_writeback::writeback_op(
+        &built,
+        json!({"project": "widget", "policy": "full", "reason": "migrate it"}),
+    )
+    .unwrap();
+    work::create_op(
+        &built,
+        json!({
+            "kind": "chore",
+            "title": "native item",
+            "project": "widget",
+            "local_only": true,
+            "reason": "parity",
+        }),
+    )
+    .unwrap();
+
+    let linked =
+        forge_link::link_op(&built, json!({"project": "widget", "reason": "link it"})).unwrap();
+
+    assert_eq!(linked["project"]["link_state"], "linked", "{linked}");
+    let migrated = linked["migrated"].as_array().expect("migrated is a list");
+    assert_eq!(migrated.len(), 1, "{linked}");
+    assert_eq!(migrated[0]["title"], "native item");
+    assert_eq!(migrated[0]["subject_key"], "gh:acme/widget#8");
+    assert_eq!(project_link_state(&built, "widget"), "linked");
+    assert!(
+        standin
+            .requests()
+            .iter()
+            .any(|request| request == "POST https://api.github.com/repos/acme/widget/issues"),
+        "the native item was created upstream: {:?}",
+        standin.requests()
+    );
 }
