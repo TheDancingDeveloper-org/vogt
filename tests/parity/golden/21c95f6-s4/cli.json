@@ -3248,5 +3248,37 @@
     },
     "exit": 0,
     "operation": "inbox.list"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "preference.set"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "preference.set"
+  },
+  {
+    "body": {
+      "preferences": [
+        {
+          "key": "inbox.filter",
+          "updated_at": "2026-01-02T03:04:05Z",
+          "value": {
+            "actor": "any",
+            "sources": [
+              "ci"
+            ],
+            "triage_states": [
+              "active"
+            ]
+          },
+          "version": 1
+        }
+      ]
+    },
+    "exit": 0,
+    "operation": "preference.get"
   }
 ]

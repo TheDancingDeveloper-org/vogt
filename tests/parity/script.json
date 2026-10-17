@@ -1465,6 +1465,40 @@
     "expect": {
       "exit": 0
     }
+  },
+  {
+    "operation": "preference.set",
+    "params": {
+      "key": "inbox.filter",
+      "value": "{\"sources\": [\"bogus\"]}",
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 1
+    },
+    "why": "B5: an inbox.filter value the Inbox model refuses is refused, not stored"
+  },
+  {
+    "operation": "preference.set",
+    "params": {
+      "key": "inbox.filter",
+      "value": "{\"unknown\": 1}",
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 1
+    },
+    "why": "B5: the saved filter forbids unknown fields"
+  },
+  {
+    "operation": "preference.get",
+    "params": {
+      "key": "inbox.filter"
+    },
+    "expect": {
+      "exit": 0
+    },
+    "why": "B5: a refused write leaves the stored filter as it was"
   }
  ]
 }

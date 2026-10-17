@@ -2898,5 +2898,41 @@
     },
     "is_error": false,
     "operation": "inbox.list"
+  },
+  {
+    "body": {
+      "text": "invalid_preference: invalid inbox.filter value \u2014 sources.0: Input should be 'github', 'drift', 'ci' or 'agent'"
+    },
+    "is_error": true,
+    "operation": "preference.set"
+  },
+  {
+    "body": {
+      "text": "invalid_preference: invalid inbox.filter value \u2014 unknown: Extra inputs are not permitted"
+    },
+    "is_error": true,
+    "operation": "preference.set"
+  },
+  {
+    "body": {
+      "preferences": [
+        {
+          "key": "inbox.filter",
+          "updated_at": "2026-01-02T03:04:25Z",
+          "value": {
+            "actor": "any",
+            "sources": [
+              "ci"
+            ],
+            "triage_states": [
+              "active"
+            ]
+          },
+          "version": 1
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "preference.get"
   }
 ]
