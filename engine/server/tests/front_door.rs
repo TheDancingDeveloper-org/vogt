@@ -68,7 +68,6 @@ struct Forwarded {
 #[derive(Debug, Clone)]
 struct AuditRow {
     actor: String,
-    reason: String,
 }
 
 #[derive(Default)]
@@ -162,7 +161,6 @@ async fn core_handler(
     });
     let who = bearer.as_deref().and_then(|b| identify(&core, b));
     let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let reason = payload["reason"].as_str().unwrap_or_default().to_string();
 
     match (method, uri.path()) {
         (Method::GET, "/api/auth/whoami") => match who {
@@ -217,7 +215,6 @@ async fn core_handler(
                 "label.create".to_string(),
                 AuditRow {
                     actor: w.name.to_string(),
-                    reason,
                 },
             ));
             (AxumStatus::OK, Json(json!({"name": payload["name"]}))).into_response()
@@ -237,7 +234,6 @@ async fn core_handler(
                 "work.create".to_string(),
                 AuditRow {
                     actor: w.name.to_string(),
-                    reason,
                 },
             ));
             (AxumStatus::OK, Json(json!({"id": "work-1"}))).into_response()
