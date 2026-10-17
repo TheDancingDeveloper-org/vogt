@@ -1728,7 +1728,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
     fn insert_project(&mut self, project: &Project) -> Result<(), VogtError> {
         self.view.conn.execute(
             "INSERT INTO projects (id, slug, name, root_path, repo_url, lifecycle_state, current_version, contract_version, compliance_status, compliance_checked_at, agent_policy, contract_adopted_at, write_back, link_state, exclusions, trust_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![project.id, project.slug, project.name, project.root_path, project.repo_url, project.lifecycle_state, project.current_version, project.contract_version, project.compliance_status, project.compliance_checked_at.map(to_iso), crate::decisions::python_json_dumps(&serde_json::json!(project.agent_policy), false), project.contract_adopted_at.map(to_iso), project.write_back, project.link_state, crate::decisions::python_json_dumps(&serde_json::json!(project.exclusions), false), project.trust_state, to_iso(project.created_at), to_iso(project.updated_at)],
+            params![project.id, project.slug, project.name, project.root_path, project.repo_url, project.lifecycle_state, project.current_version, project.contract_version, project.compliance_status, project.compliance_checked_at.map(to_iso), serde_json::to_string(&project.agent_policy).expect("an agent policy is plain data and serialises"), project.contract_adopted_at.map(to_iso), project.write_back, project.link_state, crate::decisions::python_json_dumps(&serde_json::json!(project.exclusions), false), project.trust_state, to_iso(project.created_at), to_iso(project.updated_at)],
         ).map_err(sql_err)?;
         Ok(())
     }

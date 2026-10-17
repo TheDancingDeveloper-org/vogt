@@ -1470,27 +1470,27 @@ impl Project {
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
     #[serde(default)]
+    pub forbidden_text: Vec<String>,
+    #[serde(default)]
+    pub merge_deploys_prod: bool,
+    #[serde(default)]
+    pub main_branches: Vec<String>,
+    #[serde(default)]
     pub base_branch: String,
     #[serde(default)]
     pub commit_identity: String,
     #[serde(default)]
+    pub test_recipe: String,
+    #[serde(default)]
     pub deployed_setup: String,
-    #[serde(default)]
-    pub forbidden_text: Vec<String>,
-    #[serde(default)]
-    pub landing: Option<serde_json::Value>,
-    #[serde(default)]
-    pub main_branches: Vec<String>,
-    #[serde(default)]
-    pub merge_deploys_prod: bool,
-    #[serde(default)]
-    pub review: Option<serde_json::Value>,
     #[serde(default)]
     pub rules: Vec<String>,
     #[serde(default)]
     pub session_wall_clock_minutes: Option<i64>,
     #[serde(default)]
-    pub test_recipe: String,
+    pub landing: Option<serde_json::Value>,
+    #[serde(default)]
+    pub review: Option<serde_json::Value>,
     #[serde(default)]
     pub verification: Option<serde_json::Value>,
 }

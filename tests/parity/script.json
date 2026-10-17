@@ -7,7 +7,7 @@
    "agent-token": "vogt_agent_bootstrap_secret_long_enough_4567",
    "ada-password": "correct horse battery",
    "ada-passphrase": "another passphrase",
-   "broken/.git": "gitdir: {root}/nowhere\n"
+   "instance/repos/broken/.git": "gitdir: {root}/nowhere\n"
   },
   "env": {
    "VOGT_BOOTSTRAP_CORE_TOKEN_FILE": "{root}/core-token",
@@ -182,7 +182,7 @@
    "operation": "project.register",
    "params": {
     "name": "Second",
-    "root_path": "{root}/second",
+    "root_path": "{root}/instance/repos/second",
     "reason": "parity harness"
    },
    "expect": {
@@ -824,7 +824,7 @@
     "auth": "admin",
     "body": {
      "name": "Second",
-     "root_path": "{root}/second",
+     "root_path": "{root}/instance/repos/second",
      "reason": "parity harness"
     }
    },
@@ -834,7 +834,7 @@
    "operation": "project.register",
    "params": {
     "name": "Broken",
-    "root_path": "{root}/broken",
+    "root_path": "{root}/instance/repos/broken",
     "reason": "parity harness"
    },
    "why": "a checkout whose .git cannot be read: git-local fails for this project, so its sweep is partial and coverage says so",
@@ -847,7 +847,7 @@
     "auth": "admin",
     "body": {
      "name": "Broken",
-     "root_path": "{root}/broken",
+     "root_path": "{root}/instance/repos/broken",
      "reason": "parity harness"
     }
    }
