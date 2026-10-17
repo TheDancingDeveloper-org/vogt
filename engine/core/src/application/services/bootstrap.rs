@@ -94,8 +94,11 @@ pub fn adopt_bootstrap_token(
             return Ok(false);
         }
 
-        let at = crate::application::instance::stamp(clock);
-
+        // The clock is read where Python reads it, one step each, so the
+        // stamps and the revocation's `revoked_at` match row for row. Each
+        // audited write also records the caller's principal, not the actor the
+        // token is bound to.
+        //
         // The secret rotated back to a value a rotation revoked. Reinstate that
         // row on its own actor, as Python does, whichever actor the config
         // names now. Revoke whatever holds the row's name on that actor.
@@ -107,7 +110,8 @@ pub fn adopt_bootstrap_token(
             )
             .ok();
         if let Some((existing_id, existing_actor, existing_name)) = revoked {
-            let superseded = revoke_named(&conn, &existing_actor, &existing_name, &at)?;
+            let revoke_at = crate::application::instance::stamp(clock);
+            let superseded = revoke_named(&conn, &existing_actor, &existing_name, &revoke_at)?;
             conn.execute(
                 "UPDATE tokens SET revoked_at = NULL, revoked_reason = NULL WHERE id = ?1",
                 params![existing_id],
@@ -126,11 +130,13 @@ pub fn adopt_bootstrap_token(
                 &serde_json::json!({"actor": holder_ref}),
                 false,
             );
+            let now = crate::application::instance::stamp(clock);
+            let principal = principal_actor(&conn)?;
             record_adoption(
                 &conn,
                 ids,
-                &at,
-                &existing_actor,
+                &now,
+                &principal,
                 &existing_id,
                 reason,
                 &payload,
@@ -161,22 +167,32 @@ pub fn adopt_bootstrap_token(
             Some((id, _)) => id.clone(),
             None => {
                 let id = next_id(ids, "act");
+                let created_at = crate::application::instance::stamp(clock);
                 conn.execute(
                     "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at)
                      VALUES (?1, 'agent', ?2, ?3, 0, ?4)",
-                    params![id, identity_ref, identity_ref, at],
+                    params![id, identity_ref, identity_ref, created_at],
                 )?;
                 id
             }
         };
 
-        let superseded = revoke_named(&conn, &actor_id, name, &at)?;
+        let revoke_at = crate::application::instance::stamp(clock);
+        let superseded = revoke_named(&conn, &actor_id, name, &revoke_at)?;
         let token_id = next_id(ids, "tok");
+        let created_at = crate::application::instance::stamp(clock);
         let scopes_json = crate::decisions::python_json_dumps(&serde_json::json!(scopes), false);
         conn.execute(
             "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![token_id, actor_id, name, token_hash, scopes_json, at],
+            params![
+                token_id,
+                actor_id,
+                name,
+                token_hash,
+                scopes_json,
+                created_at
+            ],
         )?;
         // Python's fresh payload is {actor, scopes, name, source, superseded}.
         // The digest is over that object, so the keys have to match.
@@ -191,8 +207,10 @@ pub fn adopt_bootstrap_token(
             &serde_json::json!({"actor": identity_ref, "scopes": scopes}),
             false,
         );
+        let now = crate::application::instance::stamp(clock);
+        let principal = principal_actor(&conn)?;
         record_adoption(
-            &conn, ids, &at, &actor_id, &token_id, reason, &payload, &summary,
+            &conn, ids, &now, &principal, &token_id, reason, &payload, &summary,
         )?;
         Ok(true)
     })();
@@ -220,6 +238,17 @@ fn next_id(ids: &mut Option<SequentialIds>, prefix: &str) -> String {
         Some(factory) => factory.next(prefix),
         None => crate::core::fresh_id(prefix),
     }
+}
+
+/// The row of the principal `init` runs as, the actor Python's audited writes
+/// record. `bootstrap` creates it from the OS user.
+fn principal_actor(conn: &rusqlite::Connection) -> Result<String, rusqlite::Error> {
+    let identity = crate::core::local_principal(&crate::core::os_user()).identity_ref;
+    conn.query_row(
+        "SELECT id FROM actors WHERE identity_ref = ?1",
+        params![identity],
+        |row| row.get(0),
+    )
 }
 
 /// Revoke the live tokens `actor_id` holds under `name`, and return their ids.
