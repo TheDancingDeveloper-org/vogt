@@ -38,6 +38,10 @@ export interface ApprovalPrompt {
   deadline_seconds?: number | null;
   deadline_at?: string | null;
   detected_at: string;
+  /** What kind of wait it is (WI-1736): a permission `approval` (the
+   *  default when absent) or a `picker`, an option list the agent is waiting
+   *  on a person to choose from. The engine side follows in a later phase. */
+  kind?: "approval" | "picker";
 }
 
 /** What a session is for (engine `SessionRole`, WI-957). */
