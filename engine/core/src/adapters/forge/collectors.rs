@@ -812,4 +812,74 @@ mod tests {
         assert!(glob_match("[^b]", "^"));
         assert!(!glob_match("[!a-]", "-"));
     }
+
+    /// A transport that answers nothing. The posture gap is a capability fact,
+    /// so the provider is only asked what it declares.
+    struct Silent;
+
+    impl super::super::transport::ForgeTransport for Silent {
+        fn api_root(&self) -> &str {
+            "https://forge.example/api/v1"
+        }
+        fn token(&self) -> Option<&str> {
+            Some("x")
+        }
+        fn get(
+            &self,
+            _: &str,
+            _: &[(&str, String)],
+        ) -> Result<super::super::transport::ForgeResponse, VogtError> {
+            Ok(super::super::transport::ForgeResponse::Missing)
+        }
+        fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
+            Ok(None)
+        }
+        fn send(
+            &self,
+            _: super::super::transport::WriteMethod,
+            _: &str,
+            _: Option<&Value>,
+        ) -> Result<Value, VogtError> {
+            Ok(Value::Null)
+        }
+    }
+
+    struct ForgejoOnly(super::super::forgejo::ForgejoProvider<Silent>);
+
+    impl ForgeDirectory for ForgejoOnly {
+        fn provider_for(&self, _: Option<&str>) -> Option<&dyn ForgeProvider> {
+            let provider: &dyn ForgeProvider = &self.0;
+            Some(provider)
+        }
+        fn unsupported_reason(&self, _: Option<&str>) -> String {
+            "unused".into()
+        }
+    }
+
+    #[test]
+    fn a_forge_without_posture_gets_a_receipt_not_a_zero() {
+        let directory = ForgejoOnly(super::super::forgejo::ForgejoProvider::new(
+            Silent,
+            "forge.example",
+        ));
+        let mut project = Project::new(
+            "prj_forgejo",
+            "acme",
+            "acme",
+            "/acme",
+            crate::core::Moment::from_unix(0, 0),
+        );
+        project.repo_url = Some("https://forge.example/acme/Widgets.git".into());
+
+        let found = ForgePostureCollector::new(&directory)
+            .collect(&project)
+            .unwrap();
+        assert_eq!(found.len(), 1, "one receipt, no posture observation");
+        assert_eq!(found[0].kind, KIND_SYNC);
+        assert_eq!(found[0].payload["supported"], Value::Bool(false));
+        assert!(found[0].payload["detail"]
+            .as_str()
+            .unwrap()
+            .contains("posture"));
+    }
 }

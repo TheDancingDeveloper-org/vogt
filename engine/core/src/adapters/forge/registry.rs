@@ -894,4 +894,60 @@ mod tests {
 
         assert!(identity_for(Some("https://gitlab.com/acme/widget"), &config, None).is_none());
     }
+
+    #[test]
+    fn host_selection_holds_for_every_url_form() {
+        let config = config_with(vec![("forge.example", "/t")], None);
+        let rows: [(Option<&str>, bool); 11] = [
+            (Some("https://forge.example/acme/Widgets"), true),
+            (Some("https://forge.example/acme/Widgets.git"), true),
+            (Some("git@forge.example:acme/Widgets.git"), true),
+            (Some("ssh://git@forge.example/acme/Widgets.git"), true),
+            (Some("git@forge.example/acme/Widgets.git"), true),
+            (Some("git+https://forge.example/acme/Widgets"), true),
+            (Some("https://github.com/o/r"), true),
+            (Some("https://gitlab.com/group/project"), false),
+            (Some("https://forge.example/only-owner"), false),
+            (None, false),
+            (Some(""), false),
+        ];
+        for (url, supported) in rows {
+            assert_eq!(
+                unsupported_reason(url, Some(&config)).is_none(),
+                supported,
+                "{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mapped_host_with_no_usable_token_is_supported_but_not_configured() {
+        let dir = std::env::temp_dir().join(format!("vogt-forge-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("empty");
+        std::fs::write(&empty, "   \n").unwrap();
+        let url = "https://forge.example/acme/Widgets";
+
+        for path in [Path::new("/no/such/file"), empty.as_path()] {
+            let config = config_with(vec![("forge.example", path.to_str().unwrap())], None);
+            assert!(provider_for(Some(url), &config, None).unwrap().is_none());
+            // The host is named, so the reason is None: "not collected", not
+            // "no forge reads this host".
+            assert!(unsupported_reason(Some(url), Some(&config)).is_none());
+            assert!(!has_configured_forge(&config).unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_github_entry_in_the_map_is_a_token_override_not_a_forgejo_host() {
+        let config = config_with(vec![("github.com", "/run/secrets/github")], None);
+        assert!(forgejo_hosts(Some(&config)).is_empty());
+        assert_eq!(
+            supported_hosts(Some(&config)),
+            vec!["github.com".to_owned()]
+        );
+        let matched = match_repo(Some("https://github.com/o/r"), Some(&config)).unwrap();
+        assert_eq!(matched.kind, ForgeKind::GitHub);
+    }
 }
