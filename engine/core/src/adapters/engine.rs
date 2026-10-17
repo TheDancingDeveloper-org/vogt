@@ -145,10 +145,11 @@ impl EngineClient {
         if let Some(work_item) = &spec.work_item {
             body.insert("work_item".to_string(), Value::String(work_item.clone()));
         }
-        if let Some(account) = &spec.account {
+        // An empty account or companion is left off, as the Python client does.
+        if let Some(account) = spec.account.as_ref().filter(|text| !text.is_empty()) {
             body.insert("account".to_string(), Value::String(account.clone()));
         }
-        if let Some(companion) = &spec.companion {
+        if let Some(companion) = spec.companion.as_ref().filter(|text| !text.is_empty()) {
             body.insert("companion".to_string(), Value::String(companion.clone()));
         }
         // Policy and worktree are sent only when they carry something, as the
@@ -2432,6 +2433,18 @@ mod tests {
         assert!(sent.contains(r#""companion":"guide text""#));
         assert!(!sent.contains("policy"));
         assert!(!sent.contains("worktree"));
+    }
+
+    #[test]
+    fn create_session_leaves_out_an_empty_account_or_companion() {
+        let (seen, transport) = scripted(200, r#"{"id":"s","name":"n","cwd":"/proj"}"#);
+        let mut spec = CreateSession::new("n", "/proj");
+        spec.account = Some(String::new());
+        spec.companion = Some(String::new());
+        client(transport).create_session(&spec).unwrap();
+        let sent = &seen.lock().unwrap()[0];
+        assert!(!sent.contains("account"));
+        assert!(!sent.contains("companion"));
     }
 
     #[test]
