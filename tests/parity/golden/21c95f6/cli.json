@@ -1139,7 +1139,7 @@
         "link_state": "unlinked",
         "name": "Second",
         "repo_url": null,
-        "root_path": "<root>/second",
+        "root_path": "<root>/instance/repos/second",
         "slug": "second",
         "trust_state": "unverified",
         "updated_at": "2026-01-02T03:04:05Z",
@@ -1251,7 +1251,7 @@
       "detail": "nothing collected \u2014 either there is nothing to say, or the configured token cannot read notifications; `coverage` distinguishes the two",
       "freshness": {
         "age_seconds": null,
-        "collectors": "<volatile>",
+        "collectors": {},
         "detail": "no collector has completed a sweep yet",
         "oldest_relevant_sweep": null,
         "status": "never_swept"
@@ -1709,7 +1709,7 @@
       "excluded_unlinked": 0,
       "freshness": {
         "age_seconds": null,
-        "collectors": "<volatile>",
+        "collectors": {},
         "detail": "no collector has completed a sweep yet",
         "oldest_relevant_sweep": null,
         "status": "never_swept"
@@ -1778,7 +1778,7 @@
       "excluded_unlinked": 0,
       "freshness": {
         "age_seconds": null,
-        "collectors": "<volatile>",
+        "collectors": {},
         "detail": "no collector has completed a sweep yet",
         "oldest_relevant_sweep": null,
         "status": "never_swept"
@@ -2278,6 +2278,53 @@
   },
   {
     "body": {
+      "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "landing": null,
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "review": null,
+          "rules": [],
+          "session_wall_clock_minutes": null,
+          "test_recipe": "",
+          "verification": null
+        },
+        "compliance_checked_at": null,
+        "compliance_status": "not_checked",
+        "contract_adopted_at": null,
+        "contract_version": null,
+        "created_at": "2026-01-02T03:04:05Z",
+        "current_version": null,
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0003",
+        "lifecycle_state": "active",
+        "link_state": "unlinked",
+        "name": "Broken",
+        "repo_url": null,
+        "root_path": "<root>/instance/repos/broken",
+        "slug": "broken",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "write_back": "none"
+      }
+    },
+    "exit": 0,
+    "operation": "project.register"
+  },
+  {
+    "body": {
       "digests": [],
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
       "hidden_count": 0,
@@ -2300,6 +2347,392 @@
     },
     "exit": 0,
     "operation": "session.sweep"
+  },
+  {
+    "body": {
+      "dep_refs": 0,
+      "disk": null,
+      "projects": 3,
+      "reports": [
+        {
+          "collector": "dep-refs",
+          "failures": {},
+          "new": 3,
+          "outcome": "ok",
+          "projects": 3,
+          "sweep_id": "swp_0001",
+          "unchanged": 0
+        },
+        {
+          "collector": "git-local",
+          "failures": {
+            "broken": "CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere"
+          },
+          "new": 2,
+          "outcome": "partial",
+          "projects": 3,
+          "sweep_id": "swp_0002",
+          "unchanged": 0
+        },
+        {
+          "collector": "mirrored-source",
+          "failures": {},
+          "new": 0,
+          "outcome": "ok",
+          "projects": 3,
+          "sweep_id": "swp_0003",
+          "unchanged": 0
+        },
+        {
+          "collector": "source-markers",
+          "failures": {},
+          "new": 0,
+          "outcome": "ok",
+          "projects": 3,
+          "sweep_id": "swp_0004",
+          "unchanged": 0
+        }
+      ],
+      "scope": "all registered projects",
+      "subjects": 5
+    },
+    "exit": 0,
+    "operation": "sweep"
+  },
+  {
+    "body": {
+      "dep_refs": 0,
+      "disk": null,
+      "projects": 3,
+      "reports": [
+        {
+          "collector": "git-local",
+          "failures": {
+            "broken": "CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere"
+          },
+          "new": 0,
+          "outcome": "partial",
+          "projects": 3,
+          "sweep_id": "swp_0005",
+          "unchanged": 2
+        }
+      ],
+      "scope": "all registered projects",
+      "subjects": 5
+    },
+    "exit": 0,
+    "operation": "sweep"
+  },
+  {
+    "body": {
+      "collectors": [
+        {
+          "age_seconds": null,
+          "collector": "contract-checker",
+          "detail": "this collector has not completed a sweep",
+          "last_sweep_scope": 0,
+          "last_swept_at": "<volatile>",
+          "never_swept": 0,
+          "projects": 0,
+          "registered": 3,
+          "status": "never_run"
+        },
+        {
+          "age_seconds": -2,
+          "collector": "dep-refs",
+          "detail": null,
+          "last_sweep_scope": 3,
+          "last_swept_at": "<volatile>",
+          "never_swept": 0,
+          "projects": 3,
+          "registered": 3,
+          "status": "ok"
+        },
+        {
+          "age_seconds": -5,
+          "collector": "git-local",
+          "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
+          "last_sweep_scope": 3,
+          "last_swept_at": "<volatile>",
+          "never_swept": 0,
+          "projects": 3,
+          "registered": 3,
+          "status": "partial"
+        },
+        {
+          "age_seconds": -8,
+          "collector": "mirrored-source",
+          "detail": null,
+          "last_sweep_scope": 3,
+          "last_swept_at": "<volatile>",
+          "never_swept": 0,
+          "projects": 3,
+          "registered": 3,
+          "status": "ok"
+        },
+        {
+          "age_seconds": -11,
+          "collector": "source-markers",
+          "detail": null,
+          "last_sweep_scope": 3,
+          "last_swept_at": "<volatile>",
+          "never_swept": 0,
+          "projects": 3,
+          "registered": 3,
+          "status": "ok"
+        }
+      ],
+      "swept_project_ids": [
+        "prj_0001",
+        "prj_0002",
+        "prj_0003"
+      ],
+      "unswept_project_ids": []
+    },
+    "exit": 0,
+    "operation": "coverage"
+  },
+  {
+    "body": {
+      "observed": {
+        "latest_observations": [
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+            "kind": "dep_scan",
+            "observation_id": "obs_0001",
+            "observed_at": "2026-01-02T03:04:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0003",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:broken"
+          },
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+            "kind": "dep_scan",
+            "observation_id": "obs_0002",
+            "observed_at": "2026-01-02T03:04:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:parity"
+          },
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
+            "kind": "dep_scan",
+            "observation_id": "obs_0003",
+            "observed_at": "2026-01-02T03:04:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0002",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:second"
+          },
+          {
+            "collector": "git-local",
+            "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+            "kind": "git.checkout",
+            "observation_id": "obs_0004",
+            "observed_at": "2026-01-02T03:04:09+00:00",
+            "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "git:parity"
+          },
+          {
+            "collector": "git-local",
+            "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+            "kind": "git.checkout",
+            "observation_id": "obs_0005",
+            "observed_at": "2026-01-02T03:04:09+00:00",
+            "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
+            "project_id": "prj_0002",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "git:second"
+          }
+        ],
+        "meta": [
+          {
+            "key": "instance_id",
+            "value": "ins_0001"
+          },
+          {
+            "key": "created_at",
+            "value": "2026-01-02T03:04:08+00:00"
+          },
+          {
+            "key": "latest_generation",
+            "value": "1"
+          }
+        ],
+        "migration_lock": [
+          {
+            "acquired_at": null,
+            "holder": null,
+            "id": 1
+          }
+        ],
+        "migrations": [
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "c050f9e4dba983119f045b8fb4ccbe8b1ee97473170eead7d28279e99468de4b",
+            "id": "0001_foundation"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "9cdc9c9179740af96606bab0b557c7b35639eaabc78faf16630c7705f1d368f5",
+            "id": "0002_evidence"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "8bf0b8533774a156762fddc2e56bbb9656ba3b6bf0e38ec85a66c9dc9c325ed1",
+            "id": "0003_inherited_dep_refs"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "8d5cffbb2acb6ff18099ad73384eaa4ea5ebca7a6f45afb79d353fb4cbbcaee6",
+            "id": "0004_forge_sync"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "e6902e6616ab9948f9d222b2763ce9bc421a136b6acb1422240e5957683e5e45",
+            "id": "0005_perf_indexes"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "e0e959f4bf4f39db47d5e41ac11391d5f80a0b73bcce57d36168572062b1ab66",
+            "id": "0006_agent_activity"
+          }
+        ],
+        "observations": [
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+            "id": "obs_0001",
+            "kind": "dep_scan",
+            "observed_at": "2026-01-02T03:04:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0003",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:broken",
+            "sweep_id": "swp_0001"
+          },
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+            "id": "obs_0002",
+            "kind": "dep_scan",
+            "observed_at": "2026-01-02T03:04:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:parity",
+            "sweep_id": "swp_0001"
+          },
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
+            "id": "obs_0003",
+            "kind": "dep_scan",
+            "observed_at": "2026-01-02T03:04:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0002",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:second",
+            "sweep_id": "swp_0001"
+          },
+          {
+            "collector": "git-local",
+            "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+            "id": "obs_0004",
+            "kind": "git.checkout",
+            "observed_at": "2026-01-02T03:04:09+00:00",
+            "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "git:parity",
+            "sweep_id": "swp_0002"
+          },
+          {
+            "collector": "git-local",
+            "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+            "id": "obs_0005",
+            "kind": "git.checkout",
+            "observed_at": "2026-01-02T03:04:09+00:00",
+            "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
+            "project_id": "prj_0002",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "git:second",
+            "sweep_id": "swp_0002"
+          }
+        ],
+        "sweeps": [
+          {
+            "collector": "dep-refs",
+            "detail": null,
+            "finished_at": "2026-01-02T03:04:07+00:00",
+            "id": "swp_0001",
+            "outcome": "ok",
+            "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
+            "started_at": "2026-01-02T03:04:05+00:00",
+            "stats": "{\"projects\": 3, \"new\": 3, \"unchanged\": 0, \"failed_projects\": 0}"
+          },
+          {
+            "collector": "git-local",
+            "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
+            "finished_at": "2026-01-02T03:04:10+00:00",
+            "id": "swp_0002",
+            "outcome": "partial",
+            "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
+            "started_at": "2026-01-02T03:04:08+00:00",
+            "stats": "{\"projects\": 3, \"new\": 2, \"unchanged\": 0, \"failed_projects\": 1}"
+          },
+          {
+            "collector": "mirrored-source",
+            "detail": null,
+            "finished_at": "2026-01-02T03:04:13+00:00",
+            "id": "swp_0003",
+            "outcome": "ok",
+            "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
+            "started_at": "2026-01-02T03:04:11+00:00",
+            "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
+          },
+          {
+            "collector": "source-markers",
+            "detail": null,
+            "finished_at": "2026-01-02T03:04:16+00:00",
+            "id": "swp_0004",
+            "outcome": "ok",
+            "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
+            "started_at": "2026-01-02T03:04:14+00:00",
+            "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
+          },
+          {
+            "collector": "git-local",
+            "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
+            "finished_at": "2026-01-02T03:04:07+00:00",
+            "id": "swp_0005",
+            "outcome": "partial",
+            "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
+            "started_at": "2026-01-02T03:04:05+00:00",
+            "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 2, \"failed_projects\": 1}"
+          }
+        ]
+      }
+    },
+    "exit": 0,
+    "operation": "dump.observed"
   },
   {
     "body": {
@@ -2681,12 +3114,12 @@
           "at": "2026-01-02T03:04:06Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0027",
+          "id": "aud_0028",
           "operation": "user.remove",
           "payload_digest": "sha256:6cb1b570d1a756565af0191ec35d1fed1dc103ed9b82afa000b68a0172b6f711",
           "reason": "parity harness",
-          "revision": 26,
-          "txn_id": "txn_0030"
+          "revision": 27,
+          "txn_id": "txn_0036"
         },
         {
           "actor_id": "act_0001",
@@ -2694,12 +3127,25 @@
           "at": "2026-01-02T03:04:06Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0026",
+          "id": "aud_0027",
           "operation": "token.revoke",
           "payload_digest": "sha256:5b5962b852bf72720c110fabfda9bea2589305bb33f47f25d1361ce815fa78c9",
           "reason": "parity harness",
+          "revision": 26,
+          "txn_id": "txn_0034"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:06Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0026",
+          "operation": "user.set_password",
+          "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
+          "reason": "parity harness",
           "revision": 25,
-          "txn_id": "txn_0028"
+          "txn_id": "txn_0033"
         },
         {
           "actor_id": "act_0001",
@@ -2708,40 +3154,27 @@
           "entity_id": "act_0005",
           "entity_kind": "user",
           "id": "aud_0025",
-          "operation": "user.set_password",
-          "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
+          "operation": "user.create",
+          "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
           "reason": "parity harness",
           "revision": 24,
-          "txn_id": "txn_0027"
+          "txn_id": "txn_0032"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
           "at": "2026-01-02T03:04:06Z",
-          "entity_id": "act_0005",
-          "entity_kind": "user",
+          "entity_id": "prj_0003",
+          "entity_kind": "project",
           "id": "aud_0024",
-          "operation": "user.create",
-          "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
+          "operation": "project.register",
+          "payload_digest": "<path-bearing>",
           "reason": "parity harness",
           "revision": 23,
           "txn_id": "txn_0026"
-        },
-        {
-          "actor_id": "act_0001",
-          "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:05Z",
-          "entity_id": "prj_0001",
-          "entity_kind": "project",
-          "id": "aud_0023",
-          "operation": "forge.onboard",
-          "payload_digest": "sha256:de96f57714a400d1aa3ccb1208c8d7f796cabd99d0fff7de7fdc85927be5ef34",
-          "reason": "parity harness",
-          "revision": 22,
-          "txn_id": "txn_0024"
         }
       ],
-      "total": 27
+      "total": 28
     },
     "exit": 0,
     "operation": "audit.list"
@@ -2755,12 +3188,12 @@
           "at": "2026-01-02T03:04:06Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0026",
+          "id": "aud_0027",
           "operation": "token.revoke",
           "payload_digest": "sha256:5b5962b852bf72720c110fabfda9bea2589305bb33f47f25d1361ce815fa78c9",
           "reason": "parity harness",
-          "revision": 25,
-          "txn_id": "txn_0028"
+          "revision": 26,
+          "txn_id": "txn_0034"
         },
         {
           "actor_id": "act_0001",
@@ -2768,15 +3201,15 @@
           "at": "2026-01-02T03:04:06Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0025",
+          "id": "aud_0026",
           "operation": "user.set_password",
           "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
           "reason": "parity harness",
-          "revision": 24,
-          "txn_id": "txn_0027"
+          "revision": 25,
+          "txn_id": "txn_0033"
         }
       ],
-      "total": 27
+      "total": 28
     },
     "exit": 0,
     "operation": "audit.list"
@@ -3010,7 +3443,7 @@
           "detail": "no session engine is configured",
           "observed_at": null,
           "projects": 0,
-          "registered": 2,
+          "registered": 3,
           "source": "agent",
           "status": "unconfigured"
         },
@@ -3019,7 +3452,7 @@
           "detail": "this collector has not completed a sweep",
           "observed_at": null,
           "projects": 0,
-          "registered": 2,
+          "registered": 3,
           "source": "ci",
           "status": "unswept"
         },
@@ -3028,7 +3461,7 @@
           "detail": "open proposals in the declared store",
           "observed_at": null,
           "projects": 0,
-          "registered": 2,
+          "registered": 3,
           "source": "drift",
           "status": "current"
         },
@@ -3037,7 +3470,7 @@
           "detail": "this collector has not completed a sweep",
           "observed_at": null,
           "projects": 0,
-          "registered": 2,
+          "registered": 3,
           "source": "github",
           "status": "unswept"
         }
@@ -3256,7 +3689,7 @@
           "detail": "no session engine is configured",
           "observed_at": null,
           "projects": 0,
-          "registered": 2,
+          "registered": 3,
           "source": "agent",
           "status": "unconfigured"
         },
@@ -3265,7 +3698,7 @@
           "detail": "this collector has not completed a sweep",
           "observed_at": null,
           "projects": 0,
-          "registered": 2,
+          "registered": 3,
           "source": "ci",
           "status": "unswept"
         },
@@ -3274,7 +3707,7 @@
           "detail": "open proposals in the declared store",
           "observed_at": null,
           "projects": 0,
-          "registered": 2,
+          "registered": 3,
           "source": "drift",
           "status": "current"
         },
@@ -3283,7 +3716,7 @@
           "detail": "this collector has not completed a sweep",
           "observed_at": null,
           "projects": 0,
-          "registered": 2,
+          "registered": 3,
           "source": "github",
           "status": "unswept"
         }
