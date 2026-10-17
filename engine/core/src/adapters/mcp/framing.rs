@@ -767,4 +767,35 @@ mod tests {
             .unwrap()
             .contains("'resources/list'"));
     }
+
+    #[test]
+    fn tools_list_matches_the_python_golden() {
+        // Recorded from Python's `McpSurface.list_tools` as `tools/list` wire
+        // objects, by the capture in tests/parity/golden/mcp-tools.json. Names
+        // and order are compared first so a reordered list says so plainly.
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/golden/mcp-tools.json");
+        let golden: Value =
+            serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
+        let response = &responses(&line(json!({
+            "jsonrpc": "2.0", "id": "a", "method": "tools/list"
+        })))[0];
+        let names = |list: &Value| -> Vec<String> {
+            list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(&response["result"]),
+            names(&golden),
+            "tool names or order drifted"
+        );
+        assert_eq!(
+            response["result"], golden,
+            "tools/list drifted from the Python golden"
+        );
+    }
 }
