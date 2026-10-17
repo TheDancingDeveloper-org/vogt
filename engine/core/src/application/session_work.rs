@@ -547,7 +547,7 @@ fn text(params: &Value, name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use crate::adapters::engine::EngineClient;
     use crate::application::context::build_context;
@@ -766,5 +766,398 @@ mod tests {
         let error = super::bind_work_op(&built, json!({"work_item": "WI-7", "reason": "mine"}))
             .unwrap_err();
         assert!(matches!(error, VogtError::InvalidRequest(_)), "{error:?}");
+    }
+
+    /// What the stand-in engine was asked, and the work-item label it holds
+    /// for each session. `knows_work_items` false answers the label route with
+    /// a 404, as an engine that predates session work items does.
+    #[derive(Default)]
+    struct StandIn {
+        asked: Vec<(String, String, Value)>,
+        labels: std::collections::BTreeMap<String, String>,
+        knows_work_items: bool,
+    }
+
+    type Shared = std::sync::Arc<std::sync::Mutex<StandIn>>;
+
+    fn stand_in(shared: &Shared) -> EngineClient {
+        let shared = std::sync::Arc::clone(shared);
+        EngineClient::new(
+            "http://engine",
+            None,
+            Some(std::sync::Arc::new(move |path, _, body, method| {
+                let route = path.split("/api/").nth(1).unwrap_or(path).to_string();
+                let payload: Value = if body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(body).unwrap_or(Value::Null)
+                };
+                let mut state = shared.lock().unwrap();
+                state
+                    .asked
+                    .push((method.to_string(), route.clone(), payload.clone()));
+                let parts: Vec<&str> = route.split('/').collect();
+                let Some(engine_id) = parts.get(1).filter(|_| parts[0] == "sessions") else {
+                    return (404, Vec::new());
+                };
+                let engine_id = engine_id.to_string();
+                let summary = |state: &StandIn| {
+                    let mut row = json!({"id": engine_id, "name": engine_id, "alive": true,
+                        "activity": "idle", "cwd": "/work", "role": "worker"});
+                    if let Some(label) = state.labels.get(&engine_id) {
+                        row["work_item"] = json!(label);
+                    }
+                    serde_json::to_vec(&row).unwrap()
+                };
+                match (method, parts.get(2).copied()) {
+                    ("GET", None) => (200, summary(&state)),
+                    ("POST", Some("work-item")) if state.knows_work_items => {
+                        match payload["work_item"].as_str() {
+                            Some(label) => {
+                                state.labels.insert(engine_id.clone(), label.to_string());
+                            }
+                            None => {
+                                state.labels.remove(&engine_id);
+                            }
+                        }
+                        (200, summary(&state))
+                    }
+                    _ => (404, Vec::new()),
+                }
+            })),
+        )
+    }
+
+    fn work_item(id: &str, reference: &str, project_id: &str) -> WorkItem {
+        WorkItem {
+            id: id.to_string(),
+            reference: reference.to_string(),
+            kind: WorkKind::Feature,
+            title: "The thing".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            priority: Priority::P2,
+            effort: None,
+            project_id: Some(project_id.to_string()),
+            project_slug: Some("proj".to_string()),
+            initiative_id: None,
+            origin: Origin::Created,
+            trust_state: TrustState::Unverified,
+            assignee_actor_id: None,
+            assignee_identity_ref: None,
+            labels: Vec::new(),
+            relations: Vec::new(),
+            superseded_by: None,
+            created_at: Moment::from_unix(1_700_000_000, 0),
+            updated_at: Moment::from_unix(1_700_000_000, 0),
+        }
+    }
+
+    /// A Vogt instance over `dir` for one principal, asking `shared`'s engine.
+    fn as_principal(
+        dir: &std::path::Path,
+        principal: Principal,
+        shared: &Shared,
+        engine: bool,
+    ) -> crate::application::context::Built {
+        build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.to_path_buf(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(principal),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            None,
+            None,
+            engine.then(|| stand_in(shared)),
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// An instance with two projects, two work items (WI-7 in `proj`, WI-8 in
+    /// `other`), a live session `ses_0001` for `eng-1`, a live child `ses_0002`
+    /// for `eng-2`, and a stopped `ses_0003` for `eng-3`.
+    fn estate(
+        name: &str,
+    ) -> (
+        std::path::PathBuf,
+        Shared,
+        crate::application::context::Built,
+    ) {
+        let dir = std::env::temp_dir().join(format!("vogt-bind-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let shared: Shared = std::sync::Arc::new(std::sync::Mutex::new(StandIn {
+            knows_work_items: true,
+            ..StandIn::default()
+        }));
+        let built = as_principal(&dir, person(), &shared, true);
+        crate::with_ctx!(&built, |ctx| {
+            let mut write = crate::application::context::write_of(ctx);
+            audited_write(&mut write, "seed", "test", |txn, actor| {
+                let at = Moment::from_unix(1_700_000_000, 0);
+                txn.insert_project(&Project::new("prj_1", "proj", "Proj", "/work", at))?;
+                txn.insert_project(&Project::new("prj_other", "other", "Other", "/other", at))?;
+                txn.insert_work_item(&work_item("wrk_7", "WI-7", "prj_1"))?;
+                let mut second = work_item("wrk_8", "WI-8", "prj_other");
+                second.title = "the ops item".to_string();
+                txn.insert_work_item(&second)?;
+                for (id, engine_id, stopped) in [
+                    ("ses_0001", "eng-1", None),
+                    ("ses_0002", "eng-2", None),
+                    ("ses_0003", "eng-3", Some(at)),
+                ] {
+                    txn.insert_session(&CodingSession {
+                        id: id.to_string(),
+                        engine_session_id: engine_id.to_string(),
+                        project_id: "prj_1".to_string(),
+                        work_item_id: None,
+                        actor_id: actor.id.clone(),
+                        cwd: "/work".to_string(),
+                        template: None,
+                        model: None,
+                        effort: None,
+                        reason: "test".to_string(),
+                        started_at: at,
+                        stopped_at: stopped,
+                    })?;
+                }
+                Ok(crate::application::writes::WriteOutcome {
+                    result: json!({}),
+                    entity_kind: "session".to_string(),
+                    entity_id: "ses_0001".to_string(),
+                    payload: json!({}),
+                    event_kind: "session.started".to_string(),
+                    summary: json!({}),
+                })
+            })
+        })
+        .unwrap();
+        (dir, shared, built)
+    }
+
+    fn person() -> Principal {
+        Principal::new("local:ada", ActorKind::Human, "Ada").unwrap()
+    }
+
+    /// The label writes the engine was sent for one session, in order.
+    fn label_writes(shared: &Shared, engine_id: &str) -> Vec<Value> {
+        let route = format!("sessions/{engine_id}/work-item");
+        shared
+            .lock()
+            .unwrap()
+            .asked
+            .iter()
+            .filter(|(method, path, _)| method.as_str() == "POST" && *path == route)
+            .map(|(_, _, body)| body["work_item"].clone())
+            .collect()
+    }
+
+    #[test]
+    fn rebinding_and_unbinding_are_audited_and_labelled() {
+        let (_, shared, built) = estate("rebind");
+        let bound = super::bind_work_op(
+            &built,
+            json!({"id": "ses_0001", "work_item": "WI-7", "reason": "start"}),
+        )
+        .unwrap();
+        assert_eq!(bound["previous_work_item"], json!(null));
+        assert_eq!(bound["engine_label"], "written");
+        assert_eq!(bound["session"]["work_item_state"], "open");
+
+        // Rebinding by the engine's id reaches the same row; WI-8 is filed
+        // under another project, so the answer says so, and the terminal stays
+        // where it was.
+        let rebound = super::bind_work_op(
+            &built,
+            json!({"id": "eng-1", "work_item": "WI-8", "reason": "move"}),
+        )
+        .unwrap();
+        assert_eq!(rebound["previous_work_item"], "WI-7");
+        assert_eq!(rebound["project_mismatch"], json!(true));
+        assert_eq!(rebound["session"]["cwd"], "/work");
+
+        let cleared = super::bind_work_op(
+            &built,
+            json!({"id": "ses_0001", "work_item": null, "reason": "done"}),
+        )
+        .unwrap();
+        assert_eq!(cleared["session"]["work_item"], json!(null));
+        assert_eq!(cleared["previous_work_item"], "WI-8");
+        assert_eq!(
+            label_writes(&shared, "eng-1"),
+            vec![json!("WI-7"), json!("WI-8"), json!(null)]
+        );
+        assert!(!shared.lock().unwrap().labels.contains_key("eng-1"));
+
+        let ledger = crate::with_ctx!(&built, |ctx| {
+            ctx.declared
+                .read()
+                .unwrap()
+                .list_audit(&crate::storage::interface::AuditQuery {
+                    limit: 20,
+                    offset: 0,
+                    actor_id: None,
+                    operation: Some("session.bind_work".to_string()),
+                    entity_id: None,
+                    project_id: None,
+                    since: None,
+                    until: None,
+                })
+        })
+        .unwrap();
+        assert_eq!(ledger.len(), 3, "one audit row per bind");
+        assert!(ledger.iter().all(|row| row.entity_id == "ses_0001"));
+    }
+
+    #[test]
+    fn the_declared_branch_is_recorded_and_the_item_names_the_session() {
+        let (_, _, built) = estate("branch");
+        super::bind_work_op(
+            &built,
+            json!({"id": "ses_0001", "work_item": "WI-7", "reason": "start"}),
+        )
+        .unwrap();
+        let detail = crate::registry::default_registry()
+            .get("work.get")
+            .expect("work.get is registered")
+            .run(Some(&built), json!({"ref": "WI-7"}))
+            .unwrap();
+        assert_eq!(detail["sessions"][0]["id"], "ses_0001");
+        assert!(
+            detail["branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|branch| matches!(branch["source"].as_str(), Some("declared" | "both"))),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn another_session_may_bind_a_child() {
+        let (dir, shared, _) = estate("child");
+        let overseer = as_principal(
+            &dir,
+            Principal::new("agent:session:ses_0001", ActorKind::Agent, "Session").unwrap(),
+            &shared,
+            true,
+        );
+        let result = super::bind_work_op(
+            &overseer,
+            json!({"id": "ses_0002", "work_item": "WI-7", "reason": "child"}),
+        )
+        .unwrap();
+        assert_eq!(result["session"]["id"], "ses_0002");
+        assert_eq!(result["session"]["work_item"], "WI-7");
+    }
+
+    #[test]
+    fn a_session_binds_itself_without_an_id() {
+        let (dir, shared, _) = estate("self");
+        let own = as_principal(
+            &dir,
+            Principal::new("agent:session:ses_0001", ActorKind::Agent, "Session").unwrap(),
+            &shared,
+            true,
+        );
+        let result =
+            super::bind_work_op(&own, json!({"work_item": "WI-7", "reason": "mine"})).unwrap();
+        assert_eq!(result["session"]["id"], "ses_0001");
+        assert_eq!(result["session"]["work_item"], "WI-7");
+    }
+
+    #[test]
+    fn an_unknown_item_or_a_stopped_session_is_refused() {
+        let (_, _, built) = estate("refused");
+        let unknown = super::bind_work_op(
+            &built,
+            json!({"id": "ses_0001", "work_item": "WI-99", "reason": "typo"}),
+        )
+        .unwrap_err();
+        assert!(matches!(unknown, VogtError::NotFound(_)), "{unknown:?}");
+        let stopped = super::bind_work_op(
+            &built,
+            json!({"id": "ses_0003", "work_item": "WI-7", "reason": "late"}),
+        )
+        .unwrap_err();
+        assert!(matches!(stopped, VogtError::Conflict(_)), "{stopped:?}");
+    }
+
+    #[test]
+    fn a_label_the_engine_refuses_is_reported_not_fatal() {
+        let (dir, shared, built) = estate("label");
+        shared.lock().unwrap().knows_work_items = false;
+        let bound = super::bind_work_op(
+            &built,
+            json!({"id": "ses_0001", "work_item": "WI-7", "reason": "start"}),
+        )
+        .unwrap();
+        assert_eq!(bound["engine_label"], "not_found");
+        assert!(bound["engine"].is_string(), "{bound}");
+        assert_eq!(
+            bound["session"]["work_item"], "WI-7",
+            "the core row is the truth"
+        );
+
+        // With no engine at all the label is unavailable, not dead.
+        let offline = as_principal(&dir, person(), &shared, false);
+        let unbound = super::bind_work_op(
+            &offline,
+            json!({"id": "ses_0001", "work_item": null, "reason": "done"}),
+        )
+        .unwrap();
+        assert_eq!(unbound["engine_label"], "unavailable");
+        assert_eq!(unbound["session"]["work_item"], json!(null));
+        assert_eq!(
+            unbound["session"]["alive"],
+            json!(null),
+            "not asked is not dead"
+        );
+    }
+
+    #[test]
+    fn an_unlinked_session_is_bound_by_its_engine_label_only() {
+        let (_, shared, built) = estate("unlinked");
+        let bound = super::bind_work_op(
+            &built,
+            json!({"id": "eng-9", "work_item": "WI-7", "reason": "gui-started"}),
+        )
+        .unwrap();
+        assert_eq!(bound["session"]["linked"], json!(false));
+        assert_eq!(bound["session"]["work_item"], "WI-7");
+        assert_eq!(bound["session"]["work_item_title"], "The thing");
+        assert_eq!(shared.lock().unwrap().labels["eng-9"], "WI-7");
+
+        let ledger = crate::with_ctx!(&built, |ctx| {
+            ctx.declared
+                .read()
+                .unwrap()
+                .list_audit(&crate::storage::interface::AuditQuery {
+                    limit: 20,
+                    offset: 0,
+                    actor_id: None,
+                    operation: Some("session.bind_work".to_string()),
+                    entity_id: None,
+                    project_id: None,
+                    since: None,
+                    until: None,
+                })
+        })
+        .unwrap();
+        assert!(ledger.iter().any(|row| row.entity_id == "eng-9"));
+
+        shared.lock().unwrap().knows_work_items = false;
+        let error = super::bind_work_op(
+            &built,
+            json!({"id": "eng-9", "work_item": null, "reason": "done"}),
+        )
+        .unwrap_err();
+        assert!(matches!(error, VogtError::NotFound(_)), "{error:?}");
     }
 }
