@@ -103,6 +103,9 @@ class ForgeIssue:
     body: str | None = None
     updated_at: str | None = None
     closed_at: str | None = None
+    #: Why a closed issue closed: `completed`, `not_planned`, `reopened`. `None`
+    #: is "the forge did not say" (or an open issue).
+    state_reason: str | None = None
     source_url: str | None = None
 
 

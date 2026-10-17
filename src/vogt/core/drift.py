@@ -319,8 +319,15 @@ def forge_state_mismatch(
     project_id: str | None,
     evidence: EvidenceSnapshot,
     evidence_observation_id: str | None,
+    upstream_reason: str | None = None,
 ) -> DriftFinding:
-    """A linked issue's state disagrees with the item's (ARCHITECTURE.md)."""
+    """A linked issue's state disagrees with the item's (ARCHITECTURE.md).
+
+    A not-planned close proposes `wont_do`, the same finished state the
+    upstream mapping gives it, so accepting does not turn a declined item into
+    a delivered one.
+    """
+    closed_to = "wont_do" if upstream_reason == "not_planned" else "done"
     return DriftFinding(
         kind=FORGE_STATE_MISMATCH,
         subject_kind="work_item",
@@ -336,7 +343,7 @@ def forge_state_mismatch(
             "entity": "work_item",
             "field": "state",
             "from": declared_state,
-            "to": "done" if upstream_state == "closed" else "open",
+            "to": closed_to if upstream_state == "closed" else "open",
             "work_ref": work_ref,
         },
         evidence=evidence,

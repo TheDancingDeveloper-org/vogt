@@ -248,6 +248,8 @@ class ForgeIssuesCollector(_ForgeSyncCollector):
                 "body": item.body,
                 "updated_at": item.updated_at,
                 "closed_at": item.closed_at,
+                # How a closed issue closed: a not-planned close is `wont_do`.
+                "state_reason": item.state_reason,
                 "repo": ref.slug,
             },
         )

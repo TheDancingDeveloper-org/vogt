@@ -529,6 +529,7 @@ def _to_issue(ref: RepoRef, item: dict[str, Any]) -> ForgeIssue:
         body=item.get("body"),
         updated_at=item.get("updated_at"),
         closed_at=item.get("closed_at"),
+        state_reason=item.get("state_reason"),
         source_url=item.get("html_url"),
     )
 
