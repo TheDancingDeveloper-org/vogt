@@ -188,8 +188,11 @@ class GitHubProvider:
         payloads = self._client.get(f"/repos/{ref.owner}/{ref.repo}/issues", **params)
         for item in _as_list(payloads):
             if "pull_request" in item:
-                # The issues endpoint returns PRs too; they have their own
-                # reader and their own kind.
+                # The issues endpoint returns PRs too. They are not issues, but
+                # they are part of the page: a page of nothing but PRs must
+                # still move the watermark, or the same window is asked for
+                # forever (WI-1752). The issues collector steps over them.
+                yield _to_pull(ref, item)
                 continue
             yield _to_issue(ref, item)
 

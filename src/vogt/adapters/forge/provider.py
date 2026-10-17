@@ -132,8 +132,12 @@ class ForgeProvider(Protocol):
 
     def issues_updated_since(
         self, ref: RepoRef, since: str | None
-    ) -> Iterable[ForgeIssue]:
+    ) -> Iterable[ForgeIssue | ForgePull]:
         """Issues touched since `since` (all states), or all when `since` is None.
+
+        Pull requests that share the issues endpoint are yielded too, as
+        `ForgePull`, so the page's `updated_at` moves the watermark past them;
+        the caller must skip them as issues.
 
         `since` is honoured only when `capabilities.supports_since`; a provider
         that cannot filter returns the current page and says so through the

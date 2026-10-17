@@ -16,7 +16,9 @@ from typing import Any
 import pytest
 
 from vogt.adapters.forge import (
+    ForgeIssue,
     ForgeProvider,
+    ForgePull,
     GitHubProvider,
     RepoRef,
     provider_for,
@@ -154,7 +156,7 @@ def test_the_urls_come_from_the_provider_not_a_hardcoded_string() -> None:
 # -- read surface: normalized models (wired into collectors in Phase 2) ---
 
 
-def test_issues_updated_since_normalises_and_drops_pull_requests() -> None:
+def test_issues_updated_since_normalises_and_passes_pull_requests_through() -> None:
     provider = _provider(
         {
             "/issues": [
@@ -172,10 +174,14 @@ def test_issues_updated_since_normalises_and_drops_pull_requests() -> None:
     )
     ref = provider.parse(GITHUB)
     assert ref is not None
-    issues = list(provider.issues_updated_since(ref, since=None))
-    assert [i.number for i in issues] == [7]
-    assert issues[0].labels == ("bug",)
-    assert issues[0].author == "alice"
+    items = list(provider.issues_updated_since(ref, since=None))
+    # The PR is yielded too, so a page of nothing else still moves the sync
+    # watermark (WI-1752); the issues collector is what steps over it.
+    assert [i.number for i in items] == [7, 8]
+    assert isinstance(items[1], ForgePull)
+    assert isinstance(items[0], ForgeIssue)
+    assert items[0].labels == ("bug",)
+    assert items[0].author == "alice"
 
 
 def test_pulls_and_releases_and_checks_normalise() -> None:
