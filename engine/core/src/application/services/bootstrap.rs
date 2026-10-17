@@ -12,6 +12,7 @@ use crate::config::VogtConfig;
 use crate::core::{IdFactory, SequentialIds};
 use crate::errors::VogtError;
 use crate::storage::sqlite::declared_path;
+use rusqlite::params;
 
 /// Which operator-supplied bootstrap secret `init` adopts.
 #[derive(Clone, Copy)]
@@ -42,8 +43,6 @@ pub fn adopt_bootstrap_token(
     ids: &mut Option<SequentialIds>,
     which: Bootstrap,
 ) -> Result<String, VogtError> {
-    use rusqlite::params;
-
     let (file, actor, scope_text, name, reason, field) = match which {
         Bootstrap::Core => (
             config.bootstrap_core_token_file.clone(),
@@ -79,13 +78,6 @@ pub fn adopt_bootstrap_token(
     let conn =
         crate::storage::sqlite::connection::connect(&declared_path(data_dir)).map_err(sql_error)?;
 
-    let next = |ids: &mut Option<SequentialIds>, prefix: &str| -> String {
-        match ids {
-            Some(factory) => factory.next(prefix),
-            None => crate::core::fresh_id(prefix),
-        }
-    };
-
     // Everything that decides the row lives inside the transaction. The
     // revision and the actor are read there too: a read taken before
     // BEGIN IMMEDIATE can lose to the other container of the same stack.
@@ -102,8 +94,53 @@ pub fn adopt_bootstrap_token(
             return Ok(false);
         }
 
-        // Python refuses `kind != "agent"`. A missing actor is created as an
-        // agent below; there is no identity_ref prefix rule.
+        let at = crate::application::instance::stamp(clock);
+
+        // The secret rotated back to a value a rotation revoked. Reinstate that
+        // row on its own actor, as Python does, whichever actor the config
+        // names now. Revoke whatever holds the row's name on that actor.
+        let revoked: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT id, actor_id, name FROM tokens WHERE token_hash = ?1",
+                params![token_hash],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok();
+        if let Some((existing_id, existing_actor, existing_name)) = revoked {
+            let superseded = revoke_named(&conn, &existing_actor, &existing_name, &at)?;
+            conn.execute(
+                "UPDATE tokens SET revoked_at = NULL, revoked_reason = NULL WHERE id = ?1",
+                params![existing_id],
+            )?;
+            let payload = serde_json::json!({
+                "adopted": true,
+                "reason": "reinstated",
+                "superseded": superseded,
+            });
+            let holder_ref: String = conn.query_row(
+                "SELECT identity_ref FROM actors WHERE id = ?1",
+                params![existing_actor],
+                |row| row.get(0),
+            )?;
+            let summary = crate::decisions::python_json_dumps(
+                &serde_json::json!({"actor": holder_ref}),
+                false,
+            );
+            record_adoption(
+                &conn,
+                ids,
+                &at,
+                &existing_actor,
+                &existing_id,
+                reason,
+                &payload,
+                &summary,
+            )?;
+            return Ok(true);
+        }
+
+        // Python refuses `kind != "agent"` on the fresh-insert path only. A
+        // missing actor is created as an agent below.
         let holder: Option<(String, String)> = conn
             .query_row(
                 "SELECT id, kind FROM actors WHERE identity_ref = ?1",
@@ -120,115 +157,42 @@ pub fn adopt_bootstrap_token(
                 )));
             }
         }
-
-        let at = crate::application::instance::stamp(clock);
-        let (actor_id, actor_is_new) = match &holder {
-            Some((id, _)) => (id.clone(), false),
-            None => (next(ids, "act"), true),
+        let actor_id = match &holder {
+            Some((id, _)) => id.clone(),
+            None => {
+                let id = next_id(ids, "act");
+                conn.execute(
+                    "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at)
+                     VALUES (?1, 'agent', ?2, ?3, 0, ?4)",
+                    params![id, identity_ref, identity_ref, at],
+                )?;
+                id
+            }
         };
-        if actor_is_new {
-            conn.execute(
-                "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at)
-                 VALUES (?1, 'agent', ?2, ?3, 0, ?4)",
-                params![actor_id, identity_ref, identity_ref, at],
-            )?;
-        }
 
-        // A rotate-back finds the revoked row for this hash. Reinstate it
-        // and revoke whatever currently holds the name, the way Python does.
-        let revoked_row: Option<String> = conn
-            .query_row(
-                "SELECT id FROM tokens WHERE token_hash = ?1",
-                params![token_hash],
-                |row| row.get(0),
-            )
-            .ok();
-
-        let mut superseded: Vec<String> = Vec::new();
-        let mut stmt = conn.prepare(
-            "SELECT id FROM tokens
-             WHERE actor_id = ?1 AND name = ?2 AND revoked_at IS NULL",
+        let superseded = revoke_named(&conn, &actor_id, name, &at)?;
+        let token_id = next_id(ids, "tok");
+        let scopes_json = crate::decisions::python_json_dumps(&serde_json::json!(scopes), false);
+        conn.execute(
+            "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![token_id, actor_id, name, token_hash, scopes_json, at],
         )?;
-        let ids_to_revoke: Vec<String> = stmt
-            .query_map(params![actor_id, name], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(stmt);
-        for id in ids_to_revoke {
-            conn.execute(
-                "UPDATE tokens SET revoked_at = ?1,
-                        revoked_reason = 'superseded by a rotated bootstrap secret'
-                 WHERE id = ?2 AND revoked_at IS NULL",
-                params![at, id],
-            )?;
-            superseded.push(id);
-        }
-
-        let entity_id = if let Some(ref existing_id) = revoked_row {
-            conn.execute(
-                "UPDATE tokens SET revoked_at = NULL, revoked_reason = NULL WHERE id = ?1",
-                params![existing_id],
-            )?;
-            existing_id.clone()
-        } else {
-            let token_id = next(ids, "tok");
-            let scopes_json =
-                crate::decisions::python_json_dumps(&serde_json::json!(scopes), false);
-            conn.execute(
-                "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![token_id, actor_id, name, token_hash, scopes_json, at],
-            )?;
-            token_id
-        };
-
-        let revision: i64 = conn
-            .query_row(
-                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'revision'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0)
-            + 1;
-        // Python's reinstated payload is {adopted, reason, superseded}; a
-        // fresh adoption is {actor, scopes, name, source, superseded}. The
-        // digest is over that object, so the keys have to match.
-        let payload = if revoked_row.is_some() {
-            serde_json::json!({
-                "adopted": true,
-                "reason": "reinstated",
-                "superseded": superseded,
-            })
-        } else {
-            serde_json::json!({
-                "actor": identity_ref,
-                "scopes": scopes,
-                "name": name,
-                "source": "operator-supplied",
-                "superseded": superseded,
-            })
-        };
-        let digest = crate::decisions::digest_of(&payload);
+        // Python's fresh payload is {actor, scopes, name, source, superseded}.
+        // The digest is over that object, so the keys have to match.
+        let payload = serde_json::json!({
+            "actor": identity_ref,
+            "scopes": scopes,
+            "name": name,
+            "source": "operator-supplied",
+            "superseded": superseded,
+        });
         let summary = crate::decisions::python_json_dumps(
             &serde_json::json!({"actor": identity_ref, "scopes": scopes}),
             false,
         );
-        let audit_id = next(ids, "aud");
-        let txn_id = next(ids, "txn");
-        conn.execute(
-            "UPDATE meta SET value = ?1 WHERE key = 'revision'",
-            params![revision.to_string()],
-        )?;
-        conn.execute(
-            "INSERT INTO audit (id, txn_id, revision, actor_id, operation, entity_kind,
-                                entity_id, reason, payload_digest, at)
-             VALUES (?1, ?2, ?3, ?4, 'token.adopt', 'token', ?5,
-                     ?6, ?7, ?8)",
-            params![audit_id, txn_id, revision, actor_id, entity_id, reason, digest, at],
-        )?;
-        conn.execute(
-            "INSERT INTO events (kind, entity_kind, entity_id, actor_id, audit_id, summary, at)
-             VALUES ('token.adopted', 'token', ?1, ?2, ?3, ?4, ?5)",
-            params![entity_id, actor_id, audit_id, summary, at],
+        record_adoption(
+            &conn, ids, &at, &actor_id, &token_id, reason, &payload, &summary,
         )?;
         Ok(true)
     })();
@@ -247,6 +211,81 @@ pub fn adopt_bootstrap_token(
             Err(VogtError::InvalidRequest(format!("adopt: {err}")))
         }
     }
+}
+
+/// The next id, from the caller's counter when there is one. Without a
+/// counter the id is fresh, which is what a plain init does.
+fn next_id(ids: &mut Option<SequentialIds>, prefix: &str) -> String {
+    match ids {
+        Some(factory) => factory.next(prefix),
+        None => crate::core::fresh_id(prefix),
+    }
+}
+
+/// Revoke the live tokens `actor_id` holds under `name`, and return their ids.
+fn revoke_named(
+    conn: &rusqlite::Connection,
+    actor_id: &str,
+    name: &str,
+    at: &str,
+) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM tokens WHERE actor_id = ?1 AND name = ?2 AND revoked_at IS NULL",
+    )?;
+    let ids_to_revoke: Vec<String> = stmt
+        .query_map(params![actor_id, name], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for id in &ids_to_revoke {
+        conn.execute(
+            "UPDATE tokens SET revoked_at = ?1,
+                    revoked_reason = 'superseded by a rotated bootstrap secret'
+             WHERE id = ?2 AND revoked_at IS NULL",
+            params![at, id],
+        )?;
+    }
+    Ok(ids_to_revoke)
+}
+
+/// Write the `token.adopt` audit row, its revision bump and the event.
+#[allow(clippy::too_many_arguments)]
+fn record_adoption(
+    conn: &rusqlite::Connection,
+    ids: &mut Option<SequentialIds>,
+    at: &str,
+    actor_id: &str,
+    entity_id: &str,
+    reason: &str,
+    payload: &serde_json::Value,
+    summary: &str,
+) -> Result<(), rusqlite::Error> {
+    let revision: i64 = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'revision'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+        + 1;
+    let digest = crate::decisions::digest_of(payload);
+    let audit_id = next_id(ids, "aud");
+    let txn_id = next_id(ids, "txn");
+    conn.execute(
+        "UPDATE meta SET value = ?1 WHERE key = 'revision'",
+        params![revision.to_string()],
+    )?;
+    conn.execute(
+        "INSERT INTO audit (id, txn_id, revision, actor_id, operation, entity_kind,
+                            entity_id, reason, payload_digest, at)
+         VALUES (?1, ?2, ?3, ?4, 'token.adopt', 'token', ?5, ?6, ?7, ?8)",
+        params![audit_id, txn_id, revision, actor_id, entity_id, reason, digest, at],
+    )?;
+    conn.execute(
+        "INSERT INTO events (kind, entity_kind, entity_id, actor_id, audit_id, summary, at)
+         VALUES ('token.adopted', 'token', ?1, ?2, ?3, ?4, ?5)",
+        params![entity_id, actor_id, audit_id, summary, at],
+    )?;
+    Ok(())
 }
 
 fn sql_error(err: rusqlite::Error) -> VogtError {
@@ -504,6 +543,64 @@ mod tests {
         let outcome = init(&dir, &config).expect("both adopt");
         assert_eq!(outcome.bootstrap_core_token, "adopted");
         assert_eq!(outcome.bootstrap_agent_token, "adopted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotating_back_reinstates_the_row_on_its_own_actor() {
+        // The config names a different actor on the rotate-back. Python
+        // reinstates the revoked row on the actor it was adopted under, and
+        // creates nothing for the new name.
+        let dir = scratch("rotate-actor");
+        let secret_a = "core-token-abcdef1234567890";
+        let secret_b = "core-token-bbbbbbbbbbbbbbbb";
+        let path = dir.join("core-token");
+        let config = |actor: &str| {
+            overrides(&[
+                (
+                    "bootstrap_core_token_file",
+                    json!(path.display().to_string()),
+                ),
+                ("bootstrap_core_token_actor", json!(actor)),
+            ])
+        };
+
+        std::fs::write(&path, secret_a).unwrap();
+        init(&dir, &config("agent:first")).expect("A adopts under agent:first");
+        std::fs::write(&path, secret_b).unwrap();
+        init(&dir, &config("agent:first")).expect("B rotates under agent:first");
+        std::fs::write(&path, secret_a).unwrap();
+        init(&dir, &config("agent:second")).expect("rotate-back to A under a new actor");
+
+        let conn = connect(&dir);
+        let holder: String = conn
+            .query_row(
+                "SELECT a.identity_ref FROM tokens t JOIN actors a ON a.id = t.actor_id
+                 WHERE t.token_hash = ?1 AND t.revoked_at IS NULL",
+                params![crate::auth::hash_token(secret_a)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            holder, "agent:first",
+            "A stays on the actor it was adopted under"
+        );
+        let second: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM actors WHERE identity_ref = 'agent:second'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(second, 0, "the new configured name creates no actor");
+        let live: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tokens WHERE revoked_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 1, "rotating back revokes B and leaves one live token");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
