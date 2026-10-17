@@ -12,6 +12,8 @@ pub mod deployed;
 #[cfg(test)]
 mod disposition;
 pub mod drift;
+#[cfg(test)]
+mod forge_standin;
 pub mod forge_transport;
 pub mod git_signals;
 pub mod git_story;

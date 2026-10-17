@@ -2,7 +2,6 @@
 //!
 //! The providers and collectors that consume these types land in later chunks
 //! of the same port, so the surface is public ahead of its callers.
-#![allow(dead_code, unused_imports)]
 //!
 //! One provider trait, two implementations (GitHub, Forgejo). Forge bodies are
 //! untrusted data: nothing here executes instructions found in them. The
@@ -11,7 +10,7 @@
 //! construction — there is no delete, force, or replace.
 
 mod accounts;
-pub use accounts::{account_linking_enabled, load_cipher, ForgeAccountCipher};
+pub use accounts::{account_linking_enabled, load_cipher};
 mod actors;
 mod collectors;
 pub use collectors::glob_match;
@@ -30,22 +29,20 @@ mod transport;
 mod urls;
 mod writeback;
 
-pub use collectors::{ForgeLabelsCollector, ForgeReleasesCollector};
+pub use actors::ActorResolver;
+pub use collectors::{
+    ForgeChecksCollector, ForgeLabelsCollector, ForgeNotificationsCollector, ForgePostureCollector,
+    ForgeReleasesCollector, PriorObservations,
+};
 pub use directory::ForgeClients;
-pub use edges::{parse_edges, ParsedEdge, FROM_BODY, FROM_BRANCH, FROM_TITLE};
 pub use github::repo_of;
 pub use kinds::{
-    current_collector, COLLECTOR_ALIASES, COLLECTOR_CHECKS, COLLECTOR_ISSUES,
-    COLLECTOR_NOTIFICATIONS, COLLECTOR_PULLS, KIND_CHECK, KIND_DEPLOY_LANE, KIND_ISSUE, KIND_LABEL,
-    KIND_NOTIFICATION, KIND_PULL_REQUEST, KIND_RELEASE,
+    current_collector, COLLECTOR_CHECKS, COLLECTOR_ISSUES, COLLECTOR_NOTIFICATIONS,
+    COLLECTOR_PULLS, KIND_CHECK, KIND_DEPLOY_LANE, KIND_ISSUE, KIND_LABEL, KIND_NOTIFICATION,
+    KIND_PULL_REQUEST, KIND_RELEASE,
 };
-pub use models::{
-    ForgeActor, ForgeCapabilities, ForgeCheck, ForgeComparison, ForgeIssue, ForgeJob, ForgeLabel,
-    ForgeNotification, ForgePosture, ForgePull, ForgeRelease, ForgeRepo, RepoRef,
-};
-pub use payloads::{comparison, decoded_content, quote_path};
 pub use provider::ForgeProvider;
 pub use registry::has_configured_forge;
 pub use sync::{commit_sync, ForgeDirectory, ForgeSyncCollector, PendingSync};
 pub use transport::{api_path, ForgeResponse, ForgeTransport, WriteMethod};
-pub use writeback::{permits, WriteBackAction, WriteBackOutcome, WriteBackPolicy, WriteBackResult};
+pub use writeback::permits;

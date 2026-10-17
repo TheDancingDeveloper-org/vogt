@@ -25,7 +25,6 @@ use serde_json::{json, Value};
 use super::collectors::ActorBlock;
 use super::models::{ForgeActor, ForgeNotification, RepoRef};
 use super::provider::ForgeProvider;
-use crate::errors::VogtError;
 
 /// Author reads one project's notification sweep may spend.
 pub const RESOLVE_BUDGET: i64 = 30;
@@ -250,6 +249,7 @@ fn from_prior(prior: Option<&Value>, url: &str, stamp: &str) -> Option<ForgeActo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::VogtError;
     use std::cell::Cell;
 
     struct Stub {
