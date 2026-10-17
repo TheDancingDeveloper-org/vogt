@@ -272,7 +272,7 @@ fn register_forge_sync<C: Clock + 'static, I: IdFactory + 'static>(
 }
 
 /// Which read an [`OwnedForgeSync`] performs.
-enum ForgeSyncKind {
+pub(crate) enum ForgeSyncKind {
     Issues,
     Pulls,
 }
@@ -284,7 +284,7 @@ enum ForgeSyncKind {
 /// `'static` collectors, so this owns both and calls the same reads and the
 /// same post-append bookkeeping through them: another handle on the context's
 /// observed store, and a share of the directory opened once for the sweep.
-struct OwnedForgeSync<C: Clock + 'static, I: IdFactory + 'static> {
+pub(crate) struct OwnedForgeSync<C: Clock + 'static, I: IdFactory + 'static> {
     name: &'static str,
     kind: ForgeSyncKind,
     store: crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
@@ -293,7 +293,7 @@ struct OwnedForgeSync<C: Clock + 'static, I: IdFactory + 'static> {
 }
 
 impl<C: Clock + 'static, I: IdFactory + 'static> OwnedForgeSync<C, I> {
-    fn new(
+    pub(crate) fn new(
         kind: ForgeSyncKind,
         store: crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
         directory: Rc<crate::adapters::forge::ForgeClients>,

@@ -830,3 +830,160 @@ fn opened_with_account_key() -> Built {
     }
     built
 }
+
+/// Onboarding reads a project's history through the stand-in and writes
+/// nothing upstream: every request is a GET, and the result says what it read.
+/// An unsupported host is refused before any adapter is built.
+#[test]
+fn forge_onboard_reads_history_and_refuses_an_unsupported_host() {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use crate::application::forge_transport::SharedForgeTransport;
+    use crate::application::services::forge_onboard;
+    use crate::config::VogtConfig;
+    use crate::core::Project;
+
+    let dir =
+        std::env::temp_dir().join(format!("vogt-onboard-{}-{}", std::process::id(), unique()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let token = dir.join("forge-token");
+    std::fs::write(&token, "secret-token\n").unwrap();
+    let mut clock = Some(crate::core::StepClock::new(moment()));
+    let mut ids = Some(crate::core::SequentialIds::new(None).unwrap());
+    crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+    let built = crate::application::context::build_context(
+        VogtConfig {
+            data_dir: dir.clone(),
+            github_token_file: Some(token),
+            ..VogtConfig::default()
+        },
+        Some(principal()),
+        clock,
+        ids,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    // The stand-in answers the four reads onboarding makes and records every
+    // request it was asked to send.
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+    let issue = json!({
+        "number": 7,
+        "title": "Onboard me",
+        "state": "open",
+        "html_url": "https://github.com/acme/widget/issues/7",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "labels": [],
+        "user": {"login": "octo"},
+        "body": "",
+    });
+    let label = json!({"name": "bug", "color": "d73a4a"});
+    let release = json!({
+        "tag_name": "v1.0.0",
+        "name": "v1.0.0",
+        "html_url": "https://github.com/acme/widget/releases/tag/v1.0.0",
+        "published_at": "2026-01-03T00:00:00Z",
+        "draft": false,
+        "prerelease": false,
+    });
+    let transport: SharedForgeTransport = Arc::new(
+        move |url: &str, _headers: &BTreeMap<String, String>, _body: &[u8], method: &str| {
+            recorded.lock().unwrap().push(format!("{method} {url}"));
+            let answer = if url.contains("/issues?") {
+                json!([issue.clone()])
+            } else if url.contains("/labels?") {
+                json!([label.clone()])
+            } else if url.contains("/releases?") {
+                json!([release.clone()])
+            } else if url.contains("/pulls?") {
+                json!([])
+            } else {
+                return (404, Vec::new(), BTreeMap::new());
+            };
+            (200, answer.to_string().into_bytes(), BTreeMap::new())
+        },
+    );
+    let Built::StepSequential(ctx) = built else {
+        panic!("expected a step clock");
+    };
+    let built =
+        Built::StepSequential(ctx.with_forge_transport(move |url, headers, body, method| {
+            transport(url, headers, body, method)
+        }));
+
+    let mut github = Project::new("prj_widget", "widget", "widget", "/tmp", moment());
+    github.repo_url = Some("https://github.com/acme/widget".to_owned());
+    let mut stray = Project::new("prj_stray", "stray", "stray", "/tmp", moment());
+    stray.repo_url = Some("https://no.such.host/acme/widget".to_owned());
+    {
+        let Built::StepSequential(ctx) = &built else {
+            panic!("expected a step clock");
+        };
+        let mut txn = ctx.declared.write().unwrap();
+        txn.insert_project(&github).unwrap();
+        txn.insert_project(&stray).unwrap();
+        txn.commit().unwrap();
+    }
+
+    let refused = forge_onboard::onboard_op(
+        &built,
+        json!({"project": "stray", "reason": "not a forge we read"}),
+    )
+    .unwrap();
+    assert_eq!(refused["supported"], false);
+    assert_eq!(refused["mutations"], 0);
+    assert!(refused["detail"]
+        .as_str()
+        .is_some_and(|text| !text.is_empty()));
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "an unsupported host is never read"
+    );
+
+    let done = forge_onboard::onboard_op(
+        &built,
+        json!({"project": "widget", "reason": "backfill the history"}),
+    )
+    .unwrap();
+    assert_eq!(done["supported"], true);
+    assert_eq!(done["mutations"], 0);
+    assert_eq!(done["issues"], 1, "{done}");
+    assert_eq!(done["labels"], 1, "{done}");
+    assert_eq!(done["releases"], 1, "{done}");
+    let requests = seen.lock().unwrap().clone();
+    assert!(!requests.is_empty());
+    assert!(
+        requests.iter().all(|request| request.starts_with("GET ")),
+        "onboarding only reads: {requests:?}"
+    );
+
+    // Every return path is attributed, the refused one and the run alike.
+    let audited = crate::application::services::history::audit_list_op(
+        &built,
+        json!({"operation": "forge.onboard"}),
+    )
+    .unwrap();
+    let rows = audited["records"]
+        .as_array()
+        .or_else(|| audited["audit"].as_array())
+        .or_else(|| audited.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(rows.len(), 2, "{audited}");
+
+    let zero = forge_onboard::onboard_op(
+        &built,
+        json!({"project": "widget", "reason": "no pages", "max_pages": 0}),
+    );
+    assert!(
+        matches!(zero, Err(VogtError::InvalidRequest(_))),
+        "{zero:?}"
+    );
+}
