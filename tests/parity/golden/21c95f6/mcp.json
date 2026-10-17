@@ -1715,6 +1715,79 @@
   },
   {
     "body": {
+      "text": "forge_link_refused: cannot link 'parity': no configured forge reads example.invalid; this build reads github.com only, so nothing was collected here and no conclusion should be drawn from the counts. Set a supported repo_url with `project update`, or import the repository through `project import`."
+    },
+    "is_error": true,
+    "operation": "forge.link"
+  },
+  {
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
+    "is_error": true,
+    "operation": "forge.link"
+  },
+  {
+    "body": {
+      "text": "forge_publish_refused: 'parity' already names a repository (https://example.invalid/parity.git); publish never overwrites that association \u2014 attach to it with `forge link`, or clear the repo_url first if it is wrong"
+    },
+    "is_error": true,
+    "operation": "forge.publish"
+  },
+  {
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
+    "is_error": true,
+    "operation": "forge.publish"
+  },
+  {
+    "body": {
+      "text": "invalid_request: 'no.such.host' is not a configured forge host; add it to forge_token_files before importing by host"
+    },
+    "is_error": true,
+    "operation": "forge.import"
+  },
+  {
+    "body": {
+      "text": "invalid_request: no forge credential is available for this host \u2014 neither a linked account (`forge account link`) nor the instance file token  \u2014 so there is nothing to clone github.com/acme/widget with"
+    },
+    "is_error": true,
+    "operation": "forge.import"
+  },
+  {
+    "body": {
+      "detail": "no configured forge reads example.invalid; this build reads github.com only, so nothing was collected here and no conclusion should be drawn from the counts",
+      "issues": 0,
+      "labels": 0,
+      "mutations": 0,
+      "new": 0,
+      "project": "parity",
+      "pull_requests": 0,
+      "releases": 0,
+      "repo": "https://example.invalid/parity.git",
+      "supported": false,
+      "unchanged": 0
+    },
+    "is_error": false,
+    "operation": "forge.onboard"
+  },
+  {
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
+    "is_error": true,
+    "operation": "forge.onboard"
+  },
+  {
+    "body": {
+      "text": "invalid_request: 'no.such.host' has no provider to validate a token against; configure the host under forge_token_files first"
+    },
+    "is_error": true,
+    "operation": "forge.account_unlink"
+  },
+  {
+    "body": {
       "contributions": [
         {
           "contribution": 55.0,
@@ -1842,6 +1915,19 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:52Z",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
+          "id": "aud_0020",
+          "operation": "forge.onboard",
+          "payload_digest": "sha256:de96f57714a400d1aa3ccb1208c8d7f796cabd99d0fff7de7fdc85927be5ef34",
+          "reason": "parity harness",
+          "revision": 19,
+          "txn_id": "txn_0023"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
           "at": "2026-01-02T03:04:51Z",
           "entity_id": "prj_0001",
           "entity_kind": "project",
@@ -1890,22 +1976,9 @@
           "reason": "parity",
           "revision": 15,
           "txn_id": "txn_0017"
-        },
-        {
-          "actor_id": "act_0001",
-          "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:30Z",
-          "entity_id": "wrk_0001",
-          "entity_kind": "work_item",
-          "id": "aud_0015",
-          "operation": "work.create",
-          "payload_digest": "sha256:575870b9df83c702df7cfd73d439289a2e52b7dc3f37236710df812b0664db5b",
-          "reason": "parity",
-          "revision": 14,
-          "txn_id": "txn_0016"
         }
       ],
-      "total": 19
+      "total": 20
     },
     "is_error": false,
     "operation": "audit.list"
@@ -1944,7 +2017,7 @@
       },
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
       "rows": [],
-      "swept_at": "2026-01-02T03:04:55Z"
+      "swept_at": "2026-01-02T03:04:56Z"
     },
     "is_error": false,
     "operation": "session.sweep"
@@ -2049,13 +2122,13 @@
       "user": {
         "actor_id": "act_0005",
         "actor_identity_ref": "human:ada",
-        "created_at": "2026-01-02T03:04:56Z",
+        "created_at": "2026-01-02T03:04:57Z",
         "scopes": [
           "read",
           "work.write",
           "project.write"
         ],
-        "updated_at": "2026-01-02T03:04:56Z",
+        "updated_at": "2026-01-02T03:04:57Z",
         "username": "ada"
       }
     },
@@ -2068,13 +2141,13 @@
         {
           "actor_id": "act_0005",
           "actor_identity_ref": "human:ada",
-          "created_at": "2026-01-02T03:04:56Z",
+          "created_at": "2026-01-02T03:04:57Z",
           "scopes": [
             "read",
             "work.write",
             "project.write"
           ],
-          "updated_at": "2026-01-02T03:04:56Z",
+          "updated_at": "2026-01-02T03:04:57Z",
           "username": "ada"
         }
       ]
@@ -2087,13 +2160,13 @@
       "user": {
         "actor_id": "act_0005",
         "actor_identity_ref": "human:ada",
-        "created_at": "2026-01-02T03:04:56Z",
+        "created_at": "2026-01-02T03:04:57Z",
         "scopes": [
           "read",
           "work.write",
           "project.write"
         ],
-        "updated_at": "2026-01-02T03:04:58Z",
+        "updated_at": "2026-01-02T03:04:59Z",
         "username": "ada"
       }
     },
@@ -2144,7 +2217,7 @@
         "id": "tok_0002",
         "kind": "api",
         "name": "bootstrap agent token",
-        "revoked_at": "2026-01-02T03:05:00Z",
+        "revoked_at": "2026-01-02T03:05:01Z",
         "revoked_reason": "parity harness",
         "scopes": [
           "read",
@@ -2181,7 +2254,7 @@
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "path": "<root>/backup",
-      "taken_at": "2026-01-02T03:05:02Z"
+      "taken_at": "2026-01-02T03:05:03Z"
     },
     "is_error": false,
     "operation": "backup"
@@ -2194,7 +2267,7 @@
       "import_root_then": "<root>/instance/repos",
       "instance_id": "ins_0001",
       "migrations_applied": [],
-      "restored_from": "2026-01-02T03:05:02Z",
+      "restored_from": "2026-01-02T03:05:03Z",
       "source": "<root>/backup"
     },
     "is_error": false,
@@ -2336,25 +2409,38 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:07Z",
+          "at": "2026-01-02T03:05:08Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0023",
+          "id": "aud_0024",
           "operation": "user.remove",
           "payload_digest": "sha256:6cb1b570d1a756565af0191ec35d1fed1dc103ed9b82afa000b68a0172b6f711",
           "reason": "parity harness",
-          "revision": 22,
-          "txn_id": "txn_0028"
+          "revision": 23,
+          "txn_id": "txn_0029"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:01Z",
+          "at": "2026-01-02T03:05:02Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0022",
+          "id": "aud_0023",
           "operation": "token.revoke",
-          "payload_digest": "sha256:8fa240315d52246f71e2fb88d07d05ccf98a13728f41fe384e7bdfc092b145bd",
+          "payload_digest": "sha256:f3a75264eaa1aa43d5f36af74de3d54874dcbc21dc80593ddb591d842696d099",
+          "reason": "parity harness",
+          "revision": 22,
+          "txn_id": "txn_0027"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:05:00Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0022",
+          "operation": "user.set_password",
+          "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
           "reason": "parity harness",
           "revision": 21,
           "txn_id": "txn_0026"
@@ -2362,12 +2448,12 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:59Z",
+          "at": "2026-01-02T03:04:58Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
           "id": "aud_0021",
-          "operation": "user.set_password",
-          "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
+          "operation": "user.create",
+          "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
           "reason": "parity harness",
           "revision": 20,
           "txn_id": "txn_0025"
@@ -2375,31 +2461,18 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:57Z",
-          "entity_id": "act_0005",
-          "entity_kind": "user",
-          "id": "aud_0020",
-          "operation": "user.create",
-          "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
-          "reason": "parity harness",
-          "revision": 19,
-          "txn_id": "txn_0024"
-        },
-        {
-          "actor_id": "act_0001",
-          "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:51Z",
+          "at": "2026-01-02T03:04:52Z",
           "entity_id": "prj_0001",
           "entity_kind": "project",
-          "id": "aud_0019",
-          "operation": "project.writeback",
-          "payload_digest": "sha256:5160587a6bd4fd6e1c8cfdfbe9e7b71a0aff7cb411b75e8ad277bea16adfdf65",
+          "id": "aud_0020",
+          "operation": "forge.onboard",
+          "payload_digest": "sha256:de96f57714a400d1aa3ccb1208c8d7f796cabd99d0fff7de7fdc85927be5ef34",
           "reason": "parity harness",
-          "revision": 18,
-          "txn_id": "txn_0022"
+          "revision": 19,
+          "txn_id": "txn_0023"
         }
       ],
-      "total": 23
+      "total": 24
     },
     "is_error": false,
     "operation": "audit.list"
@@ -2410,31 +2483,31 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:01Z",
+          "at": "2026-01-02T03:05:02Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0022",
+          "id": "aud_0023",
           "operation": "token.revoke",
-          "payload_digest": "sha256:8fa240315d52246f71e2fb88d07d05ccf98a13728f41fe384e7bdfc092b145bd",
+          "payload_digest": "sha256:f3a75264eaa1aa43d5f36af74de3d54874dcbc21dc80593ddb591d842696d099",
           "reason": "parity harness",
-          "revision": 21,
-          "txn_id": "txn_0026"
+          "revision": 22,
+          "txn_id": "txn_0027"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:59Z",
+          "at": "2026-01-02T03:05:00Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0021",
+          "id": "aud_0022",
           "operation": "user.set_password",
           "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
           "reason": "parity harness",
-          "revision": 20,
-          "txn_id": "txn_0025"
+          "revision": 21,
+          "txn_id": "txn_0026"
         }
       ],
-      "total": 23
+      "total": 24
     },
     "is_error": false,
     "operation": "audit.list"
@@ -2479,8 +2552,8 @@
       "decision": {
         "asker": "local:parity",
         "context": "CI is green.",
-        "created_at": "2026-01-02T03:05:08Z",
-        "expires_at": "2026-01-03T03:05:08Z",
+        "created_at": "2026-01-02T03:05:09Z",
+        "expires_at": "2026-01-03T03:05:09Z",
         "id": "dec_0001",
         "options": [
           {
@@ -2507,8 +2580,8 @@
       "decision": {
         "asker": "local:parity",
         "context": "",
-        "created_at": "2026-01-02T03:05:11Z",
-        "expires_at": "2026-01-03T03:05:11Z",
+        "created_at": "2026-01-02T03:05:12Z",
+        "expires_at": "2026-01-03T03:05:12Z",
         "id": "dec_0002",
         "options": [
           {
@@ -2536,8 +2609,8 @@
         {
           "asker": "local:parity",
           "context": "",
-          "created_at": "2026-01-02T03:05:11Z",
-          "expires_at": "2026-01-03T03:05:11Z",
+          "created_at": "2026-01-02T03:05:12Z",
+          "expires_at": "2026-01-03T03:05:12Z",
           "id": "dec_0002",
           "options": [
             {
@@ -2558,8 +2631,8 @@
         {
           "asker": "local:parity",
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:05:08Z",
-          "expires_at": "2026-01-03T03:05:08Z",
+          "created_at": "2026-01-02T03:05:09Z",
+          "expires_at": "2026-01-03T03:05:09Z",
           "id": "dec_0001",
           "options": [
             {
@@ -2588,8 +2661,8 @@
         {
           "asker": "local:parity",
           "context": "",
-          "created_at": "2026-01-02T03:05:11Z",
-          "expires_at": "2026-01-03T03:05:11Z",
+          "created_at": "2026-01-02T03:05:12Z",
+          "expires_at": "2026-01-03T03:05:12Z",
           "id": "dec_0002",
           "options": [
             {
@@ -2610,8 +2683,8 @@
         {
           "asker": "local:parity",
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:05:08Z",
-          "expires_at": "2026-01-03T03:05:08Z",
+          "created_at": "2026-01-02T03:05:09Z",
+          "expires_at": "2026-01-03T03:05:09Z",
           "id": "dec_0001",
           "options": [
             {
@@ -2692,7 +2765,7 @@
           "evidence_snapshot": "<volatile>",
           "freshness": "live",
           "kind": "decision.pending",
-          "occurred_at": "2026-01-02T03:05:11Z",
+          "occurred_at": "2026-01-02T03:05:12Z",
           "provisional": true,
           "source": "agent",
           "source_subject_key": "dec_0002",
@@ -2713,7 +2786,7 @@
           "evidence_snapshot": "<volatile>",
           "freshness": "live",
           "kind": "decision.pending",
-          "occurred_at": "2026-01-02T03:05:08Z",
+          "occurred_at": "2026-01-02T03:05:09Z",
           "provisional": true,
           "source": "agent",
           "source_subject_key": "dec_0001",
@@ -2725,10 +2798,10 @@
       ],
       "github_scope": "registered projects only",
       "high_water": {
-        "agent": "2026-01-02T03:05:11Z"
+        "agent": "2026-01-02T03:05:12Z"
       },
       "instance_scope": "registered projects only",
-      "snapshot_at": "2026-01-02T03:05:18Z"
+      "snapshot_at": "2026-01-02T03:05:19Z"
     },
     "is_error": false,
     "operation": "inbox.list"
@@ -2740,12 +2813,12 @@
           "label": "Merge",
           "note": "reviewed"
         },
-        "answered_at": "2026-01-02T03:05:24Z",
+        "answered_at": "2026-01-02T03:05:25Z",
         "answered_by": "local:parity",
         "asker": "local:parity",
         "context": "CI is green.",
-        "created_at": "2026-01-02T03:05:08Z",
-        "expires_at": "2026-01-03T03:05:08Z",
+        "created_at": "2026-01-02T03:05:09Z",
+        "expires_at": "2026-01-03T03:05:09Z",
         "id": "dec_0001",
         "options": [
           {
@@ -2786,8 +2859,8 @@
       "decision": {
         "asker": "local:parity",
         "context": "",
-        "created_at": "2026-01-02T03:05:11Z",
-        "expires_at": "2026-01-03T03:05:11Z",
+        "created_at": "2026-01-02T03:05:12Z",
+        "expires_at": "2026-01-03T03:05:12Z",
         "id": "dec_0002",
         "options": [
           {
@@ -2817,12 +2890,12 @@
             "label": "Merge",
             "note": "reviewed"
           },
-          "answered_at": "2026-01-02T03:05:24Z",
+          "answered_at": "2026-01-02T03:05:25Z",
           "answered_by": "local:parity",
           "asker": "local:parity",
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:05:08Z",
-          "expires_at": "2026-01-03T03:05:08Z",
+          "created_at": "2026-01-02T03:05:09Z",
+          "expires_at": "2026-01-03T03:05:09Z",
           "id": "dec_0001",
           "options": [
             {
@@ -2894,7 +2967,7 @@
       "github_scope": "registered projects only",
       "high_water": {},
       "instance_scope": "registered projects only",
-      "snapshot_at": "2026-01-02T03:05:32Z"
+      "snapshot_at": "2026-01-02T03:05:33Z"
     },
     "is_error": false,
     "operation": "inbox.list"
