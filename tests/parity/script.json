@@ -840,6 +840,55 @@
    }
   },
   {
+   "operation": "sweep",
+   "params": {
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/sweep",
+    "auth": "admin",
+    "body": {
+     "reason": "parity harness"
+    }
+   }
+  },
+  {
+   "operation": "sweep",
+   "params": {
+    "collectors": ["git-local"],
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "why": "a named sweep runs one collector and leaves the coverage of the rest as it was",
+   "http": {
+    "method": "POST",
+    "path": "/api/sweep",
+    "auth": "admin",
+    "body": {
+     "collectors": ["git-local"],
+     "reason": "parity harness"
+    }
+   }
+  },
+  {
+   "operation": "coverage",
+   "params": {},
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/coverage",
+    "auth": "admin"
+   }
+  },
+  {
    "operation": "session.log_tail",
    "cli": [
     "session",
