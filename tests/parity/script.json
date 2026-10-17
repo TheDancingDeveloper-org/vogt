@@ -190,6 +190,32 @@
    }
   },
   {
+   "operation": "project.brief",
+   "params": {
+    "slug": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "place.metrics",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "deployed.versions",
+   "cli": [
+    "deployed-versions"
+   ],
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
    "operation": "initiative.create",
    "params": {
     "title": "Platform",
