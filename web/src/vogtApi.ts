@@ -1106,7 +1106,14 @@ export const listSessions = (
   params: Record<string, unknown> = {},
   signal?: AbortSignal,
 ) =>
-  call<{ sessions: SessionSummary[]; engine?: string | null }>(
+  call<{
+    sessions: SessionSummary[];
+    engine?: string | null;
+    /** More links match than this page returned (WI-1736). */
+    truncated?: boolean;
+    /** How many the engine left out of its default list (WI-1289). */
+    hidden_count?: number;
+  }>(
     "session.list",
     { mode: "full", ...params },
     "GET",

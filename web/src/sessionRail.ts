@@ -18,7 +18,7 @@
 // Pure, so the grouping can be pinned by a unit test rather than through DOM.
 
 import type { SessionSummary } from "./api";
-import { isOversight } from "./sessionRowModel";
+import { isOversight, pickerWaiting } from "./sessionRowModel";
 
 /** How long a finished or asleep session stays in "Done recently". */
 export const RAIL_RECENT_MS = 6 * 60 * 60 * 1000;
@@ -64,6 +64,8 @@ export interface RailSection {
 
 export interface RailModel {
   pinned: SessionSummary[];
+  /** How many pinned sessions need a person. They are counted here, not in a section. */
+  pinnedNeeds: number;
   sections: RailSection[];
 }
 
@@ -78,6 +80,10 @@ export interface RailOptions {
   collapsed?: ReadonlySet<string>;
   /** Free-text filter over name, work item, cwd and template. */
   query?: string;
+  /** The engine's `hidden_count`: how many finished sessions are past the
+   *  retain window. Older's header shows this, so it reads right before any
+   *  older row is loaded (WI-1736). */
+  hiddenCount?: number;
   /** The order the previous render showed, so a held list does not reshuffle
    *  while a row's menu is open (#686). Ids not in it keep their place after. */
   held?: readonly string[];
@@ -236,6 +242,7 @@ export function buildRailModel(sessions: readonly SessionSummary[], options: Rai
   }
 
   const held = options.held ? new Map(options.held.map((id, index) => [id, index])) : null;
+  const pinnedNeeds = pinned.filter((s) => railSectionOf(s, now) === "needs").length;
   const sections: RailSection[] = RAIL_SECTION_ORDER.map((id) => {
     const rows = sectionRows.get(id)!;
     rows.sort((a, b) => {
@@ -246,10 +253,12 @@ export function buildRailModel(sessions: readonly SessionSummary[], options: Rai
       }
       return compareInSection(id, a.session, b.session);
     });
-    return { id, title: RAIL_SECTION_TITLES[id], count: rows.length, rows };
+    // Older counts what the engine hid, loaded or not.
+    const count = id === "older" && options.hiddenCount !== undefined ? options.hiddenCount : rows.length;
+    return { id, title: RAIL_SECTION_TITLES[id], count, rows };
   });
 
-  return { pinned, sections };
+  return { pinned, pinnedNeeds, sections };
 }
 
 /** Finished or asleep: nothing to do until someone wakes or restarts it. */
@@ -265,6 +274,8 @@ export interface RailHeadEntry {
   title: string;
   count: number;
   open: boolean;
+  /** Pinned strip only: how many of its sessions need a person. */
+  needs: number;
 }
 
 /** A session row: a top-level row, a nested child, or a pinned one. */
@@ -336,7 +347,15 @@ export function flattenRail(
   };
 
   if (model.pinned.length > 0) {
-    add({ kind: "head", key: "head:pinned", id: "pinned", title: "Pinned", count: model.pinned.length, open: options.open("pinned") });
+    add({
+      kind: "head",
+      key: "head:pinned",
+      id: "pinned",
+      title: "Pinned",
+      count: model.pinned.length,
+      open: options.open("pinned"),
+      needs: model.pinnedNeeds,
+    });
     if (options.open("pinned")) {
       for (const s of model.pinned) {
         add({ kind: "row", key: `row:${s.id}`, session: s, section: "pinned", depth: 0, lifted: null, tally: null, expanded: null });
@@ -347,7 +366,7 @@ export function flattenRail(
   for (const section of model.sections) {
     if (section.count === 0) continue;
     const open = options.open(section.id);
-    add({ kind: "head", key: `head:${section.id}`, id: section.id, title: section.title, count: section.count, open });
+    add({ kind: "head", key: `head:${section.id}`, id: section.id, title: section.title, count: section.count, open, needs: 0 });
     if (open) pushRows(section.rows, section.id);
   }
   return out;
@@ -357,7 +376,7 @@ function sameEntry(a: RailEntry, b: RailEntry): boolean {
   if (a.kind === "head") {
     // `open` is not compared: a header reads its open state live, so a fold
     // must not replace the header (and drop the focus on it).
-    return b.kind === "head" && a.id === b.id && a.title === b.title && a.count === b.count;
+    return b.kind === "head" && a.id === b.id && a.title === b.title && a.count === b.count && a.needs === b.needs;
   }
   if (b.kind === "head") return false;
   return a.session === b.session
@@ -366,4 +385,28 @@ function sameEntry(a: RailEntry, b: RailEntry): boolean {
     && a.lifted === b.lifted
     && a.expanded === b.expanded
     && JSON.stringify(a.tally) === JSON.stringify(b.tally);
+}
+
+/** A small glyph and the words it stands for. The words are the tooltip and
+ *  the accessible name, so colour and glyph are never the only signal. */
+export interface RailBadge {
+  glyph: string;
+  label: string;
+}
+
+/** The state badges a row shows (design §4): `?` a picker waiting for a
+ *  choice, `⚠` an approval, `⛔` blocked, `✗` errored, `AP` autopilot,
+ *  `☾` hibernated, `✓` ready (idle at its prompt). */
+export function railBadges(s: SessionSummary, now: number): RailBadge[] {
+  const badges: RailBadge[] = [];
+  if (pickerWaiting(s)) badges.push({ glyph: "?", label: "waiting for a choice" });
+  else if (s.exit_code === null && s.activity === "awaiting-approval") badges.push({ glyph: "⚠", label: "needs approval" });
+  if (s.blocked && s.exit_code === null) badges.push({ glyph: "⛔", label: "blocked on you" });
+  if (s.activity === "errored" || (s.exit_code !== null && s.exit_code !== 0 && s.activity !== "stopped")) {
+    badges.push({ glyph: "✗", label: "errored" });
+  }
+  if (s.autopilot) badges.push({ glyph: "AP", label: "autopilot" });
+  if (s.activity === "hibernated") badges.push({ glyph: "☾", label: "hibernated" });
+  if (railSectionOf(s, now) === "ready") badges.push({ glyph: "✓", label: "ready" });
+  return badges;
 }
