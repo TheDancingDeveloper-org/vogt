@@ -30,6 +30,7 @@ import {
   setFileTreeSearch,
 } from "./fileTreeState";
 import { workspaceVersion } from "./workspaceVersion";
+import { onWake } from "./wakeCoordinator";
 
 interface Props {
   onOpen?: () => void;
@@ -348,20 +349,12 @@ const FileTree: Component<Props> = (props) => {
   });
 
   // Coming back to the tab is a moment the tree may be stale (an agent wrote
-  // files, a terminal ran git). Reconcile on focus and on becoming visible.
+  // files, a terminal ran git). One shared wake avoids a double refresh.
   const revalidate = () => {
     void refetch();
     void refetchGitStatus();
   };
-  const onVisibility = () => {
-    if (document.visibilityState === "visible") revalidate();
-  };
-  window.addEventListener("focus", revalidate);
-  document.addEventListener("visibilitychange", onVisibility);
-  onCleanup(() => {
-    window.removeEventListener("focus", revalidate);
-    document.removeEventListener("visibilitychange", onVisibility);
-  });
+  onCleanup(onWake(() => revalidate()));
 
   createEffect(() => {
     const query = searchQuery();

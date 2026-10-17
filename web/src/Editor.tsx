@@ -2,6 +2,7 @@ import { Component, createSignal, onCleanup, onMount, Show, For } from "solid-js
 import { api, ApiError } from "./api";
 import {
   languageFor,
+  loadLanguage,
   loadMonaco,
   monacoThemeForApp,
   syncMonacoTheme,
@@ -146,8 +147,10 @@ const Editor: Component<Props> = (props) => {
     addRecentFile(props.path);
     const mountedHost = host;
     try {
-      const [monaco, file] = await Promise.all([
+      const language = languageFor(props.path);
+      const [monaco, , file] = await Promise.all([
         loadMonaco(),
+        loadLanguage(language),
         api.readFile(props.path),
       ]);
       if (disposed) return;
@@ -166,19 +169,20 @@ const Editor: Component<Props> = (props) => {
       if (remembered && remembered.content !== savedContent) {
         setDraftDiffers(true);
       }
-      model = monaco.editor.createModel(
+      const createdModel = monaco.editor.createModel(
         initialContent,
-        languageFor(props.path),
+        language,
         monaco.Uri.parse(`inmemory://workspace/${props.path}`),
       );
+      model = createdModel;
       if (disposed) {
-        model.dispose();
+        createdModel.dispose();
         model = null;
         return;
       }
       syncMonacoTheme(monaco);
-      editor = monaco.editor.create(mountedHost, {
-        model,
+      const createdEditor = monaco.editor.create(mountedHost, {
+        model: createdModel,
         theme: monacoThemeForApp(),
         automaticLayout: false,
         fontFamily:
@@ -189,9 +193,10 @@ const Editor: Component<Props> = (props) => {
         scrollBeyondLastLine: false,
         renderWhitespace: "selection",
       });
-      if (remembered?.viewState) editor.restoreViewState(remembered.viewState);
+      editor = createdEditor;
+      if (remembered?.viewState) createdEditor.restoreViewState(remembered.viewState);
       setEditorDirty(props.tabId, initialContent !== savedContent);
-      contentChangeDisposable = editor.onDidChangeModelContent(() => {
+      contentChangeDisposable = createdEditor.onDidChangeModelContent(() => {
         if (!editor) return;
         const content = editor.getValue();
         if (content === savedContent) {
@@ -207,7 +212,7 @@ const Editor: Component<Props> = (props) => {
         }
         setEditorDirty(props.tabId, content !== savedContent);
       });
-      editor.addCommand(
+      createdEditor.addCommand(
         monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
         () => void save(),
       );

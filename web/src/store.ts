@@ -3,6 +3,7 @@ import { createStore, produce } from "solid-js/store";
 import type { ActivityState, SessionSummary, ServerEvent } from "./api";
 import { api, subscribeEvents } from "./api";
 import { getStoragePrefs } from "./storagePrefs";
+import { noteForeground, onWake, reconcile, type Wake } from "./wakeCoordinator";
 
 interface SessionsStore {
   sessions: Record<string, SessionSummary>;
@@ -211,6 +212,7 @@ export function startEventStream(): void {
     () => {
       setConnected(false);
       unsubscribeEvents = null;
+      noteForeground("sse-reconnect");
       const delay = nextReconnectDelay();
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
@@ -235,7 +237,7 @@ export function stopEventStream(): void {
 // backgrounding without ever firing an error, so the stream can look
 // "connected" while stale indefinitely. Force a reconnect whenever the app
 // comes back to the foreground, instead of waiting on error-driven backoff.
-function forceReconnectEventStream(): void {
+export function forceReconnectEventStream(): void {
   if (!streamStarted) return;
   reconnectAttempts = 0;
   if (unsubscribeEvents) {
@@ -249,19 +251,10 @@ function forceReconnectEventStream(): void {
   startEventStream();
 }
 
-if (typeof document !== "undefined") {
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") forceReconnectEventStream();
-  });
-}
-
-if (typeof window !== "undefined") {
-  void (async () => {
-    try {
-      const { App } = await import("@capacitor/app");
-      App.addListener("resume", () => forceReconnectEventStream());
-    } catch {
-      // Not running under Capacitor (plain web/PWA); visibilitychange covers it.
-    }
-  })();
-}
+// Lifecycle ownership lives in wakeCoordinator: one reconnect and one session
+// reconciliation for a burst of visibility/focus/resume events.
+onWake(() => forceReconnectEventStream());
+onWake((wake: Wake) => {
+  if (wake.reason === "boot" && sessionsStore.ready) return;
+  void reconcile("sessions", wake, () => refreshSessions());
+});

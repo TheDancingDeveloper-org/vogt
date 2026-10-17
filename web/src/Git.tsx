@@ -18,6 +18,7 @@ import {
 } from "./api";
 import {
   languageFor,
+  loadLanguage,
   loadMonaco,
   monacoThemeForApp,
   syncMonacoTheme,
@@ -172,12 +173,13 @@ const DiffView: Component<{
     }
     try {
       setLoading(true);
+      const lang = languageFor(path);
       const [nextEditor, d] = await Promise.all([
         ensureEditor(mountedHost),
         api.gitDiff(repo, path, staged),
+        loadLanguage(lang),
       ]);
       if (disposed || generation !== loadGeneration || !nextEditor || !monaco) return;
-      const lang = languageFor(path);
       const original = monaco.editor.createModel(d.head, lang);
       const modified = monaco.editor.createModel(d.current, lang);
       if (disposed || generation !== loadGeneration) {

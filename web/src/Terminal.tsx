@@ -22,6 +22,12 @@ import {
   saveTerminalCache,
 } from "./terminalCache";
 import {
+  createReplayQueue,
+  prepareReplayTail,
+  scheduleReplay,
+  type ReplayHandle,
+} from "./terminalReplay";
+import {
   clampTerminalFontSize,
   DEFAULT_TERMINAL_FONT_SIZE,
   readTerminalFontSize,
@@ -34,6 +40,7 @@ import {
   ReconnectTracker,
 } from "./terminalReconnect";
 import { applyStickyMods } from "./terminalModifiers";
+import { onWake } from "./wakeCoordinator";
 
 export interface TerminalActions {
   /** Copy the current xterm selection to the system clipboard. Returns true on success. */
@@ -124,6 +131,7 @@ const TerminalView: Component<Props> = (props) => {
   let cacheChunks: Uint8Array[] = [];
   let cacheBytes = 0;
   let cacheTimer: ReturnType<typeof setTimeout> | null = null;
+  let replay: ReplayHandle | null = null;
   let readyToConnect = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let countdownTimer: ReturnType<typeof setInterval> | null = null;
@@ -132,7 +140,7 @@ const TerminalView: Component<Props> = (props) => {
   const reconnect = new ReconnectTracker();
   let destroyed = false;
   let sessionGone = false;
-  let visibilityHandler: (() => void) | null = null;
+  let wakeCleanup: (() => void) | null = null;
   let viewportHandler: (() => void) | null = null;
   let fontSizeHandler: ((event: Event) => void) | null = null;
   let themeHandler: (() => void) | null = null;
@@ -681,10 +689,9 @@ const TerminalView: Component<Props> = (props) => {
 
     props.registerSend?.(sendToPty);
 
-    // On mobile the OS kills the WebSocket when the app is backgrounded.
-    // Reconnect immediately when the page becomes visible again.
-    visibilityHandler = () => {
-      if (document.visibilityState !== "visible") return;
+    // On mobile the OS kills the WebSocket when the app is backgrounded. The
+    // shared wake gives every retained pane one debounced return-to-front.
+    wakeCleanup = onWake(() => {
       scheduleFit();
       term?.scrollToBottom();
       if (!readyToConnect) return;
@@ -693,8 +700,7 @@ const TerminalView: Component<Props> = (props) => {
         clearCountdown();
         connect();
       }
-    };
-    document.addEventListener("visibilitychange", visibilityHandler);
+    });
 
     void loadTerminalCache(props.sessionId).then((cached) => {
       if (destroyed) return;
@@ -704,12 +710,29 @@ const TerminalView: Component<Props> = (props) => {
         return;
       }
       const bytes = new Uint8Array(cached.data);
+      const prepared = prepareReplayTail(bytes, cached.outputPosition);
       cacheChunks = [bytes];
       cacheBytes = bytes.byteLength;
       setStatusText("Restoring terminal...");
-      term?.write(bytes, () => {
+      replay = scheduleReplay(
+        props.sessionId,
+        [prepared.data],
+        (chunk, done) => {
+          if (!term) {
+            done();
+            return;
+          }
+          term.write(chunk, done);
+        },
+        {
+          kind: "cache",
+          droppedBytes: prepared.droppedBytes,
+          droppedLines: prepared.droppedLines,
+        },
+      );
+      void replay.done.then(() => {
         if (destroyed) return;
-        outputPosition = cached.outputPosition;
+        outputPosition = prepared.outputPosition;
         term?.scrollToBottom();
         readyToConnect = true;
         connect();
@@ -768,6 +791,7 @@ const TerminalView: Component<Props> = (props) => {
 
   function connect() {
     if (isSessionGone()) { markSessionGone(); return; }
+    replay?.cancel();
     inSnapshot = true;
     // We are actively attaching now, not waiting to retry — retire the overlay.
     clearCountdown();
@@ -792,6 +816,18 @@ const TerminalView: Component<Props> = (props) => {
             | { type: "snapshot-done" }
             | { type: "lag"; note?: string };
           if (ctrl.type === "snapshot-start") {
+            replay?.cancel();
+            replay = createReplayQueue(
+              props.sessionId,
+              (chunk, done) => {
+                if (!term) {
+                  done();
+                  return;
+                }
+                term.write(chunk, done);
+              },
+              { kind: "snapshot" },
+            );
             if (ctrl.reset !== false) {
               term?.reset();
               cacheChunks = [];
@@ -807,13 +843,18 @@ const TerminalView: Component<Props> = (props) => {
             inSnapshot = true;
             setStatusText("Loading terminal...");
           } else if (ctrl.type === "snapshot-done") {
-            inSnapshot = false;
             outputPosition = snapshotEndPosition ?? outputPosition;
             snapshotEndPosition = undefined;
-            setStatusText(null);
             sendResize();
-            term?.write("", () => term?.scrollToBottom());
-            persistCache();
+            const snapshotReplay = replay;
+            snapshotReplay?.finish();
+            void (snapshotReplay?.done ?? Promise.resolve()).then(() => {
+              if (destroyed || replay !== snapshotReplay) return;
+              inSnapshot = false;
+              setStatusText(null);
+              term?.scrollToBottom();
+              persistCache();
+            });
           } else if (ctrl.type === "lag") {
             term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
             setStatusText("Reattaching terminal...");
@@ -830,8 +871,14 @@ const TerminalView: Component<Props> = (props) => {
       const buf = new Uint8Array(ev.data as ArrayBuffer);
       outputPosition = (outputPosition ?? 0) + buf.byteLength;
       appendToCache(buf);
-      if (!inSnapshot) scheduleCachePersist();
-      term?.write(buf);
+      if (inSnapshot) {
+        // Snapshot and immediately-following live frames share one ordered
+        // queue until the snapshot parser has drained.
+        if (!replay?.enqueue(buf)) term?.write(buf);
+      } else {
+        scheduleCachePersist();
+        term?.write(buf);
+      }
     });
     ws.addEventListener("close", () => {
       // Write the [disconnected] marker once at the start of the outage, not on
@@ -852,6 +899,7 @@ const TerminalView: Component<Props> = (props) => {
 
   onCleanup(() => {
     destroyed = true;
+    replay?.cancel();
     pendingInput = [];
     pendingInputBytes = 0;
     if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -862,10 +910,8 @@ const TerminalView: Component<Props> = (props) => {
       cancelAnimationFrame(fitFrame);
       fitFrame = null;
     }
-    if (visibilityHandler) {
-      document.removeEventListener("visibilitychange", visibilityHandler);
-      visibilityHandler = null;
-    }
+    wakeCleanup?.();
+    wakeCleanup = null;
     if (viewportHandler) {
       window.removeEventListener("resize", viewportHandler);
       window.removeEventListener("orientationchange", viewportHandler);
