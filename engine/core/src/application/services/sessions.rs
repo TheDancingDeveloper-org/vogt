@@ -1929,9 +1929,10 @@ where
                 item,
                 session_id,
                 ranking.as_ref(),
+                Some(&project),
             )?
         }
-        None => crate::application::brief::brief_for_project(&project.slug, session_id),
+        None => crate::application::brief::brief_for_project(&project, session_id),
     };
     Ok(Subject {
         session_id: session_id.to_string(),
@@ -3224,7 +3225,7 @@ fn _sweep_entry(entry: &EngineSweepEntry) -> &EngineSession {
 /// The brief a session's task becomes, when the work item is known.
 #[allow(dead_code)]
 fn task_brief(view: &dyn ReadView, item: &WorkItem, session_id: &str) -> Result<String, VogtError> {
-    brief::brief_for_work_item(view, item, session_id, None)
+    brief::brief_for_work_item(view, item, session_id, None, None)
 }
 
 /// A started session's clock read, so a test can pin it.
