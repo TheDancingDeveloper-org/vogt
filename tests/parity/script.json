@@ -1,5 +1,18 @@
 {
  "why": "A slice of the in-process SCRIPT that a fresh process can replay without a stand-in forge. The full script stays in tests/test_parity.py until the forge stand-in has an out-of-process form.",
+ "init": {
+  "why": "bootstrap token adoption runs in init, before the first step, in every transport",
+  "files": {
+   "core-token": "vogt_bootstrap_core_secret_long_enough_0123",
+   "agent-token": "vogt_agent_bootstrap_secret_long_enough_4567",
+   "ada-password": "correct horse battery",
+   "ada-passphrase": "another passphrase"
+  },
+  "env": {
+   "VOGT_BOOTSTRAP_CORE_TOKEN_FILE": "{root}/core-token",
+   "VOGT_BOOTSTRAP_AGENT_TOKEN_FILE": "{root}/agent-token"
+  }
+ },
  "steps": [
   {
    "operation": "status",
@@ -563,7 +576,7 @@
     "body": {
      "display_name": "Ada Lovelace"
     },
-    "capture": "token"
+    "capture": "admin"
    }
   },
   {
@@ -575,7 +588,7 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions",
-    "auth": "issued"
+    "auth": "admin"
    }
   },
   {
@@ -587,7 +600,7 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions/sweep",
-    "auth": "issued"
+    "auth": "admin"
    }
   },
   {
@@ -605,7 +618,7 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions/log?id=ses_00000000000000000000000000",
-    "auth": "issued"
+    "auth": "admin"
    }
   },
   {
@@ -619,7 +632,7 @@
    "http": {
     "method": "POST",
     "path": "/api/sessions",
-    "auth": "issued",
+    "auth": "admin",
     "body": {
      "reason": "parity"
     }
@@ -638,7 +651,7 @@
    "http": {
     "method": "POST",
     "path": "/api/sessions/input",
-    "auth": "issued",
+    "auth": "admin",
     "body": {
      "id": "ses_00000000000000000000000000",
      "text": "hi",
@@ -657,7 +670,7 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions/screen?id=ses_00000000000000000000000000",
-    "auth": "issued"
+    "auth": "admin"
    }
   },
   {
@@ -671,7 +684,7 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions/wait?id=ses_00000000000000000000000000",
-    "auth": "issued"
+    "auth": "admin"
    }
   },
   {
@@ -687,7 +700,7 @@
    "http": {
     "method": "POST",
     "path": "/api/sessions/answer",
-    "auth": "issued",
+    "auth": "admin",
     "body": {
      "id": "ses_00000000000000000000000000",
      "option": 1,
@@ -707,7 +720,7 @@
    "http": {
     "method": "POST",
     "path": "/api/sessions/hibernate",
-    "auth": "issued",
+    "auth": "admin",
     "body": {
      "id": "ses_00000000000000000000000000",
      "reason": "parity"
@@ -731,7 +744,7 @@
    "http": {
     "method": "POST",
     "path": "/api/sessions/keep-awake",
-    "auth": "issued",
+    "auth": "admin",
     "body": {
      "id": "ses_00000000000000000000000000",
      "keep_awake": true,
@@ -756,7 +769,7 @@
    "http": {
     "method": "POST",
     "path": "/api/sessions/role",
-    "auth": "issued",
+    "auth": "admin",
     "body": {
      "id": "ses_00000000000000000000000000",
      "role": "worker",
@@ -776,7 +789,7 @@
    "http": {
     "method": "POST",
     "path": "/api/sessions/wake",
-    "auth": "issued",
+    "auth": "admin",
     "body": {
      "id": "ses_00000000000000000000000000",
      "reason": "parity"
@@ -795,7 +808,7 @@
    "http": {
     "method": "POST",
     "path": "/api/sessions/stop",
-    "auth": "issued",
+    "auth": "admin",
     "body": {
      "id": "ses_00000000000000000000000000",
      "reason": "parity"
@@ -807,7 +820,7 @@
    "http": {
     "method": "POST",
     "path": "/api/labels",
-    "auth": "issued",
+    "auth": "admin",
     "body": {
      "name": "bug",
      "reason": "seed"
@@ -819,7 +832,7 @@
    "http": {
     "method": "POST",
     "path": "/api/tokens",
-    "auth": "issued",
+    "auth": "admin",
     "body": {
      "actor": "human:ada-lovelace",
      "name": "reader",
@@ -834,7 +847,7 @@
    "http": {
     "method": "POST",
     "path": "/api/labels",
-    "auth": "issued",
+    "auth": "token",
     "body": {
      "name": "chore",
      "reason": "should be refused"
@@ -846,7 +859,7 @@
    "http": {
     "method": "POST",
     "path": "/api/auth/logout",
-    "auth": "issued",
+    "auth": "token",
     "body": {
      "reason": "done"
     }
@@ -855,13 +868,198 @@
   {
    "operation": "chat.list",
    "params": {},
-   "expect": {"exit": 1, "capture_error": true}
+   "expect": {
+    "exit": 1,
+    "capture_error": true
+   }
   },
   {
    "operation": "chat.get",
-   "params": {"id": "nope"},
-   "expect": {"exit": 1, "capture_error": true}
+   "params": {
+    "id": "nope"
+   },
+   "expect": {
+    "exit": 1,
+    "capture_error": true
+   }
+  },
+  {
+   "operation": "user.create",
+   "params": {
+    "username": "ada",
+    "password": "correct horse battery",
+    "display_name": "Ada Lovelace",
+    "reason": "parity harness"
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/users",
+    "auth": "admin",
+    "body": {
+     "username": "ada",
+     "password": "correct horse battery",
+     "display_name": "Ada Lovelace",
+     "reason": "parity harness"
+    }
+   },
+   "expect": {
+    "exit": 0
+   },
+   "cli_params": {
+    "username": "ada",
+    "display_name": "Ada Lovelace",
+    "reason": "parity harness",
+    "password_file": "{root}/ada-password"
+   }
+  },
+  {
+   "operation": "user.list",
+   "params": {},
+   "http": {
+    "method": "GET",
+    "path": "/api/users",
+    "auth": "admin"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "user.set_password",
+   "params": {
+    "username": "ada",
+    "password": "another passphrase",
+    "reason": "parity harness"
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/users/password",
+    "auth": "admin",
+    "body": {
+     "username": "ada",
+     "password": "another passphrase",
+     "reason": "parity harness"
+    }
+   },
+   "expect": {
+    "exit": 0
+   },
+   "cli_params": {
+    "username": "ada",
+    "reason": "parity harness",
+    "password_file": "{root}/ada-passphrase"
+   },
+   "cli": [
+    "user",
+    "passwd"
+   ]
+  },
+  {
+   "operation": "token.list",
+   "params": {
+    "include_revoked": true
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/tokens?include_revoked=true",
+    "auth": "admin"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "token.revoke",
+   "params": {
+    "id": "tok_0002",
+    "reason": "parity harness"
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/tokens/revoke",
+    "auth": "admin",
+    "body": {
+     "id": "tok_0002",
+     "reason": "parity harness"
+    }
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "auth.whoami",
+   "params": {},
+   "http": {
+    "method": "GET",
+    "path": "/api/auth/whoami",
+    "auth": "admin"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "backup",
+   "params": {
+    "destination": "{root}/backup",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+  },
+  {
+   "operation": "restore",
+   "params": {
+    "source": "{root}/backup",
+    "confirm": true,
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+  },
+  {
+   "operation": "auth.login",
+   "http": {
+    "method": "POST",
+    "path": "/api/auth/login",
+    "body": {
+     "username": "ada",
+     "password": "another passphrase"
+    },
+    "capture": "session"
+   }
+  },
+  {
+   "operation": "auth.whoami",
+   "http": {
+    "method": "GET",
+    "path": "/api/auth/whoami",
+    "auth": "session"
+   }
+  },
+  {
+   "operation": "user.remove",
+   "params": {
+    "username": "ada",
+    "reason": "parity harness"
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/users/remove",
+    "auth": "admin",
+    "body": {
+     "username": "ada",
+     "reason": "parity harness"
+    }
+   },
+   "expect": {
+    "exit": 0
+   }
   }
-
  ]
 }

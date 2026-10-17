@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd = sub.add_parser(name)
         cmd.add_argument("--impl", choices=sorted(BINS), required=True)
         cmd.add_argument("--only", default="", help="operation prefix, e.g. actor")
-        cmd.add_argument("--transport", default="cli", choices=["cli", "http"])
+        cmd.add_argument("--transport", default="cli", choices=["cli", "http", "mcp"])
         if name == "record":
             cmd.add_argument("--out", type=Path, required=True)
         else:
@@ -125,12 +125,147 @@ def _load_steps(prefix: str) -> list[dict[str, Any]]:
     return [step for step in document["steps"] if step["operation"].startswith(prefix)]
 
 
+def _prepare_init(root: Path, env: dict[str, str]) -> dict[str, str]:
+    """Write the init pre-step's token files and return the env `init` runs with.
+
+    The script's `init` block names bootstrap token files and the environment
+    that points at them. Every transport runs `init` with the same block, so
+    the adoption shows up in the after-init dump of each one.
+    """
+    spec = json.loads(SCRIPT_PATH.read_text()).get("init", {})
+    for name, content in spec.get("files", {}).items():
+        (root / name).write_text(content, encoding="utf-8")
+    init_env = dict(env)
+    for key, value in spec.get("env", {}).items():
+        init_env[key] = value.replace("{root}", str(root))
+    return init_env
+
+
 def _run(
     binary: str, steps: list[dict[str, Any]], transport: str
 ) -> list[dict[str, Any]]:
     if transport == "http":
         return _run_http(binary, steps)
+    if transport == "mcp":
+        return _run_mcp(binary, steps)
     return _run_cli(binary, steps)
+
+
+def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drive the steps that take parameters over MCP stdio.
+
+    The binary serves `mcp stdio` on a fresh instance, and each step with
+    `params` is one `tools/call`. The tool is the operation with dots as
+    underscores, which is the registry's `mcp_tool` for every operation here.
+    The arguments are the step's params, the same model the CLI reads. Steps
+    without params are CLI-only or HTTP-only and are skipped.
+
+    Every answer is recorded, including an `isError` result, so a refusal the
+    two cores word differently fails the comparison. The after-init dump is
+    recorded first, as the CLI run does. No final dump: the session token that
+    the HTTP login mints is random, and nothing in this transport captures it.
+    """
+    steps = [step for step in steps if "params" in step]
+    with tempfile.TemporaryDirectory(prefix="vogt-parity-mcp-") as scratch:
+        root = Path(scratch)
+        data = root / "instance"
+        env = _child_env()
+        init = subprocess.run(
+            [binary, "--json", "--data-dir", str(data), "init"],
+            env=_prepare_init(root, env),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if init.returncode != 0:
+            raise SystemExit(f"init exited {init.returncode}: {init.stderr.strip()}")
+        recorded: list[dict[str, Any]] = [
+            {
+                "operation": "dump.after_init",
+                "body": _normalise(_dump(data), root, data),
+            }
+        ]
+        server = subprocess.Popen(
+            [binary, "--data-dir", str(data), "mcp", "stdio"],
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        call_id = 0
+
+        def request(method: str, params: dict[str, Any] | None = None) -> Any:
+            nonlocal call_id
+            call_id += 1
+            message: dict[str, Any] = {
+                "jsonrpc": "2.0",
+                "id": call_id,
+                "method": method,
+            }
+            if params is not None:
+                message["params"] = params
+            assert server.stdin is not None and server.stdout is not None
+            server.stdin.write(json.dumps(message) + "\n")
+            server.stdin.flush()
+            line = server.stdout.readline()
+            if not line:
+                reason = (server.stderr.read() if server.stderr else "") or "closed"
+                raise SystemExit(f"mcp stdio closed on {method}: {reason}")
+            reply = json.loads(line)
+            if reply.get("id") != call_id:
+                raise SystemExit(f"mcp reply id {reply.get('id')} for call {call_id}")
+            return reply
+
+        try:
+            initialised = request(
+                "initialize",
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "parity", "version": "0"},
+                },
+            )
+            if "error" in initialised:
+                raise SystemExit(f"mcp initialize failed: {initialised['error']}")
+            assert server.stdin is not None
+            server.stdin.write(
+                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+                + "\n"
+            )
+            server.stdin.flush()
+            for step in steps:
+                arguments = _substitute(step["params"], {}, root)
+                tool = step.get("mcp_tool", step["operation"].replace(".", "_"))
+                reply = request("tools/call", {"name": tool, "arguments": arguments})
+                if "error" in reply:
+                    answer: dict[str, Any] = {
+                        "operation": step["operation"],
+                        "rpc_error": _normalise(
+                            reply["error"], root, data, step["operation"]
+                        ),
+                    }
+                else:
+                    result = reply["result"]
+                    text = "".join(
+                        item.get("text", "") for item in result.get("content", [])
+                    )
+                    try:
+                        body: Any = json.loads(text)
+                    except json.JSONDecodeError:
+                        body = {"text": text}
+                    answer = {
+                        "operation": step["operation"],
+                        "is_error": bool(result.get("isError", False)),
+                        "body": _normalise(body, root, data, step["operation"]),
+                    }
+                recorded.append(answer)
+        finally:
+            if server.stdin:
+                server.stdin.close()
+            server.terminate()
+            server.wait(timeout=10)
+    return recorded
 
 
 def _child_env() -> dict[str, str]:
@@ -167,9 +302,10 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     answers: list[dict[str, Any]] = []
     seen: dict[str, Any] = {}
     try:
+        root.mkdir(parents=True, exist_ok=True)
         init = subprocess.run(
             [binary, "--json", "--data-dir", str(data), "init"],
-            env=env,
+            env=_prepare_init(root, env),
             capture_output=True,
             text=True,
             check=False,
@@ -186,7 +322,9 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for step in steps:
             if "params" not in step:
                 continue
-            params = _substitute(step["params"], seen, root)
+            # A step may give the CLI its own params where the CLI reads a
+            # secret from a file, which MCP and HTTP take as a plain field.
+            params = _substitute(step.get("cli_params", step["params"]), seen, root)
             # A step may name its CLI words explicitly when the operation's
             # dotted name does not match the command path, as `session.log_tail`
             # is the `session log` subcommand.
@@ -310,7 +448,7 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         env = _child_env()
         init = subprocess.run(
             [binary, "--json", "--data-dir", str(data), "init"],
-            env=env,
+            env=_prepare_init(Path(scratch), env),
             capture_output=True,
             text=True,
             check=False,
@@ -345,21 +483,28 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         try:
             base = f"http://127.0.0.1:{port}"
             _wait_until(f"{base}/health/live", server)
-            token: str | None = None
+            credentials: dict[str, str] = {}
             secrets: list[str] = []
             for step in steps:
                 spec = step["http"]
                 headers = dict(spec.get("headers") or {})
-                if spec.get("auth") == "issued":
-                    if token is None:
-                        raise SystemExit(f"{step['operation']} needs an issued token")
-                    headers["Authorization"] = f"Bearer {token}"
-                body = spec.get("body")
+                if "auth" in spec:
+                    kind = spec["auth"]
+                    if kind not in credentials:
+                        raise SystemExit(
+                            f"{step['operation']} needs a {kind} credential"
+                        )
+                    headers["Authorization"] = f"Bearer {credentials[kind]}"
+                body = (
+                    _substitute(spec["body"], {}, Path(scratch))
+                    if spec.get("body") is not None
+                    else None
+                )
                 payload_bytes = json.dumps(body).encode() if body is not None else None
                 if payload_bytes is not None:
                     headers.setdefault("Content-Type", "application/json")
                 request = urllib.request.Request(
-                    f"{base}{spec['path']}",
+                    f"{base}{spec['path'].replace('{root}', scratch)}",
                     data=payload_bytes,
                     method=spec["method"],
                     headers=headers,
@@ -384,9 +529,17 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         ),
                     }
                 )
-                if spec.get("capture") == "token":
-                    token = result["secret"]
-                    secrets.append(token)
+                if "capture" in spec:
+                    # `admin` is the install's operator token, `token` the one
+                    # token.issue mints, and `session` the login's session. The
+                    # steps name which one they present.
+                    if "secret" not in result:
+                        raise SystemExit(
+                            f"{step['operation']} answered {status} without a secret: "
+                            f"{result!r}"
+                        )
+                    credentials[spec["capture"]] = result["secret"]
+                    secrets.append(result["secret"])
             # The declared tables only. The server was started with
             # `--no-schedule`, so no background sweep writes into them.
             dumped = _normalise(_dump(data), Path(scratch), data)["declared"]
