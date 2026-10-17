@@ -79,7 +79,7 @@ fn with_token_on(standin: &StandInForge) -> Built {
 }
 
 /// A fresh directory with no `.git`, so the publish source gate refuses it.
-fn a_directory_that_is_not_a_repository() -> PathBuf {
+pub(super) fn a_directory_that_is_not_a_repository() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "vogt-not-a-repo-{}-{}",
         std::process::id(),
@@ -90,7 +90,13 @@ fn a_directory_that_is_not_a_repository() -> PathBuf {
     dir
 }
 
-fn insert_project(built: &Built, slug: &str, repo_url: Option<&str>, root: &str, linked: bool) {
+pub(super) fn insert_project(
+    built: &Built,
+    slug: &str,
+    repo_url: Option<&str>,
+    root: &str,
+    linked: bool,
+) {
     let Built::StepSequential(ctx) = built else {
         panic!("expected a step clock");
     };
@@ -993,23 +999,26 @@ fn forge_import_clones_under_the_actors_credential() {
 
 // -- a Forgejo host read by sweep: issues and PRs, watermarks, closure -------
 
-const FORGEJO_HOST: &str = "forge.example.net";
-const FORGEJO_REPO: &str = "https://forge.example.net/acme/Widgets";
+pub(super) const FORGEJO_HOST: &str = "forge.example.net";
+pub(super) const FORGEJO_REPO: &str = "https://forge.example.net/acme/Widgets";
 
 /// What a Forgejo stand-in was asked, and what it answers with now. The test
 /// changes `issues` between sweeps, the way upstream does.
 #[derive(Clone, Default)]
-struct Forgejo {
-    issues: Arc<Mutex<Value>>,
-    pulls: Arc<Mutex<Value>>,
-    requests: Arc<Mutex<Vec<String>>>,
+pub(super) struct Forgejo {
+    pub(super) issues: Arc<Mutex<Value>>,
+    pub(super) pulls: Arc<Mutex<Value>>,
+    pub(super) labels: Arc<Mutex<Value>>,
+    pub(super) requests: Arc<Mutex<Vec<String>>>,
+    pub(super) bodies: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Forgejo {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let forgejo = Self::default();
         *forgejo.issues.lock().unwrap() = json!([]);
         *forgejo.pulls.lock().unwrap() = json!([]);
+        *forgejo.labels.lock().unwrap() = json!([]);
         forgejo
     }
 
@@ -1018,14 +1027,25 @@ impl Forgejo {
     fn transport(&self) -> SharedForgeTransport {
         let issues = Arc::clone(&self.issues);
         let pulls = Arc::clone(&self.pulls);
+        let labels = Arc::clone(&self.labels);
         let requests = Arc::clone(&self.requests);
+        let bodies = Arc::clone(&self.bodies);
         Arc::new(
-            move |url: &str, _headers: &BTreeMap<String, String>, _body: &[u8], method: &str| {
+            move |url: &str, _headers: &BTreeMap<String, String>, body: &[u8], method: &str| {
                 requests.lock().unwrap().push(format!("{method} {url}"));
+                if method != "GET" {
+                    // A write answers with the created or edited object, not a list.
+                    let sent: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+                    bodies.lock().unwrap().push(sent);
+                    let answer = json!({"id": 1, "number": 12, "html_url": format!("{FORGEJO_REPO}/issues/12")});
+                    return (200, answer.to_string().into_bytes(), BTreeMap::new());
+                }
                 let body = if url.contains("/issues") && !url.contains("/comments") {
                     issues.lock().unwrap().clone()
                 } else if url.contains("/pulls") {
                     pulls.lock().unwrap().clone()
+                } else if url.contains("/labels") {
+                    labels.lock().unwrap().clone()
                 } else if url.contains("/actions/tasks") {
                     json!({"workflow_runs": []})
                 } else {
@@ -1036,7 +1056,7 @@ impl Forgejo {
         )
     }
 
-    fn mutations(&self) -> Vec<String> {
+    pub(super) fn mutations(&self) -> Vec<String> {
         self.requests
             .lock()
             .unwrap()
@@ -1050,7 +1070,7 @@ impl Forgejo {
 /// A context whose instance reads `FORGEJO_HOST` under a file token, with the
 /// Forgejo stand-in as its transport. The project is registered against the
 /// Forgejo repository, unlinked, as a sweep sees it.
-fn with_forgejo(forgejo: &Forgejo) -> Built {
+pub(super) fn with_forgejo(forgejo: &Forgejo) -> Built {
     let dir =
         std::env::temp_dir().join(format!("vogt-forgejo-{}-{}", std::process::id(), unique()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -1094,7 +1114,7 @@ fn with_forgejo(forgejo: &Forgejo) -> Built {
 }
 
 /// The item numbers the ranked backlog shows as observed `#n` rows.
-fn backlog_numbers(built: &Built) -> Vec<i64> {
+pub(super) fn backlog_numbers(built: &Built) -> Vec<i64> {
     let page = crate::application::views::backlog_op(built, json!({"limit": 100})).unwrap();
     page["items"]
         .as_array()
