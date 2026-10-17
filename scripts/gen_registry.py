@@ -30,6 +30,7 @@ OPERATIONS_RS = REPO_ROOT / "engine" / "core" / "src" / "registry" / "operations
 SCHEMAS_RS = REPO_ROOT / "engine" / "core" / "src" / "registry" / "schemas.rs"
 STRIPS_RS = REPO_ROOT / "engine" / "core" / "src" / "registry" / "strips.rs"
 GOLDEN = REPO_ROOT / "tests" / "parity" / "golden" / "registry.json"
+MODELS_RS = REPO_ROOT / "engine" / "core" / "src" / "application" / "models.rs"
 
 SCOPES = {
     "read": "Read",
@@ -135,6 +136,15 @@ def render_operations_rs(operations: list[dict[str, object]]) -> str:
     return re.sub(r"\\u([0-9a-fA-F]{4})", r"\\u{\1}", "".join(lines))
 
 
+def _derived_names() -> set[str]:
+    """The operation names `models.rs` derives, read from its `DERIVED` list."""
+    text = MODELS_RS.read_text(encoding="utf-8")
+    block = re.search(r"pub const DERIVED: &\[&str\] = &\[(.*?)\];", text, re.S)
+    if block is None:
+        raise SystemExit("engine/core/src/application/models.rs has no DERIVED list")
+    return set(re.findall(r'"([^"]+)"', block.group(1)))
+
+
 def record_golden() -> tuple[str, str]:
     """Python's own dump, plus the Rust module that emits its schemas.
 
@@ -152,8 +162,12 @@ def record_golden() -> tuple[str, str]:
     # registry_dump reads no store. The signature still asks for a context
     # because every service does; this call has nothing to give it.
     dump = registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
+    derived = _derived_names()
     entries = []
     for operation in dump["operations"]:
+        # A derived operation's schema comes from its Rust model, not from here.
+        if operation["name"] in derived:
+            continue
         entries.append(
             "    (\n"
             f"        {json.dumps(operation['name'])},\n"
@@ -164,16 +178,14 @@ def record_golden() -> tuple[str, str]:
     module = (
         "//! Parameter and result schemas, recorded from pydantic, not derived.\n"
         "//!\n"
-        "//! Produced by `scripts/gen_registry.py`. This is a recording, and\n"
-        "//! that is a gap rather than the finished port: the parameter and\n"
-        "//! result models are not hand-written Rust yet, so nothing here\n"
-        "//! derives a schema from a Rust type. The parity check compares this\n"
-        "//! table with pydantic's own output, which means a Rust model that\n"
-        "//! validated differently would still pass. Deriving the schemas from\n"
-        "//! the ported models, so the check is against Rust's own validation,\n"
-        "//! and deleting this table is the remaining work of WI-1060. It has to\n"
-        "//! land before the Python models are removed at the swap (WI-1082),\n"
-        "//! because after that nothing can regenerate the table.\n"
+        "//! Produced by `scripts/gen_registry.py`. This is a recording for every\n"
+        "//! operation except those in `application::models::DERIVED`, whose\n"
+        "//! schemas `schemars` derives from the Rust models. Those names are\n"
+        "//! left out here. `tests/test_rust_schemas.py` checks the dump, derived\n"
+        "//! and recorded alike, against Python's live `registry.dump`. Deriving\n"
+        "//! the rest is WI-1060's remaining work; the recorded rows have to\n"
+        "//! stay until then, because the Python models are removed at the swap\n"
+        "//! (WI-1082) and after that nothing can regenerate them.\n"
         "\n"
         "/// `(operation name, params schema, result schema)`, in registry order.\n"
         + _rust_array("pub static SCHEMAS: &[(&str, &str, &str)]", entries)
