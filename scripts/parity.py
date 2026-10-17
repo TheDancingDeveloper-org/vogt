@@ -182,6 +182,70 @@ def _fixed_scratch(name: str) -> Iterator[Path]:
         shutil.rmtree(path, ignore_errors=True)
 
 
+class _McpStdio:
+    """One `mcp stdio` process, initialised, with its JSON-RPC call counter.
+
+    The environment is fixed per process. A step that names a stand-in engine
+    needs `VOGT_ENGINE_URL` in the child's environment, so the runner starts a
+    fresh process for it. The data directory is shared, so the state carries.
+    """
+
+    def __init__(self, binary: str, data: Path, env: dict[str, str]) -> None:
+        self.server = subprocess.Popen(
+            [binary, "--data-dir", str(data), "mcp", "stdio"],
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.call_id = 0
+        initialised = self.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "parity", "version": "0"},
+            },
+        )
+        if "error" in initialised:
+            raise SystemExit(f"mcp initialize failed: {initialised['error']}")
+        assert self.server.stdin is not None
+        self.server.stdin.write(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+        )
+        self.server.stdin.flush()
+
+    def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        self.call_id += 1
+        message: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": self.call_id,
+            "method": method,
+        }
+        if params is not None:
+            message["params"] = params
+        assert self.server.stdin is not None and self.server.stdout is not None
+        self.server.stdin.write(json.dumps(message) + "\n")
+        self.server.stdin.flush()
+        line = self.server.stdout.readline()
+        if not line:
+            reason = (
+                self.server.stderr.read() if self.server.stderr else ""
+            ) or "closed"
+            raise SystemExit(f"mcp stdio closed on {method}: {reason}")
+        reply = json.loads(line)
+        if reply.get("id") != self.call_id:
+            raise SystemExit(f"mcp reply id {reply.get('id')} for call {self.call_id}")
+        return reply
+
+    def close(self) -> None:
+        if self.server.stdin is not None:
+            self.server.stdin.close()
+        self.server.terminate()
+        self.server.wait(timeout=10)
+
+
 def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drive the steps that take parameters over MCP stdio.
 
@@ -190,6 +254,12 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     underscores, which is the registry's `mcp_tool` for every operation here.
     The arguments are the step's params, the same model the CLI reads. Steps
     without params are CLI-only or HTTP-only and are skipped.
+
+    A step with `"engine": true` runs against the same loopback stand-in engine
+    the CLI run uses, through `VOGT_ENGINE_URL` in the server's environment.
+    Every other step runs with it unset, so the runner restarts the server when
+    the flag changes. A `{seen:...}` reference reads an earlier answer, as the
+    CLI run does, so a grant decision names the grant the request made.
 
     Every answer is recorded, including an `isError` result, so a refusal the
     two cores word differently fails the comparison. The after-init dump is
@@ -220,55 +290,12 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "body": _normalise(_dump(data), root, data),
             }
         ]
-        server = subprocess.Popen(
-            [binary, "--data-dir", str(data), "mcp", "stdio"],
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        call_id = 0
-
-        def request(method: str, params: dict[str, Any] | None = None) -> Any:
-            nonlocal call_id
-            call_id += 1
-            message: dict[str, Any] = {
-                "jsonrpc": "2.0",
-                "id": call_id,
-                "method": method,
-            }
-            if params is not None:
-                message["params"] = params
-            assert server.stdin is not None and server.stdout is not None
-            server.stdin.write(json.dumps(message) + "\n")
-            server.stdin.flush()
-            line = server.stdout.readline()
-            if not line:
-                reason = (server.stderr.read() if server.stderr else "") or "closed"
-                raise SystemExit(f"mcp stdio closed on {method}: {reason}")
-            reply = json.loads(line)
-            if reply.get("id") != call_id:
-                raise SystemExit(f"mcp reply id {reply.get('id')} for call {call_id}")
-            return reply
-
+        seen: dict[str, Any] = {}
+        engine = _StandInEngine()
+        engine_url = engine.__enter__()
+        server: _McpStdio | None = None
+        on_engine = False
         try:
-            initialised = request(
-                "initialize",
-                {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "parity", "version": "0"},
-                },
-            )
-            if "error" in initialised:
-                raise SystemExit(f"mcp initialize failed: {initialised['error']}")
-            assert server.stdin is not None
-            server.stdin.write(
-                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
-                + "\n"
-            )
-            server.stdin.flush()
             for step in steps:
                 if "dump" in step:
                     recorded.append(
@@ -278,9 +305,20 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         }
                     )
                     continue
-                arguments = _substitute(step["params"], {}, root)
+                wants_engine = bool(step.get("engine"))
+                if server is None or wants_engine != on_engine:
+                    if server is not None:
+                        server.close()
+                    step_env = (
+                        {**env, "VOGT_ENGINE_URL": engine_url} if wants_engine else env
+                    )
+                    server = _McpStdio(binary, data, step_env)
+                    on_engine = wants_engine
+                arguments = _substitute(step["params"], seen, root)
                 tool = step.get("mcp_tool", step["operation"].replace(".", "_"))
-                reply = request("tools/call", {"name": tool, "arguments": arguments})
+                reply = server.request(
+                    "tools/call", {"name": tool, "arguments": arguments}
+                )
                 if "error" in reply:
                     answer: dict[str, Any] = {
                         "operation": step["operation"],
@@ -297,6 +335,7 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         body: Any = json.loads(text)
                     except json.JSONDecodeError:
                         body = {"text": text}
+                    seen[step["operation"]] = body
                     answer = {
                         "operation": step["operation"],
                         "is_error": bool(result.get("isError", False)),
@@ -304,10 +343,9 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     }
                 recorded.append(answer)
         finally:
-            if server.stdin is not None:
-                server.stdin.close()
-            server.terminate()
-            server.wait(timeout=10)
+            if server is not None:
+                server.close()
+            engine.__exit__(None, None, None)
     return recorded
 
 

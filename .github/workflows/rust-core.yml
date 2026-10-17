@@ -206,6 +206,9 @@ jobs:
           uv run python scripts/parity.py record --impl python --transport http --out "$RUNNER_TEMP/http"
           uv run python scripts/parity.py record --impl python --transport http --out "$RUNNER_TEMP/http-again"
           diff -q "$RUNNER_TEMP/http/http.json" "$RUNNER_TEMP/http-again/http.json"
+          uv run python scripts/parity.py record --impl python --transport mcp --out "$RUNNER_TEMP/mcp"
+          uv run python scripts/parity.py record --impl python --transport mcp --out "$RUNNER_TEMP/mcp-again"
+          diff -q "$RUNNER_TEMP/mcp/mcp.json" "$RUNNER_TEMP/mcp-again/mcp.json"
           # Against the committed golden, not the recording just made: a
           # recording that agrees with itself proves nothing about drift.
           # The golden is named for the main this branch was rebased onto, not
@@ -215,8 +218,11 @@ jobs:
           test -d "$golden" || { echo "no golden for $base" >&2; exit 1; }
           uv run python scripts/parity.py check --impl python --golden "$golden"
           uv run python scripts/parity.py check --impl python --transport http --golden "$golden"
+          uv run python scripts/parity.py check --impl python --transport mcp --golden "$golden"
           VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
             uv run python scripts/parity.py check --impl rust --transport http --golden "$golden"
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py check --impl rust --transport mcp --golden "$golden"
           VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
             uv run python scripts/parity.py check --impl rust --golden "$golden" --only dump
           uv run python scripts/parity.py check --impl python --golden "$golden" --only actor

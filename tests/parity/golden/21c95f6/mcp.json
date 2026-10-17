@@ -1195,7 +1195,7 @@
             "entity_kind": "project",
             "id": "aud_0007",
             "operation": "project.update",
-            "payload_digest": "sha256:1f9f892df27e35a0a5098a2419d32395f31d2b6a81f7ca3a6502eaf32744fc00",
+            "payload_digest": "sha256:ae82e5173b8742e169a3285c8159ed74d6637b2b5fc4259831577b42adfe0b9b",
             "reason": "parity harness",
             "revision": 6,
             "txn_id": "txn_0007"
@@ -1207,7 +1207,7 @@
             "entity_kind": "project",
             "id": "aud_0008",
             "operation": "project.transition",
-            "payload_digest": "sha256:ef72486698b013b76de8d9a55095b56cef8897ac29fc98f7759ed848ab6f5c79",
+            "payload_digest": "sha256:5ec56e625d3344c6095f0135416ff80d15243ad8c1f715bd3bcee7f490bf180f",
             "reason": "parity harness",
             "revision": 7,
             "txn_id": "txn_0008"
@@ -1219,7 +1219,7 @@
             "entity_kind": "project",
             "id": "aud_0009",
             "operation": "project.scaffold",
-            "payload_digest": "sha256:bd2600c2370f8743a2c4ae1d595aec4a459745b14e3d16323948dd47878c48e8",
+            "payload_digest": "sha256:5babe85b671951396e7f888444c164894a9f7741e1543128204fea1723505130",
             "reason": "parity harness",
             "revision": 8,
             "txn_id": "txn_0009"
@@ -3170,6 +3170,180 @@
   },
   {
     "body": {
+      "grant": {
+        "id": "grt_0001",
+        "kind": "credential",
+        "project_id": "parity-project",
+        "reason": "parity",
+        "requested_at": "2026-01-02T03:04:05Z",
+        "requested_by": "local:parity",
+        "secret_name": "PARITY_TOKEN",
+        "state": "pending",
+        "target": "parity-worker",
+        "ttl_seconds": 60,
+        "uses": "once",
+        "var": "GRANT_PARITY_TOKEN"
+      }
+    },
+    "is_error": false,
+    "operation": "session.grant_request"
+  },
+  {
+    "body": {
+      "grant": {
+        "decided_at": "2026-01-02T03:04:08Z",
+        "decided_by": "local:parity",
+        "decision_reason": "parity",
+        "expires_at": "2026-01-02T03:05:08Z",
+        "id": "grt_0001",
+        "kind": "credential",
+        "project_id": "parity-project",
+        "reason": "parity",
+        "requested_at": "2026-01-02T03:04:05Z",
+        "requested_by": "local:parity",
+        "secret_name": "PARITY_TOKEN",
+        "state": "approved",
+        "target": "parity-worker",
+        "ttl_seconds": 60,
+        "uses": "once",
+        "var": "GRANT_PARITY_TOKEN"
+      }
+    },
+    "is_error": false,
+    "operation": "session.grant_decide"
+  },
+  {
+    "body": {
+      "grant": {
+        "decided_at": "2026-01-02T03:04:08Z",
+        "decided_by": "local:parity",
+        "decision_reason": "parity",
+        "expires_at": "2026-01-02T03:05:08Z",
+        "id": "grt_0001",
+        "kind": "credential",
+        "project_id": "parity-project",
+        "reason": "parity",
+        "requested_at": "2026-01-02T03:04:05Z",
+        "requested_by": "local:parity",
+        "revoked_at": "2026-01-02T03:04:11Z",
+        "revoked_by": "local:parity",
+        "secret_name": "PARITY_TOKEN",
+        "state": "revoked",
+        "target": "parity-worker",
+        "ttl_seconds": 60,
+        "uses": "once",
+        "var": "GRANT_PARITY_TOKEN"
+      }
+    },
+    "is_error": false,
+    "operation": "session.grant_revoke"
+  },
+  {
+    "body": {
+      "grants": []
+    },
+    "is_error": false,
+    "operation": "session.grant_list"
+  },
+  {
+    "body": {
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "sessions": []
+    },
+    "is_error": false,
+    "operation": "session.history_list"
+  },
+  {
+    "body": {
+      "text": "not_found: no session 'ses_00000000000000000000000000'"
+    },
+    "is_error": true,
+    "operation": "session.bind_work"
+  },
+  {
+    "body": {
+      "text": "not_found: no session 'ses_00000000000000000000000000'"
+    },
+    "is_error": true,
+    "operation": "session.last_reply"
+  },
+  {
+    "body": {
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "matches": []
+    },
+    "is_error": false,
+    "operation": "session.search_output"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.report_blocked"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.report_unblocked"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.changes"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.wait_any"
+  },
+  {
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
+    "is_error": true,
+    "operation": "session.commit_for"
+  },
+  {
+    "body": {
+      "text": "not_found: no session 'ses_00000000000000000000000000'"
+    },
+    "is_error": true,
+    "operation": "session.economics"
+  },
+  {
+    "body": {
+      "text": "not_found: no session 'ses_00000000000000000000000000'"
+    },
+    "is_error": true,
+    "operation": "session.digest"
+  },
+  {
+    "body": {
+      "detail": "agent activity is not collected: no transcript roots are configured (set `agent_activity_roots`)",
+      "events": [],
+      "total": 0
+    },
+    "is_error": false,
+    "operation": "agent_activity.search"
+  },
+  {
+    "body": {
+      "detail": "agent activity is not collected: no transcript roots are configured (set `agent_activity_roots`)",
+      "sessions": [],
+      "total": 0
+    },
+    "is_error": false,
+    "operation": "agent_activity.summary"
+  },
+  {
+    "body": {
       "text": "engine_unavailable: no session engine is configured, and chats run on it (set VOGT_ENGINE_URL)"
     },
     "is_error": true,
@@ -3187,13 +3361,13 @@
       "user": {
         "actor_id": "act_0005",
         "actor_identity_ref": "human:ada",
-        "created_at": "2026-01-02T03:05:26Z",
+        "created_at": "2026-01-02T03:04:05Z",
         "scopes": [
           "read",
           "work.write",
           "project.write"
         ],
-        "updated_at": "2026-01-02T03:05:26Z",
+        "updated_at": "2026-01-02T03:04:05Z",
         "username": "ada"
       }
     },
@@ -3206,13 +3380,13 @@
         {
           "actor_id": "act_0005",
           "actor_identity_ref": "human:ada",
-          "created_at": "2026-01-02T03:05:26Z",
+          "created_at": "2026-01-02T03:04:05Z",
           "scopes": [
             "read",
             "work.write",
             "project.write"
           ],
-          "updated_at": "2026-01-02T03:05:26Z",
+          "updated_at": "2026-01-02T03:04:05Z",
           "username": "ada"
         }
       ]
@@ -3225,13 +3399,13 @@
       "user": {
         "actor_id": "act_0005",
         "actor_identity_ref": "human:ada",
-        "created_at": "2026-01-02T03:05:26Z",
+        "created_at": "2026-01-02T03:04:05Z",
         "scopes": [
           "read",
           "work.write",
           "project.write"
         ],
-        "updated_at": "2026-01-02T03:05:28Z",
+        "updated_at": "2026-01-02T03:04:07Z",
         "username": "ada"
       }
     },
@@ -3244,7 +3418,7 @@
       "token": {
         "actor_id": "act_0005",
         "actor_identity_ref": "human:ada",
-        "created_at": "2026-01-02T03:05:30Z",
+        "created_at": "2026-01-02T03:04:09Z",
         "id": "tok_0003",
         "kind": "api",
         "name": "claude-code",
@@ -3268,18 +3442,6 @@
   {
     "body": {
       "tokens": [
-        {
-          "actor_id": "act_0005",
-          "actor_identity_ref": "human:ada",
-          "created_at": "2026-01-02T03:05:30Z",
-          "id": "tok_0003",
-          "kind": "api",
-          "name": "claude-code",
-          "scopes": [
-            "read",
-            "work.write"
-          ]
-        },
         {
           "actor_id": "act_0003",
           "actor_identity_ref": "agent:vogt-sessions",
@@ -3306,6 +3468,18 @@
             "work.write",
             "project.write"
           ]
+        },
+        {
+          "actor_id": "act_0005",
+          "actor_identity_ref": "human:ada",
+          "created_at": "2026-01-02T03:04:09Z",
+          "id": "tok_0003",
+          "kind": "api",
+          "name": "claude-code",
+          "scopes": [
+            "read",
+            "work.write"
+          ]
         }
       ]
     },
@@ -3321,7 +3495,7 @@
         "id": "tok_0002",
         "kind": "api",
         "name": "bootstrap agent token",
-        "revoked_at": "2026-01-02T03:05:32Z",
+        "revoked_at": "2026-01-02T03:04:11Z",
         "revoked_reason": "parity harness",
         "scopes": [
           "read",
@@ -3358,7 +3532,7 @@
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "path": "<root>/backup",
-      "taken_at": "2026-01-02T03:05:34Z"
+      "taken_at": "2026-01-02T03:04:13Z"
     },
     "is_error": false,
     "operation": "backup"
@@ -3372,7 +3546,7 @@
   },
   {
     "body": {
-      "text": "invalid_request: this replaces the stores in <root>/instance with the backup taken at 2026-01-02T03:05:34+00:00. Pass --confirm."
+      "text": "invalid_request: this replaces the stores in <root>/instance with the backup taken at 2026-01-02T03:04:13+00:00. Pass --confirm."
     },
     "is_error": true,
     "operation": "restore"
@@ -3385,7 +3559,7 @@
       "import_root_then": "<root>/instance/repos",
       "instance_id": "ins_0001",
       "migrations_applied": [],
-      "restored_from": "2026-01-02T03:05:34Z",
+      "restored_from": "2026-01-02T03:04:13Z",
       "source": "<root>/backup"
     },
     "is_error": false,
@@ -3527,70 +3701,70 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:40Z",
+          "at": "2026-01-02T03:04:19Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0026",
+          "id": "aud_0029",
           "operation": "user.remove",
           "payload_digest": "sha256:6cb1b570d1a756565af0191ec35d1fed1dc103ed9b82afa000b68a0172b6f711",
           "reason": "parity harness",
-          "revision": 25,
+          "revision": 28,
+          "txn_id": "txn_0039"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:12Z",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0028",
+          "operation": "token.revoke",
+          "payload_digest": "sha256:e1a436439a74c0ffa0daaa578d5dde514af515614906711d69da732f2165d206",
+          "reason": "parity harness",
+          "revision": 27,
+          "txn_id": "txn_0037"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:10Z",
+          "entity_id": "tok_0003",
+          "entity_kind": "token",
+          "id": "aud_0027",
+          "operation": "token.issue",
+          "payload_digest": "sha256:095bcb2a75c36880ea4d27397304f88e0afd90440f45bee38fabb4431e383f55",
+          "reason": "parity harness",
+          "revision": 26,
           "txn_id": "txn_0036"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:33Z",
-          "entity_id": "tok_0002",
-          "entity_kind": "token",
-          "id": "aud_0025",
-          "operation": "token.revoke",
-          "payload_digest": "sha256:ea023b94520fee9aa219311231038a5eafff92a036bb0970996d28607a1ddf1e",
-          "reason": "parity harness",
-          "revision": 24,
-          "txn_id": "txn_0034"
-        },
-        {
-          "actor_id": "act_0001",
-          "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:31Z",
-          "entity_id": "tok_0003",
-          "entity_kind": "token",
-          "id": "aud_0024",
-          "operation": "token.issue",
-          "payload_digest": "sha256:095bcb2a75c36880ea4d27397304f88e0afd90440f45bee38fabb4431e383f55",
-          "reason": "parity harness",
-          "revision": 23,
-          "txn_id": "txn_0033"
-        },
-        {
-          "actor_id": "act_0001",
-          "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:29Z",
+          "at": "2026-01-02T03:04:08Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0023",
+          "id": "aud_0026",
           "operation": "user.set_password",
           "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
           "reason": "parity harness",
-          "revision": 22,
-          "txn_id": "txn_0032"
+          "revision": 25,
+          "txn_id": "txn_0035"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:27Z",
+          "at": "2026-01-02T03:04:06Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0022",
+          "id": "aud_0025",
           "operation": "user.create",
           "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
           "reason": "parity harness",
-          "revision": 21,
-          "txn_id": "txn_0031"
+          "revision": 24,
+          "txn_id": "txn_0034"
         }
       ],
-      "total": 26
+      "total": 29
     },
     "is_error": false,
     "operation": "audit.list"
@@ -3601,31 +3775,31 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:33Z",
+          "at": "2026-01-02T03:04:12Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0025",
+          "id": "aud_0028",
           "operation": "token.revoke",
-          "payload_digest": "sha256:ea023b94520fee9aa219311231038a5eafff92a036bb0970996d28607a1ddf1e",
+          "payload_digest": "sha256:e1a436439a74c0ffa0daaa578d5dde514af515614906711d69da732f2165d206",
           "reason": "parity harness",
-          "revision": 24,
-          "txn_id": "txn_0034"
+          "revision": 27,
+          "txn_id": "txn_0037"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:31Z",
+          "at": "2026-01-02T03:04:10Z",
           "entity_id": "tok_0003",
           "entity_kind": "token",
-          "id": "aud_0024",
+          "id": "aud_0027",
           "operation": "token.issue",
           "payload_digest": "sha256:095bcb2a75c36880ea4d27397304f88e0afd90440f45bee38fabb4431e383f55",
           "reason": "parity harness",
-          "revision": 23,
-          "txn_id": "txn_0033"
+          "revision": 26,
+          "txn_id": "txn_0036"
         }
       ],
-      "total": 26
+      "total": 29
     },
     "is_error": false,
     "operation": "audit.list"
@@ -3670,8 +3844,8 @@
       "decision": {
         "asker": "local:parity",
         "context": "CI is green.",
-        "created_at": "2026-01-02T03:05:41Z",
-        "expires_at": "2026-01-03T03:05:41Z",
+        "created_at": "2026-01-02T03:04:20Z",
+        "expires_at": "2026-01-03T03:04:20Z",
         "id": "dec_0001",
         "options": [
           {
@@ -3698,8 +3872,8 @@
       "decision": {
         "asker": "local:parity",
         "context": "",
-        "created_at": "2026-01-02T03:05:44Z",
-        "expires_at": "2026-01-03T03:05:44Z",
+        "created_at": "2026-01-02T03:04:23Z",
+        "expires_at": "2026-01-03T03:04:23Z",
         "id": "dec_0002",
         "options": [
           {
@@ -3727,8 +3901,8 @@
         {
           "asker": "local:parity",
           "context": "",
-          "created_at": "2026-01-02T03:05:44Z",
-          "expires_at": "2026-01-03T03:05:44Z",
+          "created_at": "2026-01-02T03:04:23Z",
+          "expires_at": "2026-01-03T03:04:23Z",
           "id": "dec_0002",
           "options": [
             {
@@ -3749,8 +3923,8 @@
         {
           "asker": "local:parity",
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:05:41Z",
-          "expires_at": "2026-01-03T03:05:41Z",
+          "created_at": "2026-01-02T03:04:20Z",
+          "expires_at": "2026-01-03T03:04:20Z",
           "id": "dec_0001",
           "options": [
             {
@@ -3779,8 +3953,8 @@
         {
           "asker": "local:parity",
           "context": "",
-          "created_at": "2026-01-02T03:05:44Z",
-          "expires_at": "2026-01-03T03:05:44Z",
+          "created_at": "2026-01-02T03:04:23Z",
+          "expires_at": "2026-01-03T03:04:23Z",
           "id": "dec_0002",
           "options": [
             {
@@ -3801,8 +3975,8 @@
         {
           "asker": "local:parity",
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:05:41Z",
-          "expires_at": "2026-01-03T03:05:41Z",
+          "created_at": "2026-01-02T03:04:20Z",
+          "expires_at": "2026-01-03T03:04:20Z",
           "id": "dec_0001",
           "options": [
             {
@@ -3883,7 +4057,7 @@
           "evidence_snapshot": "<volatile>",
           "freshness": "live",
           "kind": "decision.pending",
-          "occurred_at": "2026-01-02T03:05:44Z",
+          "occurred_at": "2026-01-02T03:04:23Z",
           "provisional": true,
           "source": "agent",
           "source_subject_key": "dec_0002",
@@ -3904,7 +4078,7 @@
           "evidence_snapshot": "<volatile>",
           "freshness": "live",
           "kind": "decision.pending",
-          "occurred_at": "2026-01-02T03:05:41Z",
+          "occurred_at": "2026-01-02T03:04:20Z",
           "provisional": true,
           "source": "agent",
           "source_subject_key": "dec_0001",
@@ -3916,10 +4090,10 @@
       ],
       "github_scope": "registered projects only",
       "high_water": {
-        "agent": "2026-01-02T03:05:44Z"
+        "agent": "2026-01-02T03:04:23Z"
       },
       "instance_scope": "registered projects only",
-      "snapshot_at": "2026-01-02T03:05:51Z"
+      "snapshot_at": "2026-01-02T03:04:30Z"
     },
     "is_error": false,
     "operation": "inbox.list"
@@ -3931,12 +4105,12 @@
           "label": "Merge",
           "note": "reviewed"
         },
-        "answered_at": "2026-01-02T03:05:57Z",
+        "answered_at": "2026-01-02T03:04:36Z",
         "answered_by": "local:parity",
         "asker": "local:parity",
         "context": "CI is green.",
-        "created_at": "2026-01-02T03:05:41Z",
-        "expires_at": "2026-01-03T03:05:41Z",
+        "created_at": "2026-01-02T03:04:20Z",
+        "expires_at": "2026-01-03T03:04:20Z",
         "id": "dec_0001",
         "options": [
           {
@@ -3977,8 +4151,8 @@
       "decision": {
         "asker": "local:parity",
         "context": "",
-        "created_at": "2026-01-02T03:05:44Z",
-        "expires_at": "2026-01-03T03:05:44Z",
+        "created_at": "2026-01-02T03:04:23Z",
+        "expires_at": "2026-01-03T03:04:23Z",
         "id": "dec_0002",
         "options": [
           {
@@ -4008,12 +4182,12 @@
             "label": "Merge",
             "note": "reviewed"
           },
-          "answered_at": "2026-01-02T03:05:57Z",
+          "answered_at": "2026-01-02T03:04:36Z",
           "answered_by": "local:parity",
           "asker": "local:parity",
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:05:41Z",
-          "expires_at": "2026-01-03T03:05:41Z",
+          "created_at": "2026-01-02T03:04:20Z",
+          "expires_at": "2026-01-03T03:04:20Z",
           "id": "dec_0001",
           "options": [
             {
@@ -4085,7 +4259,7 @@
       "github_scope": "registered projects only",
       "high_water": {},
       "instance_scope": "registered projects only",
-      "snapshot_at": "2026-01-02T03:06:05Z"
+      "snapshot_at": "2026-01-02T03:04:44Z"
     },
     "is_error": false,
     "operation": "inbox.list"
