@@ -4,7 +4,6 @@ import {
   For,
   Show,
   createEffect,
-  createMemo,
   createSignal,
   lazy,
   onCleanup,
@@ -110,13 +109,12 @@ import {
   type PlaceMetric,
 } from "./placeMetrics";
 import { createNow, onVogtLive } from "./viewAge";
-import { noteForeground } from "./wakeCoordinator";
 import {
   activityClass,
   activityLabel,
   sessionActivityAge,
   sessionStateWord,
-  sortSessionsForRail,
+  sortSessionsByAttention,
 } from "./sessionRowModel";
 import { railSections, setRailSection } from "./railSections";
 import { setExpanded } from "./fileTreeState";
@@ -370,13 +368,7 @@ const App: Component = () => {
         ? "unavailable"
         : "loading",
   });
-  const railNow = createNow(30_000);
-  const railSessions = createMemo(() => {
-    const sessions = sessionsStore.order
-      .map((id) => sessionsStore.sessions[id])
-      .filter((s): s is SessionSummary => Boolean(s));
-    return sortSessionsForRail(sessions, new Set(bookmarks()));
-  });
+  const railNow = createNow();
   const [openMenuId, setOpenMenuId] = createSignal<string | null>(null);
   const waitingSessionList = () =>
     sessionsStore.ready
@@ -625,7 +617,6 @@ const App: Component = () => {
         setAuthState("authenticated");
         await refreshSessions();
         startEventStream();
-        noteForeground("boot");
         void placeMetrics.refresh();
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) {
@@ -645,7 +636,6 @@ const App: Component = () => {
     setBase(base);
     await refreshSessions();
     startEventStream();
-    noteForeground("boot");
     setAuthError(null);
     setAuthState("authenticated");
     void placeMetrics.refresh();
@@ -1382,7 +1372,18 @@ const App: Component = () => {
             </button>
             <div hidden={!railSections.running}>
             <For
-              each={railSessions()}
+              each={sortSessionsByAttention(
+                sessionsStore.order
+                  .map((id) => sessionsStore.sessions[id])
+                  .filter((s): s is SessionSummary => Boolean(s)),
+              )
+                // Attention order is the shared spine (matches Sessions); a
+                // stable partition then floats bookmarks to the top without
+                // disturbing the attention order within each group.
+                .sort((a, b) => {
+                  const set = new Set(bookmarks());
+                  return (set.has(a.id) ? 0 : 1) - (set.has(b.id) ? 0 : 1);
+                })}
               fallback={<div class="empty">No sessions yet.</div>}
             >
               {(s) => (
@@ -1544,7 +1545,6 @@ const App: Component = () => {
             </div>
           </Show>
           <FileTree
-            active={() => railSections.files}
             onOpen={() => navigate("/sessions")}
             promptPath={promptUser}
             confirmAction={confirmUser}
@@ -1791,7 +1791,6 @@ const App: Component = () => {
                         sessionId={
                           (tab() as Extract<Tab, { kind: "terminal" }>).sessionId
                         }
-                        parked={tabsStore.active !== t.id}
                         registerSend={(fn) => {
                           if (fn) senders.set(t.id, fn);
                           else senders.delete(t.id);
@@ -1855,8 +1854,6 @@ const App: Component = () => {
                   </Show>
                   <Show when={t.kind === "assistant"}>
                     <Assistant
-                      assistantEnabled={Boolean(publicCfg()?.assistant_enabled)}
-                      publicConfig={publicCfg()}
                       pendingHosted
                       onError={(msg) => showToast(msg, { kind: "error" })}
                       confirmAction={confirmUser}

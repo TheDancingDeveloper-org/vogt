@@ -109,7 +109,6 @@ const EditorWorkspace: Component<Props> = (props) => {
           </div>
           <div class="editor-sidebar-content">
             <FileTree
-              active={() => !sidebarCollapsed()}
               onOpen={() => undefined}
               promptPath={props.promptPath}
               confirmAction={props.confirmAction}

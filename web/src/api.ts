@@ -1,15 +1,7 @@
 // Thin typed wrapper over the Vogt HTTP+SSE+WS API.
 
 import { fetchWithRetry } from "./transport";
-import { DEADLINE_MS, type OpClass } from "./deadlines";
 import { isDemoMode, runtimeTransport, type RuntimeSocket } from "./runtimeTransport";
-import {
-  cacheIdentity,
-  cacheKey,
-  cachedRead,
-  invalidate,
-  PUBLIC_CONFIG_POLICY,
-} from "./swr";
 
 export type ActivityState =
   | "idle"
@@ -158,7 +150,6 @@ function publishAuthRejection(rejection: AuthRejection) {
   // filtered by `source` precisely so a tab never hears its own — so this
   // tab's listeners are called here, in-process, and the channel carries the
   // same fact to the others.
-  invalidate();
   for (const listener of [...authRejectedListeners]) listener(rejection);
   postAuthMessage({ type: "auth-rejected", source: AUTH_SOURCE_ID, ...rejection });
 }
@@ -193,7 +184,6 @@ export function getToken(): string {
 export function setToken(token: string) {
   if (token) localStorage.setItem(TOKEN_KEY, token);
   else localStorage.removeItem(TOKEN_KEY);
-  invalidate();
   broadcastAuthState();
 }
 
@@ -209,7 +199,6 @@ export function getBase(): string {
 export function setBase(base: string) {
   if (base) localStorage.setItem(BASE_KEY, base.replace(/\/+$/, ""));
   else localStorage.removeItem(BASE_KEY);
-  invalidate();
   broadcastAuthState();
 }
 
@@ -224,7 +213,6 @@ export function clearStoredAuth() {
   } catch {
     /* localStorage unavailable */
   }
-  invalidate();
   // Announcing a clear that cleared nothing makes every other tab reload for
   // a change that did not happen — which is what two tabs handling the same
   // 401 do, each clearing after the other, reloading the tab that is already
@@ -235,7 +223,6 @@ export function clearStoredAuth() {
 export function subscribeAuthState(onChange: () => void): () => void {
   const onStorage = (event: StorageEvent) => {
     if (event.key === null || event.key === TOKEN_KEY || event.key === BASE_KEY) {
-      invalidate();
       onChange();
     }
   };
@@ -248,7 +235,6 @@ export function subscribeAuthState(onChange: () => void): () => void {
       channel.addEventListener("message", (event: MessageEvent<AuthStateMessage>) => {
         const data = event.data;
         if (data?.type === "auth-state" && data.source !== AUTH_SOURCE_ID) {
-          invalidate();
           onChange();
         }
       });
@@ -284,7 +270,6 @@ export function subscribeAuthRejected(
       channel.addEventListener("message", (event: MessageEvent<AuthMessage>) => {
         const data = event.data;
         if (data?.type === "auth-rejected" && data.source !== AUTH_SOURCE_ID) {
-          invalidate();
           onRejected({ status: data.status, detail: data.detail });
         }
       });
@@ -326,7 +311,6 @@ async function req<T>(
   path: string,
   body?: unknown,
   signal?: AbortSignal,
-  opClass: OpClass = method === "GET" ? "list" : "detail",
 ): Promise<T> {
   const res = await fetchWithRetry(`${getBase()}${path}`, {
     method,
@@ -335,10 +319,9 @@ async function req<T>(
     ),
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal,
-  }, { deadlineMs: DEADLINE_MS[opClass] });
+  });
   const text = await res.text();
   if (!res.ok) throw refused(res.status, text);
-  if (method !== "GET") invalidate();
   return text ? (JSON.parse(text) as T) : (undefined as T);
 }
 
@@ -349,40 +332,26 @@ async function req<T>(
 export async function validateCredentials(
   token: string,
   base: string,
-): Promise<AuthCheck> {
-  if (isDemoMode()) return api.authCheck();
+): Promise<OperationalStatus> {
+  if (isDemoMode()) return api.operationalStatus();
   const candidateToken = token.trim();
   const candidateBase = base.trim().replace(/\/+$/, "");
   if (!candidateToken) throw new ApiError(401, "Bearer token is required");
 
-  const candidateInit: RequestInit = {
+  const res = await runtimeTransport().request(`${candidateBase}/api/status`, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${candidateToken}`,
       Accept: "application/json",
     },
-  };
-  const res = await fetchWithRetry(`${candidateBase}/api/auth/check`, candidateInit, {
-    deadlineMs: DEADLINE_MS.auth,
-    retries: 1,
   });
   const text = await res.text();
   // Deliberately not `refused()`: this asks about a *candidate* credential
   // the reader has just typed, so a 401 here is that form's answer and not a
   // statement about the session. Reporting it would sign the reader out of a
   // working session for mistyping a token into Settings.
-  if (res.status === 404) {
-    const fallback = await fetchWithRetry(`${candidateBase}/api/status`, candidateInit, {
-      deadlineMs: DEADLINE_MS.auth,
-      retries: 1,
-    });
-    const fallbackText = await fallback.text();
-    if (!fallback.ok) throw new ApiError(fallback.status, fallbackText);
-    const status = JSON.parse(fallbackText) as OperationalStatus;
-    return { ok: true, version: status.version, product_version: status.product_version, storage: status.storage };
-  }
   if (!res.ok) throw new ApiError(res.status, text);
-  return JSON.parse(text) as AuthCheck;
+  return JSON.parse(text) as OperationalStatus;
 }
 
 export interface FileEntry {
@@ -714,35 +683,27 @@ export interface AgentTaskUpsertRequest {
 }
 
 export const api = {
-  listSessions: (signal?: AbortSignal) =>
-    req<SessionSummary[]>("GET", "/api/sessions", undefined, signal),
+  listSessions: () => req<SessionSummary[]>("GET", "/api/sessions"),
   createSession: (s: CreateSessionRequest) =>
     req<SessionSummary>("POST", "/api/sessions", s),
-  getSession: (id: string, signal?: AbortSignal) =>
-    req<SessionDetail>("GET", `/api/sessions/${id}`, undefined, signal, "detail"),
+  getSession: (id: string) => req<SessionDetail>("GET", `/api/sessions/${id}`),
   renameSession: (id: string, name: string) =>
     req<OkResponse>("PATCH", `/api/sessions/${id}`, { name }),
   killSession: (id: string) =>
     req<OkResponse>("POST", `/api/sessions/${id}/kill`),
   deleteSession: (id: string) =>
     req<OkResponse>("DELETE", `/api/sessions/${id}`),
-  health: (signal?: AbortSignal) =>
-    req<OkResponse>("GET", "/healthz", undefined, signal, "metadata"),
-  authCheck: (signal?: AbortSignal) =>
-    req<AuthCheck>("GET", "/api/auth/check", undefined, signal, "auth"),
+  health: () => req<OkResponse>("GET", "/healthz"),
 
-  listDir: (path = "", signal?: AbortSignal) =>
-    req<FileEntry[]>("GET", `/api/dir?path=${encodeURIComponent(path)}`, undefined, signal, "list"),
-  tree: (path = "", depth = 1, signal?: AbortSignal) =>
+  listDir: (path = "") =>
+    req<FileEntry[]>("GET", `/api/dir?path=${encodeURIComponent(path)}`),
+  tree: (path = "", depth = 1) =>
     req<TreeNode[]>(
       "GET",
       `/api/tree?path=${encodeURIComponent(path)}&depth=${depth}`,
-      undefined,
-      signal,
-      "list",
     ),
   readFile: (path: string, signal?: AbortSignal) =>
-    req<FileRead>("GET", `/api/files?path=${encodeURIComponent(path)}`, undefined, signal, "long"),
+    req<FileRead>("GET", `/api/files?path=${encodeURIComponent(path)}`, undefined, signal),
   writeFile: (
     path: string,
     content: string,
@@ -786,13 +747,10 @@ export const api = {
     document.body.removeChild(a);
     URL.revokeObjectURL(objUrl);
   },
-  search: (q: string, path = "", signal?: AbortSignal) =>
+  search: (q: string, path = "") =>
     req<SearchHit[]>(
       "GET",
       `/api/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
-      undefined,
-      signal,
-      "long",
     ),
   searchFiles: (q: string, path = "", max?: number, signal?: AbortSignal) =>
     req<FileSearchResult[]>(
@@ -802,7 +760,6 @@ export const api = {
       }`,
       undefined,
       signal,
-      "long",
     ),
 
   listAgentTasks: (signal?: AbortSignal) =>
@@ -846,31 +803,22 @@ export const api = {
       keep_latest_runs_per_task: keepLatestRunsPerTask,
     }),
 
-  listHistorySessions: (limit = 50, offset = 0, signal?: AbortSignal) =>
+  listHistorySessions: (limit = 50, offset = 0) =>
     req<HistorySessionMetadata[]>(
       "GET",
       `/api/history/sessions?limit=${limit}&offset=${offset}`,
-      undefined,
-      signal,
-      "list",
     ),
-  searchHistory: (query: string, limit = 20, signal?: AbortSignal) =>
+  searchHistory: (query: string, limit = 20) =>
     req<HistorySearchResult[]>(
       "GET",
       `/api/history/search?q=${encodeURIComponent(query)}&limit=${limit}`,
-      undefined,
-      signal,
-      "long",
     ),
-  getHistorySession: (id: string, signal?: AbortSignal) =>
-    req<HistorySessionMetadata>("GET", `/api/history/${id}`, undefined, signal, "detail"),
-  getHistorySessionLog: (id: string, tailBytes = 64 * 1024, signal?: AbortSignal) =>
+  getHistorySession: (id: string) =>
+    req<HistorySessionMetadata>("GET", `/api/history/${id}`),
+  getHistorySessionLog: (id: string, tailBytes = 64 * 1024) =>
     req<HistoryLogPreview>(
       "GET",
       `/api/history/${id}/log?tail_bytes=${tailBytes}`,
-      undefined,
-      signal,
-      "long",
     ),
   deleteHistorySession: (id: string) =>
     req<OkResponse>("DELETE", `/api/history/${id}`),
@@ -919,18 +867,9 @@ export const api = {
     req<GitOpResponse>("POST", "/api/git/op", request),
 
   // Public — no token required.
-  publicConfig: (signal?: AbortSignal) =>
-    cachedRead(
-      cacheKey(cacheIdentity(getBase(), getToken()), "api.config"),
-      (requestSignal) =>
-        fetchWithRetry(`${getBase()}/api/config`, { signal: requestSignal }, {
-          deadlineMs: DEADLINE_MS.metadata,
-        }).then((r) => r.json() as Promise<PublicConfig>),
-      PUBLIC_CONFIG_POLICY,
-      signal,
-    ),
-  operationalStatus: (signal?: AbortSignal) =>
-    req<OperationalStatus>("GET", "/api/status", undefined, signal, "metadata"),
+  publicConfig: () =>
+    runtimeTransport().request(`${getBase()}/api/config`).then((r) => r.json() as Promise<PublicConfig>),
+  operationalStatus: () => req<OperationalStatus>("GET", "/api/status"),
 
   guiLaunch: (command: string[], via_sway = true) =>
     req<GuiProc>("POST", "/api/gui/launch", { command, via_sway }),
@@ -1160,13 +1099,6 @@ export interface OperationalStatus {
     state_dir: string;
     workspace_root: string;
   };
-}
-
-export interface AuthCheck {
-  ok: boolean;
-  version: string;
-  product_version?: string;
-  storage: { state_dir: string; workspace_root: string };
 }
 
 export interface GuiProc {

@@ -21,15 +21,14 @@ use crate::{
     app::AppState,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
-    gates::{self, GateOption, GateRecord, GateSpec, GateState, SteerItem, AUTO_APPROVE_ACTOR},
+    gates::{self, GateRecord, GateSpec, GateState, SteerItem, AUTO_APPROVE_ACTOR},
     prompt_files,
     pty::{Session, SessionSpec},
     push::{NotificationKind, PushManager},
     sessions::SessionRegistry,
     workflow_engine::{
-        map_conclusion, HttpWorkflowProvider, ProviderCheckpoint, ProviderEvent,
-        ProviderEventStream, ProviderGate, ProviderRunState, WorkflowEngineConfig,
-        WorkflowEngineError, WorkflowProvider,
+        map_conclusion, HttpWorkflowProvider, ProviderRunState, WorkflowEngineConfig,
+        WorkflowProvider,
     },
 };
 use futures_util::StreamExt;
@@ -793,20 +792,12 @@ impl RunOrigin {
 /// queued for a run whose engine restarted has nothing to be delivered to, and
 /// a gate left open by a restart fails closed on reconcile.
 struct RunControl {
-    session: Option<Arc<Session>>,
+    session: Arc<Session>,
     /// Text queued to reach the PTY at the next prompt boundary, in order.
     steer: Mutex<VecDeque<SteerItem>>,
     /// Woken when a steer is queued or a gate is answered, so the orchestrator
     /// acts at once rather than on its next poll tick.
     notify: Arc<Notify>,
-    /// Controls for external workflow-engine runs have no PTY, but retain the
-    /// provider and opaque run id so UI answers and steers use the same routes.
-    workflow: Option<WorkflowControl>,
-}
-
-struct WorkflowControl {
-    provider: HttpWorkflowProvider,
-    provider_run_id: String,
 }
 
 pub struct AgentTaskRegistry {
@@ -1403,9 +1394,9 @@ impl AgentTaskRegistry {
         {
             return Ok(None);
         }
-        // The per-task concurrency cap (#290). Counting live controls as well
-        // as PTY sessions means a workflow-engine run occupies a slot even
-        // though it deliberately has no local session.
+        // The per-task concurrency cap (#290). Counting live sessions, not the
+        // `executing` guard above, so a cap of two genuinely allows two runs in
+        // flight while a cap of one preserves the old one-at-a-time behaviour.
         let cap = task.concurrency.max(1) as usize;
         if self.running_run_count(&task) >= cap {
             return self.defer_or_conflict(id, trigger, "task is at its concurrency cap");
@@ -1420,7 +1411,7 @@ impl AgentTaskRegistry {
 
         // A task with a workflow-engine backend (#293) takes an entirely
         // separate path: no prompt expansion, no PTY, no session. The run is
-        // handed to the engine and tracked by SSE with polling fallback. Everything below — the
+        // handed to the engine and tracked by polling. Everything below — the
         // command build, the session spawn, the orchestrator — is the PTY path
         // and stays untouched when `workflow_engine` is None.
         if let Some(we) = task.workflow_engine.clone() {
@@ -1604,10 +1595,9 @@ impl AgentTaskRegistry {
         // moment it exists — a task with no gates can still be redirected
         // mid-flight.
         let control = Arc::new(RunControl {
-            session: Some(Arc::clone(&session)),
+            session: Arc::clone(&session),
             steer: Mutex::new(VecDeque::new()),
             notify: Arc::new(Notify::new()),
-            workflow: None,
         });
         self.runs.lock().insert(run.id, Arc::clone(&control));
         spawn_run_orchestrator(
@@ -1638,7 +1628,7 @@ impl AgentTaskRegistry {
     }
 
     /// The workflow-engine path (#293): hand a run to an external engine and
-    /// track it by SSE with polling fallback, instead of spawning a PTY. Reached only when the
+    /// track it by polling, instead of spawning a PTY. Reached only when the
     /// task carries a [`WorkflowEngineConfig`]; the PTY path above is untouched.
     ///
     /// Every provider failure — an unreadable token file, an unreachable engine,
@@ -1719,22 +1709,13 @@ impl AgentTaskRegistry {
                     None => format!("workflow engine run {}", provider_run.run_id),
                 });
                 self.record_workflow_run(id, trigger, &origin.detail, &run, now)?;
-                // Track the run off its live SSE event stream (#293),
+                // Track the run off its live SSE event stream (#293 inc-2),
                 // degrading to the poller when the stream is absent or breaks.
                 // The tracker also collects each per-stage checkpoint branch the
-                // stream or poll fallback reports as a run observation (#284).
-                // Keep a provider control beside the persisted run so gate
-                // answers and steering can be forwarded without a PTY.
-                let control = Arc::new(RunControl {
-                    session: None,
-                    steer: Mutex::new(VecDeque::new()),
-                    notify: Arc::new(Notify::new()),
-                    workflow: Some(WorkflowControl {
-                        provider: provider.clone(),
-                        provider_run_id: provider_run.run_id.clone(),
-                    }),
-                });
-                self.runs.lock().insert(run.id, control);
+                // stream reports as a run observation (#284). DEFERRED to a later
+                // slice: bridging #289 gates onto the engine's own gates,
+                // collecting checkpoints on the poll-only fallback path, and a
+                // live-engine smoke of the provisional wire field names.
                 spawn_workflow_tracker(
                     Arc::clone(self),
                     provider,
@@ -1852,7 +1833,6 @@ impl AgentTaskRegistry {
             task.updated_at = finished;
             let _ = self.save_locked(&tasks);
         }
-        self.remove_run_control(run_id);
         self.bus.publish(ServerEvent::TaskRunConcluded {
             task_id,
             run_id,
@@ -1970,21 +1950,13 @@ impl AgentTaskRegistry {
             .cloned()
     }
 
-    /// How many of a task's runs still have a live PTY or workflow control —
-    /// the number the concurrency cap (#290) is compared against.
+    /// How many of a task's runs still have a live session — the number the
+    /// concurrency cap (#290) is compared against.
     fn running_run_count(&self, task: &AgentTask) -> usize {
-        let controls = self.runs.lock();
         task.runs
             .iter()
-            .filter(|run| {
-                controls.get(&run.id).is_some_and(|control| {
-                    control.workflow.is_some()
-                        || control
-                            .session
-                            .as_ref()
-                            .is_some_and(|session| session.exit_code().is_none())
-                })
-            })
+            .filter_map(|run| self.sessions.get(run.session_id).ok())
+            .filter(|session| session.exit_code().is_none())
             .count()
     }
 
@@ -2222,7 +2194,7 @@ impl AgentTaskRegistry {
     /// this run happens to be. Refused when the task has no run in flight —
     /// there is nothing to steer, and queuing for a run that will never read it
     /// would be a silent no-op dressed as a success.
-    pub async fn steer(
+    pub fn steer(
         &self,
         task_id: Uuid,
         text: String,
@@ -2236,23 +2208,13 @@ impl AgentTaskRegistry {
                 "steer needs text, or interrupt=true".into(),
             ));
         }
-        let (run_id, control) = self.live_run(task_id)?;
-        let item = SteerItem {
+        let (_run_id, control) = self.live_run(task_id)?;
+        control.steer.lock().push_back(SteerItem {
             text,
             interrupt,
             actor,
             reason,
-        };
-        if let Some(workflow) = control.workflow.as_ref() {
-            workflow
-                .provider
-                .steer(&workflow.provider_run_id, &item.text, item.interrupt)
-                .await
-                .map_err(|err| ApiError::BadGateway(err.to_string()))?;
-            self.emit_steered(run_id, &item);
-            return Ok(());
-        }
-        control.steer.lock().push_back(item);
+        });
         control.notify.notify_one();
         Ok(())
     }
@@ -2261,7 +2223,7 @@ impl AgentTaskRegistry {
     /// input is delivered to the PTY by the orchestrator; this only records the
     /// resolution and wakes it. Fail-closed lives elsewhere — this is the human
     /// path, and the only path that can produce an approval.
-    pub async fn answer_gate(
+    pub fn answer_gate(
         &self,
         task_id: Uuid,
         gate_id: Uuid,
@@ -2270,25 +2232,6 @@ impl AgentTaskRegistry {
         reason: Option<String>,
     ) -> Result<GateRecord> {
         let (run_id, control) = self.live_run(task_id)?;
-        if let Some(workflow) = control.workflow.as_ref() {
-            let gate = self
-                .gate_record(run_id, gate_id)
-                .ok_or(ApiError::NotFound)?;
-            if !gate.state.is_open() {
-                return Err(ApiError::Conflict("gate is already resolved".into()));
-            }
-            if option_index >= gate.options.len() {
-                return Err(ApiError::BadRequest("no such gate option".into()));
-            }
-            let provider_id = gate.provider_id.ok_or_else(|| {
-                ApiError::BadRequest("gate is not owned by the workflow engine".into())
-            })?;
-            workflow
-                .provider
-                .answer_gate(&workflow.provider_run_id, &provider_id, option_index)
-                .await
-                .map_err(|err| ApiError::BadGateway(err.to_string()))?;
-        }
         let record =
             self.resolve_gate_answer(run_id, gate_id, option_index, &actor, false, reason)?;
         control.notify.notify_one();
@@ -2309,12 +2252,7 @@ impl AgentTaskRegistry {
         let controls = self.runs.lock();
         for run_id in run_ids {
             if let Some(control) = controls.get(&run_id) {
-                if control.workflow.is_some()
-                    || control
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| session.exit_code().is_none())
-                {
+                if control.session.exit_code().is_none() {
                     return Ok((run_id, Arc::clone(control)));
                 }
             }
@@ -2397,54 +2335,6 @@ impl AgentTaskRegistry {
     fn open_gate(&self, run_id: Uuid, spec: &GateSpec) -> Result<()> {
         let now = OffsetDateTime::now_utc();
         let record = GateRecord::open(spec, now);
-        self.persist_open_gate(run_id, record)
-    }
-
-    /// Mirror a provider-owned gate into the existing local gate API. The
-    /// provider id remains internal: callers answer with Vogt's UUID and the
-    /// registry translates it back before forwarding the decision upstream.
-    fn open_workflow_gate(&self, run_id: Uuid, provider_gate: &ProviderGate) -> Result<()> {
-        {
-            let tasks = self.tasks.lock();
-            if tasks
-                .iter()
-                .flat_map(|task| &task.runs)
-                .find(|run| run.id == run_id)
-                .is_some_and(|run| {
-                    run.gates
-                        .iter()
-                        .any(|gate| gate.provider_id.as_deref() == Some(provider_gate.id.as_str()))
-                })
-            {
-                return Ok(());
-            }
-        }
-        let spec = GateSpec {
-            id: Uuid::new_v4(),
-            question: provider_gate.question.clone(),
-            options: provider_gate
-                .options
-                .iter()
-                .map(|option| GateOption {
-                    label: option.label.clone(),
-                    input: option.input.clone(),
-                    approve: option.approve,
-                })
-                .collect(),
-            timeout_ms: None,
-        };
-        spec.validate()
-            .map_err(|error| ApiError::BadGateway(format!("invalid workflow gate: {error}")))?;
-        let record = GateRecord::open_with_provider(
-            &spec,
-            OffsetDateTime::now_utc(),
-            Some(provider_gate.id.clone()),
-        );
-        self.persist_open_gate(run_id, record)
-    }
-
-    fn persist_open_gate(&self, run_id: Uuid, record: GateRecord) -> Result<()> {
-        let now = OffsetDateTime::now_utc();
         let (task_id, task_name, session_id) = {
             let mut tasks = self.tasks.lock();
             let task = task_with_run_mut(&mut tasks, run_id).ok_or(ApiError::NotFound)?;
@@ -2464,21 +2354,21 @@ impl AgentTaskRegistry {
             task_id,
             run_id,
             session_id,
-            gate_id: record.id,
-            question: record.question.clone(),
-            options: record.options.iter().map(|o| o.label.clone()).collect(),
+            gate_id: spec.id,
+            question: spec.question.clone(),
+            options: spec.options.iter().map(|o| o.label.clone()).collect(),
         });
         let data = json!({
             "kind": "agent-task-gate",
             "task_id": task_id.to_string(),
             "run_id": run_id.to_string(),
-            "gate_id": record.id.to_string(),
+            "gate_id": spec.id.to_string(),
             "session_id": session_id.to_string(),
             "url": format!("/#/t/{session_id}"),
         });
         let title = format!("{task_name} needs approval");
         let push = Arc::clone(&self.push);
-        let question = record.question.clone();
+        let question = spec.question.clone();
         tokio::spawn(async move {
             let _ = push
                 .notify(NotificationKind::AgentTaskNotify, &title, &question, data)
@@ -2848,16 +2738,13 @@ pub async fn steer(
     Json(req): Json<SteerReq>,
 ) -> Result<Json<serde_json::Value>> {
     let actor = clean_optional(req.actor).unwrap_or_else(|| "operator".to_string());
-    state
-        .agent_tasks
-        .steer(
-            id,
-            req.text,
-            req.interrupt,
-            actor,
-            clean_optional(req.reason),
-        )
-        .await?;
+    state.agent_tasks.steer(
+        id,
+        req.text,
+        req.interrupt,
+        actor,
+        clean_optional(req.reason),
+    )?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2878,10 +2765,13 @@ pub async fn answer_gate(
     Json(req): Json<GateAnswerReq>,
 ) -> Result<Json<GateRecord>> {
     let actor = clean_optional(req.actor).unwrap_or_else(|| "operator".to_string());
-    let record = state
-        .agent_tasks
-        .answer_gate(id, gate_id, req.option, actor, clean_optional(req.reason))
-        .await?;
+    let record = state.agent_tasks.answer_gate(
+        id,
+        gate_id,
+        req.option,
+        actor,
+        clean_optional(req.reason),
+    )?;
     Ok(Json(record))
 }
 
@@ -3330,12 +3220,12 @@ fn clean_workflow_engine(value: Option<WorkflowEngineConfig>) -> Option<Workflow
         workflow,
         token_file: clean_optional(cfg.token_file),
         repo_ref: clean_optional(cfg.repo_ref),
-        fabro: cfg.fabro,
     })
 }
 
-/// How often a workflow run is polled for a terminal state after event-stream
-/// tracking has exhausted its bounded retry budget (#293).
+/// How often a workflow run is polled for a terminal state (#293). A steer/gate
+/// bridge that would let the engine push instead is increment-2 work; until
+/// then a fixed interval is the whole tracking mechanism.
 const WORKFLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// How many consecutive poll errors are tolerated before a workflow run is
 /// given up on as errored — a transient blip is ridden out, a persistently
@@ -3350,11 +3240,6 @@ const WORKFLOW_POLL_DEADLINE: Duration = Duration::hours(6);
 /// keep-alives well inside this; a stream that has gone quiet is treated as
 /// broken rather than blocking the run's tracking indefinitely.
 const WORKFLOW_SSE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// How many times a broken workflow-event subscription may be re-established
-/// before the tracker settles on polling. This is a total budget for the run,
-/// not a budget reset after each successful stream, so a flapping provider
-/// cannot turn one run into an unbounded stream of HTTP connections.
-const WORKFLOW_SSE_MAX_RESUBSCRIPTIONS: u32 = 1;
 
 /// Read the workflow engine's bearer token from `path`, following the
 /// token-from-file pattern in `config.rs` (`read_token_path`). `None` when no
@@ -3405,143 +3290,8 @@ fn workflow_outcome_summary(
     }
 }
 
-/// The result of consuming one workflow-event subscription.
-#[derive(Debug)]
-enum WorkflowStreamAttempt {
-    /// The stream reported a terminal event.
-    Terminal(ProviderEvent),
-    /// The stream ended, went idle, or failed at the transport layer. The
-    /// caller may spend one of its bounded re-subscription attempts.
-    Retryable { error: Option<WorkflowEngineError> },
-    /// The run deadline elapsed while this subscription was active. This is
-    /// distinct from EOF/idle so it can never trigger another subscription.
-    Deadline,
-}
-
-/// The result of consuming one or more bounded workflow-event subscriptions.
-#[derive(Debug)]
-enum WorkflowStreamExit {
-    /// A stream reported a terminal event; the caller still polls once to
-    /// enrich the provisional event with the durable conclusion fields.
-    Terminal(ProviderEvent),
-    /// The subscription budget was exhausted. The caller must use polling.
-    Fallback {
-        last_error: Option<WorkflowEngineError>,
-        resubscriptions: u32,
-    },
-    /// The overall run deadline elapsed while a stream was active.
-    Deadline,
-}
-
-/// Consume a workflow-event stream and invoke `on_event` for every parsed event.
-/// A stream that ends, errors, or stays idle is a retryable transport failure;
-/// the caller owns the bounded resubscription budget.
-async fn consume_workflow_stream<F>(
-    mut stream: ProviderEventStream,
-    started: OffsetDateTime,
-    mut on_event: F,
-) -> WorkflowStreamAttempt
-where
-    F: FnMut(&ProviderEvent) + Send,
-{
-    loop {
-        // Honour the overall deadline even while the stream is open, so a run
-        // the engine never finishes cannot stay `running` forever.
-        let remaining_ms =
-            (WORKFLOW_POLL_DEADLINE - (OffsetDateTime::now_utc() - started)).whole_milliseconds();
-        if remaining_ms <= 0 {
-            return WorkflowStreamAttempt::Deadline;
-        }
-        let idle_ms = WORKFLOW_SSE_IDLE_TIMEOUT.as_millis() as i128;
-        let wait_ms = remaining_ms.min(idle_ms) as u64;
-        let deadline_limited = remaining_ms < idle_ms;
-        match tokio::time::timeout(std::time::Duration::from_millis(wait_ms), stream.next()).await {
-            Ok(Some(Ok(event))) => {
-                let terminal = event.terminal_state.is_some();
-                on_event(&event);
-                if terminal {
-                    return WorkflowStreamAttempt::Terminal(event);
-                }
-            }
-            Ok(Some(Err(error))) => {
-                return WorkflowStreamAttempt::Retryable { error: Some(error) };
-            }
-            Ok(None) => return WorkflowStreamAttempt::Retryable { error: None },
-            Err(_elapsed) if deadline_limited => return WorkflowStreamAttempt::Deadline,
-            Err(_elapsed) => return WorkflowStreamAttempt::Retryable { error: None },
-        }
-    }
-}
-
-fn workflow_deadline_remaining(started: OffsetDateTime) -> Option<std::time::Duration> {
-    let remaining_ms =
-        (WORKFLOW_POLL_DEADLINE - (OffsetDateTime::now_utc() - started)).whole_milliseconds();
-    (remaining_ms > 0).then(|| std::time::Duration::from_millis(remaining_ms as u64))
-}
-
-/// Subscribe to workflow events, allowing one bounded re-subscription before
-/// handing tracking to polling. The closure form keeps the retry policy
-/// testable without coupling it to a particular HTTP server or provider.
-async fn stream_workflow_with_retry<F, Fut, H>(
-    mut subscribe: F,
-    started: OffsetDateTime,
-    on_event: H,
-) -> WorkflowStreamExit
-where
-    F: FnMut() -> Fut + Send,
-    Fut: std::future::Future<Output = std::result::Result<ProviderEventStream, WorkflowEngineError>>
-        + Send,
-    H: FnMut(&ProviderEvent) + Send,
-{
-    let mut on_event = on_event;
-    let mut resubscriptions = 0;
-    let mut last_error = None;
-    loop {
-        let Some(remaining) = workflow_deadline_remaining(started) else {
-            return WorkflowStreamExit::Deadline;
-        };
-        let subscription = match tokio::time::timeout(remaining, subscribe()).await {
-            Ok(subscription) => subscription,
-            Err(_elapsed) => return WorkflowStreamExit::Deadline,
-        };
-        match subscription {
-            Ok(stream) => match consume_workflow_stream(stream, started, &mut on_event).await {
-                WorkflowStreamAttempt::Terminal(event) => {
-                    return WorkflowStreamExit::Terminal(event);
-                }
-                WorkflowStreamAttempt::Retryable { error } => {
-                    if error.is_some() {
-                        last_error = error;
-                    }
-                }
-                WorkflowStreamAttempt::Deadline => return WorkflowStreamExit::Deadline,
-            },
-            Err(err) => last_error = Some(err),
-        }
-
-        // Do not spend a retry once the overall run deadline has elapsed, even
-        // when the subscription failed exactly at the deadline boundary.
-        if workflow_deadline_remaining(started).is_none() {
-            return WorkflowStreamExit::Deadline;
-        }
-
-        if resubscriptions >= WORKFLOW_SSE_MAX_RESUBSCRIPTIONS {
-            return WorkflowStreamExit::Fallback {
-                last_error,
-                resubscriptions,
-            };
-        }
-        resubscriptions += 1;
-        tracing::info!(
-            resubscriptions,
-            max_resubscriptions = WORKFLOW_SSE_MAX_RESUBSCRIPTIONS,
-            "retrying workflow event stream subscription"
-        );
-    }
-}
-
 /// Track a workflow run off its live SSE event stream, degrading to polling
-/// (#293).
+/// (#293, increment 2).
 ///
 /// Spawned once per workflow run. It first subscribes to the engine's event
 /// stream ([`WorkflowProvider::stream_events`]): each event is mirrored onto the
@@ -3563,102 +3313,99 @@ fn spawn_workflow_tracker(
     started: OffsetDateTime,
 ) {
     tokio::spawn(async move {
-        let stream_provider = provider.clone();
-        let stream_run_id = provider_run_id.clone();
-        let stream_exit = stream_workflow_with_retry(
-            move || {
-                let provider = stream_provider.clone();
-                let run_id = stream_run_id.clone();
-                async move { provider.stream_events(&run_id).await }
-            },
-            started,
-            |event| {
-                // Mirror the progress line onto the engine's log — the
-                // observability surface a workflow run has, since it owns
-                // no PTY whose output would otherwise carry progress.
-                tracing::info!(
-                    target: "workflow_engine",
-                    run = %run_id,
-                    provider_run = %provider_run_id,
-                    kind = %event.kind,
-                    step = event.step_id.as_deref().unwrap_or("-"),
-                    message = event.message.as_deref().unwrap_or(""),
-                    "workflow run event",
-                );
-                // Collect before the terminal check so a terminal event that
-                // also names a checkpoint still contributes one.
-                if let Some(branch) = event.checkpoint_branch.as_deref() {
-                    registry.record_workflow_checkpoint(
+        match provider.stream_events(&provider_run_id).await {
+            Ok(mut stream) => loop {
+                // Honour the overall deadline even while the stream is open, so a
+                // run the engine never finishes cannot stay `running` forever.
+                if OffsetDateTime::now_utc() - started > WORKFLOW_POLL_DEADLINE {
+                    registry.record_workflow_errored(
                         task_id,
                         run_id,
-                        event.step_id.as_deref(),
-                        branch,
-                        event.at.unwrap_or_else(OffsetDateTime::now_utc),
+                        session_id,
+                        started,
+                        OffsetDateTime::now_utc(),
+                        "workflow engine run did not reach a terminal state before the deadline",
                     );
+                    return;
                 }
-                if let Some(gate) = event.gate.as_ref() {
-                    if let Err(err) = registry.open_workflow_gate(run_id, gate) {
+                match tokio::time::timeout(WORKFLOW_SSE_IDLE_TIMEOUT, stream.next()).await {
+                    Ok(Some(Ok(event))) => {
+                        // Mirror the progress line onto the engine's log — the
+                        // observability surface a workflow run has, since it owns
+                        // no PTY whose output would otherwise carry progress.
+                        tracing::info!(
+                            target: "workflow_engine",
+                            run = %run_id,
+                            provider_run = %provider_run_id,
+                            kind = %event.kind,
+                            step = event.step_id.as_deref().unwrap_or("-"),
+                            message = event.message.as_deref().unwrap_or(""),
+                            "workflow run event",
+                        );
+                        // Collect a per-stage checkpoint branch the event
+                        // reported as a run observation (#284), stamped with its
+                        // provenance and age. Done before the terminal check so
+                        // a terminal event that also names a checkpoint still
+                        // contributes one. Non-fatal: absence records nothing.
+                        if let Some(branch) = event.checkpoint_branch.as_deref() {
+                            registry.record_workflow_checkpoint(
+                                task_id,
+                                run_id,
+                                event.step_id.as_deref(),
+                                branch,
+                                event.at.unwrap_or_else(OffsetDateTime::now_utc),
+                            );
+                        }
+                        if let Some(state) = event.terminal_state {
+                            finalize_workflow_run(
+                                &registry,
+                                &provider,
+                                &provider_run_id,
+                                task_id,
+                                run_id,
+                                session_id,
+                                started,
+                                state,
+                                event.message,
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                    Ok(Some(Err(err))) => {
                         tracing::warn!(
+                            target: "workflow_engine",
                             run = %run_id,
                             error = %err,
-                            "failed to mirror workflow gate"
+                            "workflow event stream errored; falling back to polling",
                         );
+                        break;
+                    }
+                    Ok(None) => {
+                        tracing::info!(
+                            target: "workflow_engine",
+                            run = %run_id,
+                            "workflow event stream ended without a terminal event; polling",
+                        );
+                        break;
+                    }
+                    Err(_elapsed) => {
+                        tracing::info!(
+                            target: "workflow_engine",
+                            run = %run_id,
+                            "workflow event stream idle; falling back to polling",
+                        );
+                        break;
                     }
                 }
             },
-        )
-        .await;
-
-        match stream_exit {
-            WorkflowStreamExit::Terminal(event) => {
-                let state = event
-                    .terminal_state
-                    .expect("a terminal stream exit carries a terminal state");
-                finalize_workflow_run(
-                    &registry,
-                    &provider,
-                    &provider_run_id,
-                    task_id,
-                    run_id,
-                    session_id,
-                    started,
-                    state,
-                    event.message,
-                )
-                .await;
-                return;
-            }
-            WorkflowStreamExit::Deadline => {
-                registry.record_workflow_errored(
-                    task_id,
-                    run_id,
-                    session_id,
-                    started,
-                    OffsetDateTime::now_utc(),
-                    "workflow engine run did not reach a terminal state before the deadline",
+            Err(err) => {
+                tracing::info!(
+                    target: "workflow_engine",
+                    run = %run_id,
+                    error = %err,
+                    "workflow event stream unavailable; tracking by polling",
                 );
-                return;
-            }
-            WorkflowStreamExit::Fallback {
-                last_error,
-                resubscriptions,
-            } => {
-                if let Some(err) = last_error {
-                    tracing::warn!(
-                        target: "workflow_engine",
-                        run = %run_id,
-                        resubscriptions,
-                        error = %err,
-                        "workflow event stream unavailable after bounded retry; polling",
-                    );
-                } else {
-                    tracing::info!(
-                        target: "workflow_engine",
-                        run = %run_id,
-                        resubscriptions,
-                        "workflow event stream ended after bounded retry; polling",
-                    );
-                }
             }
         }
         // Fallback: track the run to terminal by polling (increment-1 path).
@@ -3696,11 +3443,6 @@ async fn finalize_workflow_run(
     let finished = OffsetDateTime::now_utc();
     let (outcome, conclusion, provider_summary) = match provider.poll(provider_run_id).await {
         Ok(status) if status.state.is_terminal() => {
-            record_workflow_checkpoints(registry, task_id, run_id, &status.checkpoints);
-            record_workflow_gates(registry, run_id, &status.gates);
-            if status.state == ProviderRunState::Blocked {
-                registry.block_open_gates(run_id, "workflow engine blocked the run");
-            }
             let summary = status.conclusion.as_ref().and_then(|c| c.summary.clone());
             let (outcome, conclusion) =
                 map_conclusion(status.state, status.conclusion, started, finished);
@@ -3753,12 +3495,7 @@ async fn poll_workflow_to_terminal(
         match provider.poll(&provider_run_id).await {
             Ok(status) => {
                 consecutive_errors = 0;
-                record_workflow_checkpoints(&registry, task_id, run_id, &status.checkpoints);
-                record_workflow_gates(&registry, run_id, &status.gates);
                 if status.state.is_terminal() {
-                    if status.state == ProviderRunState::Blocked {
-                        registry.block_open_gates(run_id, "workflow engine blocked the run");
-                    }
                     let finished = OffsetDateTime::now_utc();
                     let provider_summary =
                         status.conclusion.as_ref().and_then(|c| c.summary.clone());
@@ -3786,34 +3523,6 @@ async fn poll_workflow_to_terminal(
                     return;
                 }
             }
-        }
-    }
-}
-
-/// Preserve checkpoint observations when SSE is unavailable. Polling is a
-/// fallback transport, not a weaker evidence path: repeated snapshots are
-/// safe because the registry deduplicates `(branch, step)` pairs.
-fn record_workflow_checkpoints(
-    registry: &AgentTaskRegistry,
-    task_id: Uuid,
-    run_id: Uuid,
-    checkpoints: &[ProviderCheckpoint],
-) {
-    for checkpoint in checkpoints {
-        registry.record_workflow_checkpoint(
-            task_id,
-            run_id,
-            checkpoint.step_id.as_deref(),
-            &checkpoint.branch,
-            checkpoint.at.unwrap_or_else(OffsetDateTime::now_utc),
-        );
-    }
-}
-
-fn record_workflow_gates(registry: &AgentTaskRegistry, run_id: Uuid, gates: &[ProviderGate]) {
-    for gate in gates {
-        if let Err(err) = registry.open_workflow_gate(run_id, gate) {
-            tracing::warn!(run = %run_id, error = %err, "failed to mirror workflow gate");
         }
     }
 }
@@ -4018,9 +3727,7 @@ fn spawn_run_orchestrator(
     auto_approve: bool,
 ) {
     tokio::spawn(async move {
-        let Some(session) = control.session.clone() else {
-            return;
-        };
+        let session = Arc::clone(&control.session);
         let mut pending: VecDeque<GateSpec> = gates.into();
         // The gate this loop is currently holding, if any. Held as its spec so
         // its deadline is known without another lookup; its live state is read
@@ -4686,8 +4393,6 @@ fn read_output_file(cwd: &str, rel: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    use std::sync::atomic::{AtomicU32, Ordering};
-
     #[test]
     fn parses_daily_time() {
         assert!(parse_hhmm("09:30").is_ok());
@@ -5249,7 +4954,6 @@ mod tests {
                     workflow: "nightly".into(),
                     token_file: None,
                     repo_ref: None,
-                    fabro: None,
                 }),
                 enabled: None,
                 notify_on_start: None,
@@ -5280,49 +4984,6 @@ mod tests {
         let stored = registry.get(task.id).unwrap();
         assert_eq!(stored.runs.len(), 1);
         assert_eq!(stored.runs[0].status, AgentTaskRunStatus::Errored);
-    }
-
-    #[tokio::test]
-    async fn workflow_stream_retries_once_then_falls_back_to_polling() {
-        let subscriptions = Arc::new(AtomicU32::new(0));
-        let subscription_count = subscriptions.clone();
-        let exit = stream_workflow_with_retry(
-            move || {
-                subscription_count.fetch_add(1, Ordering::SeqCst);
-                async { Ok(Box::pin(futures_util::stream::empty()) as ProviderEventStream) }
-            },
-            OffsetDateTime::now_utc(),
-            |_| {},
-        )
-        .await;
-
-        assert_eq!(subscriptions.load(Ordering::SeqCst), 2);
-        assert!(matches!(
-            exit,
-            WorkflowStreamExit::Fallback {
-                resubscriptions: 1,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn an_expired_workflow_stream_does_not_subscribe_or_retry() {
-        let subscriptions = Arc::new(AtomicU32::new(0));
-        let subscription_count = subscriptions.clone();
-        let started = OffsetDateTime::now_utc() - WORKFLOW_POLL_DEADLINE - Duration::seconds(1);
-        let exit = stream_workflow_with_retry(
-            move || {
-                subscription_count.fetch_add(1, Ordering::SeqCst);
-                async { Ok(Box::pin(futures_util::stream::empty()) as ProviderEventStream) }
-            },
-            started,
-            |_| {},
-        )
-        .await;
-
-        assert_eq!(subscriptions.load(Ordering::SeqCst), 0);
-        assert!(matches!(exit, WorkflowStreamExit::Deadline));
     }
 
     /// Seed a `Running` workflow run into a task and return its id, so a test
@@ -5432,68 +5093,6 @@ mod tests {
         assert_eq!(back.checkpoints[0].observed_at, t1);
     }
 
-    #[test]
-    fn poll_fallback_records_checkpoint_snapshots_idempotently() {
-        let registry = test_registry();
-        let task = registry
-            .create(AgentTaskCreate {
-                name: "polled workflow".into(),
-                prompt: "collect stages".into(),
-                schedule: Some(AgentTaskSchedule::Manual),
-                triggers: None,
-                concurrency: None,
-                command: None,
-                cwd: Some("/tmp".into()),
-                env: Some(vec![]),
-                context: None,
-                vogt_project: Some("vogt".into()),
-                vogt_work_item: Some("WI-7".into()),
-                gates: None,
-                auto_approve: None,
-                output_schema: None,
-                output_file: None,
-                output_schema_max_retries: None,
-                branch: None,
-                workflow_engine: None,
-                enabled: None,
-                notify_on_start: None,
-                notify_on_phrase: None,
-                auto_retry_on_rate_limit: None,
-            })
-            .expect("task created");
-        let run_id = seed_running_run(&registry, task.id);
-        let observed = OffsetDateTime::from_unix_timestamp(3_000).unwrap();
-        let checkpoints = vec![
-            ProviderCheckpoint {
-                branch: "wf/run-1/stage-1".into(),
-                step_id: Some("n1".into()),
-                at: None,
-            },
-            ProviderCheckpoint {
-                branch: "wf/run-1/stage-2".into(),
-                step_id: None,
-                at: Some(observed),
-            },
-            // A repeated poll snapshot must not create another observation.
-            ProviderCheckpoint {
-                branch: "wf/run-1/stage-1".into(),
-                step_id: Some("n1".into()),
-                at: None,
-            },
-        ];
-
-        let before = OffsetDateTime::now_utc();
-        record_workflow_checkpoints(&registry, task.id, run_id, &checkpoints);
-        let after = OffsetDateTime::now_utc();
-
-        let stored = registry.get(task.id).unwrap();
-        let run = stored.runs.iter().find(|r| r.id == run_id).unwrap();
-        assert_eq!(run.checkpoints.len(), 2);
-        assert!(run.checkpoints[0].observed_at >= before);
-        assert!(run.checkpoints[0].observed_at <= after);
-        assert_eq!(run.checkpoints[1].observed_at, observed);
-    }
-
     /// #284 non-fatal absence: recording a checkpoint against a run the registry
     /// does not have, and a run that reports none, are both silent no-ops.
     #[test]
@@ -5549,7 +5148,6 @@ mod tests {
             workflow: "nightly-audit".into(),
             token_file: Some("/run/secrets/workflow-engine".into()),
             repo_ref: Some("main".into()),
-            fabro: None,
         });
         let json = serde_json::to_string(&task).unwrap();
         let back: AgentTask = serde_json::from_str(&json).unwrap();

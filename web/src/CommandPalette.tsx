@@ -9,8 +9,11 @@ import {
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { createSession, sessionsStore } from "./store";
-import { listWork, type WorkItem as VogtWorkItem } from "./vogtApi";
-import { taxonomy } from "./taxonomyCache";
+import {
+  listProjects,
+  listWork,
+  type WorkItem as VogtWorkItem,
+} from "./vogtApi";
 import {
   focusTab,
   openGitTab,
@@ -409,7 +412,7 @@ const CommandPalette: Component<Props> = (props) => {
       setProviderStatus("projects", "ready");
     } else {
       setProviderStatus("projects", "loading");
-      void withProviderController(() => taxonomy.projects())
+      void withProviderController((signal) => listProjects({ limit: 200 }, signal))
         .then((answer) => {
           const projects = answer.projects ?? [];
           currentProviderCache().vogtProjects = projects;

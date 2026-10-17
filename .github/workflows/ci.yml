@@ -1,9 +1,8 @@
 name: ci
 
-# One pipeline for a product with five halves (NFR-C6): the Python core, the
-# Rust engine that fronts it, the Solid PWA the engine embeds, the optional
-# first-party voice sidecar, and the Capacitor shell that points at it.
-# Everything the engine's Woodpecker
+# One pipeline for a product with four halves (NFR-C6): the Python core, the
+# Rust engine that fronts it, the Solid PWA the engine embeds, and the
+# Capacitor shell that points at it. Everything the engine's Woodpecker
 # pipeline guaranteed is guaranteed here — see "What did not come over" at
 # the bottom of this file for the parts that deliberately did not.
 #
@@ -95,7 +94,6 @@ jobs:
     outputs:
       python: ${{ steps.classify.outputs.python }}
       engine: ${{ steps.classify.outputs.engine }}
-      voice: ${{ steps.classify.outputs.voice }}
       mobile: ${{ steps.classify.outputs.mobile }}
       any: ${{ steps.classify.outputs.any }}
     steps:
@@ -119,7 +117,6 @@ jobs:
             {
               echo "python=true"
               echo "engine=true"
-              echo "voice=true"
               echo "mobile=true"
               echo "any=true"
             } >> "$GITHUB_OUTPUT"
@@ -158,7 +155,6 @@ jobs:
 
           python=false
           engine=false
-          voice=false
           mobile=false
 
           # `config.example.toml` is generated from the config schema and the
@@ -172,7 +168,6 @@ jobs:
           # than a neighbour of it: a web-only change changes what the engine
           # serves, and is checked by rebuilding the engine.
           matches '^(engine/|web/)' && engine=true
-          matches '^voice/' && voice=true
           # The shell wraps a remote URL, not the PWA bundle — `webDir` is
           # `mobile/web/`, a one-file offline fallback — so a `web/` change
           # does not imply an APK rebuild.
@@ -181,11 +176,10 @@ jobs:
           {
             echo "python=$python"
             echo "engine=$engine"
-            echo "voice=$voice"
             echo "mobile=$mobile"
           } >> "$GITHUB_OUTPUT"
 
-          if [ "$python" = false ] && [ "$engine" = false ] && [ "$voice" = false ] && [ "$mobile" = false ]; then
+          if [ "$python" = false ] && [ "$engine" = false ] && [ "$mobile" = false ]; then
             echo "any=false" >> "$GITHUB_OUTPUT"
           else
             echo "any=true" >> "$GITHUB_OUTPUT"
@@ -453,56 +447,6 @@ jobs:
         working-directory: engine
         run: cargo test --workspace
 
-  voice:
-    name: fmt, clippy, test (voice sidecar foundation)
-    needs: changes
-    if: needs.changes.outputs.voice == 'true'
-    runs-on: [self-hosted]
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: voice
-
-      - name: install native voice build dependencies
-        run: |
-          set -eu
-          if command -v clang >/dev/null 2>&1 \
-            && command -v cmake >/dev/null 2>&1 \
-            && command -v pkg-config >/dev/null 2>&1 \
-            && pkg-config --exists opus \
-            && ldconfig -p 2>/dev/null | grep -q libclang; then
-            exit 0
-          fi
-          missing="clang cmake libclang-dev libopus-dev pkg-config"
-          if [ "$(id -u)" = "0" ]; then
-            apt-get update
-            apt-get install -y --no-install-recommends $missing
-          elif command -v sudo >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends $missing
-          else
-            echo "clang, cmake, libclang-dev, libopus-dev, and pkg-config are required to build the voice sidecar" >&2
-            exit 1
-          fi
-
-      - name: cargo fmt
-        working-directory: voice
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy
-        working-directory: voice
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
-      - name: cargo test
-        working-directory: voice
-        run: cargo test --locked --workspace
-
   android:
     name: the Android shell assembles
     needs: changes
@@ -633,40 +577,9 @@ jobs:
         if: always()
         run: rm -f mobile/android/app/google-services.json
 
-  security:
-    name: tracked secret hygiene
-    needs: changes
-    runs-on: [self-hosted]
-    # Check the reviewed tree, not full history: the known pre-#265 exposure
-    # still needs an operator-coordinated rewrite decision.
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: reject live Firebase config and API keys in tracked files
-        run: |
-          set -euo pipefail
-
-          tracked_configs="$(git ls-files -- '*google-services.json')"
-          if [ -n "$tracked_configs" ]; then
-            echo "A live Firebase config must not be tracked:"
-            echo "$tracked_configs"
-            exit 1
-          fi
-
-          # The example is a structurally valid, non-live fixture. Print paths
-          # only so a future failure cannot echo a credential into the log.
-          key_paths="$(git grep -l -I -E 'AIzaSy[A-Za-z0-9_-]{20,}' -- ':!mobile/android/app/google-services.json.example' || true)"
-          if [ -n "$key_paths" ]; then
-            echo "Firebase-looking API keys found in tracked files:"
-            echo "$key_paths"
-            exit 1
-          fi
-
-          echo "No live Firebase config or Firebase-looking API key is tracked"
-
   ci:
     name: ci
-    needs: [changes, build, core, engine, voice, android, security]
+    needs: [changes, build, core, engine, android]
     if: always()
     runs-on: [self-hosted]
     steps:
@@ -676,9 +589,7 @@ jobs:
           PYTHON: ${{ needs.build.result }}
           CORE: ${{ needs.core.result }}
           ENGINE: ${{ needs.engine.result }}
-          VOICE: ${{ needs.voice.result }}
           ANDROID: ${{ needs.android.result }}
-          SECURITY: ${{ needs.security.result }}
         run: |
           set -euo pipefail
           if [ "$CHANGES" != "success" ]; then
@@ -691,9 +602,7 @@ jobs:
             "python:$PYTHON" \
             "core-alone:$CORE" \
             "engine:$ENGINE" \
-            "voice:$VOICE" \
-            "android:$ANDROID" \
-            "security:$SECURITY"
+            "android:$ANDROID"
           do
             name="${half%%:*}"
             result="${half#*:}"

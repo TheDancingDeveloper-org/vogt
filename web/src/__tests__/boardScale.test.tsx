@@ -27,7 +27,6 @@
 // no hook and no test-only branch, so what is measured is the shipped code.
 
 import { describe, expect, it, vi } from "vitest";
-import { clearTaxonomy } from "../taxonomyCache";
 import { fireEvent, waitFor } from "@solidjs/testing-library";
 import Board, { CARD_ESTIMATE, cellKey, projectBoard, type Lane } from "../Board";
 import type { WorkItem } from "../vogtApi";
@@ -505,7 +504,6 @@ describe("NFR-S5 — the filter and drag paths do not degrade with backlog size"
     narrow.unmount();
 
     vogt.route("GET /workflows", { body: { workflows: [chain("feature", twelve)] } });
-    clearTaxonomy("workflows");
     const before = reads();
     const wide = board();
     await settled(wide.container, twelve.length);

@@ -10,7 +10,6 @@ vi.mock("../monaco", () => {
     languageFor: () => "plaintext",
     monacoThemeForApp: () => "vs-dark",
     syncMonacoTheme: () => {},
-    loadLanguage: async () => {},
     loadMonaco: async () => ({
       KeyMod: { CtrlCmd: 2048 },
       KeyCode: { KeyS: 49 },

@@ -3,7 +3,6 @@ import { createStore, produce } from "solid-js/store";
 import type { ActivityState, SessionSummary, ServerEvent } from "./api";
 import { api, subscribeEvents } from "./api";
 import { getStoragePrefs } from "./storagePrefs";
-import { noteForeground, onWake, reconcile, type Wake } from "./wakeCoordinator";
 
 interface SessionsStore {
   sessions: Record<string, SessionSummary>;
@@ -25,10 +24,9 @@ export const sessionsStore = store;
 export const sessionsError = error;
 export const isConnected = connected;
 
-export async function refreshSessions(signal?: AbortSignal): Promise<void> {
+export async function refreshSessions(): Promise<void> {
   try {
-    const list = await api.listSessions(signal);
-    if (signal?.aborted) return;
+    const list = await api.listSessions();
     setStore(
       produce((s) => {
         s.sessions = {};
@@ -43,7 +41,6 @@ export async function refreshSessions(signal?: AbortSignal): Promise<void> {
     setError(null);
     setConnected(true);
   } catch (e) {
-    if (signal?.aborted) return;
     setError((e as Error).message);
     setConnected(false);
   }
@@ -122,8 +119,6 @@ function nextReconnectDelay(): number {
 
 /** Callers waiting to hear that vogt-core changed (FR-U10). */
 const vogtListeners = new Set<(seq: number) => void>();
-export type VogtChangedEvent = Extract<ServerEvent, { type: "vogt-changed" }>;
-const vogtEventListeners = new Set<(event: VogtChangedEvent) => void>();
 
 /**
  * Subscribe to vogt-core's changes, as republished on the engine's stream.
@@ -138,16 +133,8 @@ export function onVogtChanged(listener: (seq: number) => void): () => void {
   return () => vogtListeners.delete(listener);
 }
 
-export function onVogtChangedEvent(
-  listener: (event: VogtChangedEvent) => void,
-): () => void {
-  vogtEventListeners.add(listener);
-  return () => vogtEventListeners.delete(listener);
-}
-
-function notifyVogtChanged(event: VogtChangedEvent): void {
-  for (const listener of vogtListeners) listener(event.seq);
-  for (const listener of vogtEventListeners) listener(event);
+function notifyVogtChanged(seq: number): void {
+  for (const listener of vogtListeners) listener(seq);
 }
 
 /** Callers waiting to hear that a session exited (a PTY the engine killed). */
@@ -217,14 +204,13 @@ export function startEventStream(): void {
           // has no opinion about a work item. Recorded here so the switch is
           // exhaustive and a future reader is not left wondering whether the
           // event was forgotten or ignored.
-          notifyVogtChanged(ev);
+          notifyVogtChanged(ev.seq);
           break;
       }
     },
     () => {
       setConnected(false);
       unsubscribeEvents = null;
-      noteForeground("sse-reconnect");
       const delay = nextReconnectDelay();
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
@@ -249,7 +235,7 @@ export function stopEventStream(): void {
 // backgrounding without ever firing an error, so the stream can look
 // "connected" while stale indefinitely. Force a reconnect whenever the app
 // comes back to the foreground, instead of waiting on error-driven backoff.
-export function forceReconnectEventStream(): void {
+function forceReconnectEventStream(): void {
   if (!streamStarted) return;
   reconnectAttempts = 0;
   if (unsubscribeEvents) {
@@ -263,10 +249,19 @@ export function forceReconnectEventStream(): void {
   startEventStream();
 }
 
-// Lifecycle ownership lives in wakeCoordinator: one reconnect and one session
-// reconciliation for a burst of visibility/focus/resume events.
-onWake(() => forceReconnectEventStream());
-onWake((wake: Wake) => {
-  if (wake.reason === "boot" && sessionsStore.ready) return;
-  void reconcile("sessions", wake, (signal) => refreshSessions(signal));
-});
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") forceReconnectEventStream();
+  });
+}
+
+if (typeof window !== "undefined") {
+  void (async () => {
+    try {
+      const { App } = await import("@capacitor/app");
+      App.addListener("resume", () => forceReconnectEventStream());
+    } catch {
+      // Not running under Capacitor (plain web/PWA); visibilitychange covers it.
+    }
+  })();
+}

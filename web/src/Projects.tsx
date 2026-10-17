@@ -49,6 +49,7 @@ import {
   importProject,
   listDrift,
   listForgeRepos,
+  listProjects,
   projectBrief,
   resolveDrift,
   type ComplianceResult,
@@ -72,7 +73,6 @@ import {
   filterAndSortProjects,
   type ProjectSort,
 } from "./projectRegistry";
-import { taxonomy } from "./taxonomyCache";
 
 interface Props {
   onError?: (message: string) => void;
@@ -947,7 +947,7 @@ const Projects: Component<Props> = (props) => {
 
   const [projects, { refetch: refetchProjects }] = createResource(
     () => reloadKey(),
-    () => attempt(() => taxonomy.projects({ limit: PROJECT_LIMIT })),
+    () => attempt(() => listProjects({ limit: PROJECT_LIMIT })),
   );
 
   const projectRows = createMemo(() => {

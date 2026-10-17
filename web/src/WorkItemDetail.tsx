@@ -39,10 +39,13 @@ import {
   backlog,
   commentWork,
   getWork,
+  listActors,
   listAudit,
   listEvents,
   listObservations,
+  listProjects,
   listSessions,
+  listWorkflows,
   startSession,
   stopSession,
   transitionWork,
@@ -60,7 +63,6 @@ import {
   type WorkItemGitStory,
   type WorkItemPullRequest,
 } from "./vogtApi";
-import { taxonomy } from "./taxonomyCache";
 import SurfaceHeader from "./SurfaceHeader";
 import {
   ViewAgeBadge,
@@ -951,16 +953,12 @@ const WorkItemDetail: Component<Props> = (props) => {
       ),
   );
 
-  // Start the workflow read before the item read. The item page can render
-  // its current state without workflow metadata, but when both answers are
-  // available together the transition control is present on the first
-  // settled item render instead of appearing one reactive turn later.
-  const [workflows] = createResource(() => attempt(() => taxonomy.workflows()));
+  const [workflows] = createResource(() => attempt(() => listWorkflows()));
 
   // The actors an item can be assigned to, for the editor's assignee picker.
   // Read once: the roster is not per-item, and an empty answer is a real one —
   // the picker then offers only "nobody", never a made-up name.
-  const [actors] = createResource(() => attempt(() => taxonomy.actors()));
+  const [actors] = createResource(() => attempt(() => listActors()));
 
   const actorOptions = createMemo<{ identity_ref: string; display_name: string }[]>(
     () => {
@@ -971,7 +969,7 @@ const WorkItemDetail: Component<Props> = (props) => {
 
   // The registry, read for the same reason: the item names a project by slug,
   // and the fact chip should read the project's name (FR-U7).
-  const [projects] = createResource(() => attempt(() => taxonomy.projects()));
+  const [projects] = createResource(() => attempt(() => listProjects({ limit: 200 })));
 
   const projectRows = createMemo(() => {
     const loaded = projects();

@@ -1,15 +1,12 @@
 import type { DemoManifest, RuntimeSocket, RuntimeTransport } from "../runtimeTransport";
 import { DemoSocket } from "./socket";
-import { requestedDemoScale } from "./scale";
 import { DemoStore } from "./store";
 
 export class DemoTransport implements RuntimeTransport {
   readonly store: DemoStore;
 
   constructor(readonly manifest: DemoManifest) {
-    this.store = new DemoStore(manifest, requestedDemoScale(
-      new URLSearchParams(window.location.search).get("demoScale"),
-    ));
+    this.store = new DemoStore(manifest);
   }
 
   bootstrapPresentation(): void {

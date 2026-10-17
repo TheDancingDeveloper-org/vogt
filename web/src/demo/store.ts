@@ -1,7 +1,6 @@
 import type { ServerEvent } from "../api";
 import type { DemoManifest } from "../runtimeTransport";
 import { createDemoState, DEMO_NOW, type DemoState } from "./fixtures";
-import { scaleDemoState } from "./scale";
 
 const STORAGE_KEY = "vogt.demo.state.v1";
 const LOGICAL_TICK_MS = 1_000;
@@ -40,16 +39,12 @@ function workflowFor(kind: string): Record<string, unknown> {
 
 export class DemoStore {
   private state: DemoState;
-  constructor(
-    private readonly provenance: Pick<DemoManifest, "product_version" | "source_ref" | "source_sha"> = {
-      product_version: "local/dev",
-      source_ref: "local/dev",
-      source_sha: "local/dev",
-    },
-    private readonly scale = 0,
-  ) {
-    this.state = scaleDemoState(this.read(), this.scale);
-    this.write();
+  constructor(private readonly provenance: Pick<DemoManifest, "product_version" | "source_ref" | "source_sha"> = {
+    product_version: "local/dev",
+    source_ref: "local/dev",
+    source_sha: "local/dev",
+  }) {
+    this.state = this.read();
   }
   private listeners = new Set<(event: ServerEvent) => void>();
 
@@ -89,7 +84,7 @@ export class DemoStore {
       "vogt.places.v1", "vogt.recentPlaces.v1", "vogt.inbox.seen.v1",
       "vogt.demo.presentation.v1",
     ]) localStorage.removeItem(key);
-    this.state = scaleDemoState(createDemoState(), this.scale);
+    this.state = createDemoState();
     this.seedPresentation();
   }
 
@@ -218,7 +213,6 @@ export class DemoStore {
         ? `https://github.com/TheDancingDeveloper-org/vogt/releases/tag/${this.provenance.source_ref}`
         : null,
     };
-    if (path === "/api/auth/check") return json({ ...product, ok: true, storage: { state_dir: "browser sessionStorage (ephemeral)", workspace_root: "/Working (simulated)" } });
     if (path === "/api/status") return json({ ...product, session_count: Object.keys(this.state.sessions).length, push_subscription_count: 1, gui_process_count: 1, gui_stream_configured: true, fcm_enabled: false, history: { enabled: true, archived_session_count: 4, log_file_count: 4, log_bytes: 184320, db_bytes: 49152 }, agent_tasks: { task_count: this.state.tasks.length, prompt_task_dir_count: 3, prompt_file_count: 8, context_file_count: 6, prompt_bytes: 24576, orphan_task_dir_count: 0 }, auth_broker: { auto_agent_auth: false, helper: "not configured in public demo" }, storage: { state_dir: "browser sessionStorage (ephemeral)", workspace_root: "/Working (simulated)" } });
     if (path === "/api/config") return json({ ...product, gui_stream_url: "/demo-gui.html", gui_stream_available: true, assistant_enabled: true, assistant_stt_enabled: false, assistant_tts_enabled: false, assistant_model: "demo-model", assistant_profiles: [{ name: "Guided demo", model: "demo-model", default: true }, { name: "Concise", model: "demo-model-mini", default: false }], features: { demo: "full-estate-v1" }, vogt: { configured: true, api_prefix: "/api/vogt", mcp_prefix: "/mcp" }, session_templates: [{ name: "Shell", description: "A safe simulated shell with canned commands", command: null, cwd: "/Working/orbit", env: [], default_name: "Demo shell" }, { name: "Agent review", description: "Waiting-for-input review session", command: ["demo-agent"], cwd: "/Working/orbit", env: [], default_name: "Agent review" }] });
     if (path === "/api/install/status") return json({ install_mode: false });
@@ -302,15 +296,6 @@ export class DemoStore {
   private async vogt(path: string, method: string, query: URLSearchParams, body: Record<string, unknown>): Promise<Response> {
     const params = method === "GET" ? Object.fromEntries(query.entries()) : body;
     if (path === "/status") return json({ ok: true });
-    if (path === "/place/metrics") return json({
-      inbox_active: this.state.inbox.filter((row) => row.triage_state === "active").length,
-      projects_total: this.projects().length,
-      work_total: this.filterWork({}).length,
-      backlog_total_considered: this.filterWork({}).length + 2,
-      drift_present: this.state.drift.some((row) => row.status === "open"),
-      revision: this.state.revision,
-      generated_at: DEMO_NOW,
-    });
     if (path === "/workflows") return json({ workflows: [workflowFor("feature"), workflowFor("bug"), workflowFor("chore"), workflowFor("question")] });
     if (path === "/work" && method === "GET") return json({ items: this.filterWork(params), total: this.filterWork(params).length, link_state: "linked" });
     if (path === "/work" && method === "POST") { const ref = `WI-${this.state.next_id++}`; const row = { ...this.state.work[0]!, ...body, id: `work-${this.state.next_id}`, ref, state: "open", created_at: this.now(), updated_at: this.now() }; this.state.work.unshift(row); this.audit("work.create", "work_item", row.id, String(body.reason)); this.changed("work.created", "work_item", row.id); return json({ item: row, comments: [], sessions: [] }); }

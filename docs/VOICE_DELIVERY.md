@@ -1,6 +1,6 @@
 # Voice assistant — delivery status and remaining scope
 
-*2026-08-26. Companion to [`VOICE_POC.md`](VOICE_POC.md) (the POC's design
+*2026-08-21. Companion to [`VOICE_POC.md`](VOICE_POC.md) (the POC's design
 and findings) and [`ENGINE.md`](ENGINE.md) §6 (the assistant's reference,
 including **Configuring the assistant provider**). The `FR-Txx` / `FR-Mxx`
 ids are stable requirement identifiers; each rule they label is stated in
@@ -28,8 +28,8 @@ evidence, with per-piece test counts):
 - The FR-T2 gate holds against spoken approval; both mutating journeys cost
   exactly one tap.
 
-**Delivered since** (the implementation work is complete; the remaining
-external gate is the real-device coexistence test tracked by #191):
+**Built since, code half only** (the spoken and on-device passes are still
+owed — `VOICE_POC.md` §6 records each):
 
 - Desktop microphone via Web Speech where the browser has it (#189).
 - Server-side STT/TTS (FR-T12, #190): `POST /api/assistant/stt` / `tts`
@@ -37,9 +37,8 @@ external gate is the real-device coexistence test tracked by #191):
   `engine/server/src/assistant_speech.rs`.
 - The durable, attributable interaction log (FR-T14, #193) —
   `engine/server/src/assistant_log.rs`.
-- The phone's foreground service and speak-the-push (FR-M6, #192). The
-  implementation is delivered; the remaining device validation is the
-  dev/prod FCM coexistence test tracked by #191.
+- The phone's foreground service and speak-the-push (FR-M6, #192), compiled
+  but never run on hardware.
 
 **Voice input without any of that is mobile-only.** The on-device microphone
 is the Capacitor `SpeechRecognition` plugin; a desktop browser without Web
@@ -82,24 +81,16 @@ one before anyone relies on it.
 
 ## 3. What remains
 
-Only [#191](https://github.com/TheDancingDeveloper-org/vogt/issues/191) is
-still open in this delivery tracker. It requires an operator to install the
-`com.sprooty.vogt.dev` APK beside `com.sprooty.vogt`, confirm both FCM
-registrations, and verify that environment-specific pushes reach the intended
-installation. The implementation issues #189, #190, #192, #193 and #194 are
-closed; their code and validation records remain linked below for context.
-
-| Issue | Scope | Design source | Status |
+| Issue | Scope | Design source | Blocked by |
 |---|---|---|---|
-| [#189](https://github.com/TheDancingDeveloper-org/vogt/issues/189) | Checkpoint B: desktop mic via Web Speech `webkitSpeechRecognition`, then the spoken five-utterance pass with findings into `VOICE_POC.md` §6 | `VOICE_POC.md` §3.4, §4–5; FR-T13 | Closed |
-| [#190](https://github.com/TheDancingDeveloper-org/vogt/issues/190) | Checkpoint C: engine `POST /api/assistant/stt` / `tts` proxying OpenAI-compatible audio endpoints; MediaRecorder capture and `<audio>` playback; 404-and-fall-back when unconfigured | `VOICE_POC.md` §3.5; FR-T12; voicemode | Closed |
-| [#191](https://github.com/TheDancingDeveloper-org/vogt/issues/191) | FR-M4: dev/prod package identity, Firebase config handling, side-by-side installation, registration, and correctly routed pushes | FR-M4 | **Open — external device test** |
-| [#192](https://github.com/TheDancingDeveloper-org/vogt/issues/192) | Checkpoint D implementation: foreground service for active conversations and speak-the-push | `VOICE_POC.md` §3.6; FR-M6 | Closed |
-| [#193](https://github.com/TheDancingDeveloper-org/vogt/issues/193) | FR-T14: durable, attributable, both-directions interaction log | FR-T14 (r18) | Closed |
-| [#194](https://github.com/TheDancingDeveloper-org/vogt/issues/194) | Ops: validate the enabled assistant end-to-end in the GUI | this file §2 | Closed |
+| [#189](https://github.com/TheDancingDeveloper-org/vogt/issues/189) | Checkpoint B: desktop mic via Web Speech `webkitSpeechRecognition`, then the spoken five-utterance pass with findings into `VOICE_POC.md` §6 | `VOICE_POC.md` §3.4, §4–5; FR-T13 | — |
+| [#190](https://github.com/TheDancingDeveloper-org/vogt/issues/190) | Checkpoint C: engine `POST /api/assistant/stt` / `tts` proxying OpenAI-compatible audio endpoints; MediaRecorder capture and `<audio>` playback; 404-and-fall-back when unconfigured | `VOICE_POC.md` §3.5; FR-T12; voicemode | — |
+| [#191](https://github.com/TheDancingDeveloper-org/vogt/issues/191) | FR-M4: FCM client entry for the dev application id, so a dev APK installs beside prod and registers for push | FR-M4 | — |
+| [#192](https://github.com/TheDancingDeveloper-org/vogt/issues/192) | Checkpoint D: foreground service for active conversations, speak-the-push, the battery number, and the phone half of FR-T13 (first hardware validation of mobile voice at all) | `VOICE_POC.md` §3.6; FR-M6 | #191 |
+| [#193](https://github.com/TheDancingDeveloper-org/vogt/issues/193) | FR-T14: durable, attributable, both-directions interaction log — built (`engine/server/src/assistant_log.rs`); see the issue for what remains | FR-T14 (r18) | — |
+| [#194](https://github.com/TheDancingDeveloper-org/vogt/issues/194) | Ops: validate the enabled assistant end-to-end in the GUI; a dedicated, raised-limit provider key; record the env facts | this file §2 | — |
 
-The remaining edge is the #191 device gate. Once its coexistence and routing
-evidence is recorded, #188's residual voice-delivery gate can close. The
-closed issues above are not reopened for additional implementation work; any
-regression found during the device pass should be filed against the affected
-surface.
+The only hard edge is #191 → #192. Everything else is independently
+pickable. The POC's exit criteria (`VOICE_POC.md` §5) close when #189 and
+#192 both land their findings; r17 of the requirements then either closes
+FR-T13 or reopens FR-T2 with the measured tap counts.
