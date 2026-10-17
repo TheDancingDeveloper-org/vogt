@@ -340,6 +340,9 @@ mod tests {
         git: (u16, Value),
         forbidden: Vec<String>,
     ) -> (std::path::PathBuf, Built, Seen) {
+        // Config tests set VOGT_* variables process-wide; hold the shared lock
+        // while this context reads them, or a parallel test's bad value fails it.
+        let _env = crate::config::env_lock();
         let dir = std::env::temp_dir().join(format!("vogt-commit-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
