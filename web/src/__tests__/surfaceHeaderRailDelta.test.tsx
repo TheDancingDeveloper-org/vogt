@@ -11,6 +11,7 @@
 // pass instead.
 
 import { describe, expect, it } from "vitest";
+import { clearBookmarks } from "../bookmarks";
 import { fireEvent, waitFor } from "@solidjs/testing-library";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { render } from "@solidjs/testing-library";
@@ -191,6 +192,9 @@ describe("B3 — Running, Recent places and Files collapse, state persists", () 
   });
 
   it("keeps the Running count reachable by its existing aria-label once it is a toggle", async () => {
+    // A bookmarked session sits in the Pinned strip, not in Running (WI-1736);
+    // an earlier test in this file may have bookmarked this one.
+    clearBookmarks();
     const { container } = mountShell([RUNNING]);
     await waitFor(() =>
       expect(

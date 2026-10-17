@@ -4342,6 +4342,8 @@ test("A long session list scrolls inside the session area, not the rail", async 
     ...liveSession,
     id: `scroll-${index}`,
     name: `scroll-session-${index}`,
+    // Running, so the crowd sits in the Running section this test scrolls.
+    activity: "running",
   }));
   await installFixtures(page, {}, crowd);
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -4404,6 +4406,80 @@ test("A long session list scrolls inside the session area, not the rail", async 
   await sessionArea.getByRole("button", { name: /Running/ }).click();
   await expect(sessionArea.getByRole("button", { name: /Running/ })).toHaveAttribute("aria-expanded", "false");
   await expect(page.locator(".places-rail-session-area .session-row").first()).toBeHidden();
+});
+
+/**
+ * WI-1736: the rail sorts sessions by what they need from a person. Workers
+ * nest under the oversight session that started them, a worker that needs a
+ * person is lifted into "Needs you" with its parent named, the section headers
+ * carry counts, and the filter narrows the list.
+ */
+test("The places rail groups sessions by state, nests workers, and filters", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  const sessions = [
+    { ...liveSession, id: "ovs-main", name: "ovs-main", role: "oversight", activity: "idle", created_at: minutesAgo(120), last_event_at: minutesAgo(1) },
+    { ...liveSession, id: "w-run", name: "w-run", activity: "running", created_at: minutesAgo(20), last_event_at: minutesAgo(1) },
+    {
+      ...liveSession,
+      id: "w-ask",
+      name: "w-ask",
+      activity: "awaiting-approval",
+      approval: { question: "Run the tests?", command_excerpt: "npm test", detected_at: minutesAgo(2) },
+      created_at: minutesAgo(30),
+      last_event_at: minutesAgo(2),
+    },
+    { ...liveSession, id: "solo", name: "solo", activity: "idle", created_at: minutesAgo(10), last_event_at: minutesAgo(3) },
+    { ...liveSession, id: "w-done", name: "w-done", activity: "exited", exit_code: 0, created_at: minutesAgo(90), last_event_at: minutesAgo(40) },
+  ];
+  await installFixtures(page, {}, sessions);
+  // Vogt says who started whom; the engine list does not.
+  await page.route((url) => url.pathname.endsWith("/vogt/sessions"), (route) => route.fulfill({
+    json: {
+      sessions: [
+        { id: "ses_run", engine_session_id: "w-run", started_by_session: "ovs-main" },
+        { id: "ses_ask", engine_session_id: "w-ask", started_by_session: "ovs-main" },
+        { id: "ses_done", engine_session_id: "w-done", started_by_session: "ovs-main" },
+      ],
+      engine: null,
+    },
+  }));
+  await page.goto("/#/sessions");
+
+  const area = page.locator(".places-rail-session-area");
+  const heads = area.locator(".rail-section-head");
+  await expect(heads.filter({ hasText: "Needs you" })).toBeVisible();
+  await expect(heads.filter({ hasText: "Running" })).toBeVisible();
+  await expect(heads.filter({ hasText: "Ready / idle" })).toBeVisible();
+  await expect(heads.filter({ hasText: "Done recently" })).toBeVisible();
+  // The old single "Running" header counted every listed session; each section
+  // now counts its own.
+  await expect(area.locator('[aria-label^="1 needs you sessions"]')).toHaveText("1");
+
+  // The waiting worker is lifted into Needs you, with its parent named.
+  const lifted = area.locator('.session-row[aria-label^="w-ask,"]');
+  await expect(lifted).toContainText("↳ ovs-main");
+  await expect(lifted).toHaveClass(/waiting/);
+
+  // The parent rolls up its children: one running, and the lifted one counts as needing you.
+  const parent = area.locator('.session-row[aria-label^="ovs-main,"]');
+  await expect(parent.locator(".session-tally")).toContainText("1▶");
+  await expect(area.locator(".session-row--child", { hasText: "w-run" })).toBeVisible();
+
+  // Folding the parent hides its children; a finished child stays in Done.
+  await parent.locator(".session-caret").click();
+  await expect(area.locator(".session-row--child", { hasText: "w-run" })).toBeHidden();
+  await parent.locator(".session-caret").click();
+  await expect(area.locator(".session-row--child", { hasText: "w-run" })).toBeVisible();
+
+  // The filter narrows the list, and Escape clears it.
+  const filter = area.getByRole("searchbox", { name: "Filter sessions" });
+  await filter.fill("solo");
+  await expect(area.locator('.session-row[aria-label^="solo,"]')).toBeVisible();
+  await expect(area.locator('.session-row[aria-label^="w-run,"]')).toHaveCount(0);
+  await filter.press("Escape");
+  await expect(filter).toHaveValue("");
+  await expect(area.locator('.session-row[aria-label^="w-run,"]')).toBeVisible();
 });
 
 /**

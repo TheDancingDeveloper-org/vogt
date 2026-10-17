@@ -284,9 +284,10 @@ describe("a pasted link opens the surface it names", () => {
     await waitFor(() => expect(shell.url()).toBe("/sessions"));
   });
 
-  it("keeps the engine's rail order instead of reshuffling by attention (WI-1289)", async () => {
-    // The engine already lists oversight first, then last event. The rail
-    // keeps that order; attention stays a badge. Waiting does not jump ahead.
+  it("groups the rail by state, keeping the engine's order within a section (WI-1289, WI-1736)", async () => {
+    // The rail sections sessions by what they need from a person (WI-1736):
+    // a waiting session is in Needs you, ahead of running work; idle work is
+    // in Ready / idle. Within a section the engine's order is kept.
     const sessions = [
       { id: "eng-idle", name: "idle-one", cwd: "/a", activity: "idle", exit_code: null },
       { id: "eng-wait", name: "waiting-one", cwd: "/b", activity: "waiting-for-input", exit_code: null },
@@ -301,9 +302,9 @@ describe("a pasted link opens the surface it names", () => {
     // store until this mount's list request lands; wait for identities, not
     // merely for a coincidentally equal row count.
     await waitFor(() =>
-      expect(names()).toEqual(["idle-one", "waiting-one", "running-one"]),
+      expect(names()).toEqual(["waiting-one", "running-one", "idle-one"]),
     );
-    expect(names()).toEqual(["idle-one", "waiting-one", "running-one"]);
+    expect(names()).toEqual(["waiting-one", "running-one", "idle-one"]);
   });
 
   it("shows a session's work item as a chip and binds and unbinds it (WI-998)", async () => {
@@ -415,7 +416,10 @@ describe("shared live steering", () => {
       expect(container.querySelector('[aria-label="Projects unavailable"]')).toBeTruthy();
       expect(container.querySelector('.phone-bottom-nav [aria-label="12 Board work items"]')).toBeTruthy();
       expect(container.querySelector('.phone-bottom-nav [aria-label="7 Backlog candidates"]')).toBeTruthy();
-      expect(container.querySelector('.places-section-label [aria-label="2 running sessions"]')).toBeTruthy();
+      // Each section counts its own sessions (WI-1736): one waits for input,
+      // one is idle at its prompt.
+      expect(container.querySelector('.places-section-label [aria-label="1 needs you sessions"]')).toBeTruthy();
+      expect(container.querySelector('.places-section-label [aria-label="1 ready / idle sessions"]')).toBeTruthy();
       // Scoped to the rail: the desktop Sessions overview now also lists the
       // running sessions as rows, so the waiting session is drawn once
       // in the rail and once in that list. This assertion is about the rail's
