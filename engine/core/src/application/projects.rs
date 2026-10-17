@@ -1,7 +1,8 @@
 //! Projects: registration, scaffolding, the per-repo brief, lifecycle.
 //! Ports `src/vogt/application/services/projects.py`.
 //!
-//! `project.import` is not exposed: the clone it performs is a later service.
+//! `project.import` clones, registers and (with `consolidate: false`) stops there.
+//! Consolidation waits on `forge.onboard`, which has no Rust port yet.
 //! Ranked backlog is not ported, so the brief says `not_collected` for the
 //! counts that come out of the gather rather than inventing a zero.
 
@@ -10,7 +11,10 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::application::context::{AppContext, Built};
+use crate::adapters::forge::registry::{identity_for, provider_for_host};
+use crate::adapters::forge::ForgeProvider;
+use crate::adapters::git::CloneRequest;
+use crate::application::context::{write_of, AppContext, Built};
 use crate::application::resolve;
 use crate::application::services::{context_parts, next_id, now_of};
 use crate::application::writes::{audited_write, WriteContext, WriteOutcome};
@@ -408,6 +412,188 @@ fn register_project<C: Clock + 'static, I: IdFactory + 'static>(
         },
     )?;
     Ok(json!({"project": project}))
+}
+
+// --- import -----------------------------------------------------------------
+
+const PROJECT_IMPORT: &str = "project.import";
+const PROJECT_IMPORTED_EVENT: &str = "project.imported";
+
+#[derive(Deserialize)]
+struct ImportProjectParams {
+    repo: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    root_path: Option<String>,
+    #[serde(default = "default_active")]
+    lifecycle_state: String,
+    #[serde(default = "default_consolidate")]
+    consolidate: bool,
+    reason: String,
+}
+
+fn default_consolidate() -> bool {
+    true
+}
+
+/// `owner/name` for GitHub, `host/owner/name` for a configured Forgejo host,
+/// and a URL is passed through as written. A bare name is never a reference.
+/// Ports `_normalise_reference`.
+fn normalise_reference(reference: &str) -> String {
+    let candidate = reference.trim();
+    let parts: Vec<&str> = candidate
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() == 2 && parts.iter().all(|part| is_forge_name(part)) {
+        let repo = parts[1].strip_suffix(".git").unwrap_or(parts[1]);
+        return format!("https://github.com/{}/{repo}", parts[0]);
+    }
+    candidate.to_string()
+}
+
+/// What a forge permits in an owner or repository name: an ASCII letter or
+/// digit first, then letters, digits, `.`, `_` or `-`. Strict on purpose, so
+/// `https://example.com` is not read as a repository.
+fn is_forge_name(part: &str) -> bool {
+    let mut chars = part.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+pub fn import_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| import_project(ctx, params))
+}
+
+/// Clone, register, and report. Ports `import_project` and `import_from_ref`.
+///
+/// Ordering is load-bearing: the clone happens before the declared write, so a
+/// half-finished import leaves a directory nobody registered, never a project
+/// pointing at nothing.
+fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params = parse::<ImportProjectParams>(params)?;
+    // Refused before anything is cloned: Python would clone, register and
+    // then call forge.onboard, and that step has no Rust port yet.
+    if params.consolidate {
+        return Err(VogtError::InvalidRequest(
+            "consolidate is not yet ported to the Rust core (forge.onboard); \
+             pass consolidate: false to clone and register only"
+                .to_string(),
+        ));
+    }
+    let (declared, _, principal, clock, ids, config) = context_parts(ctx);
+    let reference = normalise_reference(&params.repo);
+    let Some((_, repo)) = identity_for(Some(&reference), config, ctx.forge_transport()) else {
+        return Err(VogtError::InvalidRequest(format!(
+            "{} does not name a GitHub repository or a configured Forgejo repository; \
+             give owner/name, host/owner/name, or a repository URL",
+            py_repr(&params.repo)
+        )));
+    };
+    let provider = provider_for_host(&repo.host, config, ctx.forge_transport())?;
+    if let Some(root) = &params.root_path {
+        guard_remote_root_path(
+            &principal.identity_ref,
+            &config.resolved_import_root(),
+            root,
+        )?;
+    }
+    let Some((identity_provider, _)) = identity_for(
+        Some(&format!(
+            "https://{}/{}/{}",
+            repo.host, repo.owner, repo.repo
+        )),
+        config,
+        ctx.forge_transport(),
+    ) else {
+        return Err(VogtError::InvalidRequest(format!(
+            "no forge provider is registered for {}",
+            repo.host
+        )));
+    };
+    let remote = identity_provider.clone_url(&repo);
+    let name = params.name.clone().unwrap_or_else(|| repo.repo.clone());
+    let slug = slug_for(&name)?;
+
+    // A read, not a gate: cloning a large repository only to fail on a name
+    // collision wastes minutes. The write path still refuses duplicates.
+    if declared.read()?.project_by_slug(&slug)?.is_some() {
+        return Err(VogtError::Conflict(format!(
+            "a project with slug {} is already registered",
+            py_repr(&slug)
+        )));
+    }
+
+    let metadata = match &provider {
+        None => serde_json::Map::new(),
+        Some(forge) => forge.describe(&repo)?.ok_or_else(|| {
+            VogtError::NotFound(format!(
+                "the forge has no repository {} visible to this instance's token",
+                repo.slug()
+            ))
+        })?,
+    };
+
+    let destination = match &params.root_path {
+        Some(root) => expand_user(Path::new(root)),
+        None => config.resolved_import_root().join(&slug),
+    };
+    let outcome = (ctx.cloner)(&CloneRequest {
+        remote: remote.clone(),
+        destination: destination.clone(),
+        token: provider.as_ref().and_then(|forge| forge.clone_token()),
+        helper_dir: Some(config.resolved_data_dir().join("tmp")),
+    })?;
+
+    let project_id = next_id(&ids, "prj");
+    let now = now_of(&clock);
+    let mut writing = write_of(ctx);
+    let project = record_registration(
+        &mut writing,
+        &params.reason,
+        Registration {
+            operation: PROJECT_IMPORT,
+            event_kind: PROJECT_IMPORTED_EVENT,
+            name,
+            root_path: outcome.destination.display().to_string(),
+            repo_url: Some(identity_provider.web_url(&repo)),
+            lifecycle_state: params.lifecycle_state,
+            exclusions: None,
+            adopts_contract: false,
+            link_state: LinkState::Unlinked,
+            now,
+            project_id,
+        },
+    )?;
+
+    let default_branch = outcome.default_branch.or_else(|| {
+        metadata
+            .get("default_branch")
+            .and_then(Value::as_str)
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_string)
+    });
+    let detail = outcome.reused.then(|| {
+        format!(
+            "{} already held a clone of this remote; it was registered as it stood",
+            destination.display()
+        )
+    });
+    Ok(json!({
+        "project": project,
+        "remote": remote,
+        "root_path": outcome.destination.display().to_string(),
+        "revision": outcome.revision,
+        "default_branch": default_branch,
+        "cloned": !outcome.reused,
+        "consolidated": null,
+        "detail": detail,
+    }))
 }
 
 // --- scaffold ---------------------------------------------------------------
@@ -1045,6 +1231,57 @@ mod tests {
         // A local principal owns the filesystem, so the same path is allowed.
         let local = context("local:test-user", Some(import));
         register_op(&local, registration("Widget", "/etc/passwd")).unwrap();
+    }
+
+    #[test]
+    fn a_reference_is_owner_name_or_a_url_and_never_a_bare_name() {
+        assert_eq!(
+            normalise_reference("indexarr/vogt.git"),
+            "https://github.com/indexarr/vogt"
+        );
+        assert_eq!(
+            normalise_reference("/indexarr/vogt/"),
+            "https://github.com/indexarr/vogt"
+        );
+        assert_eq!(
+            normalise_reference("https://example.com/a/b"),
+            "https://example.com/a/b"
+        );
+        // Two parts that are not names stay as written, so the URL check, not a
+        // guessed host, decides what they are.
+        assert_eq!(
+            normalise_reference("https://example.com"),
+            "https://example.com"
+        );
+        assert_eq!(normalise_reference("vogt"), "vogt");
+    }
+
+    #[test]
+    fn an_import_that_would_consolidate_is_refused_before_anything_is_cloned() {
+        let ctx = context("local:test-user", None);
+        let error = import_op(
+            &ctx,
+            json!({"repo": "indexarr/vogt", "reason": "a reason", "consolidate": true}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VogtError::InvalidRequest(ref message) if message.contains("forge.onboard")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_reference_that_names_no_repository_is_refused() {
+        let ctx = context("local:test-user", None);
+        let error = import_op(
+            &ctx,
+            json!({"repo": "not a repo!", "reason": "a reason", "consolidate": false}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VogtError::InvalidRequest(ref message) if message.contains("does not name a GitHub repository")),
+            "{error}"
+        );
     }
 
     #[test]
