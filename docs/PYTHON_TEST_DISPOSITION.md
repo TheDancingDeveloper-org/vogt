@@ -11,6 +11,11 @@ the work item that will port it.
 
 `tests/fixtures/` stays. Both cores and the harness read it.
 
+The Python lint and type gates (`ruff check`, `ruff format --check`, `mypy
+--strict` in `.github/workflows/ci.yml`) are retired in favour of
+`cargo fmt --check` and `cargo clippy -- -D warnings`. They still run until
+the Python package is removed; they come out with it, not before.
+
 The Python floor was `pytest --cov-fail-under=80`. On this branch
 `cargo llvm-cov -p vogt-core` measures 72.6% line coverage over the whole
 crate, so `.github/workflows/rust-core.yml` fails under 70%. The gap to 80%
