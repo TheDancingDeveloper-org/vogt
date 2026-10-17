@@ -436,7 +436,7 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
         detected_at: (!approval.detected_at.is_empty()).then(|| approval.detected_at.clone()),
     });
     summary.blocked = live.blocked.as_ref().map(|blocked| SessionBlocked {
-        reason: blocked.reason.clone(),
+        blocker: blocked.reason.clone(),
         items: blocked.items.clone(),
         since: blocked.since.clone(),
     });
