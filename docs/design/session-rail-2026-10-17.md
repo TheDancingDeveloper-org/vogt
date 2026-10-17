@@ -264,3 +264,18 @@ Playwright rail specs need updating for the section headers.
 3. For pickers, a new `AwaitingChoice` state or reuse `awaiting-approval`
    with a `kind`? This proposal leans towards reuse, because it is a smaller
    contract change.
+
+## Decisions
+
+Recorded from the operator's answers (WI-1736, 2026-10-17). They settle the
+open questions above.
+
+1. **Retain windows.** "Done recently" covers the last 6 hours. Auto-archive
+   applies after 72 hours (`ENGINE_SESSION_ARCHIVE_AFTER`). Archiving is a
+   later phase, so Phase 1 does not archive anything.
+2. **Oversight is not pinned to the top.** An oversight session is a parent
+   row placed by its state, like any other row. Its children nest under it.
+   A child that needs you is lifted into "Needs you" with a breadcrumb.
+3. **Pickers reuse `awaiting-approval`.** An option picker is
+   `awaiting-approval` with `kind = picker`. The web side is ready to render
+   it now. The engine side (WI-1706) follows in a later phase.
