@@ -12548,3 +12548,107 @@ a.vogt-projects-tag:hover {
 .chat--narrow .chat-main { padding: 8px; }
 .chat--narrow .chat-row { max-width: 92%; }
 .chat--narrow .chat-composer textarea { font-size: 16px; }
+
+/* The session rail's sections (WI-1736): a filter row above the list, one
+   header per state with its count, workers nested under their oversight
+   session, and a compact row (the working directory moves to the tooltip). */
+.rail-session-tools {
+  padding: 4px 8px 6px;
+}
+.rail-search {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  color: inherit;
+}
+.rail-search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* A section header stays at the top of the list while its rows scroll under
+   it, so the operator always sees which state the rows belong to. */
+.places-rail-session-area .rail-section-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin-top: 0;
+  background: var(--bg-elev);
+}
+.places-rail-session-area .session-row .cwd {
+  display: none;
+}
+.session-row.session-row--child {
+  margin-left: 14px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+.session-row.session-row--dimmed {
+  opacity: 0.55;
+}
+.session-row .session-caret {
+  flex: 0 0 auto;
+  border: 0;
+  background: none;
+  color: inherit;
+  padding: 0 4px 0 0;
+  font: inherit;
+  cursor: pointer;
+}
+.session-row .session-lift {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-right: 4px;
+}
+.session-row .session-tally {
+  font-size: 11px;
+  opacity: 0.8;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+@media (pointer: coarse) {
+  .places-rail-session-area .session-row,
+  .places-rail-session-area .rail-section-head {
+    min-height: 44px;
+  }
+  .rail-search {
+    font-size: 16px;
+    min-height: 44px;
+  }
+}
+
+/* The phone and overview session lists are sectioned too (WI-1736): a header
+   per state, a button that folds it, and the count. */
+.session-list-section {
+  list-style: none;
+}
+.session-list-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: start;
+  cursor: pointer;
+}
+.session-list-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+@media (pointer: coarse) {
+  .session-list-head {
+    min-height: 44px;
+  }
+}
