@@ -6,13 +6,16 @@
 //! different states and both are said, never returned as an empty success.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde_json::{json, Value};
 
+use super::lifecycle::expand_user;
 use super::{dispatch, Built};
 
 use crate::application::context::AppContext;
 use crate::application::resolve;
+use crate::core::session_economics::{meter, split_lines, SessionEconomics};
 use crate::core::{py_repr, Clock, IdFactory, Moment};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
@@ -93,6 +96,7 @@ where
     if let Some(detail) = prepared.detail {
         return Ok(empty("sessions", prepared.indexed_at, &detail));
     }
+    let metered = flag(params, "economics")?;
     let rows = ctx
         .observed
         .summarize_activity(&prepared.query, prepared.limit, prepared.offset)?;
@@ -111,6 +115,11 @@ where
                 row,
                 links.get(&row.agent_session_id).cloned(),
                 project_of(&projects, row.cwd.as_deref()),
+                if metered {
+                    economics_of(row.transcript_path.as_deref(), &row.agent)
+                } else {
+                    None
+                },
             )
         })
         .collect();
@@ -210,7 +219,9 @@ where
         None => None,
         Some(slug) => {
             let project = resolve::project(&view, &slug)?;
-            Some(vec![project.root_path])
+            Some(vec![expand_user(Path::new(&project.root_path))
+                .display()
+                .to_string()])
         }
     };
     Ok(ActivityScope {
@@ -255,7 +266,11 @@ where
         .filter(|project| !project.root_path.is_empty())
         .map(|project| {
             (
-                project.root_path.trim_end_matches('/').to_string(),
+                expand_user(Path::new(&project.root_path))
+                    .display()
+                    .to_string()
+                    .trim_end_matches('/')
+                    .to_string(),
                 project.slug,
             )
         })
@@ -294,10 +309,19 @@ fn event_of(
     })
 }
 
+/// Meter the conversation's transcript. `None` when it cannot be read: a
+/// missing file is "not measured", not an empty conversation.
+fn economics_of(path: Option<&str>, agent: &str) -> Option<SessionEconomics> {
+    let path = path.filter(|path| !path.is_empty())?;
+    let bytes = std::fs::read(path).ok()?;
+    Some(meter(split_lines(&String::from_utf8_lossy(&bytes)), agent))
+}
+
 fn summary_of(
     row: &ActivitySessionRow,
     vogt_session_id: Option<String>,
     project: Option<String>,
+    reading: Option<SessionEconomics>,
 ) -> Value {
     let error_rate = if row.calls == 0 {
         0.0
@@ -319,6 +343,10 @@ fn summary_of(
         "unfinished": row.calls - row.finished,
         "tools": row.tools,
         "services": row.services,
+        "turns": reading.as_ref().map(|reading| reading.turns),
+        "context_tokens": reading.as_ref().map(|reading| reading.context_tokens),
+        "peak_context_tokens": reading.as_ref().map(|reading| reading.peak_context_tokens),
+        "compactions": reading.as_ref().map(|reading| reading.compactions),
     })
 }
 
@@ -407,7 +435,7 @@ mod tests {
     use crate::application::instance;
     use crate::core::{ActorKind, Principal, StepClock, SweepOutcome};
     use crate::storage::interface::ObservedStore;
-    use crate::storage::observed_types::{ActivityBatch, ActivityCall};
+    use crate::storage::observed_types::{ActivityBatch, ActivityCall, TranscriptCursor};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -509,6 +537,96 @@ mod tests {
         let summary = summarize_agent_activity_op(&built, json!({})).unwrap();
         assert_eq!(summary["sessions"][0]["calls"], 1);
         assert_eq!(summary["sessions"][0]["unfinished"], 1);
+        assert!(summary["sessions"][0]["turns"].is_null());
+        assert!(summary["sessions"][0]["compactions"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn economics_meters_the_newest_indexed_transcript() {
+        let (dir, built) = context("metered", vec![("claude", "/transcripts")]);
+        indexed(&built);
+        let transcript = dir.join("conv-1.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n",
+                json!({"type": "assistant", "message": {"id": "m1",
+                    "usage": {"input_tokens": 30, "output_tokens": 1}}}),
+                json!({"type": "user", "isCompactSummary": true, "message": {}}),
+            ),
+        )
+        .unwrap();
+        crate::with_ctx!(&built, |ctx| {
+            let now = Moment::from_unix(1_700_000_200, 0);
+            let sweep = ctx.observed.begin_sweep(COLLECTOR_NAME, &[], now).unwrap();
+            ctx.observed
+                .index_activity(
+                    &sweep.id,
+                    &ActivityBatch {
+                        cursors: vec![TranscriptCursor {
+                            path: transcript.display().to_string(),
+                            agent: "claude".into(),
+                            offset: 0,
+                            size: 0,
+                            agent_session_id: Some("conv-1".into()),
+                            cwd: Some("/work".into()),
+                        }],
+                        ..ActivityBatch::default()
+                    },
+                    now,
+                )
+                .unwrap();
+            ctx.observed
+                .finish_sweep(&sweep.id, SweepOutcome::Ok, &[], now, None)
+                .unwrap();
+        });
+        let summary = summarize_agent_activity_op(&built, json!({"economics": true})).unwrap();
+        let row = &summary["sessions"][0];
+        assert_eq!(row["turns"], 1);
+        assert_eq!(row["context_tokens"], 30);
+        assert_eq!(row["peak_context_tokens"], 30);
+        assert_eq!(row["compactions"], 1);
+        let plain = summarize_agent_activity_op(&built, json!({"economics": false})).unwrap();
+        assert!(plain["sessions"][0]["turns"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_roots_expand_the_home_directory() {
+        let (dir, built) = context("home", vec![]);
+        let home = std::env::var("HOME").unwrap_or_default();
+        crate::with_ctx!(&built, |ctx| {
+            let mut write = crate::application::context::write_of(ctx);
+            crate::application::writes::audited_write(&mut write, "seed", "test", |txn, _| {
+                crate::storage::interface::WriteTxn::insert_project(
+                    txn,
+                    &crate::core::Project::new(
+                        "prj_1",
+                        "proj",
+                        "Proj",
+                        "~/code/proj/",
+                        Moment::from_unix(1_700_000_000, 0),
+                    ),
+                )?;
+                Ok(crate::application::writes::WriteOutcome {
+                    result: json!({}),
+                    entity_kind: "project".to_string(),
+                    entity_id: "prj_1".to_string(),
+                    payload: json!({}),
+                    event_kind: "project.registered".to_string(),
+                    summary: json!({}),
+                })
+            })
+            .unwrap();
+            let roots = project_roots(ctx).unwrap();
+            assert_eq!(
+                roots,
+                vec![(format!("{home}/code/proj"), "proj".to_string())]
+            );
+            let scope = scope_of(ctx, &json!({"project": "proj"})).unwrap();
+            assert_eq!(scope.cwd_roots, Some(vec![format!("{home}/code/proj/")]));
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -888,6 +888,7 @@ where
         }
 
         let mut cwds: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut transcripts: BTreeMap<String, Option<String>> = BTreeMap::new();
         for session_id in &ids {
             let cwd: Option<String> = conn
                 .query_row(
@@ -899,6 +900,15 @@ where
                 .map_err(sql_err)?
                 .flatten();
             cwds.insert(session_id.clone(), cwd);
+            let transcript: Option<String> = conn
+                .query_row(
+                    "SELECT path FROM agent_activity_files WHERE agent_session_id = ? ORDER BY updated_at DESC LIMIT 1",
+                    [session_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sql_err)?;
+            transcripts.insert(session_id.clone(), transcript);
         }
 
         Ok(groups
@@ -917,6 +927,7 @@ where
                         wait_ms,
                         tools: ranked(tools.remove(&session).unwrap_or_default()),
                         services: ranked(services.remove(&session).unwrap_or_default()),
+                        transcript_path: transcripts.remove(&session).flatten(),
                     }
                 },
             )
