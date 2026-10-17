@@ -231,6 +231,7 @@ fn bootstrap_recorded<C: Clock + 'static, I: IdFactory + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::interface::AuditQuery;
 
     fn fresh(name: &str) -> (std::path::PathBuf, crate::application::context::Built) {
         let dir = std::env::temp_dir().join(format!("vogt-install-{name}-{}", std::process::id()));
@@ -481,6 +482,357 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    const PASSWORD: &str = "correct horse battery";
+    /// The stack secret a Docker quick start writes to deploy/vogt-core-token.
+    const CORE_SECRET: &str = "vogt_stack_secret_that_is_long_enough_0123456789";
+    /// The migration that latches install mode closed, named rather than
+    /// derived so the upgrade test keeps testing that upgrade.
+    const LATCH_MIGRATION: i64 = 20;
+
+    fn start() -> Moment {
+        Moment::from_unix(1_700_000_000, 0)
+    }
+
+    fn actor_refs(built: &Built) -> Vec<String> {
+        let view = crate::with_ctx!(built, |ctx| ctx.declared.read()).unwrap();
+        view.list_actors(100, 0)
+            .unwrap()
+            .into_iter()
+            .map(|actor| actor.identity_ref)
+            .collect()
+    }
+
+    /// The audit rows as (operation, actor) pairs, newest first.
+    fn audit_pairs(built: &Built) -> Vec<(String, String)> {
+        let view = crate::with_ctx!(built, |ctx| ctx.declared.read()).unwrap();
+        view.list_audit(&AuditQuery {
+            limit: 50,
+            offset: 0,
+            actor_id: None,
+            operation: None,
+            entity_id: None,
+            project_id: None,
+            since: None,
+            until: None,
+        })
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.operation, row.actor_identity_ref))
+        .collect()
+    }
+
+    /// A declared store migrated with every shipped migration before the
+    /// latch, the way a v0.7.7 instance's store is. Returns its path.
+    fn store_before_the_latch(dir: &std::path::Path) -> std::path::PathBuf {
+        let old = dir.join("before-latch");
+        std::fs::create_dir_all(&old).unwrap();
+        for migration in
+            crate::storage::sqlite::migrator::load_migrations("declared", None).unwrap()
+        {
+            if migration.number() < LATCH_MIGRATION {
+                std::fs::write(old.join(format!("{}.sql", migration.id)), &migration.sql).unwrap();
+            }
+        }
+        let path = dir.join("declared.sqlite3");
+        let mut conn = crate::storage::sqlite::connection::connect(&path).unwrap();
+        crate::storage::sqlite::migrator::migrate(
+            &mut conn,
+            "declared",
+            Some(&old),
+            "old/1",
+            "2026-09-01T00:00:00+00:00",
+        )
+        .unwrap();
+        path
+    }
+
+    /// The gate's answer for a bearer secret, as HTTP asks it.
+    fn bearer(
+        built: &Built,
+        secret: &str,
+    ) -> Result<crate::adapters::auth_gate::Grant, crate::adapters::auth_gate::Denial> {
+        use crate::adapters::auth_gate;
+        let registry = crate::registry::default_registry();
+        let operation = registry.get("auth.whoami").unwrap();
+        crate::with_ctx!(built, |ctx| auth_gate::authenticate(
+            &ctx.declared,
+            auth_gate::Request {
+                operation,
+                transport: crate::registry::Transport::Http,
+                presented: Some(secret),
+                no_auth: false,
+                writes_enabled: true,
+                now: start(),
+            },
+            ctx.config.session_ttl_days,
+        ))
+    }
+
+    /// A failed bootstrap writes nothing: the actor it would have registered
+    /// is rolled back with the refused write.
+    #[test]
+    fn a_failed_bootstrap_leaves_no_actor_behind() {
+        use crate::application::services::auth::create_user_op;
+        let (dir, built) = fresh("no-actor");
+        create_user_op(
+            &built,
+            json!({"username": "ada", "password": PASSWORD, "scopes": "admin", "reason": "first"}),
+        )
+        .unwrap();
+        let refused = install_bootstrap_op(&built, json!({"display_name": "Eve"})).unwrap_err();
+        assert!(matches!(refused, VogtError::InstallClosed(_)), "{refused}");
+        assert!(!actor_refs(&built).contains(&"human:eve".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A login made with a password closes the door the same way a token does.
+    #[test]
+    fn a_password_login_closes_install_mode() {
+        use crate::application::services::auth::create_user_op;
+        let (dir, built) = fresh("login-closes");
+        create_user_op(
+            &built,
+            json!({"username": "ada", "password": PASSWORD, "scopes": "admin", "reason": "first"}),
+        )
+        .unwrap();
+        assert_eq!(
+            install_status_op(&built, json!({})).unwrap()["install_mode"],
+            false
+        );
+        let refused = install_bootstrap_op(&built, json!({"display_name": "Eve"})).unwrap_err();
+        assert!(matches!(refused, VogtError::InstallClosed(_)), "{refused}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_bootstrap_is_audited_and_attributed_to_the_new_actor() {
+        let (dir, built) = fresh("audit");
+        install_bootstrap_op(&built, json!({"display_name": "Ada"})).unwrap();
+        let rows = audit_pairs(&built);
+        assert!(
+            rows.contains(&("install.bootstrap".to_string(), "human:ada".to_string())),
+            "{rows:?}"
+        );
+        assert!(
+            rows.contains(&("actor.auto_register".to_string(), "human:ada".to_string())),
+            "{rows:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_explicit_identity_ref_is_honoured() {
+        let (dir, built) = fresh("explicit");
+        let minted = install_bootstrap_op(
+            &built,
+            json!({"display_name": "Ada", "identity_ref": "human:ada.l"}),
+        )
+        .unwrap();
+        assert_eq!(minted["actor"]["identity_ref"], "human:ada.l");
+        assert!(actor_refs(&built).contains(&"human:ada.l".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unsluggable_display_name_is_refused() {
+        let (dir, built) = fresh("unsluggable");
+        let refused = install_bootstrap_op(&built, json!({"display_name": "???"})).unwrap_err();
+        assert!(
+            matches!(&refused, VogtError::InvalidRequest(message) if message.contains("cannot derive an identity")),
+            "{refused}"
+        );
+        assert_eq!(
+            install_status_op(&built, json!({})).unwrap()["install_mode"],
+            true
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The core token the Docker quick start adopts is an agent's, so it leaves
+    /// the door open, and the engine's own call still authenticates with it.
+    /// The row is seeded in the shape `init` writes, because adoption reads its
+    /// file through the environment, which a unit test should not set.
+    #[test]
+    fn the_adopted_core_token_leaves_install_mode_open() {
+        let (dir, built) = fresh("core");
+        seed(
+            &dir,
+            "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at) VALUES ('act_engine', 'agent', 'agent:vogt-engine', 'agent:vogt-engine', 0, '2026-01-01T00:00:00Z')",
+        );
+        let hash = crate::auth::hash_token(CORE_SECRET);
+        seed(
+            &dir,
+            &format!(
+                "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, kind, created_at) VALUES ('tok_core', 'act_engine', 'bootstrap-core-token', '{hash}', '[\"project.write\",\"read\",\"work.write\"]', 'api', '2026-01-01T00:00:00Z')"
+            ),
+        );
+        assert_eq!(
+            install_status_op(&built, json!({})).unwrap()["install_mode"],
+            true
+        );
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        assert!(view.list_password_credentials().unwrap().is_empty());
+        drop(view);
+        let grant = bearer(&built, CORE_SECRET).unwrap();
+        assert_eq!(grant.identity_ref.as_deref(), Some("agent:vogt-engine"));
+        assert_eq!(grant.kind, crate::core::ActorKind::Agent);
+        let mut scopes = grant.scopes.clone();
+        scopes.sort();
+        assert_eq!(scopes, vec!["project.write", "read", "work.write"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An upgraded store that held only agent-bound tokens, and no person's, is
+    /// latched closed by migration 0020 rather than reopened by the upgrade.
+    #[test]
+    fn an_upgraded_instance_operated_without_a_person_stays_closed() {
+        let dir = std::env::temp_dir().join(format!("vogt-install-upgrade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = store_before_the_latch(&dir);
+        let stamp = "2026-09-01T00:00:00+00:00";
+        {
+            let conn = crate::storage::sqlite::connection::connect(&path).unwrap();
+            conn.execute(
+                "INSERT INTO actors (id, kind, display_name, identity_ref, created_at) \
+                 VALUES ('act_engine', 'agent', 'agent:vogt-engine', 'agent:vogt-engine', ?1)",
+                [stamp],
+            )
+            .unwrap();
+            for (token_id, name, kind) in [
+                ("tok_core", "bootstrap-core-token", "api"),
+                ("tok_session", "session ses_1", "agent"),
+            ] {
+                conn.execute(
+                    "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, kind, created_at) \
+                     VALUES (?1, 'act_engine', ?2, ?3, '[\"read\"]', ?4, ?5)",
+                    rusqlite::params![token_id, name, format!("hash-{token_id}"), kind, stamp],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO projects (id, slug, name, root_path, lifecycle_state, \
+                 compliance_status, exclusions, trust_state, created_at, updated_at) \
+                 VALUES ('prj_1', 'months-of-work', 'Months of work', '/srv/w', 'active', \
+                 'not_checked', '[]', 'unverified', ?1, ?1)",
+                [stamp],
+            )
+            .unwrap();
+        }
+        let store = crate::storage::sqlite::declared::SqliteDeclaredStore::new(
+            path,
+            crate::core::StepClock::new(start()),
+            crate::application::context::RandomIds,
+        );
+        store
+            .bootstrap(&crate::core::local_principal("tester"))
+            .unwrap();
+        let report = store.migrate().unwrap();
+        assert!(
+            report.applied.contains(&"0020_install_latch".to_string()),
+            "{report:?}"
+        );
+        let view = store.read().unwrap();
+        assert!(view.install_closed().unwrap());
+        drop(view);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The latch copies the old rule exactly: a store that held no token at all
+    /// was in install mode before the upgrade and still is.
+    #[test]
+    fn an_upgraded_store_with_no_tokens_is_still_a_fresh_install() {
+        let dir = std::env::temp_dir().join(format!("vogt-install-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = store_before_the_latch(&dir);
+        let store = crate::storage::sqlite::declared::SqliteDeclaredStore::new(
+            path,
+            crate::core::StepClock::new(start()),
+            crate::application::context::RandomIds,
+        );
+        store
+            .bootstrap(&crate::core::local_principal("tester"))
+            .unwrap();
+        store.migrate().unwrap();
+        let view = store.read().unwrap();
+        assert!(!view.install_closed().unwrap());
+        drop(view);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A login removed after it was made still leaves the door shut: the latch
+    /// was set when the person was given credentials, and removal does not undo it.
+    #[test]
+    fn removing_the_only_operator_does_not_reopen_install_mode() {
+        use crate::application::services::auth::{create_user_op, remove_user_op};
+        let (dir, built) = fresh("removed");
+        create_user_op(
+            &built,
+            json!({"username": "adda", "password": PASSWORD, "scopes": "admin", "reason": "first"}),
+        )
+        .unwrap();
+        remove_user_op(&built, json!({"username": "adda", "reason": "typo"})).unwrap();
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        assert!(view.list_password_credentials().unwrap().is_empty());
+        drop(view);
+        assert_eq!(
+            install_status_op(&built, json!({})).unwrap()["install_mode"],
+            false
+        );
+        let refused = install_bootstrap_op(&built, json!({"display_name": "Eve"})).unwrap_err();
+        assert!(matches!(refused, VogtError::InstallClosed(_)), "{refused}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With a username and password the bootstrap creates a login, returns a
+    /// browser session, and the password signs in as the same actor.
+    #[test]
+    fn the_bootstrap_can_create_a_login_and_hands_back_a_session() {
+        use crate::application::services::auth::login_op;
+        let _gate = crate::application::services::auth::throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::application::services::auth::throttle_reset();
+        let (dir, built) = fresh("login-bootstrap");
+        let minted = install_bootstrap_op(
+            &built,
+            json!({"display_name": "Ada Lovelace", "password": PASSWORD}),
+        )
+        .unwrap();
+        assert_eq!(minted["username"], "ada-lovelace");
+        assert_eq!(minted["token"]["kind"], "session");
+        assert!(!minted["token"]["expires_at"].is_null());
+        assert_eq!(minted["token"]["scopes"], json!(["admin"]));
+        let signed_in = login_op(
+            &built,
+            json!({"username": "ada-lovelace", "password": PASSWORD}),
+        )
+        .unwrap();
+        assert_eq!(signed_in["actor"]["id"], minted["actor"]["id"]);
+        assert_eq!(signed_in["token"]["scopes"], json!(["admin"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A username with no password is refused before anything is written.
+    #[test]
+    fn the_bootstrap_refuses_a_username_without_a_password() {
+        let (dir, built) = fresh("username-only");
+        let refused =
+            install_bootstrap_op(&built, json!({"display_name": "Ada", "username": "ada"}))
+                .unwrap_err();
+        assert!(
+            matches!(&refused, VogtError::InvalidRequest(message) if message.contains("password")),
+            "{refused}"
+        );
+        assert!(!actor_refs(&built).contains(&"human:ada".to_string()));
+        assert_eq!(
+            install_status_op(&built, json!({})).unwrap()["install_mode"],
+            true
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn seed(dir: &std::path::Path, sql: &str) {

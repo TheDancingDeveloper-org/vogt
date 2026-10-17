@@ -839,7 +839,7 @@ fn throttle() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec
 /// the middle of another's window. Every test that logs in holds this for its
 /// whole body.
 #[cfg(test)]
-fn throttle_gate() -> &'static std::sync::Mutex<()> {
+pub(crate) fn throttle_gate() -> &'static std::sync::Mutex<()> {
     static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     &GATE
 }
@@ -878,7 +878,7 @@ fn throttle_succeeded(username: &str) {
 
 /// Tests share one process, so one test's failures would lock the next test's
 /// username. Production never calls this.
-fn throttle_reset() {
+pub(crate) fn throttle_reset() {
     throttle()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -932,6 +932,8 @@ pub(super) fn password_hash_of(password: &str) -> Result<String, VogtError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::auth_gate;
+    use crate::application::taxonomy::create_actor_op;
 
     /// A refused login leaves the denial behind even though the write rolls
     /// back, and the next correct password still signs in. Both are easy to get
@@ -1239,18 +1241,27 @@ mod tests {
         )
         .unwrap();
         cheapen(&dir, "gone", "correct horse battery");
+        let session = login_op(
+            &built,
+            serde_json::json!({"username": "gone", "password": "correct horse battery"}),
+        )
+        .unwrap();
+        let session_id = session["token"]["id"].as_str().unwrap().to_string();
         let removed = remove_user_op(
             &built,
             serde_json::json!({"username": "gone", "reason": "left"}),
         )
         .unwrap();
         assert_eq!(removed["username"], "gone");
+        assert_eq!(removed["sessions_revoked"], 1);
         let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
         assert!(view.actor_by_identity("human:gone").unwrap().is_some());
         assert!(view
             .password_credential_by_username("gone")
             .unwrap()
             .is_none());
+        let revoked = view.token_by_id(&session_id).unwrap().unwrap();
+        assert!(revoked.revoked_at.is_some(), "the session was revoked");
         drop(view);
         let refused = login_op(
             &built,
@@ -1267,6 +1278,675 @@ mod tests {
             missing.message().contains("no user named 'gone'"),
             "{missing}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const PASSWORD: &str = "correct horse battery staple";
+
+    /// The step clock's touch lands one tick after the decision, as
+    /// `auth_gate::touch_instant` documents for a stepped store.
+    const TOUCH_TICK: i64 = 1;
+
+    /// The same store `fresh_at` builds, with the clock set to `start`.
+    /// Rebuilding on one directory moves time without reopening anything.
+    fn at(dir: &std::path::Path, start: crate::core::Moment) -> crate::application::context::Built {
+        crate::application::context::build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.to_path_buf(),
+                ..crate::config::VogtConfig::default()
+            },
+            None,
+            Some(crate::core::StepClock::new(start)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// The gate's answer for a bearer secret at `now`, as HTTP and MCP ask it.
+    fn presented(
+        built: &crate::application::context::Built,
+        secret: &str,
+        now: crate::core::Moment,
+    ) -> Result<auth_gate::Grant, auth_gate::Denial> {
+        let registry = crate::registry::default_registry();
+        let operation = registry.get("auth.whoami").unwrap();
+        crate::with_ctx!(built, |ctx| auth_gate::authenticate(
+            &ctx.declared,
+            auth_gate::Request {
+                operation,
+                transport: crate::registry::Transport::Http,
+                presented: Some(secret),
+                no_auth: false,
+                writes_enabled: true,
+                now,
+            },
+            ctx.config.session_ttl_days,
+        ))
+    }
+
+    /// Make `built` a request made with `grant`'s token, as a handler sees it.
+    fn as_caller(built: &mut crate::application::context::Built, grant: &auth_gate::Grant) {
+        use crate::application::context::Built;
+        let principal = auth_gate::principal_for(grant).unwrap();
+        let token = grant.token.clone();
+        match built {
+            Built::SystemRandom(ctx) => {
+                ctx.principal = principal;
+                ctx.token = token;
+            }
+            Built::SystemSequential(ctx) => {
+                ctx.principal = principal;
+                ctx.token = token;
+            }
+            Built::StepRandom(ctx) => {
+                ctx.principal = principal;
+                ctx.token = token;
+            }
+            Built::StepSequential(ctx) => {
+                ctx.principal = principal;
+                ctx.token = token;
+            }
+        }
+    }
+
+    fn ttl_seconds(built: &crate::application::context::Built) -> i64 {
+        crate::with_ctx!(built, |ctx| ctx.config.session_ttl_days * 86_400)
+    }
+
+    fn token_of(value: &Value) -> Token {
+        serde_json::from_value(value["token"].clone()).unwrap()
+    }
+
+    /// The expiry the store holds for a token, in whole seconds.
+    fn expiry_of(built: &crate::application::context::Built, token_id: &str) -> i64 {
+        let view = crate::with_ctx!(built, |ctx| ctx.declared.read()).unwrap();
+        view.token_by_id(token_id)
+            .unwrap()
+            .unwrap()
+            .expires_at
+            .unwrap()
+            .unix_seconds()
+    }
+
+    /// A password verifies against the hash it was stored as, and against
+    /// nothing else: not a near miss, and not a value that is not a hash.
+    #[test]
+    fn a_password_verifies_against_its_hash_and_nothing_else_does() {
+        let stored = password_hash_of(PASSWORD).unwrap();
+        assert!(stored.starts_with("scrypt$"), "{stored}");
+        assert!(crate::auth::verify_password(PASSWORD, &stored));
+        assert!(!crate::auth::verify_password(
+            &format!("{PASSWORD}x"),
+            &stored
+        ));
+        assert!(!crate::auth::verify_password(PASSWORD, "garbage"));
+    }
+
+    /// Salted: an operator cannot tell two people share a password.
+    #[test]
+    fn two_hashes_of_one_password_differ() {
+        let first = password_hash_of(PASSWORD).unwrap();
+        let second = password_hash_of(PASSWORD).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn a_short_password_is_refused() {
+        let err = password_hash_of("short").unwrap_err();
+        assert!(
+            matches!(&err, VogtError::InvalidRequest(message) if message.contains("at least 8")),
+            "{err}"
+        );
+    }
+
+    /// The user list names the login, the human actor behind it, its scopes and
+    /// the display name the person was given.
+    #[test]
+    fn creating_a_user_creates_a_human_actor_and_a_login() {
+        let (_dir, built) = fresh("create");
+        create_user_op(
+            &built,
+            serde_json::json!({
+                "username": "Ada",
+                "password": PASSWORD,
+                "display_name": "Ada Lovelace",
+                "scopes": "read,work.write",
+                "reason": "first user",
+            }),
+        )
+        .unwrap();
+        let listed = list_users_op(&built, serde_json::json!({})).unwrap();
+        let users = listed["users"].as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["username"], "ada");
+        assert_eq!(users[0]["actor_identity_ref"], "human:ada");
+        assert_eq!(
+            users[0]["scopes"],
+            serde_json::json!(["read", "work.write"])
+        );
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        let actor = view.actor_by_identity("human:ada").unwrap().unwrap();
+        assert_eq!(actor.kind, ActorKind::Human);
+        assert_eq!(actor.display_name, "Ada Lovelace");
+    }
+
+    /// Neither the create reply nor the list carries the stored hash, nor a
+    /// field that names one.
+    #[test]
+    fn a_user_result_never_carries_the_hash() {
+        let (_dir, built) = fresh("nohash");
+        let created = create_user_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD, "reason": "first"}),
+        )
+        .unwrap();
+        let stored = {
+            let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+            let actor = view.actor_by_identity("human:ada").unwrap().unwrap();
+            view.password_hash(&actor.id).unwrap().unwrap()
+        };
+        let listed = list_users_op(&built, serde_json::json!({})).unwrap();
+        for user in [&created["user"], &listed["users"][0]] {
+            let keys: Vec<&String> = user.as_object().unwrap().keys().collect();
+            assert!(
+                keys.iter()
+                    .all(|key| !key.contains("hash") && !key.contains("password")),
+                "{keys:?}"
+            );
+            assert!(!user.to_string().contains(&stored));
+        }
+    }
+
+    #[test]
+    fn a_duplicate_username_is_a_conflict() {
+        let (_dir, built) = fresh("dup");
+        create_user_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD, "reason": "first"}),
+        )
+        .unwrap();
+        let err = create_user_op(
+            &built,
+            serde_json::json!({"username": "ADA", "password": PASSWORD, "reason": "again"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, VogtError::Conflict(message) if message.contains("already exists")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_bad_username_or_scope_is_an_invalid_request() {
+        let (_dir, built) = fresh("invalid");
+        let bad_name = create_user_op(
+            &built,
+            serde_json::json!({"username": "a", "password": PASSWORD, "reason": "x"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(bad_name, VogtError::InvalidRequest(_)),
+            "{bad_name}"
+        );
+        let unknown_scope = create_user_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD, "scopes": "root", "reason": "x"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&unknown_scope, VogtError::InvalidRequest(message) if message.contains("unknown scope")),
+            "{unknown_scope}"
+        );
+        let short = create_user_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": "short", "reason": "x"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&short, VogtError::InvalidRequest(message) if message.contains("at least 8")),
+            "{short}"
+        );
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        assert!(view.list_password_credentials().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_agent_cannot_hold_a_password() {
+        let (_dir, built) = fresh("agentpw");
+        create_actor_op(
+            &built,
+            serde_json::json!({
+                "identity_ref": "agent:bot",
+                "kind": "agent",
+                "display_name": "bot",
+                "reason": "setup",
+            }),
+        )
+        .unwrap();
+        let err = create_user_op(
+            &built,
+            serde_json::json!({
+                "username": "bot",
+                "password": PASSWORD,
+                "actor": "agent:bot",
+                "reason": "x",
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, VogtError::InvalidRequest(message) if message.contains("agent")),
+            "{err}"
+        );
+    }
+
+    /// The session is the person's own: it names the human actor, expires one
+    /// configured ttl after it was minted, and the gate resolves it to the
+    /// human principal with the session kind.
+    #[test]
+    fn a_login_mints_a_session_bound_to_the_person() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        throttle_reset();
+        let (dir, built) = fresh("bound");
+        create_user_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD, "scopes": "read,work.write", "display_name": "Ada Lovelace", "reason": "first"}),
+        )
+        .unwrap();
+        cheapen(&dir, "ada", PASSWORD);
+        let session = login_op(
+            &built,
+            serde_json::json!({"username": "Ada", "password": PASSWORD}),
+        )
+        .unwrap();
+        assert_eq!(session["actor"]["identity_ref"], "human:ada");
+        let token = token_of(&session);
+        assert_eq!(token.kind, crate::core::TokenKind::Session);
+        assert_eq!(token.scopes, vec!["read", "work.write"]);
+        let expires = token.expires_at.expect("a session expires");
+        assert_eq!(
+            expires.unix_seconds() - token.created_at.unix_seconds(),
+            ttl_seconds(&built)
+        );
+        let secret = session["secret"].as_str().unwrap();
+        let grant = presented(&built, secret, token.created_at).unwrap();
+        let principal = auth_gate::principal_for(&grant).unwrap();
+        assert_eq!(principal.identity_ref, "human:ada");
+        assert_eq!(principal.kind, ActorKind::Human);
+        assert_eq!(grant.token.unwrap().kind, crate::core::TokenKind::Session);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The login row is written to the person, carries no secret, and the
+    /// decision that goes with it reads `login_ok`.
+    #[test]
+    fn the_login_is_audited_to_the_person_without_the_secret() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        throttle_reset();
+        let (dir, built) = fresh("audited");
+        create_user_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD, "reason": "first"}),
+        )
+        .unwrap();
+        cheapen(&dir, "ada", PASSWORD);
+        let session = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD}),
+        )
+        .unwrap();
+        let secret = session["secret"].as_str().unwrap().to_string();
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        let rows = view
+            .list_audit(&crate::storage::interface::AuditQuery {
+                limit: 10,
+                offset: 0,
+                actor_id: None,
+                operation: Some("auth.login".to_string()),
+                entity_id: None,
+                project_id: None,
+                since: None,
+                until: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].operation, "auth.login");
+        assert_eq!(rows[0].actor_identity_ref, "human:ada");
+        assert!(!format!("{:?}", rows[0]).contains(&secret));
+        let decisions = view.list_auth_decisions(None, 5).unwrap();
+        assert_eq!(decisions[0].reason_code, "login_ok");
+        assert_eq!(decisions[0].operation, "auth.login");
+        assert_eq!(
+            decisions[0].token_id.as_deref(),
+            session["token"]["id"].as_str()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Logout revokes the token the request arrived with and leaves another
+    /// device's session working.
+    #[test]
+    fn logout_revokes_the_session_it_arrived_with() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        throttle_reset();
+        let start = crate::core::Moment::from_unix(1_700_000_000, 0);
+        let (dir, built) = fresh_at("logout", start);
+        create_user_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD, "reason": "first"}),
+        )
+        .unwrap();
+        cheapen(&dir, "ada", PASSWORD);
+        let first = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD}),
+        )
+        .unwrap();
+        let second = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD}),
+        )
+        .unwrap();
+        let first_token = token_of(&first);
+        let first_secret = first["secret"].as_str().unwrap();
+        let second_secret = second["secret"].as_str().unwrap();
+        let grant = presented(&built, first_secret, first_token.created_at).unwrap();
+        let mut caller = at(&dir, first_token.created_at);
+        as_caller(&mut caller, &grant);
+        let result = logout_op(&caller, serde_json::json!({"reason": "bye"})).unwrap();
+        assert_eq!(result["revoked"], true);
+        assert!(!result["token"]["revoked_at"].is_null(), "{result}");
+        let refused = presented(&built, first_secret, first_token.created_at)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(
+                refused,
+                auth_gate::Denial::Rejected {
+                    code: "token_revoked"
+                }
+            ),
+            "{refused:?}"
+        );
+        let other = presented(&built, second_secret, first_token.created_at).unwrap();
+        assert_eq!(
+            auth_gate::principal_for(&other).unwrap().identity_ref,
+            "human:ada"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A call with no token behind it, the local CLI, has nothing to revoke and
+    /// says so rather than failing.
+    #[test]
+    fn logout_with_no_token_behind_it_is_an_honest_no() {
+        let (dir, built) = fresh("nologout");
+        let result = logout_op(&built, serde_json::json!({"reason": "bye"})).unwrap();
+        assert_eq!(result["revoked"], false);
+        assert!(result["token"].is_null(), "{result}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `whoami` reports the caller's identity and its effective scopes, with
+    /// the implications applied, and the local grant when there is no token.
+    #[test]
+    fn whoami_reports_the_authenticated_identity_and_effective_scopes() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        throttle_reset();
+        let (dir, mut built) = fresh("whoami");
+        create_user_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD, "scopes": "read,work.write", "display_name": "Ada Lovelace", "reason": "first"}),
+        )
+        .unwrap();
+        cheapen(&dir, "ada", PASSWORD);
+        let session = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD}),
+        )
+        .unwrap();
+        let token = token_of(&session);
+        let secret = session["secret"].as_str().unwrap();
+        let grant = presented(&built, secret, token.created_at).unwrap();
+        as_caller(&mut built, &grant);
+        let me = whoami_op(&built, serde_json::json!({})).unwrap();
+        assert_eq!(me["identity_ref"], "human:ada");
+        assert_eq!(me["kind"], "human");
+        assert_eq!(me["display_name"], "Ada Lovelace");
+        assert_eq!(me["scopes"], serde_json::json!(["read", "work.write"]));
+        assert_eq!(me["token"]["id"], session["token"]["id"]);
+
+        let (local_dir, local_built) = fresh("whoami-local");
+        let local = whoami_op(&local_built, serde_json::json!({})).unwrap();
+        let identity = crate::with_ctx!(&local_built, |ctx| ctx.principal.identity_ref.clone());
+        assert_eq!(local["identity_ref"], identity);
+        assert!(local["scopes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("admin")));
+        assert!(local["token"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    /// A session that goes unused past its life is refused, and a revoked one
+    /// is not moved by a later attempt to use it.
+    #[test]
+    fn an_unused_session_still_expires_and_a_revoked_one_is_not_revived() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        throttle_reset();
+        let start = crate::core::Moment::from_unix(1_700_000_000, 0);
+        let (dir, built) = fresh_at("expiry", start);
+        create_user_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD, "reason": "first"}),
+        )
+        .unwrap();
+        cheapen(&dir, "ada", PASSWORD);
+        let ttl = ttl_seconds(&built);
+
+        let idle = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD}),
+        )
+        .unwrap();
+        let idle_token = token_of(&idle);
+        let past =
+            crate::core::Moment::from_unix(idle_token.created_at.unix_seconds() + ttl + 60, 0);
+        let refused = presented(&built, idle["secret"].as_str().unwrap(), past)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(
+                refused,
+                auth_gate::Denial::Rejected {
+                    code: "token_expired"
+                }
+            ),
+            "{refused:?}"
+        );
+
+        let live = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD}),
+        )
+        .unwrap();
+        let live_token = token_of(&live);
+        let live_secret = live["secret"].as_str().unwrap();
+        let created = live_token.created_at.unix_seconds();
+        let three_quarters = crate::core::Moment::from_unix(created + ttl * 3 / 4, 0);
+        presented(&built, live_secret, three_quarters).unwrap();
+        assert_eq!(
+            expiry_of(&built, &live_token.id),
+            three_quarters.unix_seconds() + TOUCH_TICK + ttl,
+            "live: extended"
+        );
+
+        let mut caller = at(&dir, three_quarters);
+        let grant = presented(&built, live_secret, three_quarters).unwrap();
+        as_caller(&mut caller, &grant);
+        logout_op(&caller, serde_json::json!({"reason": "revoke"})).unwrap();
+        let before = expiry_of(&built, &live_token.id);
+        let later = crate::core::Moment::from_unix(created + ttl * 4 / 5, 0);
+        let revived = presented(&built, live_secret, later).err().unwrap();
+        assert!(
+            matches!(
+                revived,
+                auth_gate::Denial::Rejected {
+                    code: "token_revoked"
+                }
+            ),
+            "{revived:?}"
+        );
+        assert_eq!(
+            expiry_of(&built, &live_token.id),
+            before,
+            "revoked: never moved"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only a login session slides, and only once past half its life. The
+    /// boundary and the expired case are answered by the pure rule itself.
+    #[test]
+    fn only_a_login_session_slides() {
+        let now = crate::core::from_iso("2026-10-01T00:00:00Z").unwrap();
+        let ttl = 30 * 86_400;
+        let near = crate::core::Moment::from_unix(now.unix_seconds() + 10 * 86_400, 0);
+        let renewed = crate::auth::renewed_expiry("session", Some(near), now, ttl).unwrap();
+        assert_eq!(renewed.unix_seconds(), now.unix_seconds() + ttl);
+        assert!(crate::auth::renewed_expiry("api", Some(near), now, ttl).is_none());
+        assert!(crate::auth::renewed_expiry("agent", Some(near), now, ttl).is_none());
+        assert!(crate::auth::renewed_expiry("session", None, now, ttl).is_none());
+        let far = crate::core::Moment::from_unix(now.unix_seconds() + 20 * 86_400, 0);
+        assert!(crate::auth::renewed_expiry("session", Some(far), now, ttl).is_none());
+        let gone = crate::core::Moment::from_unix(now.unix_seconds() - 1, 0);
+        assert!(crate::auth::renewed_expiry("session", Some(gone), now, ttl).is_none());
+    }
+
+    /// The phone opened every day is not signed out a fixed ttl after login:
+    /// past half its life, a request renews it to a full ttl from that request.
+    #[test]
+    fn a_session_in_regular_use_slides_and_is_never_signed_out() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        throttle_reset();
+        let start = crate::core::Moment::from_unix(1_700_000_000, 0);
+        let (dir, built) = fresh_at("slide", start);
+        create_user_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD, "reason": "first"}),
+        )
+        .unwrap();
+        cheapen(&dir, "ada", PASSWORD);
+        let ttl = ttl_seconds(&built);
+        let session = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": PASSWORD}),
+        )
+        .unwrap();
+        let token = token_of(&session);
+        let secret = session["secret"].as_str().unwrap();
+        let created = token.created_at.unix_seconds();
+        let first_expiry = created + ttl;
+        assert_eq!(expiry_of(&built, &token.id), first_expiry);
+
+        // Early in its life a request leaves the expiry where it was.
+        presented(
+            &built,
+            secret,
+            crate::core::Moment::from_unix(created + ttl / 4, 0),
+        )
+        .unwrap();
+        assert_eq!(expiry_of(&built, &token.id), first_expiry);
+
+        // Past half its life the same request renews it to a full ttl from now.
+        let mid = created + ttl * 3 / 4;
+        presented(&built, secret, crate::core::Moment::from_unix(mid, 0)).unwrap();
+        assert_eq!(
+            expiry_of(&built, &token.id),
+            mid + TOUCH_TICK + ttl,
+            "renewed"
+        );
+
+        // Used every few weeks, it outlives the original expiry by far.
+        let mut now = mid;
+        for _ in 0..4 {
+            now += ttl * 3 / 5;
+            presented(&built, secret, crate::core::Moment::from_unix(now, 0)).unwrap();
+        }
+        assert!(now > first_expiry + ttl, "{now} vs {first_expiry}");
+        assert_eq!(
+            expiry_of(&built, &token.id),
+            now + TOUCH_TICK + ttl,
+            "the last use renewed it again"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Changing the password with `revoke_sessions=false` keeps the live
+    /// session working and moves the scopes for the next login.
+    #[test]
+    fn setting_a_password_can_keep_sessions_and_change_scopes() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        throttle_reset();
+        let (dir, built) = fresh("keep");
+        create_user_op(
+            &built,
+            serde_json::json!({"username": "keep", "password": PASSWORD, "reason": "first"}),
+        )
+        .unwrap();
+        cheapen(&dir, "keep", PASSWORD);
+        let session = login_op(
+            &built,
+            serde_json::json!({"username": "keep", "password": PASSWORD}),
+        )
+        .unwrap();
+        let token = token_of(&session);
+        let changed = set_password_op(
+            &built,
+            serde_json::json!({
+                "username": "keep",
+                "password": "a new passphrase",
+                "scopes": "admin",
+                "revoke_sessions": false,
+                "reason": "rotated",
+            }),
+        )
+        .unwrap();
+        assert_eq!(changed["user"]["scopes"], serde_json::json!(["admin"]));
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        let kept = view.token_by_id(&token.id).unwrap().unwrap();
+        assert!(kept.revoked_at.is_none(), "the session survived");
+        drop(view);
+        presented(
+            &built,
+            session["secret"].as_str().unwrap(),
+            token.created_at,
+        )
+        .unwrap();
+        let renewed = login_op(
+            &built,
+            serde_json::json!({"username": "keep", "password": "a new passphrase"}),
+        )
+        .unwrap();
+        assert_eq!(token_of(&renewed).scopes, vec!["admin"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
