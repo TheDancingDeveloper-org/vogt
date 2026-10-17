@@ -74,10 +74,9 @@ jobs:
       ENGINE_BIND: "127.0.0.1"
       ENGINE_PORT: "8910"
       ENGINE_PUBLIC_URL: "http://127.0.0.1:8910"
-      # Build the core image locally and point BOTH the core service's `image:`
-      # and the engine build's `CORE_IMAGE` arg (both read `${VOGT_IMAGE}`) at
-      # it, so nothing pulls the private GHCR core — the job runs with no
-      # registry credentials.
+      # Build the core image locally and point the core service's `image:`
+      # (it reads `${VOGT_IMAGE}`) at it, so nothing pulls the private GHCR
+      # core — the job runs with no registry credentials.
       VOGT_IMAGE: "vogt-core:local"
     steps:
       # A clean clone, every run: the whole point is that nothing on the runner
@@ -113,11 +112,11 @@ jobs:
           set -euo pipefail
           # The core is private on GHCR and the runner has no registry
           # creds, so build everything from the repo's own Dockerfiles. VOGT_IMAGE
-          # points the core service and the engine build-arg at the local core.
+          # points the core service at the local core.
           # The e2e engine bakes in the fake-agent + preset, so nothing is
           # host-bind-mounted (the runner's FS is not the docker daemon's).
           docker build -t vogt-core:local -f Dockerfile .
-          docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:local .
+          docker build -t vogt-engine:local -f engine/Dockerfile .
           docker build -t vogt-engine-e2e:local -f deploy/e2e.engine.Dockerfile .
           # The live-Playwright image: web/ + browsers baked in so the
           # `live` project runs in-network with no bind-mount. Public base image,

@@ -29,7 +29,7 @@ sidecar, released as a pair and run by one Compose file,
     ├── /mcp            proxied to the core
     ├── /api/auth/login, /api/install/...   proxied untouched; the core self-gates
     └── /healthz, /readyz
-  vogt serve   (:8000, loopback inside the container, never published)
+  vogt-core serve   (:8000, loopback inside the container, never published)
     ├── /api/...        REST (OpenAPI at /openapi.json)
     ├── /mcp            MCP streamable HTTP transport
     └── /health/live, /health/ready, /version
@@ -526,12 +526,28 @@ instance id), otherwise every difference is a conflict.
    fresh prod backup: the clone baseline is now behind both sides, so a
    second carry would report every item touched by the first as a conflict.
 
-**Migrations run at boot.** The entrypoint runs `vogt init` before every
-`vogt serve`. `init` is idempotent: it creates the instance on a new volume,
+**Migrations run at boot.** The entrypoint runs `vogt-core init` before every
+`vogt-core serve`. `init` is idempotent: it creates the instance on a new volume,
 brings an existing one forward to this build's schema, and leaves the audit
 history alone after that. Until the schemas match, `/health/ready` answers
 503 naming the store and both schema numbers. Migrations are forward-only and
 run under a lock. Read [`SCHEMA.md`](SCHEMA.md) before a major version.
+
+**The stack image's CLI is the Rust core.** On the stack image's PATH, `vogt`,
+`vogt-core` and `vogt-mcp-remote` are one binary, `vogt-core`, built from
+`engine/core` in the same build (WI-1078). It answers `init` (with `--check`)
+and `serve`, plus the global `--json` and `--data-dir`. There is no Python
+`vogt` in the stack image, so these Python commands are not in it: `status`,
+`migrate`, `registry`, `diagnostics`, `engine`, `place`, `connect`, `mcp`,
+`project`, `work`, `board`, `backlog`, `bugs`, `why`, `label`, `initiative`,
+`actor`, `workflow`, `sweep`, `coverage`, `observations`, `deps`, `suppress`,
+`suppression`, `contract`, `compliance`, `drift`, `session`, `decision`,
+`agent-cli`, `agent-activity`, `token`, `auth`, `user`, `backup`, `restore`,
+`clone`, `export`, `import`, `forge`, `events`, `notifications`,
+`deployed-versions`, `inbox`, `preference`, `chat`, `audit`. `vogt-mcp` is the
+engine's own stdio script, not the Python `mcp` command. Run those commands
+against the Python core image (the root `Dockerfile`, published until I7), or
+use the API and MCP endpoints.
 
 **Upgrade.**
 

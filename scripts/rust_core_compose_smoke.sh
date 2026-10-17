@@ -50,7 +50,7 @@ echo "building the Rust core image"
 docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
 
 echo "building the engine image with the Rust core in its core slot"
-docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:rust .
+docker build -t vogt-engine:local -f engine/Dockerfile .
 
 echo "starting the stack"
 "${COMPOSE[@]}" up -d
