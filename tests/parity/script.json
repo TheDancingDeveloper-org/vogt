@@ -1269,17 +1269,7 @@
     "expect": {
       "exit": 1
     },
-    "why": "a clone refuses without confirmation and touches nothing",
-    "http": {
-      "method": "POST",
-      "path": "/api/instance/clone",
-      "auth": "admin",
-      "body": {
-        "source": "{root}/backup",
-        "confirm": false,
-        "reason": "parity harness"
-      }
-    }
+    "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
   },
   {
     "operation": "clone",
@@ -1291,17 +1281,7 @@
     "expect": {
       "exit": 1
     },
-    "why": "a backup of this instance is not a clone source",
-    "http": {
-      "method": "POST",
-      "path": "/api/instance/clone",
-      "auth": "admin",
-      "body": {
-        "source": "{root}/backup",
-        "confirm": true,
-        "reason": "parity harness"
-      }
-    }
+    "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
   },
   {
     "operation": "clone",
@@ -1313,17 +1293,7 @@
     "expect": {
       "exit": 1
     },
-    "why": "a source with no manifest is refused",
-    "http": {
-      "method": "POST",
-      "path": "/api/instance/clone",
-      "auth": "admin",
-      "body": {
-        "source": "{root}/missing",
-        "confirm": true,
-        "reason": "parity harness"
-      }
-    }
+    "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
   },
   {
     "operation": "project.import",
