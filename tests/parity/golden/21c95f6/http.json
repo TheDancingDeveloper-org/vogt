@@ -1136,6 +1136,151 @@
     "status": 404
   },
   {
+    "operation": "session.grant_request",
+    "result": {
+      "error": {
+        "code": "engine_unavailable",
+        "message": "no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+      }
+    },
+    "status": 502
+  },
+  {
+    "operation": "session.grant_list",
+    "result": {
+      "grants": []
+    },
+    "status": 200
+  },
+  {
+    "operation": "session.history_list",
+    "result": {
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "sessions": []
+    },
+    "status": 200
+  },
+  {
+    "operation": "session.bind_work",
+    "result": {
+      "error": {
+        "code": "not_found",
+        "message": "no session 'ses_00000000000000000000000000'"
+      }
+    },
+    "status": 404
+  },
+  {
+    "operation": "session.last_reply",
+    "result": {
+      "error": {
+        "code": "not_found",
+        "message": "no session 'ses_00000000000000000000000000'"
+      }
+    },
+    "status": 404
+  },
+  {
+    "operation": "session.search_output",
+    "result": {
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "matches": []
+    },
+    "status": 200
+  },
+  {
+    "operation": "session.report_blocked",
+    "result": {
+      "error": {
+        "code": "engine_unavailable",
+        "message": "no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+      }
+    },
+    "status": 502
+  },
+  {
+    "operation": "session.report_unblocked",
+    "result": {
+      "error": {
+        "code": "engine_unavailable",
+        "message": "no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+      }
+    },
+    "status": 502
+  },
+  {
+    "operation": "session.changes",
+    "result": {
+      "error": {
+        "code": "engine_unavailable",
+        "message": "no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+      }
+    },
+    "status": 502
+  },
+  {
+    "operation": "session.wait_any",
+    "result": {
+      "error": {
+        "code": "engine_unavailable",
+        "message": "no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+      }
+    },
+    "status": 502
+  },
+  {
+    "operation": "session.commit_for",
+    "result": {
+      "error": {
+        "code": "engine_unavailable",
+        "message": "no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+      }
+    },
+    "status": 502
+  },
+  {
+    "operation": "session.economics",
+    "result": {
+      "error": {
+        "code": "not_found",
+        "message": "no session 'ses_00000000000000000000000000'"
+      }
+    },
+    "status": 404
+  },
+  {
+    "operation": "session.digest",
+    "result": {
+      "error": {
+        "code": "not_found",
+        "message": "no session 'ses_00000000000000000000000000'"
+      }
+    },
+    "status": 404
+  },
+  {
+    "operation": "agent_activity.search",
+    "result": {
+      "detail": "agent activity is not collected: no transcript roots are configured (set `agent_activity_roots`)",
+      "events": [],
+      "indexed_at": null,
+      "next_offset": null,
+      "total": 0
+    },
+    "status": 200
+  },
+  {
+    "operation": "agent_activity.summary",
+    "result": {
+      "detail": "agent activity is not collected: no transcript roots are configured (set `agent_activity_roots`)",
+      "indexed_at": null,
+      "next_offset": null,
+      "sessions": [],
+      "total": 0
+    },
+    "status": 200
+  },
+  {
     "operation": "label.create",
     "result": {
       "label": {
@@ -2284,7 +2429,7 @@
           "detail": null,
           "id": "aut_0027",
           "identity_ref": "human:ada-lovelace",
-          "operation": "label.create",
+          "operation": "session.grant_request",
           "reason_code": "token_valid",
           "scope": "work.write",
           "token_id": "tok_0003",
@@ -2297,23 +2442,23 @@
           "detail": null,
           "id": "aut_0028",
           "identity_ref": "human:ada-lovelace",
-          "operation": "token.issue",
+          "operation": "session.grant_list",
           "reason_code": "token_valid",
-          "scope": "admin",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:05+00:00",
-          "decision": "deny",
+          "decision": "allow",
           "detail": null,
           "id": "aut_0029",
           "identity_ref": "human:ada-lovelace",
-          "operation": "label.create",
-          "reason_code": "missing_scope",
-          "scope": "work.write",
-          "token_id": "tok_0004",
+          "operation": "session.history_list",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
           "transport": "http"
         },
         {
@@ -2323,10 +2468,10 @@
           "detail": null,
           "id": "aut_0030",
           "identity_ref": "human:ada-lovelace",
-          "operation": "auth.logout",
+          "operation": "session.bind_work",
           "reason_code": "token_valid",
-          "scope": "read",
-          "token_id": "tok_0004",
+          "scope": "work.write",
+          "token_id": "tok_0003",
           "transport": "http"
         },
         {
@@ -2336,9 +2481,9 @@
           "detail": null,
           "id": "aut_0031",
           "identity_ref": "human:ada-lovelace",
-          "operation": "user.create",
+          "operation": "session.last_reply",
           "reason_code": "token_valid",
-          "scope": "admin",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -2349,9 +2494,9 @@
           "detail": null,
           "id": "aut_0032",
           "identity_ref": "human:ada-lovelace",
-          "operation": "user.list",
+          "operation": "session.search_output",
           "reason_code": "token_valid",
-          "scope": "admin",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -2362,9 +2507,9 @@
           "detail": null,
           "id": "aut_0033",
           "identity_ref": "human:ada-lovelace",
-          "operation": "user.set_password",
+          "operation": "session.report_blocked",
           "reason_code": "token_valid",
-          "scope": "admin",
+          "scope": "work.write",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -2375,9 +2520,9 @@
           "detail": null,
           "id": "aut_0034",
           "identity_ref": "human:ada-lovelace",
-          "operation": "token.list",
+          "operation": "session.report_unblocked",
           "reason_code": "token_valid",
-          "scope": "admin",
+          "scope": "work.write",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -2388,9 +2533,9 @@
           "detail": null,
           "id": "aut_0035",
           "identity_ref": "human:ada-lovelace",
-          "operation": "token.revoke",
+          "operation": "session.changes",
           "reason_code": "token_valid",
-          "scope": "admin",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -2401,36 +2546,36 @@
           "detail": null,
           "id": "aut_0036",
           "identity_ref": "human:ada-lovelace",
-          "operation": "auth.whoami",
+          "operation": "session.wait_any",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
         {
-          "actor_id": "act_0005",
-          "at": "2026-01-02T03:04:07+00:00",
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
           "id": "aut_0037",
-          "identity_ref": "human:ada",
-          "operation": "auth.login",
-          "reason_code": "login_ok",
-          "scope": null,
-          "token_id": "tok_0005",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.commit_for",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
           "transport": "http"
         },
         {
-          "actor_id": "act_0005",
+          "actor_id": "act_0004",
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
           "id": "aut_0038",
-          "identity_ref": "human:ada",
-          "operation": "auth.whoami",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.economics",
           "reason_code": "token_valid",
           "scope": "read",
-          "token_id": "tok_0005",
+          "token_id": "tok_0003",
           "transport": "http"
         },
         {
@@ -2440,9 +2585,9 @@
           "detail": null,
           "id": "aut_0039",
           "identity_ref": "human:ada-lovelace",
-          "operation": "user.remove",
+          "operation": "session.digest",
           "reason_code": "token_valid",
-          "scope": "admin",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -2453,7 +2598,7 @@
           "detail": null,
           "id": "aut_0040",
           "identity_ref": "human:ada-lovelace",
-          "operation": "events.list",
+          "operation": "agent_activity.search",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
@@ -2466,7 +2611,7 @@
           "detail": null,
           "id": "aut_0041",
           "identity_ref": "human:ada-lovelace",
-          "operation": "events.list",
+          "operation": "agent_activity.summary",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
@@ -2479,7 +2624,176 @@
           "detail": null,
           "id": "aut_0042",
           "identity_ref": "human:ada-lovelace",
-          "operation": "audit.list",
+          "operation": "label.create",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0043",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "token.issue",
+          "reason_code": "token_valid",
+          "scope": "admin",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "deny",
+          "detail": null,
+          "id": "aut_0044",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "label.create",
+          "reason_code": "missing_scope",
+          "scope": "work.write",
+          "token_id": "tok_0004",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0045",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "auth.logout",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0004",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0046",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "user.create",
+          "reason_code": "token_valid",
+          "scope": "admin",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0047",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "user.list",
+          "reason_code": "token_valid",
+          "scope": "admin",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0048",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "user.set_password",
+          "reason_code": "token_valid",
+          "scope": "admin",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0049",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "token.list",
+          "reason_code": "token_valid",
+          "scope": "admin",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0050",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "token.revoke",
+          "reason_code": "token_valid",
+          "scope": "admin",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0051",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "auth.whoami",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0005",
+          "at": "2026-01-02T03:04:07+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0052",
+          "identity_ref": "human:ada",
+          "operation": "auth.login",
+          "reason_code": "login_ok",
+          "scope": null,
+          "token_id": "tok_0005",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0005",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0053",
+          "identity_ref": "human:ada",
+          "operation": "auth.whoami",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0005",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0054",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "user.remove",
+          "reason_code": "token_valid",
+          "scope": "admin",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0055",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "events.list",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
@@ -2490,7 +2804,20 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0043",
+          "id": "aut_0056",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "events.list",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0057",
           "identity_ref": "human:ada-lovelace",
           "operation": "audit.list",
           "reason_code": "token_valid",
@@ -2503,7 +2830,20 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0044",
+          "id": "aut_0058",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "audit.list",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0059",
           "identity_ref": "human:ada-lovelace",
           "operation": "project.import",
           "reason_code": "token_valid",
@@ -2516,7 +2856,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0045",
+          "id": "aut_0060",
           "identity_ref": "human:ada-lovelace",
           "operation": "project.import",
           "reason_code": "token_valid",
