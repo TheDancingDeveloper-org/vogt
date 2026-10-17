@@ -444,7 +444,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=main
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.17
+            VOGT_PRODUCT_VERSION=0.7.18
           cache-from: |
             type=registry,ref=${{ env.CACHE_IMAGE }}:stack-main
             type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main
@@ -560,7 +560,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=main
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.17
+            VOGT_PRODUCT_VERSION=0.7.18
           provenance: true
           sbom: true
           cache-from: |
@@ -715,7 +715,7 @@ jobs:
             --set "*.args.CORE_IMAGE=${CORE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
-            --set "*.args.VOGT_PRODUCT_VERSION=0.7.17"
+            --set "*.args.VOGT_PRODUCT_VERSION=0.7.18"
           )
           # One label per line. A value is a url, a revision or a timestamp.
           while IFS= read -r pair || [ -n "$pair" ]; do
@@ -899,7 +899,7 @@ jobs:
             --set "*.args.CORE_IMAGE=${CORE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
-            --set "*.args.VOGT_PRODUCT_VERSION=0.7.17"
+            --set "*.args.VOGT_PRODUCT_VERSION=0.7.18"
           )
           # metadata-action's labels are newline-separated key=value.
           while IFS= read -r pair || [ -n "$pair" ]; do
