@@ -10,8 +10,10 @@ upstream, sweep, and watch it leave the backlog.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -36,6 +38,11 @@ class FakeForge:
         self.issues: list[dict[str, Any]] = []
         self.pulls: list[dict[str, Any]] = []
         self.requests: list[tuple[str, str]] = []
+        #: When set, the issues endpoint behaves as GitHub's does for a sync:
+        #: `since` keeps what was updated at or after it, `sort=updated` walks
+        #: ascending, and a page holds 100 items. Pull requests share that
+        #: endpoint (`self.issues` may hold them, marked by `pull_request`).
+        self.honour_since = False
 
     def __call__(
         self, url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
@@ -43,7 +50,14 @@ class FakeForge:
         del headers, body
         self.requests.append((method, url))
         if "/issues" in url and "/comments" not in url:
-            return 200, json.dumps(self.issues).encode("utf-8")
+            items = self.issues
+            if self.honour_since:
+                since = parse_qs(urlsplit(url).query).get("since", [""])[0]
+                items = sorted(
+                    (i for i in items if not since or i["updated_at"] >= since),
+                    key=lambda i: i["updated_at"],
+                )[:100]
+            return 200, json.dumps(items).encode("utf-8")
         if "/pulls" in url:
             return 200, json.dumps(self.pulls).encode("utf-8")
         if "/actions/runs" in url:
@@ -282,3 +296,57 @@ def test_prs_are_in_the_backlog_by_default_and_excludable(
         if i.title.startswith("#")
     }
     assert 1 in numbers and 100 not in numbers
+
+
+# -- a page of pull requests must not wedge the issue watermark ------------
+
+
+def test_a_page_of_pull_requests_does_not_wedge_the_issue_watermark(
+    instance: AppContext, forge: FakeForge
+) -> None:
+    """The issues endpoint returns pull requests too, and a sync page can be
+    all of them. The watermark must still move past them, or every later sweep
+    asks for the same window and never reaches a closure inside it.
+
+    Found on vogt: the watermark stopped at 2026-09-07 while issues closed on
+    and after 09-08 stayed `open` in Vogt for weeks.
+    """
+    forge.honour_since = True
+    start = datetime(2026, 8, 1)
+
+    def stamp(moment: datetime) -> str:
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    forge.issues = [
+        {"number": 1, "title": "first", "state": "open", "updated_at": stamp(start)}
+    ]
+    sweep(instance, SweepParams(reason=WHY))
+
+    # More than one page of pull requests moves after that watermark, then a
+    # real issue closes behind them.
+    forge.issues += [
+        {
+            "number": number,
+            "title": "a pr",
+            "state": "open",
+            "pull_request": {},
+            "updated_at": stamp(start + timedelta(minutes=number)),
+        }
+        for number in range(100, 200)
+    ]
+    forge.issues.append(
+        {
+            "number": 42,
+            "title": "closed later",
+            "state": "closed",
+            "updated_at": stamp(start + timedelta(minutes=300)),
+        }
+    )
+    for _ in range(4):
+        sweep(instance, SweepParams(reason=WHY))
+
+    latest = instance.observed.latest_by_subject(
+        "gh:TheDancingDeveloper-org/rustnzb#42"
+    )
+    assert latest is not None, "the closure behind a page of PRs is observed"
+    assert lifecycle_of(latest) == LIFECYCLE_CLOSED
