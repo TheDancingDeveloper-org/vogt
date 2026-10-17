@@ -1590,7 +1590,7 @@
             "link_state": "unlinked",
             "name": "Second",
             "repo_url": null,
-            "root_path": "<root>/second",
+            "root_path": "<root>/instance/repos/second",
             "slug": "second",
             "trust_state": "unverified",
             "updated_at": "2026-01-02T03:04:05+00:00",
@@ -1730,7 +1730,7 @@
       },
       "freshness": {
         "age_seconds": null,
-        "collectors": "<volatile>",
+        "collectors": {},
         "detail": "no collector has completed a sweep yet",
         "oldest_relevant_sweep": null,
         "status": "never_swept"
@@ -1807,7 +1807,7 @@
       "detail": "deploy_lanes is not configured, so deployed versions are not collected",
       "freshness": {
         "age_seconds": null,
-        "collectors": "<volatile>",
+        "collectors": {},
         "detail": "no collector has completed a sweep yet",
         "oldest_relevant_sweep": null,
         "status": "never_swept"
