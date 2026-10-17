@@ -1062,6 +1062,74 @@ mod tests {
         );
     }
 
+    /// The schema normaliser of `tests/parity/normalise.toml` `[schema]`: drop
+    /// `title` and sort `anyOf`, applied only inside a schema object (one that
+    /// carries `$schema` or `properties`). Pydantic's titles and union order
+    /// are generator accidents, not contract.
+    fn normalise_schema(value: &serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        match value {
+            Value::Object(object) => {
+                let is_schema = object.contains_key("$schema") || object.contains_key("properties");
+                let mut out = serde_json::Map::new();
+                for (key, child) in object {
+                    if is_schema && key == "title" {
+                        continue;
+                    }
+                    let child = if is_schema && key == "anyOf" {
+                        let mut options: Vec<Value> = child
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(normalise_schema)
+                            .collect();
+                        options.sort_by_key(|option| option.to_string());
+                        Value::Array(options)
+                    } else {
+                        normalise_schema(child)
+                    };
+                    out.insert(key.clone(), child);
+                }
+                Value::Object(out)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(normalise_schema).collect()),
+            other => other.clone(),
+        }
+    }
+
+    #[test]
+    fn every_operation_schema_matches_the_python_golden_under_the_normaliser() {
+        // One comparison per operation, so a drift names the operation that
+        // moved. The whole-dump golden test above is stricter; this one is the
+        // contract-level check the normaliser is written for.
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/golden/registry.json");
+        let golden: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
+        let golden_ops = golden["operations"].as_array().unwrap();
+        let rust = dump();
+        let rust_ops = rust["operations"].as_array().unwrap();
+        assert_eq!(rust_ops.len(), golden_ops.len(), "operation count drifted");
+
+        let mut drifted = Vec::new();
+        for expected in golden_ops {
+            let name = expected["name"].as_str().unwrap();
+            let Some(actual) = rust_ops.iter().find(|op| op["name"] == name) else {
+                drifted.push(format!("{name}: missing from the Rust dump"));
+                continue;
+            };
+            for field in ["params_schema", "result_schema"] {
+                if normalise_schema(&actual[field]) != normalise_schema(&expected[field]) {
+                    drifted.push(format!("{name}.{field}"));
+                }
+            }
+        }
+        assert!(
+            drifted.is_empty(),
+            "schemas drifted from Python: {drifted:?}"
+        );
+    }
+
     #[test]
     fn lookup_misses_are_errors() {
         let registry = registry();
