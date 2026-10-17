@@ -348,3 +348,32 @@ fn restore_of_a_directory_that_is_not_a_backup_says_so() {
         text(&output.stderr)
     );
 }
+
+#[test]
+fn a_missing_required_argument_is_usage_before_a_secret_file_is_read() {
+    let (root, data) = fresh("required-before-secret");
+    // `--username` is absent. The password file is also missing, so reading it
+    // first would report that file instead of the usage error.
+    let output = run(
+        &data,
+        &[
+            "user",
+            "create",
+            "--password-file",
+            root.join("missing").to_str().unwrap(),
+            "--reason",
+            "admin test",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty(), "{}", text(&output.stdout));
+    let stderr = text(&output.stderr);
+    assert!(stderr.starts_with("usage: vogt user create ["), "{stderr}");
+    assert!(
+        stderr.ends_with(
+            "vogt user create: error: the following arguments are required: --username\n"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("cannot read secret file"), "{stderr}");
+}
