@@ -62,7 +62,7 @@ gain tests; it does not move down.
 | test_engine_parity.py | retired | Rust engine wire parity. Owned by `engine/server` tests, not `engine/core`. |
 | test_fake_agent.py | retired | `scripts/fake-agent` test double for the engine. Not product behaviour. |
 | test_forge_accounts.py | ported | `adapters/forge/accounts.rs` and the forge-account service. |
-| test_forge_import.py | ported | `forge_ops_test.rs`: the clone, register and consolidate path under the file token; the Forgejo picker, which lists host-qualified repositories under the host's file token; the Forgejo import, which clones the host-qualified URL under that token; the clone under the actor's linked PAT; and the refusals. Cross-core parity of the success paths is not checked (WI-1072 operator decision: in-process only). |
+| test_forge_import.py | ported | `forge_ops_test.rs`: the clone, register and consolidate path under the file token; the Forgejo picker, which lists host-qualified repositories under the host's file token; the Forgejo import, which clones the host-qualified URL under that token; the clone under the actor's linked PAT; the display-name override and the write-back policy on an imported project; and the refusals. Cross-core parity of the success paths is not checked (WI-1072 operator decision: in-process only). |
 | test_forge_live.py | retired | Live forge network. The port keeps the offline stand-in tests; a live call is not a unit of the core crate. |
 | test_forge_module.py | ported | `adapters/forge/` (kinds, edges, payloads, sync). |
 | test_forge_provider.py | ported | GitHub and Forgejo provider stand-ins in `adapters/forge/github.rs` and `forgejo.rs`. |
