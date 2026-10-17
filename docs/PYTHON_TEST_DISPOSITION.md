@@ -25,6 +25,10 @@ tests, it measures 80.22% (rust-core a5ac4cba), so
 `.github/workflows/rust-core.yml` now fails under 80%, the Python floor.
 The floor only moves up.
 
+There is no `tests/test_resolve*.py`: Python's resolver has no test file of its
+own. Its cases (`WI-n`, slugs, `identity_ref`, and each not-found error) are
+pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
+
 | File | Disposition | Where / why |
 |---|---|---|
 | test_agent_activity.py | ported | `collectors/agent_activity.rs` |
