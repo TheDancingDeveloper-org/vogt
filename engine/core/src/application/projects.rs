@@ -1,8 +1,8 @@
 //! Projects: registration, scaffolding, the per-repo brief, lifecycle.
 //! Ports `src/vogt/application/services/projects.py`.
 //!
-//! `project.import` clones, registers and (with `consolidate: false`) stops there.
-//! Consolidation waits on `forge.onboard`, which has no Rust port yet.
+//! `project.import` clones, registers and, unless `consolidate: false`, reads the
+//! repository's existing forge state through `forge.onboard`.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -481,16 +481,6 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
             py_repr(&params.repo)
         )));
     };
-    // Refused after the reference check, so a bad reference gets Python's
-    // message, and before anything is cloned: Python would clone, register and
-    // then call forge.onboard, which has no Rust port yet (WI-1725).
-    if params.consolidate {
-        return Err(VogtError::InvalidRequest(
-            "consolidate: true is not available in the Rust core yet: it needs the \
-             forge.onboard port (WI-1725). Pass consolidate: false to clone and register only"
-                .to_string(),
-        ));
-    }
     let provider = provider_for_host(&repo.host, config, ctx.forge_transport())?;
     import_repository(
         ctx,
@@ -1226,6 +1216,7 @@ fn transition_project<C: Clock + 'static, I: IdFactory + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::git::CloneOutcome;
     use crate::core::{ActorKind, Principal, SequentialIds, StepClock};
     use crate::storage::interface::DeclaredStore;
 
@@ -1329,17 +1320,118 @@ mod tests {
         assert_eq!(normalise_reference("vogt"), "vogt");
     }
 
+    /// A clone that only makes the destination: the import under test is the
+    /// registration and the consolidation, not git.
+    fn stub_clone(request: &CloneRequest) -> Result<CloneOutcome, VogtError> {
+        std::fs::create_dir_all(&request.destination).expect("destination");
+        Ok(CloneOutcome {
+            destination: request.destination.clone(),
+            revision: None,
+            default_branch: Some("main".to_owned()),
+            reused: false,
+        })
+    }
+
+    /// Ports the Python test of the same name: with no forge token the clone and
+    /// registration still happen, and the result says the forge was not read,
+    /// rather than pretending the repository has no issues.
     #[test]
-    fn an_import_that_would_consolidate_is_refused_before_anything_is_cloned() {
-        let ctx = context("local:test-user", None);
-        let error = import_op(
-            &ctx,
-            json!({"repo": "indexarr/vogt", "reason": "a reason", "consolidate": true}),
+    fn an_import_without_a_forge_token_clones_and_says_it_was_not_collected() {
+        let Built::StepSequential(mut ctx) = context("local:test-user", None) else {
+            unreachable!("the test asks for a step clock and sequential ids");
+        };
+        ctx.cloner = stub_clone;
+        let built = Built::StepSequential(ctx);
+        let root = std::env::temp_dir().join(format!(
+            "vogt-import-untokened-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let result = import_op(
+            &built,
+            json!({
+                "repo": "acme/widget",
+                "root_path": root.display().to_string(),
+                "reason": "a reason",
+            }),
         )
-        .unwrap_err();
+        .unwrap();
+
+        assert!(root.is_dir(), "the clone ran");
+        assert!(result["consolidated"].is_null(), "{result}");
         assert!(
-            matches!(error, VogtError::InvalidRequest(ref message) if message.contains("forge.onboard")),
-            "{error}"
+            result["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("not collected")),
+            "{result}"
+        );
+    }
+
+    /// Ports the import demo: the repository is cloned, registered linked, and
+    /// its existing forge state is read, with every request a GET. The forge is
+    /// the stand-in, so nothing reaches the network.
+    #[test]
+    fn an_import_that_consolidates_reads_the_forge_and_changes_nothing_upstream() {
+        use crate::application::forge_standin::StandInForge;
+
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-import-consolidate-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = dir.join("forge-token");
+        std::fs::write(&token, "secret-token\n").unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir.clone(),
+            github_token_file: Some(token),
+            ..crate::config::VogtConfig::default()
+        };
+        // Initialising the instance migrates both stores, the observed one too:
+        // consolidation writes observations.
+        let mut clock = Some(StepClock::new(moment()));
+        let mut ids = Some(SequentialIds::new(None).unwrap());
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let principal = Principal::new("local:test-user", ActorKind::Human, "Test").unwrap();
+        let built = crate::application::context::build_context(
+            config,
+            Some(principal),
+            clock,
+            ids,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let standin = StandInForge::one_of_each();
+        let transport = standin.transport();
+        let Built::StepSequential(mut ctx) = built else {
+            unreachable!("the test asks for a step clock and sequential ids");
+        };
+        ctx.cloner = stub_clone;
+        let built =
+            Built::StepSequential(ctx.with_forge_transport(move |url, headers, body, method| {
+                transport(url, headers, body, method)
+            }));
+
+        let result = import_op(
+            &built,
+            json!({"repo": "acme/widget", "reason": "a reason", "consolidate": true}),
+        )
+        .unwrap();
+
+        assert_eq!(result["consolidated"]["supported"], true, "{result}");
+        assert_eq!(result["consolidated"]["issues"], 1, "{result}");
+        assert_eq!(result["consolidated"]["mutations"], 0, "{result}");
+        let requests = standin.requests();
+        assert!(!requests.is_empty(), "consolidation read nothing");
+        assert!(
+            requests.iter().all(|request| request.starts_with("GET ")),
+            "import mutated upstream: {requests:?}"
         );
     }
 
