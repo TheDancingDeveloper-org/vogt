@@ -87,6 +87,7 @@ fn test_config() -> Config {
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         worktree_clean_on_hibernate: false,
+        worktree_clean_on_stop: false,
         disk_warn_percent: 85,
         metrics_bind: None,
         chat: Default::default(),
@@ -15761,7 +15762,7 @@ async fn worktree_cleanup_waits_for_every_session_in_the_worktree() {
     cfg.default_cwd = tmp.path().to_path_buf();
     cfg.workspace_root = tmp.path().canonicalize().unwrap();
     cfg.state_dir = tmp.path().join("state");
-    cfg.worktree_clean_on_hibernate = true;
+    cfg.worktree_clean_on_stop = true;
     let (base, _h) = boot_with_config(cfg).await;
     let client = reqwest::Client::builder()
         .default_headers(auth())
@@ -15806,6 +15807,81 @@ async fn worktree_cleanup_waits_for_every_session_in_the_worktree() {
     assert!(!target.exists(), "the last session out cleans the worktree");
     assert!(linked.join("Cargo.toml").exists());
     assert!(repo.join("README").exists());
+}
+
+/// WI-1750: by default a hibernation keeps the worktree's build output (the
+/// session is woken to carry on, and every engine shutdown hibernates every
+/// live session); removing the hibernated session is its stop, and cleans.
+#[tokio::test]
+async fn hibernation_keeps_build_output_and_removal_cleans_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "seed@vogt.invalid"]);
+    git(&repo, &["config", "user.name", "seed"]);
+    std::fs::write(repo.join("README"), "r").unwrap();
+    git(&repo, &["add", "README"]);
+    git(&repo, &["commit", "-qm", "init"]);
+    let linked = tmp.path().join("linked");
+    git(&repo, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+    std::fs::write(linked.join("Cargo.toml"), "[package]\nname=\"t\"\n").unwrap();
+    let target = linked.join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("out"), "built").unwrap();
+
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    cfg.worktree_clean_on_stop = true;
+    cfg.worktree_clean_on_hibernate = false;
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let cwd = linked.to_string_lossy().into_owned();
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "h", "command": ["/bin/cat"], "cwd": cwd }),
+    )
+    .await;
+
+    let hibernated = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({ "allow_shell": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hibernated.status(), StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        target.join("out").exists(),
+        "a hibernated session keeps its build output"
+    );
+
+    let removed = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(removed.status().is_success(), "{}", removed.status());
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while target.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!target.exists(), "removing the hibernated session cleans");
+    assert!(linked.join("Cargo.toml").exists());
 }
 
 /// A Codex turn whose title says `working` while its screen has gone quiet

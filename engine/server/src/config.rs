@@ -474,11 +474,16 @@ pub struct Config {
     /// summary (`resources`). Unset flags nothing; usage is reported either
     /// way.
     pub session_rss_warn_bytes: Option<u64>,
-    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` (on by default, WI-1750): when a session
-    /// is hibernated or stopped and its directory is a linked git worktree,
-    /// remove regenerable build output there (`worktree_clean`). Never a
-    /// repo's main checkout.
+    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` set true: a hibernation also
+    /// removes regenerable build output from the session's linked worktree
+    /// (`worktree_clean`). Off by default: a hibernated session is woken to
+    /// carry on, and every engine shutdown hibernates every live session.
     pub worktree_clean_on_hibernate: bool,
+    /// On by default (WI-1750), off when `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`
+    /// is false: stopping or removing a session whose directory is a linked
+    /// git worktree removes regenerable build output there. Never a repo's
+    /// main checkout.
+    pub worktree_clean_on_stop: bool,
     /// `ENGINE_DISK_WARN_PERCENT` (85): the workspace volume's used percent
     /// above which sweep and status carry a needs-attention disk row.
     pub disk_warn_percent: u8,
@@ -803,6 +808,11 @@ pub fn load(
         ));
     }
 
+    let worktree_clean = parse_worktree_clean(
+        engine_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE")
+            .ok()
+            .as_deref(),
+    )?;
     let config = Config {
         bind,
         token,
@@ -1001,11 +1011,8 @@ pub fn load(
             }
             _ => None,
         },
-        worktree_clean_on_hibernate: parse_worktree_clean(
-            engine_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE")
-                .ok()
-                .as_deref(),
-        )?,
+        worktree_clean_on_hibernate: worktree_clean.hibernate,
+        worktree_clean_on_stop: worktree_clean.stop,
         disk_warn_percent: parse_disk_warn_percent(
             engine_env("ENGINE_DISK_WARN_PERCENT").ok().as_deref(),
         )?,
@@ -1203,14 +1210,32 @@ fn engine_env(name: &str) -> std::result::Result<String, std::env::VarError> {
     std::env::var(name)
 }
 
-/// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`: on unless set to a false value.
-/// Unset or blank is on (WI-1750): a stopped worker's build output otherwise
-/// piles up on the host. Cleanup still fails closed, so it only removes
-/// regenerable output from a linked worktree no live session is using.
-fn parse_worktree_clean(raw: Option<&str>) -> Result<bool> {
+/// When worktree build output is cleaned (`ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorktreeClean {
+    stop: bool,
+    hibernate: bool,
+}
+
+/// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`. Unset or blank cleans on stop and
+/// remove only (WI-1750): a stopped worker's build output otherwise piles up
+/// on the host, while a hibernated one is woken to carry on and would pay a
+/// full rebuild. True adds hibernation; false turns cleanup off. Cleanup still
+/// fails closed, so it only removes regenerable output from a linked worktree
+/// no live session is using.
+fn parse_worktree_clean(raw: Option<&str>) -> Result<WorktreeClean> {
     match raw {
-        Some(v) if !v.trim().is_empty() => parse_bool_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE", v),
-        _ => Ok(true),
+        Some(v) if !v.trim().is_empty() => {
+            let on = parse_bool_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE", v)?;
+            Ok(WorktreeClean {
+                stop: on,
+                hibernate: on,
+            })
+        }
+        _ => Ok(WorktreeClean {
+            stop: true,
+            hibernate: false,
+        }),
     }
 }
 
@@ -1962,17 +1987,29 @@ mod tests {
 mod prefix_tests {
     use super::*;
 
-    /// Worktree cleanup is on by default (WI-1750); an explicit false is the
-    /// only way to keep build output in place.
+    /// Worktree cleanup on stop is on by default (WI-1750); hibernation joins
+    /// only on an explicit true, and an explicit false keeps build output.
     #[test]
-    fn worktree_clean_is_on_unless_turned_off() {
-        assert!(parse_worktree_clean(None).unwrap());
-        assert!(parse_worktree_clean(Some("")).unwrap());
-        assert!(parse_worktree_clean(Some("  ")).unwrap());
-        assert!(parse_worktree_clean(Some("1")).unwrap());
-        assert!(parse_worktree_clean(Some("true")).unwrap());
-        assert!(!parse_worktree_clean(Some("0")).unwrap());
-        assert!(!parse_worktree_clean(Some("false")).unwrap());
+    fn worktree_clean_defaults_to_stop_only() {
+        let stop_only = WorktreeClean {
+            stop: true,
+            hibernate: false,
+        };
+        let both = WorktreeClean {
+            stop: true,
+            hibernate: true,
+        };
+        let off = WorktreeClean {
+            stop: false,
+            hibernate: false,
+        };
+        assert_eq!(parse_worktree_clean(None).unwrap(), stop_only);
+        assert_eq!(parse_worktree_clean(Some("")).unwrap(), stop_only);
+        assert_eq!(parse_worktree_clean(Some("  ")).unwrap(), stop_only);
+        assert_eq!(parse_worktree_clean(Some("1")).unwrap(), both);
+        assert_eq!(parse_worktree_clean(Some("true")).unwrap(), both);
+        assert_eq!(parse_worktree_clean(Some("0")).unwrap(), off);
+        assert_eq!(parse_worktree_clean(Some("false")).unwrap(), off);
         assert!(parse_worktree_clean(Some("maybe")).is_err());
     }
 

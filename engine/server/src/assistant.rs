@@ -3164,6 +3164,7 @@ mod tests {
             agent_onboarding: crate::claude_config::Onboarding::default(),
             session_rss_warn_bytes: None,
             worktree_clean_on_hibernate: false,
+            worktree_clean_on_stop: false,
             disk_warn_percent: 85,
             metrics_bind: None,
             chat: Default::default(),
