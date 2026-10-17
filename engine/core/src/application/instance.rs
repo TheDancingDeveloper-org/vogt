@@ -24,6 +24,8 @@ pub struct InitOutcome {
     /// `not_configured`, `already_present`, or `adopted`. Python reports the
     /// same three, and the CLI prints this rather than a hardcoded value.
     pub bootstrap_core_token: String,
+    /// The same three outcomes for the brokered agent token.
+    pub bootstrap_agent_token: String,
 }
 
 /// `clock` and `ids` are resolved once by the caller from the hook environment.
@@ -85,13 +87,15 @@ pub fn init(
     // The stack secret the engine presents. Python adopts it inside init; a
     // Rust core that skips it answers every engine call with 401. A missing
     // file is not an error; a short secret or an unknown scope refuses to start.
-    let bootstrap_core_token = adopt_bootstrap_core_token(data_dir, clock, ids)?;
+    let bootstrap_core_token = adopt_bootstrap_token(data_dir, clock, ids, Bootstrap::Core)?;
+    let bootstrap_agent_token = adopt_bootstrap_token(data_dir, clock, ids, Bootstrap::Agent)?;
     Ok(InitOutcome {
         created: !declared_existed,
         declared,
         observed,
         instance_id,
         bootstrap_core_token,
+        bootstrap_agent_token,
     })
 }
 
@@ -448,8 +452,19 @@ fn stamp_if(clock: &mut Option<crate::core::StepClock>, due: bool) -> String {
     }
 }
 
-/// Adopt the operator-supplied core token, the way Python's
-/// `adopt_bootstrap_core_token` does at init.
+/// Which operator-supplied bootstrap secret `init` adopts.
+#[derive(Clone, Copy)]
+enum Bootstrap {
+    /// The stack secret the engine presents (`adopt_bootstrap_core_token`).
+    Core,
+    /// The pod-wide token sessions' agents present (`adopt_bootstrap_agent_token`).
+    Agent,
+}
+
+/// Adopt one operator-supplied bootstrap token, the way Python's
+/// `adopt_bootstrap_core_token` and `adopt_bootstrap_agent_token` do at init.
+/// The two differ only in configuration: which file, actor and scopes apply,
+/// and the token name the row is stored under.
 ///
 /// `"not_configured"` when the file is unset, unreadable or empty — the
 /// instance still boots. `"already_present"` when an unrevoked row already
@@ -459,10 +474,11 @@ fn stamp_if(clock: &mut Option<crate::core::StepClock>, due: bool) -> String {
 /// (the hash is unique). A secret under 24 characters or an unknown scope is
 /// a startup error: a deployment that believes it supplied a credential must
 /// not come up without one.
-fn adopt_bootstrap_core_token(
+fn adopt_bootstrap_token(
     data_dir: &Path,
     clock: &mut Option<crate::core::StepClock>,
     ids: &mut Option<SequentialIds>,
+    which: Bootstrap,
 ) -> Result<String, migrator::MigrateError> {
     use rusqlite::params;
 
@@ -474,10 +490,27 @@ fn adopt_bootstrap_core_token(
         "data_dir".to_string(),
         serde_json::Value::String(data_dir.display().to_string()),
     );
-    let config = crate::config::load_config(&overrides).map_err(|error| {
-        migrator::MigrateError::Message(format!("bootstrap_core_token: {error}"))
-    })?;
-    let Some(configured) = config.bootstrap_core_token_file else {
+    let config = crate::config::load_config(&overrides)
+        .map_err(|error| migrator::MigrateError::Message(format!("bootstrap token: {error}")))?;
+    let (file, actor, scope_text, name, reason, field) = match which {
+        Bootstrap::Core => (
+            config.bootstrap_core_token_file.clone(),
+            config.bootstrap_core_token_actor.clone(),
+            config.bootstrap_core_token_scopes.clone(),
+            "bootstrap core token",
+            "adopting the operator-supplied core token at init",
+            "bootstrap_core_token_actor",
+        ),
+        Bootstrap::Agent => (
+            config.bootstrap_agent_token_file.clone(),
+            config.bootstrap_agent_token_actor.clone(),
+            config.agent_session_scopes.clone(),
+            "bootstrap agent token",
+            "adopting the operator-supplied agent token at init",
+            "bootstrap_agent_token_actor",
+        ),
+    };
+    let Some(configured) = file else {
         return Ok("not_configured".to_string());
     };
     let secret = match std::fs::read_to_string(&configured) {
@@ -487,14 +520,11 @@ fn adopt_bootstrap_core_token(
     if secret.is_empty() {
         return Ok("not_configured".to_string());
     }
-    let scopes =
-        crate::auth::parse_scopes(&config.bootstrap_core_token_scopes).map_err(|error| {
-            migrator::MigrateError::Message(format!("bootstrap_core_token: {error}"))
-        })?;
-    let token_hash = crate::auth::adopt(&secret).map_err(|error| {
-        migrator::MigrateError::Message(format!("bootstrap_core_token: {error}"))
-    })?;
-    let identity_ref = config.bootstrap_core_token_actor;
+    let scopes = crate::auth::parse_scopes(&scope_text)
+        .map_err(|error| migrator::MigrateError::Message(format!("bootstrap token: {error}")))?;
+    let token_hash = crate::auth::adopt(&secret)
+        .map_err(|error| migrator::MigrateError::Message(format!("bootstrap token: {error}")))?;
+    let identity_ref = actor;
     let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
 
     let next = |ids: &mut Option<SequentialIds>, prefix: &str| -> String {
@@ -532,8 +562,8 @@ fn adopt_bootstrap_core_token(
         if let Some((_, kind)) = &holder {
             if kind != "agent" {
                 return Err(rusqlite::Error::InvalidParameterName(format!(
-                    "bootstrap_core_token_actor {identity_ref:?} is a person ({kind}); \
-                     the token the engine presents must be bound to an agent actor \
+                    "{field} {identity_ref:?} is a person ({kind}); \
+                     the token must be bound to an agent actor \
                      (for example agent:vogt-engine)"
                 )));
             }
@@ -565,10 +595,10 @@ fn adopt_bootstrap_core_token(
         let mut superseded: Vec<String> = Vec::new();
         let mut stmt = conn.prepare(
             "SELECT id FROM tokens
-             WHERE actor_id = ?1 AND name = 'bootstrap core token' AND revoked_at IS NULL",
+             WHERE actor_id = ?1 AND name = ?2 AND revoked_at IS NULL",
         )?;
         let ids_to_revoke: Vec<String> = stmt
-            .query_map(params![actor_id], |row| row.get(0))?
+            .query_map(params![actor_id, name], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
         for id in ids_to_revoke {
@@ -593,8 +623,8 @@ fn adopt_bootstrap_core_token(
                 crate::decisions::python_json_dumps(&serde_json::json!(scopes), false);
             conn.execute(
                 "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, created_at)
-                 VALUES (?1, ?2, 'bootstrap core token', ?3, ?4, ?5)",
-                params![token_id, actor_id, token_hash, scopes_json, at],
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![token_id, actor_id, name, token_hash, scopes_json, at],
             )?;
             token_id
         };
@@ -620,7 +650,7 @@ fn adopt_bootstrap_core_token(
             serde_json::json!({
                 "actor": identity_ref,
                 "scopes": scopes,
-                "name": "bootstrap core token",
+                "name": name,
                 "source": "operator-supplied",
                 "superseded": superseded,
             })
@@ -640,8 +670,8 @@ fn adopt_bootstrap_core_token(
             "INSERT INTO audit (id, txn_id, revision, actor_id, operation, entity_kind,
                                 entity_id, reason, payload_digest, at)
              VALUES (?1, ?2, ?3, ?4, 'token.adopt', 'token', ?5,
-                     'adopting the operator-supplied core token at init', ?6, ?7)",
-            params![audit_id, txn_id, revision, actor_id, entity_id, digest, at],
+                     ?6, ?7, ?8)",
+            params![audit_id, txn_id, revision, actor_id, entity_id, reason, digest, at],
         )?;
         conn.execute(
             "INSERT INTO events (kind, entity_kind, entity_id, actor_id, audit_id, summary, at)
@@ -672,6 +702,9 @@ mod tests {
 
     #[test]
     fn init_adopts_the_stack_secret_the_engine_presents() {
+        // The env var is process-wide; hold the config tests' lock so a
+        // parallel test's init does not read this secret.
+        let _guard = crate::config::env_lock();
         let dir = std::env::temp_dir().join(format!(
             "vogt-adopt-{}-{}",
             std::process::id(),
@@ -759,6 +792,55 @@ mod tests {
                 std::env::set_var("VOGT_BOOTSTRAP_CORE_TOKEN_FILE", previous)
             },
             None => unsafe { std::env::remove_var("VOGT_BOOTSTRAP_CORE_TOKEN_FILE") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_adopts_the_agent_token_the_sessions_present() {
+        let _guard = crate::config::env_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-adopt-agent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = "agent-token-abcdef1234567890";
+        let secret_path = dir.join("agent-token");
+        std::fs::write(&secret_path, secret).unwrap();
+        let saved = std::env::var("VOGT_BOOTSTRAP_AGENT_TOKEN_FILE").ok();
+        unsafe { std::env::set_var("VOGT_BOOTSTRAP_AGENT_TOKEN_FILE", &secret_path) };
+        let mut clock = None;
+        let mut ids = None;
+        let outcome = super::init(&dir, &mut clock, &mut ids).expect("init adopts");
+        assert_eq!(outcome.bootstrap_agent_token, "adopted");
+        assert_eq!(outcome.bootstrap_core_token, "not_configured");
+        let again = super::init(&dir, &mut clock, &mut ids).expect("second init is quiet");
+        assert_eq!(again.bootstrap_agent_token, "already_present");
+        let conn = crate::storage::sqlite::connection::connect(
+            &crate::storage::sqlite::declared_path(&dir),
+        )
+        .unwrap();
+        let (name, identity): (String, String) = conn
+            .query_row(
+                "SELECT t.name, a.identity_ref FROM tokens t
+                 JOIN actors a ON a.id = t.actor_id
+                 WHERE t.token_hash = ?1 AND t.revoked_at IS NULL",
+                rusqlite::params![crate::auth::hash_token(secret)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "bootstrap agent token");
+        assert_eq!(identity, "agent:vogt-sessions");
+        match saved {
+            Some(previous) => unsafe {
+                std::env::set_var("VOGT_BOOTSTRAP_AGENT_TOKEN_FILE", previous)
+            },
+            None => unsafe { std::env::remove_var("VOGT_BOOTSTRAP_AGENT_TOKEN_FILE") },
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
