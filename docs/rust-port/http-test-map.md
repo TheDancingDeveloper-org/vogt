@@ -111,3 +111,18 @@ tests are mapped by the rows below where they cover the same behaviour.
 | `test_an_upgraded_store_with_no_tokens_is_still_a_fresh_install` | gap | no test |
 | `test_removing_the_only_operator_does_not_reopen_install_mode` | gap | no test |
 
+
+## Open items (follow-up)
+
+Operator decision: this map is the port record for WI-1061 blocker 2. The 39
+`gap` rows and 13 `partial` rows above are open and are not ported on this
+branch. A follow-up work item for them could not be filed from this session
+(the `vogt` project's write-back policy refuses creates), so it still needs
+filing.
+
+Groups for the follow-up: scoped-token HTTP tests (read/write/attribution);
+logout and whoami over HTTP; password-login edge cases (salting, short password,
+duplicates, agent refusal, audit without secret); install attribution, explicit
+identity ref, unsluggable name, CLI quick start and the CLI fallback; the
+closed-bootstrap reason over HTTP; the engine's front door
+(`test_front_door.py`, `/api/vogt`).
