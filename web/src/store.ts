@@ -148,7 +148,7 @@ async function loadSessions(signal?: AbortSignal): Promise<void> {
       }),
     );
     setError(null);
-    setConnected(true);
+    markConnected();
     setStore("lastAnswerAt", new Date().toISOString());
   } catch (e) {
     if (signal?.aborted) return;
@@ -156,7 +156,7 @@ async function loadSessions(signal?: AbortSignal): Promise<void> {
     setError((e as Error).message);
     // A list that failed is reported as such; whether the front door is
     // reachable is the stream's to say while it is open (WI-77).
-    if (!streamOpen) setConnected(false);
+    if (!streamOpen) markDisconnected();
   }
 }
 
@@ -243,6 +243,57 @@ let streamOpen = false;
 export const EVENT_STREAM_STALE_MS = 45_000;
 let staleTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * A stream with no frame for this long is presumed down, so a foreground
+ * wake may force a reconnect. A healthy stream heartbeats every 15 s, so
+ * this is one keep-alive of slack past a normal gap.
+ */
+export const EVENT_STREAM_QUIET_MS = 20_000;
+/**
+ * How long a lost stream may be out before the header says "Disconnected".
+ * A handoff between networks is usually over inside this, and a flash to
+ * stale-and-back read as a broken app; the actions stay enabled meanwhile.
+ */
+export const DISCONNECT_GRACE_MS = 2_500;
+/** A loss shorter than this is not worth waking the app for when it reopens. */
+export const RECONNECT_WAKE_GAP_MS = 5_000;
+
+let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+/** Last frame or keep-alive from the stream, for the quiet check. */
+let lastAliveAt = 0;
+/** When the stream was last lost and not yet reopened. */
+let lostAt: number | null = null;
+
+/** Show "Disconnected" only once the loss has outlasted the grace period. */
+function markDisconnected(): void {
+  if (disconnectTimer !== null || !connected()) return;
+  disconnectTimer = setTimeout(() => {
+    disconnectTimer = null;
+    setConnected(false);
+  }, DISCONNECT_GRACE_MS);
+}
+
+function markConnected(): void {
+  if (disconnectTimer !== null) {
+    clearTimeout(disconnectTimer);
+    disconnectTimer = null;
+  }
+  setConnected(true);
+}
+
+function markLost(): void {
+  if (lostAt === null) lostAt = Date.now();
+}
+
+/** The stream is open and has spoken recently: no reconnect needed. */
+function streamHealthy(): boolean {
+  return (
+    streamOpen
+    && unsubscribeEvents !== null
+    && Date.now() - lastAliveAt < EVENT_STREAM_QUIET_MS
+  );
+}
+
 function disarmStaleTimer(): void {
   if (staleTimer !== null) {
     clearTimeout(staleTimer);
@@ -261,9 +312,10 @@ function armStaleTimer(): void {
     unsubscribeEvents();
     unsubscribeEvents = null;
     streamOpen = false;
-    setConnected(false);
+    markDisconnected();
     reconnectAttempts = 0;
-    noteForeground("sse-reconnect");
+    // Not a wake: the reopen says whether the app needs one (see onOpen).
+    markLost();
     startEventStream();
   }, EVENT_STREAM_STALE_MS);
 }
@@ -279,7 +331,8 @@ function armStaleTimer(): void {
  */
 function noteStreamAlive(): void {
   streamOpen = true;
-  setConnected(true);
+  lastAliveAt = Date.now();
+  markConnected();
   reconnectAttempts = 0;
   markAnswered();
   armStaleTimer();
@@ -453,9 +506,12 @@ export function startEventStream(): void {
     () => {
       disarmStaleTimer();
       streamOpen = false;
-      setConnected(false);
+      markDisconnected();
       unsubscribeEvents = null;
-      noteForeground("sse-reconnect");
+      // Every failed retry lands here. Waking the app on each one refetched
+      // every surface against a server that was still away, so the loss is
+      // only noted; the reopen decides whether the app needs a wake.
+      markLost();
       const delay = nextReconnectDelay();
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
@@ -464,11 +520,20 @@ export function startEventStream(): void {
     },
     {
       onOpen: () => {
+        const lostSince = lostAt;
+        lostAt = null;
         noteStreamAlive();
-        // The first load is the boot wake's; this retries a list that failed
-        // — or one that never landed at all — now that the same origin has
-        // just answered.
-        if (sessionListPending()) void refreshSessions();
+        if (lostSince !== null && Date.now() - lostSince > RECONNECT_WAKE_GAP_MS) {
+          // One wake for the whole gap: it re-reads the lists and the open
+          // surfaces, and the session-list reconcile below covers the
+          // refetch that a plain reopen would otherwise make.
+          noteForeground("sse-reconnect");
+        } else if (sessionListPending()) {
+          // The first load is the boot wake's; this retries a list that
+          // failed — or one that never landed at all — now that the same
+          // origin has just answered.
+          void refreshSessions();
+        }
       },
       onHeartbeat: noteStreamAlive,
     },
@@ -478,6 +543,7 @@ export function startEventStream(): void {
 export function stopEventStream(): void {
   streamStarted = false;
   streamOpen = false;
+  lostAt = null;
   disarmStaleTimer();
   disarmStallTimer();
   unsubscribeEvents?.();
@@ -485,6 +551,10 @@ export function stopEventStream(): void {
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+  }
+  if (disconnectTimer !== null) {
+    clearTimeout(disconnectTimer);
+    disconnectTimer = null;
   }
   if (laggedTimer !== null) {
     clearTimeout(laggedTimer);
@@ -516,14 +586,16 @@ export function forceReconnectEventStream(): void {
 // Lifecycle ownership lives in wakeCoordinator: one reconnect and one session
 // reconciliation for a burst of visibility/focus/resume events.
 //
-// A wake the stream raised about its own loss is not answered with a forced
-// reconnect: the stream is already retrying on its backoff, and forcing it
-// zeroes that backoff and reconnects at once — which, while the server or the
-// tunnel is still away, fails and notes another wake 250 ms later. That loop
-// made four connects a second for the length of an outage and woke every open
-// terminal each time. The session reconciliation below still runs.
+// A wake is not answered with a forced reconnect when the stream is already
+// healthy, or when the wake is `boot` (the stream was just opened; tearing it
+// down 250 ms later was a second handshake on the startup path). A wake the
+// stream raised about its own loss is never answered with one either: the
+// stream is already retrying on its backoff. The session reconciliation below
+// still runs for every wake except the boot one, which skips it while the
+// list is already loaded.
 onWake((wake: Wake) => {
-  if (wake.reason === "sse-reconnect") return;
+  if (wake.reason === "sse-reconnect" || wake.reason === "boot") return;
+  if (streamHealthy()) return;
   forceReconnectEventStream();
 });
 onWake((wake: Wake) => {
