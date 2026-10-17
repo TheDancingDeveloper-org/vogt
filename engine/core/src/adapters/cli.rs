@@ -533,7 +533,8 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
                 }
                 index += 1;
                 // A repeated secret flag is the last one, matching argparse.
-                values.insert(secret.to_string(), Value::String(read_secret_stdin()?));
+                let text = read_secret_stdin().map_err(|message| format!("domain: {message}"))?;
+                values.insert(secret.to_string(), Value::String(text));
                 continue;
             }
             let value = take_value(argv, &mut index, inline, &name)?;
@@ -578,8 +579,10 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
             continue;
         }
         let raw = take_value(argv, &mut index, inline, &name)?;
-        let parsed =
-            coerce(&raw, property).map_err(|message| format!("argument --{name}: {message}"))?;
+        // argparse rejects a value it cannot convert as an argument error:
+        // the usage synopsis, then `vogt <cmd>: error:`. Not the full help page.
+        let parsed = coerce(&raw, property)
+            .map_err(|message| format!("arg: argument --{name}: {message}"))?;
         if is_list(property) {
             let entry = values
                 .entry(field)
@@ -590,7 +593,10 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
         }
     }
     for (secret, path) in &secret_files {
-        values.insert(secret.clone(), Value::String(read_secret_file(path)?));
+        // An unreadable file is a domain error (exit 1, on stderr), as the
+        // secret-not-on-a-terminal case is. Python's uncaught OSError exits 1 too.
+        let text = read_secret_file(path).map_err(|message| format!("domain: {message}"))?;
+        values.insert(secret.clone(), Value::String(text));
     }
 
     for name in &required {
@@ -1959,8 +1965,10 @@ mod tests {
             &mut no_dispatch,
         );
         assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
+        // argparse writes a usage error to stderr, and stdout stays empty.
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
         assert!(
-            result.stdout.contains("invalid choice"),
+            result.stderr.contains("invalid choice"),
             "{}",
             result.stderr
         );
@@ -2504,9 +2512,9 @@ mod tests {
         );
         assert_eq!(bad.exit_code, EXIT_USAGE, "{}", bad.stdout);
         assert!(
-            bad.stdout.contains("invalid int value: '-1.5'"),
+            bad.stderr.contains("invalid int value: '-1.5'"),
             "{}",
-            bad.stdout
+            bad.stderr
         );
     }
 
@@ -2599,6 +2607,6 @@ mod tests {
             &mut no_dispatch,
         );
         assert_eq!(result.exit_code, EXIT_USAGE);
-        assert!(result.stdout.contains("invalid choice"));
+        assert!(result.stderr.contains("invalid choice"));
     }
 }
