@@ -1791,6 +1791,16 @@ pub struct CodingSession {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub reason: String,
+    /// The dispatch purpose the start named (WI-1323), if any.
+    #[serde(default)]
+    pub purpose: Option<String>,
+    /// The engine id of the session that started this one, when a session did.
+    #[serde(default)]
+    pub started_by_session: Option<String>,
+    /// Whether the starter was a person, or a session in the oversight or
+    /// worker role at the time (WI-1323).
+    #[serde(default)]
+    pub started_by_kind: Option<String>,
     pub started_at: Moment,
     pub stopped_at: Option<Moment>,
 }

@@ -209,7 +209,9 @@ where
 
 /// The engine session id this caller is, when the caller is a session: a
 /// session Vogt started through its row, one the engine started by its id.
-fn caller_engine_session_id<C, I>(ctx: &AppContext<C, I>) -> Result<Option<String>, VogtError>
+pub(crate) fn caller_engine_session_id<C, I>(
+    ctx: &AppContext<C, I>,
+) -> Result<Option<String>, VogtError>
 where
     C: Clock,
     I: IdFactory,
@@ -399,6 +401,9 @@ mod tests {
                     model: None,
                     effort: None,
                     reason: "test".to_string(),
+                    purpose: None,
+                    started_by_session: None,
+                    started_by_kind: None,
                     started_at: Moment::from_unix(1_700_000_000, 0),
                     stopped_at: None,
                 })?;

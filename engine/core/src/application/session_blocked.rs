@@ -279,6 +279,9 @@ mod tests {
                     model: None,
                     effort: None,
                     reason: "test".to_string(),
+                    purpose: None,
+                    started_by_session: None,
+                    started_by_kind: None,
                     started_at: Moment::from_unix(1_700_000_000, 0),
                     stopped_at: None,
                 })?;

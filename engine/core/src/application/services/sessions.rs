@@ -32,7 +32,9 @@ use crate::adapters::engine::{
 use crate::adapters::transcripts;
 use crate::application::brief;
 use crate::application::context::{write_of, AppContext};
+use crate::application::dispatch as dispatch_profiles;
 use crate::application::resolve;
+use crate::application::session_commit;
 use crate::application::writes::{self, audited_action, audited_write, WriteOutcome};
 use crate::auth::{self, TOKEN_ENTROPY_BYTES};
 use crate::core::{py_repr, Actor, ActorKind, CodingSession, Moment, Token, TokenKind, WorkItem};
@@ -141,6 +143,7 @@ where
             .unwrap_or_else(|| "default".to_string()),
         autopilot: optional_bool(&params, "autopilot")?,
         role: optional_string(&params, "role")?.unwrap_or_else(|| "worker".to_string()),
+        purpose: optional_string(&params, "purpose")?,
     };
     Ok(serde_json::to_value(start_session(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -385,6 +388,8 @@ pub struct StartSessionParams {
     pub permission_mode: String,
     pub autopilot: Option<bool>,
     pub role: String,
+    /// The dispatch purpose (WI-1323). Unset, the start takes no profile.
+    pub purpose: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -550,6 +555,13 @@ pub struct SessionSummary {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub reason: Option<String>,
+    /// The dispatch purpose the start named (WI-1323), when it named one.
+    pub purpose: Option<String>,
+    /// The engine id of the session that started this one, when a session did.
+    pub started_by_session: Option<String>,
+    /// Whether the starter was a person, or a session in the oversight or
+    /// worker role at the time.
+    pub started_by_kind: Option<String>,
     pub started_at: Option<Moment>,
     pub stopped_at: Option<Moment>,
     // The engine's own facts about the process, copied straight across. They
@@ -725,13 +737,19 @@ where
         )));
     }
     let engine = engine_of(ctx)?;
+    // Resolved after the guards above: a profile carries neither a role nor a
+    // permission posture, so naming a purpose cannot raise a start past what
+    // the caller could ask for directly (WI-1323).
+    let (resolved, read_only) = resolve_purpose(ctx, params)?;
+    let params = &resolved;
+    let (started_by_session, started_by_kind) = started_by(ctx, engine)?;
     let mut writing = write_of(ctx);
     let session_id = fresh(&writing, "ses");
     let subject = subject_of(ctx, params, &session_id)?;
     let actor_ref = format!("agent:session:{session_id}");
     let scopes = session_scopes(ctx)?;
     let (secret, token_hash) = minted_token()?;
-    let spec = build_spec(ctx, params, &subject, &secret)?;
+    let spec = build_spec(ctx, params, &subject, &secret, read_only)?;
     // How long the engine took to accept the session: on the audit row, and
     // logged, so a slow or refused start is attributable afterwards.
     let spawn_started = std::time::Instant::now();
@@ -787,6 +805,9 @@ where
         let permission_mode = params.permission_mode.clone();
         let autopilot = spec.autopilot;
         let overlay_template = ctx.config.branch_binding_template.clone();
+        let purpose = params.purpose.clone();
+        let started_by = started_by_session.clone();
+        let started_by_kind = started_by_kind.clone();
         audited_write(
             &mut writing,
             SESSION_START,
@@ -824,6 +845,9 @@ where
                     model: model.clone(),
                     effort: effort.clone(),
                     reason,
+                    purpose: purpose.clone(),
+                    started_by_session: started_by.clone(),
+                    started_by_kind: started_by_kind.clone(),
                     started_at: now,
                     stopped_at: None,
                 };
@@ -862,6 +886,9 @@ where
                         "autopilot": autopilot,
                         "role": role,
                         "permission_mode": permission_mode,
+                        "purpose": purpose,
+                        "started_by_session": started_by_session,
+                        "started_by_kind": started_by_kind,
                         "engine_spawn_ms": engine_spawn_ms,
                     }),
                 ))
@@ -2064,12 +2091,108 @@ where
     Ok(SessionResult { session: summary })
 }
 
+/// Python's `_resolve_purpose`: fill a start's unset fields from its purpose's
+/// dispatch profile. Returns the filled params and whether the profile asks for
+/// a read-only session. A start with no purpose is returned unchanged. The
+/// profile is the deployment's, written by a person, over the code defaults.
+fn resolve_purpose<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &StartSessionParams,
+) -> Result<(StartSessionParams, bool), VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let Some(purpose) = params.purpose.as_deref() else {
+        return Ok((params.clone(), false));
+    };
+    if !dispatch_profiles::PURPOSES.contains(&purpose) {
+        return Err(VogtError::InvalidRequest(format!(
+            "unknown purpose {}; the purposes are {}",
+            py_repr(purpose),
+            dispatch_profiles::PURPOSES.join(", ")
+        )));
+    }
+    let settings = dispatch_profiles::resolve(&dispatch_preferences(ctx)?);
+    let profile = settings.profile(purpose).ok_or_else(|| {
+        VogtError::InvalidRequest(format!("no dispatch profile for {}", py_repr(purpose)))
+    })?;
+    let mut filled = params.clone();
+    filled.template = filled.template.or_else(|| Some(profile.template.clone()));
+    filled.model = filled.model.or_else(|| Some(profile.model.clone()));
+    filled.effort = filled.effort.or_else(|| profile.effort.clone());
+    filled.autopilot = filled.autopilot.or(Some(profile.autopilot));
+    Ok((filled, profile.read_only))
+}
+
+/// The `dispatch.*` values a person last wrote, by key. A key nobody wrote is
+/// absent, which the resolver reads as its default.
+fn dispatch_preferences<C, I>(
+    ctx: &AppContext<C, I>,
+) -> Result<std::collections::BTreeMap<String, Value>, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let view = ctx.declared.read()?;
+    let mut stored = std::collections::BTreeMap::new();
+    for key in [
+        dispatch_profiles::PROFILES_KEY,
+        dispatch_profiles::MAX_WORKERS_KEY,
+        dispatch_profiles::ESCALATE_KEY,
+        dispatch_profiles::REVIEW_BY_OVERSIGHT_KEY,
+    ] {
+        if let Some(row) = view.latest_human_preference(key)? {
+            if row
+                .value
+                .as_object()
+                .is_some_and(|object| !object.is_empty())
+            {
+                stored.insert(key.to_string(), row.value);
+            }
+        }
+    }
+    Ok(stored)
+}
+
+/// Python's `_started_by`: who is starting this session, from the caller's
+/// verified identity. A person is `person` with no session. A session is named
+/// by its engine id, and its kind is its engine role right now, or none when
+/// the engine cannot say. Nothing here is read from the start's parameters.
+fn started_by<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+) -> Result<(Option<String>, Option<String>), VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    if ctx.principal.kind != ActorKind::Agent {
+        return Ok((None, Some("person".to_string())));
+    }
+    let Some(caller) = session_commit::caller_engine_session_id(ctx)? else {
+        return Ok((None, None));
+    };
+    let live = match engine.get_session(&caller) {
+        Ok(live) => live,
+        Err(VogtError::EngineUnavailable(_)) => None,
+        Err(error) => return Err(error),
+    };
+    let kind = match live.map(|session| session.role) {
+        Some(role) if role == "oversight" => Some("oversight".to_string()),
+        Some(role) if role == "worker" => Some("worker".to_string()),
+        _ => None,
+    };
+    Ok((Some(caller), kind))
+}
+
 /// What the engine was asked to run.
 fn build_spec<C, I>(
     ctx: &AppContext<C, I>,
     params: &StartSessionParams,
     subject: &Subject,
     token: &str,
+    read_only: bool,
 ) -> Result<CreateSession, VogtError>
 where
     C: Clock,
@@ -2095,6 +2218,7 @@ where
         &subject.brief,
         params.task.as_deref(),
         autopilot,
+        read_only,
     ));
     spec.env = Some(session_env(
         ctx,
@@ -2105,8 +2229,13 @@ where
     Ok(spec)
 }
 
-/// The brief plus the task and the autopilot note, matching `_brief_with_task`.
-fn brief_with_task(brief: &str, task: Option<&str>, autopilot: bool) -> String {
+/// The brief's read-only note, said when a profile asks for a review-shaped
+/// session (Python `READ_ONLY`).
+const READ_ONLY: &str = "## Read only\n\nThis session was started to review. Read, run the checks and report; do not edit, commit or push.";
+
+/// The brief plus the task and the autopilot and read-only notes, matching
+/// `_brief_with_task`.
+fn brief_with_task(brief: &str, task: Option<&str>, autopilot: bool, read_only: bool) -> String {
     let mut text = brief.to_string();
     if autopilot {
         text = format!(
@@ -2114,6 +2243,9 @@ fn brief_with_task(brief: &str, task: Option<&str>, autopilot: bool) -> String {
             text.trim_end(),
             crate::application::brief::AUTOPILOT
         );
+    }
+    if read_only {
+        text = format!("{}\n\n{READ_ONLY}", text.trim_end());
     }
     let task = task.unwrap_or("").trim();
     if task.is_empty() {
@@ -2213,6 +2345,9 @@ where
         model: session.model.clone(),
         effort: session.effort.clone(),
         reason: Some(session.reason.clone()),
+        purpose: session.purpose.clone(),
+        started_by_session: session.started_by_session.clone(),
+        started_by_kind: session.started_by_kind.clone(),
         started_at: Some(session.started_at),
         stopped_at: session.stopped_at,
         name: None,
@@ -2460,6 +2595,9 @@ fn unlinked_summary(
         model: None,
         effort: None,
         reason: None,
+        purpose: None,
+        started_by_session: None,
+        started_by_kind: None,
         started_at: session
             .created_at
             .as_deref()
@@ -2819,6 +2957,9 @@ fn audited_payload(session: &CodingSession) -> Value {
         "template": session.template,
         "model": session.model,
         "effort": session.effort,
+        "purpose": session.purpose,
+        "started_by_session": session.started_by_session,
+        "started_by_kind": session.started_by_kind,
         "started_at": session.started_at.to_iso(),
         "stopped_at": session.stopped_at.map(|moment| moment.to_iso()),
     })
@@ -3375,6 +3516,9 @@ mod tests {
                     model: None,
                     effort: None,
                     reason: "test".to_string(),
+                    purpose: None,
+                    started_by_session: None,
+                    started_by_kind: None,
                     started_at: Moment::from_unix(1_700_000_000, 0),
                     stopped_at: None,
                 })?;
