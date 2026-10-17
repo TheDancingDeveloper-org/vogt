@@ -110,7 +110,7 @@ gain tests; it does not move down.
 | test_pr_work_item_edge.py | ported | `implemented_by` from pull requests, in forge sync and the work services. |
 | test_product_identity.py | retired | User-facing rename and legacy compatibility names across Python packaging. The Rust binary stays `vogt-core` for the overlap. |
 | test_product_version.py | ported | `VERSION` in `main.rs`. `scripts/check_product_version.py` keeps the fallback equal to `pyproject.toml`. |
-| test_public_delivery.py | retired | Open-source delivery contract (images, compose, published docs). Not a core unit test. |
+| test_public_delivery.py | retired | Deploy-file shape. Its 32 cases read the release tags in `pyproject.toml`, the `deploy/` compose files, `deploy/.env.example`, the `Dockerfile`s, the custom-image example and the published docs as text. Two cases run `docker compose config` to render them. None calls the core, so none pins core behaviour, and the deploy files are not a core unit. |
 | test_pwa.py | retired | Solid PWA route map. `web/`; the core crate does not embed the bundle. |
 | test_ranking.py | ported | Ranking in `decisions.rs`. |
 | test_read_pool.py | unported | Pooled read connections (WI-1224). Owner WI-1054. |
