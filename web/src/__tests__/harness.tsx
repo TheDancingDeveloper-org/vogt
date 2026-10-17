@@ -597,7 +597,11 @@ export function fakeVogt(routes: Routes = {}, engine: Routes = {}): FakeVogt {
     // path when something called `startEventStream`, and the alternative — a
     // 404 — puts `store.ts` into its reconnect backoff for the rest of the
     // file.
-    if (url.pathname === "/api/events") return openStream();
+    // A test that gives `GET /api/events` an engine route is refusing the
+    // stream on purpose: the engine is away, not just its session list.
+    if (url.pathname === "/api/events" && engine[`${method} /api/events`] === undefined) {
+      return openStream();
+    }
 
     if (!url.pathname.startsWith(VOGT_PREFIX)) {
       // The engine's own API — sessions, files, git. Recorded either way, so

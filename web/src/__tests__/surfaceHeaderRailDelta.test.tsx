@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from "vitest";
 import { clearBookmarks } from "../bookmarks";
-import { fireEvent, waitFor } from "@solidjs/testing-library";
+import { fireEvent, getConfig, waitFor } from "@solidjs/testing-library";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { render } from "@solidjs/testing-library";
 import Board from "../Board";
@@ -21,6 +21,7 @@ import App from "../App";
 import { APP_ROUTES } from "../routes";
 import { setToken } from "../api";
 import { replaceTabs } from "../tabs";
+import { DISCONNECT_GRACE_MS } from "../store";
 import { fakeVogt, mountAt, unavailable } from "./harness";
 
 /** A minimal shell mount, mirroring shell.test.tsx's own `mountShell` (kept
@@ -141,11 +142,14 @@ describe("B1 — the rail attention card is a pointer, never a second WaitingSes
     // to tie against here — outage is the only thing that can be true.
     const { container } = mountShell([], {}, {
       "GET /api/sessions": { status: 503, body: { error: "session service offline" } },
+      "GET /api/events": { status: 503, body: { error: "engine offline" } },
     });
+    // The outage reads as stale only once the disconnect grace period
+    // (store.ts) has run out, so the wait has to outlast it.
     await waitFor(() => {
       const found = container.querySelector<HTMLAnchorElement>(".rail-attention--outage");
       expect(found).toBeTruthy();
-    });
+    }, { timeout: Math.max(DISCONNECT_GRACE_MS + 2_000, getConfig().asyncUtilTimeout) });
     expect(container.querySelectorAll(".rail-attention")).toHaveLength(1);
   });
 });
