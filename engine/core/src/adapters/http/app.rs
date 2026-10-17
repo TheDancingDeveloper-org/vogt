@@ -7,21 +7,23 @@
 //! rather than an empty success, in the same envelope every other failure
 //! uses.
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
-use axum::extract::State;
-use axum::http::{Method, Request, StatusCode};
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::response::Response;
 use axum::Router;
 
 use crate::adapters::auth_gate::{self, Grant, Request as AuthRequest};
+use crate::adapters::http::etag;
 use crate::core::{Clock, IdFactory, Principal};
 use crate::errors::VogtError;
 use crate::registry::{
     default_registry, validate, HttpMethod, Operation, OperationRegistry, Transport,
 };
-use crate::storage::interface::DeclaredStore;
+use crate::storage::interface::{DeclaredStore, ReadView};
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
 
 /// The prefix every registry route lives under. The engine's front door
@@ -499,19 +501,25 @@ async fn dispatch<C: Clock, I: IdFactory>(
     let query = request.uri().query().map(str::to_string);
     let presented = bearer(request.headers().get("authorization"));
     let content_type = request.headers().get("content-type").cloned();
+    let if_none_match = request
+        .headers()
+        .get("if-none-match")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let server = request
+        .extensions()
+        .get::<ServerScope>()
+        .cloned()
+        .unwrap_or_default();
+    // Starlette builds a redirect's host from the Host header, and from the
+    // server's own bind address when a request carries none.
     let host = request
         .headers()
         .get("host")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
-        .unwrap_or_else(|| {
-            request
-                .extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|info| info.0.to_string())
-                .unwrap_or_else(|| "localhost".to_string())
-        });
-    let headers_scheme = forwarded_scheme(request.headers());
+        .unwrap_or_else(|| server.address.clone());
+    let scheme = request_scheme(request.headers(), request.extensions(), &server);
     // Read one byte past the limit so an oversized body is distinguishable from
     // one that fits. `unwrap_or_default` used to turn a too-large body into an
     // empty one, and the caller was told their parameters were wrong.
@@ -569,7 +577,6 @@ async fn dispatch<C: Clock, I: IdFactory>(
                     .iter()
                     .any(|operation| operation.http_route().path == bare))
         {
-            let scheme = request_scheme(&headers_scheme);
             let mut target = format!("{scheme}://{host}{API_PREFIX}{bare}");
             if let Some(query) = query.as_deref() {
                 target.push('?');
@@ -665,8 +672,39 @@ async fn dispatch<C: Clock, I: IdFactory>(
         }
     };
     let built = context_for(&request_store, &state, &grant, principal, build);
+    // Conditional reads answer after authentication and authorization: an old
+    // validator must never turn a refused request into a 304.
+    let etag = if etag::is_conditional_read(operation.name) {
+        match request_store
+            .read()
+            .and_then(|view| view.current_revision())
+        {
+            Ok(revision) => Some(etag::etag_for_revision(revision)),
+            Err(error) => return error_response(&error),
+        }
+    } else {
+        None
+    };
+    if let Some(etag) = &etag {
+        if etag::if_none_match_matches(if_none_match.as_deref(), etag) {
+            return Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header("etag", etag.as_str())
+                .body(Body::empty())
+                .expect("a fixed response builds");
+        }
+    }
     match operation.run(built.as_ref(), params) {
-        Ok(value) => json_response(StatusCode::OK, value),
+        Ok(value) => {
+            let mut response = json_response(StatusCode::OK, value);
+            if let Some(etag) = etag
+                .as_deref()
+                .and_then(|tag| HeaderValue::from_str(tag).ok())
+            {
+                response.headers_mut().insert("etag", etag);
+            }
+            response
+        }
         // Not ported is not the caller's fault, so it is not a 400. The shared
         // error taxonomy has no 501, and adding one would change every adapter.
         Err(VogtError::InvalidRequest(message)) if message.contains("has not been ported") => {
@@ -1372,21 +1410,49 @@ fn login_missing_fields(message: &str) -> Option<Vec<serde_json::Value>> {
     }
 }
 
-/// `http` unless a proxy said otherwise. Starlette's redirect uses the request
-/// scheme; behind the estate door that arrives as `X-Forwarded-Proto`.
-fn forwarded_scheme(headers: &axum::http::HeaderMap) -> String {
+/// What the listener says about itself: the scheme it serves and the address it
+/// is bound to. Starlette reads both from the server scope, and uses them when a
+/// request carries no Host header. `serve` installs one on the router.
+#[derive(Clone, Debug)]
+pub struct ServerScope {
+    pub scheme: &'static str,
+    pub address: String,
+}
+
+impl Default for ServerScope {
+    fn default() -> Self {
+        Self {
+            scheme: "http",
+            address: "localhost".to_string(),
+        }
+    }
+}
+
+/// The request's scheme, as Starlette's `request.url` sees it. Uvicorn takes
+/// `X-Forwarded-Proto` only from a peer on loopback (its `forwarded_allow_ips`
+/// default), so a request from anywhere else keeps the listener's own scheme.
+fn request_scheme(
+    headers: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+    server: &ServerScope,
+) -> &'static str {
+    let from_loopback = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|info| info.0.ip().is_loopback());
+    if !from_loopback {
+        return server.scheme;
+    }
     headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(',').next())
         .map(str::trim)
-        .filter(|value| *value == "http" || *value == "https")
-        .unwrap_or("http")
-        .to_string()
-}
-
-fn request_scheme(scheme: &str) -> &str {
-    scheme
+        .and_then(|value| match value {
+            "http" => Some("http"),
+            "https" => Some("https"),
+            _ => None,
+        })
+        .unwrap_or(server.scheme)
 }
 
 /// A body that never reached the validator. Python reports a body that is not
@@ -1572,9 +1638,18 @@ mod tests {
         );
         runtime.spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, router_system_sequential(state))
-                .await
-                .unwrap();
+            let router = crate::adapters::http::access_log::layer(
+                router_system_sequential(state),
+                crate::adapters::http::access_log::AccessLogSettings::from_config(
+                    &crate::config::VogtConfig::default(),
+                ),
+            );
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         std::thread::sleep(std::time::Duration::from_millis(150));
         Running {
@@ -2036,6 +2111,78 @@ mod tests {
         assert_eq!(allow.as_deref(), Some("POST"), "{head}");
         let (status, _, _) = request_head(running.addr, "POST", "/api/no/such");
         assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn the_forwarded_scheme_is_trusted_only_from_loopback() {
+        let server = ServerScope {
+            scheme: "https",
+            address: "10.0.0.5:8443".to_string(),
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        let mut from_loopback = axum::http::Extensions::new();
+        from_loopback.insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
+        let mut from_elsewhere = axum::http::Extensions::new();
+        from_elsewhere.insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 9], 5000))));
+
+        // Uvicorn ignores the header from a peer it does not trust, and then
+        // answers with its own TLS scheme.
+        assert_eq!(request_scheme(&headers, &from_loopback, &server), "http");
+        assert_eq!(request_scheme(&headers, &from_elsewhere, &server), "https");
+        // Without a peer address, the listener decides.
+        let empty = axum::http::Extensions::new();
+        assert_eq!(request_scheme(&headers, &empty, &server), "https");
+        // A value that is neither http nor https is not a scheme.
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("gopher"));
+        assert_eq!(request_scheme(&headers, &from_loopback, &server), "https");
+    }
+
+    #[test]
+    fn a_declared_list_carries_its_revision_and_answers_a_matching_validator() {
+        let running = serve(true);
+        let (status, head, _) = request_head(running.addr, "GET", "/api/projects?limit=1");
+        assert_eq!(status, 200, "{head}");
+        let etag = header_value(&head, "etag").expect("a declared list has an etag");
+        assert!(etag.starts_with("W/\""), "{etag}");
+
+        // A matching validator is answered without a body.
+        let extra = format!("If-None-Match: {etag}\r\n");
+        let (status, head, body) =
+            request_head_extra(running.addr, "GET", "/api/projects?limit=1", &extra);
+        assert_eq!(status, 304, "{head}");
+        assert!(body.is_empty(), "{body}");
+        assert_eq!(header_value(&head, "etag").as_deref(), Some(etag.as_str()));
+
+        // A read outside the allow-list neither emits nor honours a validator.
+        let (status, head, _) = request_head_extra(
+            running.addr,
+            "GET",
+            "/api/engine/status",
+            "If-None-Match: W/\"0\"\r\n",
+        );
+        assert_ne!(status, 304, "{head}");
+        assert!(header_value(&head, "etag").is_none(), "{head}");
+    }
+
+    #[test]
+    fn the_request_id_is_adopted_when_usable_and_always_echoed() {
+        let running = serve(true);
+        let (_, head, _) = request_head_extra(
+            running.addr,
+            "GET",
+            "/api/projects?limit=1",
+            "X-Request-Id: engine-abc123\r\n",
+        );
+        assert_eq!(
+            header_value(&head, "x-request-id").as_deref(),
+            Some("engine-abc123"),
+            "{head}"
+        );
+        // An id that would forge a log line is replaced, not logged.
+        let (_, head, _) = request_head(running.addr, "GET", "/api/projects?limit=1");
+        let generated = header_value(&head, "x-request-id").expect("every answer carries one");
+        assert_eq!(generated.len(), 16, "{head}");
     }
 
     #[test]
