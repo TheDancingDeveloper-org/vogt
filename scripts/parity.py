@@ -261,7 +261,7 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     }
                 recorded.append(answer)
         finally:
-            if server.stdin:
+            if server.stdin is not None:
                 server.stdin.close()
             server.terminate()
             server.wait(timeout=10)
