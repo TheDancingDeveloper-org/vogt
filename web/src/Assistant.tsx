@@ -21,18 +21,13 @@ import {
   type AssistantReply,
   type AssistantSendInputAction,
   type AssistantVogtWriteAction,
-  type PublicConfig,
 } from "./api";
+import { listProjects } from "./vogtApi";
 import { renderMarkdown } from "./markdown";
 import { writeClipboardText } from "./clipboard";
 import { describeRepairs, repairUtterance } from "./voiceRepair";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { pendingAction, setPendingAction } from "./pendingAction";
-import {
-  deferAssistantHydration,
-  invalidateAssistantSnapshot,
-  readAssistantSnapshot,
-} from "./assistantCache";
 import {
   onVoiceServiceEnded,
   registerPushSpeaker,
@@ -135,10 +130,6 @@ interface AssistantDraft {
 
 interface AssistantProps {
   onError: (message: string) => void;
-  /** Capability gate already fetched by the application shell. */
-  assistantEnabled?: boolean;
-  /** Reuse the shell's config instead of fetching it for every instance. */
-  publicConfig?: PublicConfig | null;
   /** Sessions renders the shared action card when composed in its workspace. */
   pendingHosted?: boolean;
   /** Clearing the conversation is destructive, so it is confirmed before it
@@ -410,15 +401,46 @@ export default function Assistant(props: AssistantProps) {
     haltSpeech();
   };
 
-  const applyConfig = (cfg: PublicConfig | null | undefined) => {
-    if (!cfg) return;
-    setProfiles(cfg.assistant_profiles ?? []);
-    setServerSttEnabled(cfg.assistant_stt_enabled ?? false);
-    setServerTtsEnabled(cfg.assistant_tts_enabled ?? false);
-  };
-
-  const configureSpeechInput = async () => {
-    if (sttBackend || sttAvailable()) return;
+  onMount(async () => {
+    voiceEndedCleanup = onVoiceServiceEnded(endFromNotification);
+    // Speak-the-push (FR-M6 / FR-M2): an FCM message that arrives while a voice
+    // conversation is active is spoken as well as shown. Outside an active
+    // conversation the gate is false, so nothing is spoken and FR-M2's shown/
+    // handled behaviour is exactly as before. No-op off a native platform.
+    pushSpeakerCleanup = await registerPushSpeaker((text) => {
+      if (ttsOn()) speak(text);
+    });
+    try {
+      const history = await api.assistantHistory();
+      setTranscript(history.transcript);
+      setPendingAction(history.pending_action ?? null);
+    } catch (e) {
+      props.onError(`assistant history: ${String(e)}`);
+    }
+    try {
+      const cfg = await api.publicConfig();
+      setProfiles(cfg.assistant_profiles ?? []);
+      setServerSttEnabled(cfg.assistant_stt_enabled ?? false);
+      setServerTtsEnabled(cfg.assistant_tts_enabled ?? false);
+    } catch {
+      // No profile list means no choice to offer, not a broken assistant:
+      // every request then runs on the deployment's default. Server speech
+      // stays off, which is the safe absent state.
+    }
+    try {
+      const listed = await listProjects();
+      setSlugs(listed.projects.map((project) => project.slug));
+    } catch {
+      // A core that cannot be asked costs slug repair and nothing else: the
+      // composer, the work-item repair and typed input all keep working.
+    }
+    // STT backend, in preference order: the Capacitor native plugin inside the
+    // APK, then the browser's Web Speech recognizer on the desktop (FR-T13,
+    // VOICE_POC §3.4), then the server-side pipeline (FR-T12, §3.5) for a
+    // client with neither — a desktop without Web Speech that can still capture
+    // audio and let the engine transcribe it. Absent all three — no recognizer,
+    // no server route, no MediaRecorder — is a working state that degrades to
+    // typed input with no error (FR-T6).
     if (Capacitor.isPluginAvailable("SpeechRecognition")) {
       try {
         const { SpeechRecognition } = await import(
@@ -439,57 +461,6 @@ export default function Assistant(props: AssistantProps) {
       sttBackend = "server";
       setSttAvailable(true);
     }
-  };
-
-  const hydrate = async () => {
-    if (props.assistantEnabled === false) return;
-    try {
-      const snapshot = await readAssistantSnapshot(true);
-      if (!snapshot) return;
-      setTranscript(snapshot.transcript);
-      setPendingAction(snapshot.pendingAction);
-      setSlugs(snapshot.projects.map((project) => project.slug));
-    } catch (e) {
-      props.onError(`assistant history: ${String(e)}`);
-    }
-
-    await configureSpeechInput();
-  };
-
-  onMount(async () => {
-    voiceEndedCleanup = onVoiceServiceEnded(endFromNotification);
-    // Speak-the-push (FR-M6 / FR-M2): an FCM message that arrives while a voice
-    // conversation is active is spoken as well as shown. Outside an active
-    // conversation the gate is false, so nothing is spoken and FR-M2's shown/
-    // handled behaviour is exactly as before. No-op off a native platform.
-    pushSpeakerCleanup = await registerPushSpeaker((text) => {
-      if (ttsOn()) speak(text);
-    });
-    applyConfig(props.publicConfig);
-    // Standalone consumers predate the shell config prop. Read their config
-    // before deferred history hydration so capability-gated controls are
-    // ready on the same mount turn as they were before #416.
-    if (props.publicConfig === undefined && props.assistantEnabled === undefined) {
-      void api.publicConfig()
-        .then((cfg) => {
-          applyConfig(cfg);
-          void configureSpeechInput();
-        })
-        .catch(() => {
-          void configureSpeechInput();
-        });
-    } else {
-      void configureSpeechInput();
-    }
-    const cancelHydration = deferAssistantHydration(() => void hydrate());
-    onCleanup(cancelHydration);
-    // STT backend, in preference order: the Capacitor native plugin inside the
-    // APK, then the browser's Web Speech recognizer on the desktop (FR-T13,
-    // VOICE_POC §3.4), then the server-side pipeline (FR-T12, §3.5) for a
-    // client with neither — a desktop without Web Speech that can still capture
-    // audio and let the engine transcribe it. Absent all three — no recognizer,
-    // no server route, no MediaRecorder — is a working state that degrades to
-    // typed input with no error (FR-T6).
   });
 
   onCleanup(() => {
@@ -539,7 +510,6 @@ export default function Assistant(props: AssistantProps) {
       applyReply(
         await api.assistantMessage(trimmed, profile() || undefined, controller.signal),
       );
-      invalidateAssistantSnapshot();
     } catch (e) {
       // Restore the message either way — a failed or cancelled send must not
       // eat what was typed (#242).
@@ -584,10 +554,6 @@ export default function Assistant(props: AssistantProps) {
     if (!action || busy()) return;
     setBusy(true);
     setPendingAction(null);
-    // The action was consumed locally before the network round-trip. Any
-    // other assistant instance must not resurrect the old card on a failed
-    // approval attempt.
-    invalidateAssistantSnapshot();
     try {
       applyReply(await api.assistantAction(action.id, approve));
     } catch (e) {
@@ -603,7 +569,6 @@ export default function Assistant(props: AssistantProps) {
     setReasonBusy(true);
     try {
       setPendingAction(await api.assistantReplaceReason(action.id, reason));
-      invalidateAssistantSnapshot();
     } catch (e) {
       props.onError(`assistant reason: ${String(e)}`);
     } finally {
@@ -626,7 +591,6 @@ export default function Assistant(props: AssistantProps) {
       await api.assistantReset();
       setTranscript([]);
       setPendingAction(null);
-      invalidateAssistantSnapshot();
     } catch (e) {
       props.onError(`assistant reset: ${String(e)}`);
     }

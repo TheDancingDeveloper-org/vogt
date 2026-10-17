@@ -6,7 +6,7 @@ use axum::{
     routing::{any, get, post},
     Router,
 };
-use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::gui as gui_handlers;
 use crate::push_api;
@@ -248,7 +248,6 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/assistant/stt", post(assistant_speech::stt))
         .route("/api/assistant/tts", post(assistant_speech::tts))
         .route("/api/events", get(api::events_stream))
-        .route("/api/auth/check", get(api::auth_check))
         .route("/api/status", get(api::operational_status))
         .route("/api/files", get(files::read_file).put(files::write_file))
         .route("/api/files/op", post(files::operate))
@@ -385,10 +384,6 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .merge(ws_routes)
         .merge(api_fallback)
         .merge(asset_routes)
-        // Negotiate gzip for the PWA and finite API responses. tower-http's
-        // default predicate excludes SSE, images, ranges, and responses that
-        // already have Content-Encoding; upgrade responses remain untouched.
-        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         // Outermost, so every request gets an id and a line — including the

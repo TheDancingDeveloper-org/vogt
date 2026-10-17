@@ -18,7 +18,6 @@ import {
 } from "./api";
 import {
   languageFor,
-  loadLanguage,
   loadMonaco,
   monacoThemeForApp,
   syncMonacoTheme,
@@ -28,7 +27,7 @@ import {
 } from "./monaco";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { shouldRenderSideBySide } from "./diffLayout";
-import { taxonomy } from "./taxonomyCache";
+import { listProjects } from "./vogtApi";
 import { repositoryChoices } from "./gitRepositories";
 import { createRetainedRead } from "./retainedRead";
 import { openEditorTab } from "./tabs";
@@ -173,13 +172,12 @@ const DiffView: Component<{
     }
     try {
       setLoading(true);
-      const lang = languageFor(path);
       const [nextEditor, d] = await Promise.all([
         ensureEditor(mountedHost),
         api.gitDiff(repo, path, staged),
-        loadLanguage(lang),
       ]);
       if (disposed || generation !== loadGeneration || !nextEditor || !monaco) return;
+      const lang = languageFor(path);
       const original = monaco.editor.createModel(d.head, lang);
       const modified = monaco.editor.createModel(d.current, lang);
       if (disposed || generation !== loadGeneration) {
@@ -277,7 +275,7 @@ const GitTab: Component<Props> = (props) => {
       let offset = 0;
       let total = 0;
       do {
-        const page = await taxonomy.projects({ limit: 500, offset });
+        const page = await listProjects({ limit: 500, offset });
         projects.push(...page.projects);
         total = page.total;
         offset += page.projects.length;

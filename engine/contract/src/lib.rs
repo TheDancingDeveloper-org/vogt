@@ -468,12 +468,7 @@ pub enum ClientControl {
         cols: u16,
         rows: u16,
     },
-    /// Liveness probe. `id` is echoed by the server so a client can reject a
-    /// delayed answer from a socket that has already been recycled.
-    Ping {
-        #[serde(default)]
-        id: u64,
-    },
+    Ping,
 }
 
 impl ClientControl {
@@ -498,13 +493,6 @@ pub enum ServerControl {
         reset: bool,
     },
     SnapshotDone,
-    /// Response to a client liveness probe. `pos` is the server's absolute
-    /// scrollback position, allowing the client to notice output it missed
-    /// even when the WebSocket still answers.
-    Pong {
-        id: u64,
-        pos: u64,
-    },
     Lag {
         #[serde(default)]
         note: String,
@@ -563,21 +551,6 @@ mod tests {
             rows: 40,
         };
         assert_eq!(f.to_json(), r#"{"type":"resize","cols":120,"rows":40}"#);
-    }
-
-    #[test]
-    fn ping_control_is_backward_compatible_and_pong_carries_position() {
-        let legacy: ClientControl = serde_json::from_str(r#"{"type":"ping"}"#).unwrap();
-        assert!(matches!(legacy, ClientControl::Ping { id: 0 }));
-
-        let ping = ClientControl::Ping { id: 7 };
-        assert_eq!(ping.to_json(), r#"{"type":"ping","id":7}"#);
-
-        let pong = serde_json::to_value(ServerControl::Pong { id: 7, pos: 42 }).unwrap();
-        assert_eq!(
-            pong,
-            serde_json::json!({"type": "pong", "id": 7, "pos": 42})
-        );
     }
 
     #[test]

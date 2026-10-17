@@ -3846,7 +3846,6 @@ dependencies = [
  "bytes",
  "clap",
  "dashmap",
- "flate2",
  "futures-util",
  "hyper",
  "jsonwebtoken",

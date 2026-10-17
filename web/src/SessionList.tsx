@@ -27,7 +27,7 @@ interface Props {
 }
 
 export const SessionList: Component<Props> = (props) => {
-  const now = createNow(30_000);
+  const now = createNow();
   const rows = createMemo(() => {
     const omit = new Set(props.omit ?? []);
     return sortSessionsByAttention(

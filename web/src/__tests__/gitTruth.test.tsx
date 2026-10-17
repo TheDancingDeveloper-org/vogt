@@ -6,7 +6,6 @@ vi.mock("../monaco", () => ({
   languageFor: () => "typescript",
   monacoThemeForApp: () => "vs-dark",
   syncMonacoTheme: () => {},
-  loadLanguage: async () => {},
   loadMonaco: async () => ({
     editor: {
       createDiffEditor: () => ({

@@ -64,7 +64,6 @@ StepParams = dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]]
 
 SCRIPT: list[tuple[str, StepParams]] = [
     ("status", {}),
-    ("place.metrics", {}),
     ("connect", {}),
     ("workflow.list", {}),
     (

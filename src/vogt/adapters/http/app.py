@@ -23,18 +23,13 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Query, Request, Response
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.types import Lifespan
 
 from vogt import __version__
-from vogt.adapters.http.etag import (
-    etag_for_revision,
-    if_none_match_matches,
-    is_conditional_read,
-)
 from vogt.application.context import AppContext, build_context
 from vogt.application.identity import identity_from_headers
 from vogt.application.services.auth import Authenticated, authorize
@@ -185,9 +180,7 @@ def _endpoint_for(
     is_read = operation.route.method == "GET"
     annotation: Any = Annotated[params_model, Query()] if is_read else params_model
 
-    async def endpoint(
-        params: BaseModel, request: Request, response: Response
-    ) -> BaseModel | Response:
+    async def endpoint(params: BaseModel, request: Request) -> BaseModel:
         if authorize_request is None:
             ctx = factory()
         else:
@@ -201,14 +194,6 @@ def _endpoint_for(
                 mutating=operation.mutating,
                 transport="http",
             )
-        if is_conditional_read(operation.name, method=operation.route.method):
-            # This is intentionally after authentication and authorization:
-            # an old validator must never turn a refused request into a 304.
-            with ctx.declared.read() as view:
-                etag = etag_for_revision(view.current_revision())
-            response.headers["ETag"] = etag
-            if if_none_match_matches(request.headers.get("if-none-match"), etag):
-                return Response(status_code=304, headers={"ETag": etag})
         # Resolved here, not in the factory: only a request carries what the
         # front door stated, and only the adapter should read a request
         # (`identity.py`). A no-op unless this instance is configured as
@@ -221,7 +206,6 @@ def _endpoint_for(
     endpoint.__annotations__ = {
         "params": annotation,
         "request": Request,
-        "response": Response,
         "return": operation.result_model,
     }
     endpoint.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
@@ -231,9 +215,6 @@ def _endpoint_for(
             ),
             inspect.Parameter(
                 "request", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request
-            ),
-            inspect.Parameter(
-                "response", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Response
             ),
         ],
         return_annotation=operation.result_model,

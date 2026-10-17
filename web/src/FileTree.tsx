@@ -3,7 +3,6 @@ import {
   For,
   Show,
   createEffect,
-  createMemo,
   createResource,
   createSignal,
   createUniqueId,
@@ -31,11 +30,8 @@ import {
   setFileTreeSearch,
 } from "./fileTreeState";
 import { workspaceVersion } from "./workspaceVersion";
-import { onWake } from "./wakeCoordinator";
 
 interface Props {
-  /** Whether this mounted tree belongs to the currently visible surface. */
-  active?: () => boolean;
   onOpen?: () => void;
   onCreatePresetHere?: (path: string) => void;
   promptPath?: (
@@ -57,7 +53,7 @@ interface NodeProps {
   onDuplicate: (node: TreeNode) => void;
   onDelete: (node: TreeNode) => void;
   onUploadHere: (path: string) => void;
-  statusEntries: ReadonlyMap<string, FileStatus>;
+  statusEntries: GitStatusEntry[];
 }
 
 // Only one node's actions picker is open at a time. The picker behaves like a
@@ -76,26 +72,13 @@ const FILE_STATUS: Record<GitStatusKind, { marker: string; label: string }> = {
   deleted: { marker: "D", label: "Deleted" },
 };
 
-export interface FileStatus {
-  marker: string;
-  label: string;
-  kind: GitStatusKind;
-}
-
-/** Build once per Git response; each rendered node then does one map lookup. */
-export function buildStatusMap(entries: GitStatusEntry[]): ReadonlyMap<string, FileStatus> {
-  const result = new Map<string, FileStatus>();
-  for (const entry of entries) {
-    result.set(entry.path, { ...FILE_STATUS[entry.kind], kind: entry.kind });
-  }
-  return result;
-}
-
-export function statusForPath(
-  entries: ReadonlyMap<string, FileStatus>,
+function statusForPath(
+  entries: GitStatusEntry[],
   path: string,
-): FileStatus | null {
-  return entries.get(path) ?? null;
+): { marker: string; label: string; kind: GitStatusKind } | null {
+  const entry = entries.find((candidate) => candidate.path === path);
+  if (!entry) return null;
+  return { ...FILE_STATUS[entry.kind], kind: entry.kind };
 }
 
 function joinPath(dir: string, name: string): string {
@@ -299,25 +282,17 @@ const TreeNodeView: Component<NodeProps> = (props) => {
 };
 
 const FileTree: Component<Props> = (props) => {
-  const isActive = () => props.active?.() ?? true;
-  const [tree, { refetch }] = createResource(
-    () => (isActive() ? "active" : undefined),
-    () => api.tree("", 0),
-  );
-  const [gitStatus, { refetch: refetchGitStatus }] = createResource(
-    () => (isActive() ? "active" : undefined),
-    async () => {
-      try {
-        const status = await api.gitStatus("");
-        return status.is_repo === false ? [] : status.entries;
-      } catch {
-        // File browsing is independent of Git. A non-repository workspace or a
-        // local Git read failure removes optional markers, never the file tree.
-        return [];
-      }
-    },
-  );
-  const statusMap = createMemo(() => buildStatusMap(gitStatus() ?? []));
+  const [tree, { refetch }] = createResource(() => api.tree("", 0));
+  const [gitStatus, { refetch: refetchGitStatus }] = createResource(async () => {
+    try {
+      const status = await api.gitStatus("");
+      return status.is_repo === false ? [] : status.entries;
+    } catch {
+      // File browsing is independent of Git. A non-repository workspace or a
+      // local Git read failure removes optional markers, never the file tree.
+      return [];
+    }
+  });
   // Search query is hoisted to the module store so it survives a tab switch.
   const searchQuery = fileTreeSearch;
   const setSearchQuery = setFileTreeSearch;
@@ -364,7 +339,6 @@ const FileTree: Component<Props> = (props) => {
   let firstVersion = true;
   createEffect(() => {
     workspaceVersion();
-    if (!isActive()) return;
     if (firstVersion) {
       firstVersion = false;
       return;
@@ -374,15 +348,20 @@ const FileTree: Component<Props> = (props) => {
   });
 
   // Coming back to the tab is a moment the tree may be stale (an agent wrote
-  // files, a terminal ran git). The shared wake coordinator combines focus
-  // and visibility into one debounced wake (#410).
+  // files, a terminal ran git). Reconcile on focus and on becoming visible.
   const revalidate = () => {
     void refetch();
     void refetchGitStatus();
   };
-  onCleanup(onWake(() => {
-    if (isActive()) revalidate();
-  }));
+  const onVisibility = () => {
+    if (document.visibilityState === "visible") revalidate();
+  };
+  window.addEventListener("focus", revalidate);
+  document.addEventListener("visibilitychange", onVisibility);
+  onCleanup(() => {
+    window.removeEventListener("focus", revalidate);
+    document.removeEventListener("visibilitychange", onVisibility);
+  });
 
   createEffect(() => {
     const query = searchQuery();
@@ -642,7 +621,7 @@ const FileTree: Component<Props> = (props) => {
                   onDuplicate={(entry) => void duplicateNode(entry)}
                   onDelete={(entry) => void deleteNode(entry)}
                   onUploadHere={triggerUpload}
-                  statusEntries={statusMap()}
+                  statusEntries={gitStatus() ?? []}
                 />
               )}
             </For>
@@ -670,7 +649,7 @@ const FileTree: Component<Props> = (props) => {
                       <span class="tree-search-name">{file.name}</span>
                       <span class="tree-search-path">{file.path}</span>
                     </span>
-                    <Show when={statusForPath(statusMap(), file.path)}>
+                    <Show when={statusForPath(gitStatus() ?? [], file.path)}>
                       {(value) => (
                         <span
                           class={`tree-status tree-status-${value().kind}`}

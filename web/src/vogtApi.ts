@@ -21,16 +21,6 @@
 
 import { ApiError, getBase, getToken, reportAuthResponse } from "./api";
 import { fetchWithRetry } from "./transport";
-import { DEADLINE_MS } from "./deadlines";
-import {
-  cacheIdentity,
-  cacheKey,
-  cachedReadWithValidator,
-  invalidate,
-  STABLE_READ_POLICY,
-  type CacheFetchResult,
-} from "./swr";
-import { invalidateTaxonomy } from "./taxonomyInvalidation";
 
 /** Where the front door mounts vogt-core. */
 export const VOGT_PREFIX = "/api/vogt";
@@ -38,7 +28,6 @@ export const VOGT_PREFIX = "/api/vogt";
 /** One entry per operation the PWA reads or writes. Names match the registry. */
 export const ROUTES = {
   status: "/status",
-  "place.metrics": "/place/metrics",
   "project.list": "/projects",
   "project.get": "/projects/get",
   "project.brief": "/projects/brief",
@@ -107,7 +96,6 @@ async function call<T>(
   params: Record<string, unknown> = {},
   method: "GET" | "POST" = "GET",
   signal?: AbortSignal,
-  options: { cache?: boolean } = {},
 ): Promise<T> {
   const path = ROUTES[operation];
   if (!path) throw new Error(`no route for ${operation}`);
@@ -133,71 +121,28 @@ async function call<T>(
     body = JSON.stringify(params);
   }
 
-  const read = async (
-    requestSignal?: AbortSignal,
-    etag?: string | null,
-  ): Promise<CacheFetchResult<T> | "not-modified"> => {
-    const requestHeaders = { ...headers };
-    if (etag) requestHeaders["If-None-Match"] = etag;
-    const res = await fetchWithRetry(
-      url,
-      { method, headers: requestHeaders, body, signal: requestSignal },
-      { deadlineMs: DEADLINE_MS[method === "GET" ? "list" : "detail"] },
-    );
-    if (res.status === 304) return "not-modified";
-    const text = await res.text();
-    if (!res.ok) {
-      let message = text;
-      try {
-        const parsed = JSON.parse(text);
-        message = parsed?.error?.message ?? text;
-      } catch {
-        // A non-JSON body from a proxy hop; the status still carries meaning.
-      }
-      if (isAbsent(res.status)) throw new VogtUnavailable(res.status, message);
-      // A 401 from behind the front door is the same fact as a 401 from the
-      // engine's own API — the one credential the browser holds is dead — so it
-      // ends the session once for the whole shell rather than becoming one
-      // stranded panel per Vogt surface (#195). Everything else, a 403 most of
-      // all, stays the caller's to render: the credential is fine, and it is
-      // the capability the reader needs told about.
-      reportAuthResponse(res.status, message);
-      throw new ApiError(res.status, message);
+  const res = await fetchWithRetry(url, { method, headers, body, signal });
+  const text = await res.text();
+  if (!res.ok) {
+    let message = text;
+    try {
+      const parsed = JSON.parse(text);
+      message = parsed?.error?.message ?? text;
+    } catch {
+      // A non-JSON body from a proxy hop; the status still carries meaning.
     }
-    return {
-      value: text ? (JSON.parse(text) as T) : (undefined as T),
-      etag: res.headers.get("etag"),
-    };
-  };
-
-  if (method === "GET" && options.cache !== false && STABLE_READ_OPERATIONS.has(operation)) {
-    return cachedReadWithValidator(
-      cacheKey(cacheIdentity(getBase(), token), operation, params),
-      (etag, requestSignal) => read(requestSignal, etag),
-      STABLE_READ_POLICY,
-      signal,
-    );
+    if (isAbsent(res.status)) throw new VogtUnavailable(res.status, message);
+    // A 401 from behind the front door is the same fact as a 401 from the
+    // engine's own API — the one credential the browser holds is dead — so it
+    // ends the session once for the whole shell rather than becoming one
+    // stranded panel per Vogt surface (#195). Everything else, a 403 most of
+    // all, stays the caller's to render: the credential is fine, and it is
+    // the capability the reader needs told about.
+    reportAuthResponse(res.status, message);
+    throw new ApiError(res.status, message);
   }
-  const result = await read(signal);
-  if (method !== "GET") {
-    invalidate();
-    if (operation === "project.register" || operation === "project.import") {
-      invalidateTaxonomy("projects");
-    }
-  }
-  if (result === "not-modified") {
-    throw new Error("unexpected conditional response for uncached read");
-  }
-  return result.value;
+  return text ? (JSON.parse(text) as T) : (undefined as T);
 }
-
-const STABLE_READ_OPERATIONS = new Set<VogtOperation>([
-  "project.list",
-  "workflow.list",
-  "label.list",
-  "initiative.list",
-  "actor.list",
-]);
 
 // -- the shapes the surfaces read ------------------------------------------
 //
@@ -270,16 +215,6 @@ export interface InboxListResult {
   engine_available?: boolean;
   engine_status?: "not_configured" | "available" | "unreachable" | string;
   engine_detail?: string | null;
-}
-
-export interface PlaceMetricsResult {
-  inbox_active?: number | null;
-  projects_total?: number | null;
-  work_total?: number | null;
-  backlog_total_considered?: number | null;
-  drift_present?: boolean | null;
-  revision?: number;
-  generated_at?: string;
 }
 
 export interface WorkItem {
@@ -717,10 +652,8 @@ export interface ComplianceResult {
 
 // -- reads ------------------------------------------------------------------
 
-export const listWorkflows = (options: { cache?: boolean } = {}) =>
-  call<{ workflows: Workflow[] }>("workflow.list", {}, "GET", undefined, options);
-
-export const placeMetrics = () => call<PlaceMetricsResult>("place.metrics");
+export const listWorkflows = () =>
+  call<{ workflows: Workflow[] }>("workflow.list");
 
 export const listWork = (
   params: Record<string, unknown> = {},
@@ -755,42 +688,26 @@ export interface ProjectListEntry {
 export const listProjects = (
   params: Record<string, unknown> = {},
   signal?: AbortSignal,
-  options: { cache?: boolean } = {},
 ) => call<{ projects: ProjectListEntry[]; total: number }>(
   "project.list",
   params,
   "GET",
   signal,
-  options,
 );
 
-export const listLabels = (options: { cache?: boolean } = {}) =>
-  call<{ labels: { name: string; color?: string }[] }>(
-    "label.list",
-    {},
-    "GET",
-    undefined,
-    options,
-  );
+export const listLabels = () =>
+  call<{ labels: { name: string; color?: string }[] }>("label.list");
 
-export const listInitiatives = (options: { cache?: boolean } = {}) =>
+export const listInitiatives = () =>
   // `id` is not decoration: work items carry `initiative_id`, so a swimlane
   // cannot be labelled from the slug alone.
   call<{ initiatives: { id: string; slug: string; title: string }[] }>(
     "initiative.list",
-    {},
-    "GET",
-    undefined,
-    options,
   );
 
-export const listActors = (options: { cache?: boolean } = {}) =>
+export const listActors = () =>
   call<{ actors: { identity_ref: string; display_name: string }[] }>(
     "actor.list",
-    {},
-    "GET",
-    undefined,
-    options,
   );
 
 export const notifications = (params: Record<string, unknown> = {}) =>
@@ -905,15 +822,10 @@ export const listEvents = (
   params: { after?: number; limit?: number; entity_id?: string } = {},
 ) => call<EventListResult>("events.list", params);
 
-export const listSessions = (
-  params: Record<string, unknown> = {},
-  signal?: AbortSignal,
-) =>
+export const listSessions = (params: Record<string, unknown> = {}) =>
   call<{ sessions: SessionSummary[]; engine?: string | null }>(
     "session.list",
     params,
-    "GET",
-    signal,
   );
 
 // -- writes, each carrying the reason its view collected --------------------
