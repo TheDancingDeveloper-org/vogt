@@ -90,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     golden = json.loads((args.golden / f"{args.transport}.json").read_text())
     if args.only == "dump":
         golden = [step for step in golden if step["operation"].startswith("dump.")]
+        # A dump run executes the whole script so each mid-script dump sees the
+        # state the steps before it left; only the dumps are compared.
         recorded = [step for step in recorded if step["operation"].startswith("dump.")]
     elif args.only:
         golden = [step for step in golden if step["operation"].startswith(args.only)]
@@ -126,6 +128,10 @@ def _resolve(impl: str) -> str:
 
 def _load_steps(prefix: str) -> list[dict[str, Any]]:
     document = json.loads(SCRIPT_PATH.read_text())
+    if prefix == "dump":
+        # The dumps sit between the steps that write the tables they show, so
+        # a dump-only run has to execute the script up to them.
+        return list(document["steps"])
     return [step for step in document["steps"] if step["operation"].startswith(prefix)]
 
 
@@ -247,7 +253,7 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     recorded.append(
                         {
                             "operation": step["operation"],
-                            "body": _dump(data, (step["dump"],)),
+                            "body": _dump(data, _dump_names(step)),
                         }
                     )
                     continue
@@ -336,13 +342,14 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
         for step in steps:
-            if "dump" in step:
+            # A dump step records tables at this point in the script, so a
+            # later step cannot hide a change an earlier one wrote. `true`
+            # dumps both stores; a store name dumps just that one.
+            if step.get("dump"):
+                body = _dump(data, _dump_names(step))
+                _blank_payload_digests(body)
                 answers.append(
-                    {
-                        "operation": step["operation"],
-                        "exit": 0,
-                        "body": _dump(data, (step["dump"],)),
-                    }
+                    {"operation": step["operation"], "exit": 0, "body": body}
                 )
                 continue
             if "params" not in step:
@@ -390,6 +397,28 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     finally:
         shutil.rmtree(root, ignore_errors=True)
     return answers
+
+
+def _dump_names(step: dict[str, Any]) -> tuple[str, ...]:
+    """The stores a dump step names: both for `true`, else the one named."""
+    if step["dump"] is True:
+        return ("declared", "observed")
+    return (step["dump"],)
+
+
+def _blank_payload_digests(dumped: dict[str, Any]) -> None:
+    """Blank the audit digests of a mid-script dump, in place.
+
+    An audit row's `payload_digest` covers the whole payload, and a project's
+    payload names its root path, which is the run's temporary root. The digest
+    therefore differs from one run to the next even though the rest of the row
+    is fixed. The row's other fields still compare verbatim, so a changed
+    operation, actor, revision or reason is still caught.
+    """
+    for tables in dumped.values():
+        for row in (tables or {}).get("audit") or []:
+            if "payload_digest" in row:
+                row["payload_digest"] = "<payload-digest>"
 
 
 def _dump(
@@ -524,7 +553,7 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         {
                             "operation": step["operation"],
                             "result": _normalise(
-                                _dump(data, (step["dump"],)), Path(scratch), data
+                                _dump(data, _dump_names(step)), Path(scratch), data
                             ),
                         }
                     )
