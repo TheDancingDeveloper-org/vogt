@@ -173,7 +173,7 @@ class GitHubProvider:
 
     def issues_updated_since(
         self, ref: RepoRef, since: str | None
-    ) -> Iterable[ForgeIssue]:
+    ) -> Iterable[ForgeIssue | ForgePull]:
         # Ascending by update time so a watermark walks history *forward*: the
         # max `updated_at` in a page is where the next sweep resumes, and a
         # first sync backfills oldest-first a page at a time (D3).
