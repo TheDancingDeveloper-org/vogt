@@ -69,7 +69,7 @@ gain tests; it does not move down.
 | test_forge_publish.py | unported | Ported in `forge_ops_test.rs`: create-and-push-and-link, the name and visibility choice, the 422 existing-remote refusal (nothing pushed, nothing changed), the non-fast-forward refusal on a real `git push` (the remote history stands), the source gate (empty repository, detached HEAD, branch and revision read, dirty tree by name, the not-a-repository refusal), the already-linked and names-a-repository refusals (pointed at `forge link`), and the no-credential refusal before anything is created. Write-through after publish is checked at the provider, which creates the issue upstream on the published repository. Not ported: the `work.create` write-through on a linked project (`write_through_gaps` in `work.rs` still refuses with the credential gate unmet; owner WI-1068), so the upstream-truth test is open. Also not ported: the git argv spy that asserts no `--force` on every path, since `push_branch` runs its fixed argument list internally. Owner WI-1072. |
 | test_forge_repos.py | ported | Forge repo listing service. |
 | test_forge_sync.py | ported | `adapters/forge/sync.rs`. |
-| test_forgejo.py | ported | `adapters/forgejo.rs`. |
+| test_forgejo.py | ported | `adapters/forgejo.rs` for the provider, normalisation and writes. The sweep reads (Forgejo issues and PRs reach the backlog, watermarks make the second sweep incremental, a closure upstream leaves the backlog) are in `forge_ops_test.rs`. |
 | test_front_door.py | retired | Engine front door (the `/api/vogt` proxy, PTYs, files). `engine/server`, not the core. |
 | test_git_story.py | ported | `git_story.rs` and `application/git_story.rs`. |
 | test_github.py | ported | `adapters/github.rs`. |

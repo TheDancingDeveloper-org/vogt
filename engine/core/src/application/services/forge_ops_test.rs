@@ -8,10 +8,12 @@
 //! the real seams carry `github.com` remotes a test cannot reach.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::adapters::forge::registry::provider_for_host;
 use crate::adapters::forge::ForgeProvider;
@@ -20,13 +22,14 @@ use crate::adapters::git::{
 };
 use crate::application::context::{build_context, Built};
 use crate::application::forge_standin::StandInForge;
+use crate::application::forge_transport::SharedForgeTransport;
 use crate::application::services::{
     forge_accounts, forge_import, forge_link, forge_publish, forge_repos, forge_writeback, work,
 };
 use crate::config::VogtConfig;
 use crate::core::{LinkState, Project, SequentialIds, StepClock};
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
+use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn};
 
 use super::services_test::{moment, opened, principal, unique};
 
@@ -986,4 +989,261 @@ fn forge_import_clones_under_the_actors_credential() {
         )],
         "the clone used the linked PAT, not secret-token"
     );
+}
+
+// -- a Forgejo host read by sweep: issues and PRs, watermarks, closure -------
+
+const FORGEJO_HOST: &str = "forge.example.net";
+const FORGEJO_REPO: &str = "https://forge.example.net/acme/Widgets";
+
+/// What a Forgejo stand-in was asked, and what it answers with now. The test
+/// changes `issues` between sweeps, the way upstream does.
+#[derive(Clone, Default)]
+struct Forgejo {
+    issues: Arc<Mutex<Value>>,
+    pulls: Arc<Mutex<Value>>,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl Forgejo {
+    fn new() -> Self {
+        let forgejo = Self::default();
+        *forgejo.issues.lock().unwrap() = json!([]);
+        *forgejo.pulls.lock().unwrap() = json!([]);
+        forgejo
+    }
+
+    /// The Forgejo host's transport: issues, pulls and action tasks answer from
+    /// the lists; every other read answers an empty array.
+    fn transport(&self) -> SharedForgeTransport {
+        let issues = Arc::clone(&self.issues);
+        let pulls = Arc::clone(&self.pulls);
+        let requests = Arc::clone(&self.requests);
+        Arc::new(
+            move |url: &str, _headers: &BTreeMap<String, String>, _body: &[u8], method: &str| {
+                requests.lock().unwrap().push(format!("{method} {url}"));
+                let body = if url.contains("/issues") && !url.contains("/comments") {
+                    issues.lock().unwrap().clone()
+                } else if url.contains("/pulls") {
+                    pulls.lock().unwrap().clone()
+                } else if url.contains("/actions/tasks") {
+                    json!({"workflow_runs": []})
+                } else {
+                    json!([])
+                };
+                (200, body.to_string().into_bytes(), BTreeMap::new())
+            },
+        )
+    }
+
+    fn mutations(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| !request.starts_with("GET "))
+            .cloned()
+            .collect()
+    }
+}
+
+/// A context whose instance reads `FORGEJO_HOST` under a file token, with the
+/// Forgejo stand-in as its transport. The project is registered against the
+/// Forgejo repository, unlinked, as a sweep sees it.
+fn with_forgejo(forgejo: &Forgejo) -> Built {
+    let dir =
+        std::env::temp_dir().join(format!("vogt-forgejo-{}-{}", std::process::id(), unique()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let token = dir.join("forgejo-token");
+    std::fs::write(&token, "frg_fake\n").unwrap();
+    let mut clock = Some(StepClock::new(moment()));
+    let mut ids = Some(SequentialIds::new(None).unwrap());
+    crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+    let built = build_context(
+        VogtConfig {
+            data_dir: dir,
+            forge_token_files: BTreeMap::from([(FORGEJO_HOST.to_owned(), token)]),
+            ..VogtConfig::default()
+        },
+        Some(principal()),
+        clock,
+        ids,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let Built::StepSequential(ctx) = built else {
+        panic!("expected a step clock");
+    };
+    let transport = forgejo.transport();
+    let built =
+        Built::StepSequential(ctx.with_forge_transport(move |url, headers, body, method| {
+            transport(url, headers, body, method)
+        }));
+    insert_project(
+        &built,
+        "acme",
+        Some(FORGEJO_REPO),
+        &a_directory_that_is_not_a_repository().display().to_string(),
+        false,
+    );
+    built
+}
+
+/// The item numbers the ranked backlog shows as observed `#n` rows.
+fn backlog_numbers(built: &Built) -> Vec<i64> {
+    let page = crate::application::views::backlog_op(built, json!({"limit": 100})).unwrap();
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["title"].as_str())
+        .filter(|title| title.starts_with('#'))
+        .filter_map(|title| {
+            title
+                .split_whitespace()
+                .next()?
+                .trim_start_matches('#')
+                .parse()
+                .ok()
+        })
+        .collect()
+}
+
+#[test]
+fn forgejo_issues_and_prs_reach_the_backlog() {
+    let forgejo = Forgejo::new();
+    *forgejo.issues.lock().unwrap() = json!([{
+        "number": 9,
+        "title": "Crashes on empty segment",
+        "state": "open",
+        "html_url": format!("{FORGEJO_REPO}/issues/9"),
+        "labels": [{"name": "bug"}],
+        "updated_at": "2026-08-01T00:00:00Z",
+        "created_at": "2026-08-01T00:00:00Z",
+        "user": {"login": "octo"},
+        "body": "",
+    }]);
+    *forgejo.pulls.lock().unwrap() = json!([{
+        "number": 100,
+        "title": "wip",
+        "state": "open",
+        "html_url": format!("{FORGEJO_REPO}/pulls/100"),
+        "updated_at": "2026-08-02T00:00:00Z",
+        "created_at": "2026-08-02T00:00:00Z",
+        "user": {"login": "octo"},
+        "body": "",
+    }]);
+    let built = with_forgejo(&forgejo);
+
+    crate::application::collect::sweep_op(&built, json!({"project": "acme"})).unwrap();
+
+    let numbers = backlog_numbers(&built);
+    assert!(
+        numbers.contains(&9),
+        "a Forgejo issue is backlog: {numbers:?}"
+    );
+    assert!(
+        numbers.contains(&100),
+        "a Forgejo PR is backlog: {numbers:?}"
+    );
+    assert!(
+        forgejo.mutations().is_empty(),
+        "reading asked nobody anything"
+    );
+}
+
+#[test]
+fn forgejo_sync_is_incremental_via_watermarks() {
+    let forgejo = Forgejo::new();
+    *forgejo.issues.lock().unwrap() = json!([{
+        "number": 1,
+        "state": "open",
+        "html_url": format!("{FORGEJO_REPO}/issues/1"),
+        "updated_at": "2026-08-03T00:00:00Z",
+        "created_at": "2026-08-03T00:00:00Z",
+        "user": {"login": "octo"},
+        "body": "",
+    }]);
+    let built = with_forgejo(&forgejo);
+    let Built::StepSequential(ctx) = &built else {
+        panic!("expected a step clock");
+    };
+    let project_id = ctx
+        .declared
+        .read()
+        .unwrap()
+        .project_by_slug("acme")
+        .unwrap()
+        .unwrap()
+        .id;
+
+    crate::application::collect::sweep_op(&built, json!({"project": "acme"})).unwrap();
+    let watermark = ctx
+        .observed
+        .get_watermark("forge-issues", &project_id)
+        .unwrap()
+        .expect("a watermark is kept after the first sweep");
+    assert!(watermark.contains("2026-08-03"), "{watermark}");
+
+    crate::application::collect::sweep_op(&built, json!({"project": "acme"})).unwrap();
+    let issue_reads: Vec<String> = forgejo
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.starts_with("GET ") && request.contains("/issues?"))
+        .cloned()
+        .collect();
+    assert!(
+        issue_reads
+            .last()
+            .is_some_and(|read| read.contains("since=")),
+        "the second sweep asks what moved since: {issue_reads:?}"
+    );
+}
+
+/// Observe an issue open, close it upstream, sweep again: the ranked backlog
+/// drops it and the latest observation of its subject is closed.
+#[test]
+fn a_closure_upstream_leaves_the_backlog() {
+    let forgejo = Forgejo::new();
+    let issue = |state: &str, updated: &str| {
+        json!([{
+            "number": 42,
+            "title": "Segments never retry",
+            "state": state,
+            "html_url": format!("{FORGEJO_REPO}/issues/42"),
+            "labels": [{"name": "bug"}],
+            "updated_at": updated,
+            "created_at": "2026-08-01T00:00:00Z",
+            "closed_at": if state == "closed" { json!(updated) } else { json!(null) },
+            "user": {"login": "octo"},
+            "body": "",
+        }])
+    };
+    *forgejo.issues.lock().unwrap() = issue("open", "2026-08-01T00:00:00Z");
+    let built = with_forgejo(&forgejo);
+    crate::application::collect::sweep_op(&built, json!({"project": "acme"})).unwrap();
+    assert!(backlog_numbers(&built).contains(&42));
+
+    *forgejo.issues.lock().unwrap() = issue("closed", "2026-08-05T00:00:00Z");
+    crate::application::collect::sweep_op(&built, json!({"project": "acme"})).unwrap();
+    assert!(
+        !backlog_numbers(&built).contains(&42),
+        "a closed issue is not backlog"
+    );
+
+    let Built::StepSequential(ctx) = &built else {
+        panic!("expected a step clock");
+    };
+    let latest = ctx
+        .observed
+        .latest_by_subject(&format!("forge:{FORGEJO_HOST}/acme/Widgets#42"))
+        .unwrap()
+        .expect("the provider's own key scheme names the issue");
+    assert_eq!(crate::decisions::lifecycle_of(&latest), "closed");
 }
