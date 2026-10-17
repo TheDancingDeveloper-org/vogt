@@ -1164,6 +1164,63 @@ mod tests {
         }
     }
 
+    /// The announce runs after a checks collector, and its failure is contained:
+    /// the sweep reports the checks collector ok and does not fail, as Python's
+    /// does (`collect.py`). The seam makes the announce fail; the sweep is the
+    /// thing under test.
+    #[test]
+    fn a_failed_announce_does_not_fail_the_sweep() {
+        use crate::application::ci_watch::seam;
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-collect-announce-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = dir.join("forge-token");
+        std::fs::write(&token, "secret-token\n").unwrap();
+        let mut clock = Some(StepClock::new(moment()));
+        let mut ids = Some(SequentialIds::new(None).unwrap());
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let forged = build_context(
+            VogtConfig {
+                data_dir: dir.clone(),
+                github_token_file: Some(token),
+                ..VogtConfig::default()
+            },
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            clock,
+            ids,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        // No repository, so forge-checks answers with its unsupported receipt
+        // and needs no network: the sweep is offline, and reports the checks.
+        register(&forged, "bare", &dir, None);
+
+        seam::ATTEMPTS.with(|attempts| attempts.set(0));
+        seam::FAIL.with(|fail| fail.set(true));
+        let swept = sweep_op(&forged, json!({"collectors": ["forge-checks"]}));
+        seam::FAIL.with(|fail| fail.set(false));
+
+        let swept = swept.expect("a failed announce does not fail the sweep");
+        assert_eq!(
+            seam::ATTEMPTS.with(std::cell::Cell::get),
+            1,
+            "announced once"
+        );
+        let reports = swept["reports"].as_array().unwrap();
+        let checks = reports
+            .iter()
+            .find(|report| report["collector"] == "forge-checks")
+            .unwrap_or_else(|| panic!("forge-checks reported: {swept}"));
+        assert_eq!(checks["outcome"], "ok", "{checks}");
+    }
+
     /// A configured lane is swept with the rest: its collector runs over the
     /// lane's project and reports one observation, with no receipt, no version
     /// endpoint and no forge to read.
