@@ -17,7 +17,23 @@ use serde::{Deserialize, Serialize};
 ///
 /// `scripts/gen_registry.py` reads this list to decide which schemas to
 /// record, so a name added here stops being recorded on the next regeneration.
-pub const DERIVED: &[&str] = &["init", "migrate", "observations.prune", "user.remove"];
+pub const DERIVED: &[&str] = &[
+    "init",
+    "migrate",
+    "observations.prune",
+    "user.remove",
+    "chat.list",
+    "chat.get",
+    "chat.create",
+    "chat.send",
+    "chat.decide",
+    "chat.set_model",
+    "chat.interrupt",
+    "chat.archive",
+    "chat.promote",
+];
+
+mod chat;
 
 /// `(operation name, params schema, result schema)` for every name in
 /// [`DERIVED`], as `registry::dump()` emits them.
@@ -39,6 +55,51 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             schema_of::<RemoveUserParams>(),
             schema_of::<RemoveUserResult>(),
         ),
+        (
+            "chat.list",
+            schema_of::<chat::ChatListParams>(),
+            schema_of::<chat::ChatListResult>(),
+        ),
+        (
+            "chat.get",
+            schema_of::<chat::ChatGetParams>(),
+            schema_of::<chat::ChatDetailResult>(),
+        ),
+        (
+            "chat.create",
+            schema_of::<chat::ChatCreateParams>(),
+            schema_of::<chat::ChatSendResult>(),
+        ),
+        (
+            "chat.send",
+            schema_of::<chat::ChatSendParams>(),
+            schema_of::<chat::ChatSendResult>(),
+        ),
+        (
+            "chat.decide",
+            schema_of::<chat::ChatDecideParams>(),
+            schema_of::<chat::ChatApprovalView>(),
+        ),
+        (
+            "chat.set_model",
+            schema_of::<chat::ChatSetModelParams>(),
+            schema_of::<chat::ChatSummaryView>(),
+        ),
+        (
+            "chat.interrupt",
+            schema_of::<chat::ChatIdParams>(),
+            schema_of::<chat::ChatSummaryView>(),
+        ),
+        (
+            "chat.archive",
+            schema_of::<chat::ChatArchiveParams>(),
+            schema_of::<chat::ChatSummaryView>(),
+        ),
+        (
+            "chat.promote",
+            schema_of::<chat::ChatPromoteParams>(),
+            schema_of::<chat::ChatPromoteResult>(),
+        ),
     ]
 }
 
@@ -50,7 +111,78 @@ fn schema_of<T: JsonSchema>() -> serde_json::Value {
     if let Some(object) = value.as_object_mut() {
         object.remove("$schema");
     }
+    pydantic_shape(&mut value);
     canonical(value)
+}
+
+/// Reshapes `schemars`' output into pydantic's dialect, the one the registry
+/// records: a nullable type is an `anyOf` with `null`, an integer has no
+/// `format`, and every named property and definition has a title. A property
+/// that is a `$ref` gets none, as pydantic's is not titled either, and a
+/// title set on the type stays.
+fn pydantic_shape(value: &mut serde_json::Value) {
+    use serde_json::{json, Value};
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(types)) = map.get("type") {
+                if types.iter().any(|t| t == "null") {
+                    let branches: Vec<Value> = types
+                        .iter()
+                        .filter(|t| *t != "null")
+                        .map(|t| json!({ "type": t }))
+                        .chain(std::iter::once(json!({ "type": "null" })))
+                        .collect();
+                    map.remove("type");
+                    map.insert("anyOf".into(), Value::Array(branches));
+                }
+            }
+            if let Some(Value::String(format)) = map.get("format") {
+                if format.starts_with("int") || format.starts_with("uint") {
+                    map.remove("format");
+                }
+            }
+            if let Some(Value::Object(definitions)) = map.get_mut("$defs") {
+                for (name, schema) in definitions.iter_mut() {
+                    if let Value::Object(definition) = schema {
+                        definition
+                            .entry("title")
+                            .or_insert_with(|| Value::String(name.clone()));
+                    }
+                }
+            }
+            if let Some(Value::Object(properties)) = map.get_mut("properties") {
+                for (name, schema) in properties.iter_mut() {
+                    if let Value::Object(property) = schema {
+                        if !property.contains_key("$ref") && !property.contains_key("title") {
+                            property.insert("title".into(), Value::String(pydantic_title(name)));
+                        }
+                    }
+                }
+            }
+            for child in map.values_mut() {
+                pydantic_shape(child);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(pydantic_shape),
+        _ => {}
+    }
+}
+
+/// `str.title()` of a snake-case field name, as pydantic titles a field.
+fn pydantic_title(name: &str) -> String {
+    name.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first
+                    .to_uppercase()
+                    .chain(chars.as_str().to_lowercase().chars())
+                    .collect(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
 }
 
 /// Sorts the keys of every schema node, as pydantic's dump does, and keeps
@@ -95,7 +227,7 @@ fn keep_order(value: serde_json::Value) -> serde_json::Value {
 /// `int` in Python is `"type": "integer"` with no format. `schemars` would
 /// add `"format": "int64"` or `"uint32"` to a Rust integer, which pydantic
 /// does not emit, so every integer field names this instead.
-fn integer(_: &mut SchemaGenerator) -> Schema {
+pub(super) fn integer(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "integer" })
 }
 
