@@ -58,6 +58,7 @@ gain tests; it does not move down.
 | test_diagnostics.py | ported | Instance diagnostics service. |
 | test_dispatch.py | unported | Dispatch profiles as data (WI-1323, migration 0024 path). Owner WI-1058. |
 | test_drift.py | ported | `application/drift.rs`. |
+| test_engine_image_core.py | retired | Static checks on `engine/Dockerfile` and `engine/deploy/entrypoint.sh` (WI-1078). Engine image, not the core crate. |
 | test_engine_parity.py | retired | Rust engine wire parity. Owned by `engine/server` tests, not `engine/core`. |
 | test_fake_agent.py | retired | `scripts/fake-agent` test double for the engine. Not product behaviour. |
 | test_forge_accounts.py | ported | `adapters/forge/accounts.rs` and the forge-account service. |
