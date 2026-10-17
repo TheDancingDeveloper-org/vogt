@@ -89,14 +89,30 @@ describe("A: a failed stream retry does not wake the app", () => {
     expect(wakes).toEqual(["sse-reconnect"]);
   });
 
-  it("does not wake for a blip shorter than the gap threshold", async () => {
+  it("wakes once when the stream reopens after a blip, however short", async () => {
+    // Events sent during a short drop are lost as surely as in a long one, so
+    // the reopen reads the lists again. The failed retries stay silent.
     startEventStream();
     open();
     fail();
     await vi.advanceTimersByTimeAsync(1_000);
     open();
     await vi.advanceTimersByTimeAsync(250);
-    expect(wakes).toEqual([]);
+    expect(wakes).toEqual(["sse-reconnect"]);
+  });
+});
+
+describe("C: a stream torn down on focus is read again when it reopens", () => {
+  it("wakes once when a quiet stream is reopened on focus", async () => {
+    startEventStream();
+    open();
+    await vi.advanceTimersByTimeAsync(21_000);
+    noteForeground("focus");
+    await vi.advanceTimersByTimeAsync(250);
+    // The forced reconnect is a drop too: events sent while it was down are lost.
+    open();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(wakes.filter((reason) => reason === "sse-reconnect")).toEqual(["sse-reconnect"]);
   });
 });
 
