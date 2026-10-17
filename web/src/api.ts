@@ -332,13 +332,13 @@ async function req<T>(
 export async function validateCredentials(
   token: string,
   base: string,
-): Promise<OperationalStatus> {
-  if (isDemoMode()) return api.operationalStatus();
+): Promise<AuthCheck> {
+  if (isDemoMode()) return api.authCheck();
   const candidateToken = token.trim();
   const candidateBase = base.trim().replace(/\/+$/, "");
   if (!candidateToken) throw new ApiError(401, "Bearer token is required");
 
-  const res = await runtimeTransport().request(`${candidateBase}/api/status`, {
+  const res = await runtimeTransport().request(`${candidateBase}/api/auth/check`, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${candidateToken}`,
@@ -350,8 +350,21 @@ export async function validateCredentials(
   // the reader has just typed, so a 401 here is that form's answer and not a
   // statement about the session. Reporting it would sign the reader out of a
   // working session for mistyping a token into Settings.
+  if (res.status === 404) {
+    const fallback = await runtimeTransport().request(`${candidateBase}/api/status`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${candidateToken}`,
+        Accept: "application/json",
+      },
+    });
+    const fallbackText = await fallback.text();
+    if (!fallback.ok) throw new ApiError(fallback.status, fallbackText);
+    const status = JSON.parse(fallbackText) as OperationalStatus;
+    return { ok: true, version: status.version, product_version: status.product_version, storage: status.storage };
+  }
   if (!res.ok) throw new ApiError(res.status, text);
-  return JSON.parse(text) as OperationalStatus;
+  return JSON.parse(text) as AuthCheck;
 }
 
 export interface FileEntry {
@@ -694,6 +707,7 @@ export const api = {
   deleteSession: (id: string) =>
     req<OkResponse>("DELETE", `/api/sessions/${id}`),
   health: () => req<OkResponse>("GET", "/healthz"),
+  authCheck: () => req<AuthCheck>("GET", "/api/auth/check"),
 
   listDir: (path = "") =>
     req<FileEntry[]>("GET", `/api/dir?path=${encodeURIComponent(path)}`),
@@ -1099,6 +1113,13 @@ export interface OperationalStatus {
     state_dir: string;
     workspace_root: string;
   };
+}
+
+export interface AuthCheck {
+  ok: boolean;
+  version: string;
+  product_version?: string;
+  storage: { state_dir: string; workspace_root: string };
 }
 
 export interface GuiProc {

@@ -248,6 +248,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/assistant/stt", post(assistant_speech::stt))
         .route("/api/assistant/tts", post(assistant_speech::tts))
         .route("/api/events", get(api::events_stream))
+        .route("/api/auth/check", get(api::auth_check))
         .route("/api/status", get(api::operational_status))
         .route("/api/files", get(files::read_file).put(files::write_file))
         .route("/api/files/op", post(files::operate))
