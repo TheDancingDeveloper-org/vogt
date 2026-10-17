@@ -229,6 +229,22 @@ fn check_value(
     value: Value,
     root: &Value,
 ) -> Result<Value, Vec<FieldError>> {
+    // A union of several value types (`int | str | None`) accepts the value if
+    // any branch does, as pydantic's smart mode does. The first branch's error
+    // is the one reported when none does.
+    let value_branches = union_value_branches(property);
+    if value_branches.len() > 1 && !value.is_null() {
+        let mut first_error = None;
+        for branch in value_branches {
+            match check_value(operation, location, branch, value.clone(), root) {
+                Ok(checked) => return Ok(checked),
+                Err(errors) => {
+                    first_error.get_or_insert(errors);
+                }
+            }
+        }
+        return Err(first_error.unwrap_or_default());
+    }
     let (schema, nullable) = match nullable_branch(property) {
         Some(schema) => (schema, true),
         None => (property, false),
@@ -332,6 +348,18 @@ fn stamp(problems: &[FieldError], input: &Value) -> Vec<FieldError> {
     problems
         .iter()
         .map(|problem| finish(problem, input))
+        .collect()
+}
+
+/// The non-null branches of an `anyOf` union, in the order pydantic declares
+/// them. Empty when the property is not a union.
+fn union_value_branches(property: &Value) -> Vec<&Value> {
+    let Some(branches) = property.get("anyOf").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    branches
+        .iter()
+        .filter(|branch| branch.get("type").and_then(Value::as_str) != Some("null"))
         .collect()
 }
 
@@ -1053,6 +1081,15 @@ mod tests {
                 .contains("extra\n  Extra inputs are not permitted"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_wait_cursor_is_a_seq_or_now() {
+        let now = prepare("session.wait_any", serde_json::json!({"cursor": "now"})).unwrap();
+        assert_eq!(now["cursor"], "now");
+        let seq = prepare("session.wait_any", serde_json::json!({"cursor": "7"})).unwrap();
+        assert_eq!(seq["cursor"], 7);
+        assert!(prepare("session.wait_any", serde_json::json!({"cursor": "later"})).is_err());
     }
 
     #[test]
