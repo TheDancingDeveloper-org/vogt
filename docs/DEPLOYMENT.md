@@ -535,19 +535,17 @@ run under a lock. Read [`SCHEMA.md`](SCHEMA.md) before a major version.
 
 **The stack image's CLI is the Rust core.** On the stack image's PATH, `vogt`,
 `vogt-core` and `vogt-mcp-remote` are one binary, `vogt-core`, built from
-`engine/core` in the same build (WI-1078). It answers `init` (with `--check`)
-and `serve`, plus the global `--json` and `--data-dir`. There is no Python
-`vogt` in the stack image, so these Python commands are not in it: `status`,
-`migrate`, `registry`, `diagnostics`, `engine`, `place`, `connect`, `mcp`,
-`project`, `work`, `board`, `backlog`, `bugs`, `why`, `label`, `initiative`,
-`actor`, `workflow`, `sweep`, `coverage`, `observations`, `deps`, `suppress`,
-`suppression`, `contract`, `compliance`, `drift`, `session`, `decision`,
-`agent-cli`, `agent-activity`, `token`, `auth`, `user`, `backup`, `restore`,
-`clone`, `export`, `import`, `forge`, `events`, `notifications`,
-`deployed-versions`, `inbox`, `preference`, `chat`, `audit`. `vogt-mcp` is the
-engine's own stdio script, not the Python `mcp` command. Run those commands
-against the Python core image (the root `Dockerfile`, published until I7), or
-use the API and MCP endpoints.
+`engine/core` in the same build (WI-1078). Besides `init` (with `--check`) and
+`serve`, `vogt` carries the registry's CLI: the admin verbs `status`,
+`token issue`, `user create`, `backup`, `restore`, `migrate`, `project import`
+and `project register`, and the rest of the commands the Python CLI had
+(`work`, `session`, `forge`, `export`, `import`, `clone`, ...), with the same
+global `--json` and `--data-dir`. Run them in the container that holds the
+store, for example `docker exec <stack> vogt token issue ...`. Three commands
+are bound but not yet ported, and answer with a "not available" error rather
+than an empty success: `diagnostics`, `engine status` and `connect`. Use the
+API and MCP endpoints for those. `vogt-mcp` is the engine's own stdio script,
+not the `mcp` command.
 
 **Upgrade.**
 
