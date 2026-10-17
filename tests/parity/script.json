@@ -1338,6 +1338,133 @@
         "consolidate": true
       }
     }
+  },
+  {
+    "operation": "decision.ask",
+    "params": {
+      "question": "Merge the branch?",
+      "options": [
+        {
+          "label": "Merge",
+          "description": "land it now",
+          "recommended": true
+        },
+        {
+          "label": "Hold",
+          "description": "wait for the review"
+        }
+      ],
+      "context": "CI is green.",
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 0
+    },
+    "why": "a person-run ask records the asker as the person; the id is the first dec_ issued"
+  },
+  {
+    "operation": "decision.ask",
+    "params": {
+      "question": "Ship the release?",
+      "options": [
+        {
+          "label": "Ship",
+          "recommended": true
+        },
+        {
+          "label": "Wait"
+        }
+      ],
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "decision.list",
+    "params": {},
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "decision.list",
+    "params": {
+      "state": "pending"
+    },
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "inbox.list",
+    "params": {},
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "decision.answer",
+    "params": {
+      "id": "dec_0001",
+      "label": "Merge",
+      "note": "reviewed",
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "decision.answer",
+    "params": {
+      "id": "dec_0001",
+      "label": "Hold",
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 1
+    },
+    "why": "an answered decision is no longer pending"
+  },
+  {
+    "operation": "decision.answer",
+    "params": {
+      "id": "dec_0002",
+      "label": "Deploy",
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 1
+    },
+    "why": "the label must be one the decision offers"
+  },
+  {
+    "operation": "decision.withdraw",
+    "params": {
+      "id": "dec_0002",
+      "reason": "parity harness"
+    },
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "decision.list",
+    "params": {
+      "state": "answered"
+    },
+    "expect": {
+      "exit": 0
+    }
+  },
+  {
+    "operation": "inbox.list",
+    "params": {},
+    "expect": {
+      "exit": 0
+    }
   }
  ]
 }

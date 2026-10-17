@@ -646,9 +646,7 @@ where
     }
 
     // Decisions waiting for a person (WI-1321): one entry per question.
-    for decision in
-        crate::application::services::decisions::pending_decisions(view, now_of(&ctx.clock))?
-    {
+    for decision in crate::application::services::decisions::pending_decisions(view, &ctx.clock)? {
         entries.push(decision_entry(view, &decision)?);
     }
 

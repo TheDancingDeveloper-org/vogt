@@ -16,7 +16,7 @@
 //!   `expired`, computed on read; it cannot be answered, and there is no
 //!   background job.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -120,7 +120,7 @@ fn ask<C: Clock + 'static, I: IdFactory + 'static>(
             reason: reason.clone(),
         };
         txn.insert_decision(&decision)?;
-        outcome(&*txn, &decision, DECISION_ASKED_EVENT, now)
+        outcome(&*txn, &decision, DECISION_ASKED_EVENT, &clock)
     })
 }
 
@@ -159,8 +159,10 @@ fn answer<C: Clock + 'static, I: IdFactory + 'static>(
     let mut write = write_of(ctx);
     let clock = Arc::clone(write.clock());
     audited_write(&mut write, "decision.answer", &reason, |txn, actor| {
+        // Two reads, as Python makes: one to test pending, one to stamp the
+        // answer. The step clock hands out a fresh moment per read.
+        let current = pending(&*txn, &decision.id, now_of(&clock))?;
         let now = now_of(&clock);
-        let current = pending(&*txn, &decision.id, now)?;
         let answered = Decision {
             state: DecisionState::Answered,
             answer: Some(DecisionAnswer {
@@ -172,7 +174,7 @@ fn answer<C: Clock + 'static, I: IdFactory + 'static>(
             ..current
         };
         txn.update_decision(&answered)?;
-        outcome(&*txn, &answered, DECISION_ANSWERED_EVENT, now)
+        outcome(&*txn, &answered, DECISION_ANSWERED_EVENT, &clock)
     })
 }
 
@@ -194,14 +196,13 @@ fn withdraw<C: Clock + 'static, I: IdFactory + 'static>(
     let mut write = write_of(ctx);
     let clock = Arc::clone(write.clock());
     audited_write(&mut write, "decision.withdraw", &reason, |txn, _actor| {
-        let now = now_of(&clock);
-        let current = pending(&*txn, &decision.id, now)?;
+        let current = pending(&*txn, &decision.id, now_of(&clock))?;
         let withdrawn = Decision {
             state: DecisionState::Withdrawn,
             ..current
         };
         txn.update_decision(&withdrawn)?;
-        outcome(&*txn, &withdrawn, DECISION_WITHDRAWN_EVENT, now)
+        outcome(&*txn, &withdrawn, DECISION_WITHDRAWN_EVENT, &clock)
     })
 }
 
@@ -238,33 +239,36 @@ fn list<C: Clock + 'static, I: IdFactory + 'static>(
         },
         None => None,
     };
-    let now = now_of(&ctx.clock);
     let rows = view.list_decisions(
         stored_state,
         work_item_id.as_deref(),
         asker_id.as_deref(),
         limit,
     )?;
+    // One clock read per row, before the state filter, as Python's list.
     let mut views = Vec::new();
-    for row in rows {
-        if matches!(state.as_deref(), Some("pending" | "expired"))
-            && Some(row.effective_state(now).as_str()) != state.as_deref()
-        {
-            continue;
-        }
-        views.push(view_of(&view, &row, now)?);
+    for row in &rows {
+        views.push(view_of(&view, row, now_of(&ctx.clock))?);
+    }
+    if matches!(state.as_deref(), Some("pending" | "expired")) {
+        views.retain(|found| found["state"].as_str() == state.as_deref());
     }
     Ok(json!({ "decisions": views }))
 }
 
 /// What the Inbox shows: every decision still waiting for a person, newest
 /// first. Ports `pending_decisions` in the Python service.
-pub fn pending_decisions(view: &impl ReadView, now: Moment) -> Result<Vec<Decision>, VogtError> {
-    Ok(view
-        .list_decisions(Some("pending"), None, None, INBOX_PENDING_LIMIT)?
-        .into_iter()
-        .filter(|decision| decision.effective_state(now) == "pending")
-        .collect())
+pub fn pending_decisions<C: Clock>(
+    view: &impl ReadView,
+    clock: &Arc<Mutex<C>>,
+) -> Result<Vec<Decision>, VogtError> {
+    let mut pending = Vec::new();
+    for decision in view.list_decisions(Some("pending"), None, None, INBOX_PENDING_LIMIT)? {
+        if decision.effective_state(now_of(clock)) == "pending" {
+            pending.push(decision);
+        }
+    }
+    Ok(pending)
 }
 
 // -- helpers -----------------------------------------------------------------
@@ -305,14 +309,16 @@ fn pending(txn: &impl ReadView, id: &str, now: Moment) -> Result<Decision, VogtE
     Ok(current)
 }
 
-fn outcome(
+/// The write's outcome. Reads the clock for the view, as Python's `_view` does:
+/// the step clock advances per read, so the count is part of the parity.
+fn outcome<C: Clock>(
     txn: &impl ReadView,
     decision: &Decision,
     event: &str,
-    now: Moment,
+    clock: &Arc<Mutex<C>>,
 ) -> Result<WriteOutcome<Value>, VogtError> {
     Ok(WriteOutcome {
-        result: json!({ "decision": view_of(txn, decision, now)? }),
+        result: json!({ "decision": view_of(txn, decision, now_of(clock))? }),
         entity_kind: "decision".to_string(),
         entity_id: decision.id.clone(),
         payload: serde_json::to_value(decision).unwrap_or(Value::Null),
