@@ -636,6 +636,54 @@ fn forge_import_clones_registers_and_consolidates_under_the_file_token() {
     );
 }
 
+/// The display-name override names the project and derives its slug; the
+/// repository it clones is still the one the owner and name address.
+#[test]
+fn forge_import_takes_a_display_name_override() {
+    let standin = StandInForge::one_of_each();
+    let built = with_clone_and_push_seams(with_token_on(&standin));
+
+    let imported = forge_import::import_op(
+        &built,
+        json!({
+            "owner": "acme",
+            "name": "widget",
+            "display_name": "My Widget",
+            "reason": "import it",
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(imported["project"]["name"], "My Widget", "{imported}");
+    assert_eq!(imported["project"]["slug"], "my-widget", "{imported}");
+    assert_eq!(
+        imported["project"]["repo_url"],
+        "https://github.com/acme/widget"
+    );
+}
+
+/// After an import the project is linked, so `forge.writeback`'s policy setter
+/// operates on it.
+#[test]
+fn an_imported_project_takes_a_write_back_policy() {
+    let standin = StandInForge::one_of_each();
+    let built = with_clone_and_push_seams(with_token_on(&standin));
+    let imported = forge_import::import_op(
+        &built,
+        json!({"owner": "acme", "name": "widget", "reason": "import it"}),
+    )
+    .unwrap();
+    let slug = imported["project"]["slug"].as_str().unwrap().to_owned();
+
+    let armed = forge_writeback::writeback_op(
+        &built,
+        json!({"project": slug, "policy": "full", "reason": "arm it"}),
+    )
+    .unwrap();
+
+    assert_eq!(armed["project"]["write_back"], "full", "{armed}");
+}
+
 /// Linking a project with open native items opens each one upstream, in order,
 /// and only then records the link. The policy permits the creates, so nothing is
 /// refused.
