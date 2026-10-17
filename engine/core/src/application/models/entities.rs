@@ -225,3 +225,257 @@ pub struct ContributionView {
     #[schemars(schema_with = "number")]
     pub contribution: f64,
 }
+
+// `Literal["incubating", "active", "maintenance", "archived"]` in Python.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum LifecycleState {
+    Incubating,
+    Active,
+    Maintenance,
+    Archived,
+}
+
+// `Literal["compliant", "non_compliant", "not_checked", "not_applicable"]`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum ComplianceStatus {
+    Compliant,
+    NonCompliant,
+    NotChecked,
+    NotApplicable,
+}
+
+// `Literal["none", "comment_only", "full"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum WriteBack {
+    None,
+    CommentOnly,
+    Full,
+}
+
+// `Literal["unlinked", "linked"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum LinkState {
+    Unlinked,
+    Linked,
+}
+
+// `Literal["verified", "stale", "unverified", "disputed"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum TrustState {
+    Verified,
+    Stale,
+    Unverified,
+    Disputed,
+}
+
+// `Literal["push_branch", "open_pr"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum WorkerLandsBy {
+    PushBranch,
+    OpenPr,
+}
+
+// `Literal["oversight", "operator"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum MergeBy {
+    Oversight,
+    Operator,
+}
+
+// `Literal["fast_forward", "rebase"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum MergeMode {
+    FastForward,
+    Rebase,
+}
+
+pub(super) fn lifecycle_active() -> LifecycleState {
+    LifecycleState::Active
+}
+
+pub(super) fn compliance_not_checked() -> ComplianceStatus {
+    ComplianceStatus::NotChecked
+}
+
+pub(super) fn write_back_none() -> WriteBack {
+    WriteBack::None
+}
+
+pub(super) fn link_unlinked() -> LinkState {
+    LinkState::Unlinked
+}
+
+pub(super) fn trust_unverified() -> TrustState {
+    TrustState::Unverified
+}
+
+pub(super) fn branch_pattern_default() -> String {
+    "^wi-{n}-[a-z0-9-]+$".to_string()
+}
+
+pub(super) fn operator_default() -> String {
+    "operator".to_string()
+}
+
+pub(super) fn default_true() -> bool {
+    true
+}
+
+pub(super) fn review_template() -> String {
+    "claude".to_string()
+}
+
+pub(super) fn review_model() -> String {
+    "opus".to_string()
+}
+
+pub(super) fn review_effort() -> String {
+    "low".to_string()
+}
+
+pub(super) fn review_budget_turns() -> i64 {
+    40
+}
+
+/// One explicitly registered repository or folder.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Project {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub root_path: String,
+    #[serde(default)]
+    pub repo_url: Option<String>,
+    #[serde(default = "lifecycle_active")]
+    pub lifecycle_state: LifecycleState,
+    #[serde(default)]
+    pub current_version: Option<String>,
+    #[serde(default)]
+    pub contract_version: Option<String>,
+    #[serde(default = "compliance_not_checked")]
+    pub compliance_status: ComplianceStatus,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub compliance_checked_at: Option<String>,
+    #[serde(default)]
+    pub agent_policy: AgentPolicy,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub contract_adopted_at: Option<String>,
+    #[serde(default = "write_back_none")]
+    pub write_back: WriteBack,
+    #[serde(default = "link_unlinked")]
+    pub link_state: LinkState,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub exclusions: Vec<String>,
+    #[serde(default = "trust_unverified")]
+    pub trust_state: TrustState,
+    #[schemars(schema_with = "date_time")]
+    pub created_at: String,
+    #[schemars(schema_with = "date_time")]
+    pub updated_at: String,
+}
+
+/// A project's agent policy, stored as data and shown in every session brief.
+///
+/// `forbidden_text` and `merge_deploys_prod` are the two facts the session
+/// hooks refuse on. `landing`, `review` and `verification` are recorded so
+/// the brief can state them; nothing enforces them yet. Everything else is
+/// guidance the brief carries and nothing enforces: compliance stays a fact
+/// to read, never a precondition.
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPolicy {
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub forbidden_text: Vec<String>,
+    #[serde(default)]
+    pub merge_deploys_prod: bool,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub main_branches: Vec<String>,
+    #[serde(default)]
+    pub base_branch: String,
+    #[serde(default)]
+    pub commit_identity: String,
+    #[serde(default)]
+    pub test_recipe: String,
+    #[serde(default)]
+    pub deployed_setup: String,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub rules: Vec<String>,
+    #[serde(default)]
+    pub session_wall_clock_minutes: Option<i64>,
+    #[serde(default)]
+    pub landing: Option<LandingPolicy>,
+    #[serde(default)]
+    pub review: Option<ReviewPolicy>,
+    #[serde(default)]
+    pub verification: Option<VerificationPolicy>,
+}
+
+/// How a worker's branch is cut and landed on this project.
+///
+/// Recorded so a brief can state the rule and, later, so the engine can
+/// enforce it. Nothing here is enforced yet: a later item reads it.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LandingPolicy {
+    pub base_branch: String,
+    #[serde(default = "branch_pattern_default")]
+    pub branch_pattern: String,
+    pub worker_lands_by: WorkerLandsBy,
+    pub merge_by: MergeBy,
+    pub merge_mode: MergeMode,
+    #[serde(default = "default_true")]
+    pub linear_history: bool,
+    #[serde(default = "operator_default")]
+    pub deploy_by: String,
+}
+
+/// How a review of this project's work is run. Guidance until enforced.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewPolicy {
+    #[serde(default = "review_template")]
+    pub template: String,
+    #[serde(default = "review_model")]
+    pub model: String,
+    #[serde(default = "review_effort")]
+    pub effort: String,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub never_models: Vec<String>,
+    #[serde(default = "review_budget_turns")]
+    pub budget_turns: i64,
+}
+
+/// Whether closing an item needs a verification record, and where.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationPolicy {
+    #[serde(default)]
+    pub required_for_done: bool,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub lanes: Vec<String>,
+}

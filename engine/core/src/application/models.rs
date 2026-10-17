@@ -35,6 +35,13 @@ pub const DERIVED: &[&str] = &[
     "contract.adopt",
     "contract.decline",
     "project.scaffold",
+    "project.register",
+    "project.create",
+    "project.import",
+    "project.get",
+    "project.list",
+    "project.update",
+    "project.transition",
     "forge.account_unlink",
     "forge.account_link",
     "forge.account_status",
@@ -162,6 +169,41 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "project.scaffold",
             schema_of::<project::ScaffoldProjectParams>(),
             schema_of::<project::ScaffoldProjectResult>(),
+        ),
+        (
+            "project.register",
+            schema_of::<project::RegisterProjectParams>(),
+            schema_of::<project::ProjectResult>(),
+        ),
+        (
+            "project.create",
+            schema_of::<project::CreateProjectParams>(),
+            schema_of::<project::CreateProjectResult>(),
+        ),
+        (
+            "project.import",
+            schema_of::<project::ImportProjectParams>(),
+            schema_of::<project::ImportProjectResult>(),
+        ),
+        (
+            "project.get",
+            schema_of::<project::GetProjectParams>(),
+            schema_of::<project::ProjectResult>(),
+        ),
+        (
+            "project.list",
+            schema_of::<project::ListProjectsParams>(),
+            schema_of::<project::ProjectListResult>(),
+        ),
+        (
+            "project.update",
+            schema_of::<project::UpdateProjectParams>(),
+            schema_of::<project::ProjectResult>(),
+        ),
+        (
+            "project.transition",
+            schema_of::<project::TransitionProjectParams>(),
+            schema_of::<project::ProjectResult>(),
         ),
         (
             "forge.account_unlink",
@@ -368,7 +410,8 @@ fn pydantic_shape(value: &mut serde_json::Value) {
                         // `default_factory=list` records no default, where
                         // serde's `default` always does: an empty-list default
                         // is that factory, so it is dropped.
-                        if property.get("default") == Some(&json!([])) {
+                        let keep_default = property.remove("x-keep-default").is_some();
+                        if !keep_default && property.get("default") == Some(&json!([])) {
                             property.remove("default");
                         }
                         if !refers_to_definition(property) && !property.contains_key("title") {
@@ -435,6 +478,7 @@ fn nullable_as_any_of(map: &mut serde_json::Map<String, serde_json::Value>) {
         "minimum",
         "maximum",
         "format",
+        "items",
     ] {
         if let Some(value) = map.remove(key) {
             branch.insert(key.to_string(), value);
@@ -475,10 +519,12 @@ fn canonical(value: serde_json::Value) -> serde_json::Value {
             let mut entries: Vec<(String, Value)> = map
                 .into_iter()
                 .map(|(key, child)| {
-                    let child = if key == "properties" {
-                        keep_order(child)
-                    } else {
-                        canonical(child)
+                    // A `default` is a value, not a schema: it keeps the order
+                    // serde serialised it in, which is the declaration order.
+                    let child = match key.as_str() {
+                        "properties" => keep_order(child),
+                        "default" => child,
+                        _ => canonical(child),
                     };
                     (key, child)
                 })
