@@ -411,3 +411,125 @@ fn an_onboarded_issue_is_one_backlog_row() {
     );
     assert_eq!(refs.len(), 3);
 }
+
+// -- parity regressions the core does not yet meet ---------------------------
+//
+// These pin behaviour the Python core has and the Rust core does not. They are
+// ignored, not deleted, so the gap stays visible in the test run. Each one
+// names the work item that owns the fix; the item is not filed yet (see the
+// disposition row), so the reason names the review instead.
+
+#[test]
+#[ignore = "parity: the board lists declared rows only, so an upstream-only issue is missing (WI-1745 review blocker 1; work item not filed yet)"]
+fn board_lists_an_upstream_only_issue_once() {
+    let (built, _) = forgejo_with(three_issues(), true);
+    onboard(&built);
+    adopt(&built, &subject(1));
+    adopt(&built, &subject(2));
+
+    let board = board_list_op(
+        &built,
+        json!({
+            "project": SLUG,
+            "lane_mode": "none",
+            "cells": [{"lane_key": "", "state": "open"}],
+            "page_size": 10,
+        }),
+    )
+    .unwrap();
+    assert_eq!(board["total"], 3, "{board}");
+}
+
+#[test]
+#[ignore = "parity: page one carries no next_cursor and the cursor is not honoured on page two (WI-1745 review blocker 1; work item not filed yet)"]
+fn the_board_pages_with_stable_cursors() {
+    let (built, _) = forgejo_with(three_issues(), true);
+    onboard(&built);
+    for number in 1..=3 {
+        adopt(&built, &subject(number));
+    }
+
+    let first = board_list_op(
+        &built,
+        json!({
+            "project": SLUG,
+            "lane_mode": "none",
+            "cells": [{"lane_key": "", "state": "open"}],
+            "page_size": 2,
+        }),
+    )
+    .unwrap();
+    let cursor = first["cells"][0]["next_cursor"].clone();
+    assert!(cursor.is_string(), "{first}");
+
+    let second = board_list_op(
+        &built,
+        json!({
+            "project": SLUG,
+            "lane_mode": "none",
+            "cells": [{"lane_key": "", "state": "open", "cursor": cursor}],
+            "page_size": 2,
+        }),
+    )
+    .unwrap();
+    let first_refs: Vec<&str> = first["cells"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["ref"].as_str())
+        .collect();
+    let second_refs: Vec<&str> = second["cells"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["ref"].as_str())
+        .collect();
+    assert_eq!(second_refs.len(), 1, "{second}");
+    assert!(
+        second_refs
+            .iter()
+            .all(|reference| !first_refs.contains(reference)),
+        "page two must not repeat page one: {first_refs:?} / {second_refs:?}"
+    );
+    assert!(second["cells"][0]["next_cursor"].is_null(), "{second}");
+}
+
+#[test]
+#[ignore = "parity: title and body edits on an adopted item are accepted locally, Python refuses them as upstream truth (WI-1745 review blocker 2; work item not filed yet)"]
+fn title_and_body_edits_on_an_adopted_item_are_refused() {
+    let (built, _) = forgejo_with(four_issues(), true);
+    onboard(&built);
+    let reference = adopt(&built, &subject(9));
+
+    for edit in [json!({"title": "New"}), json!({"body": "New"})] {
+        let mut params = json!({"ref": reference, "reason": WHY});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(edit.as_object().unwrap().clone());
+        match update_op(&built, params) {
+            Err(VogtError::InvalidRequest(message)) => {
+                assert!(message.contains("upstream truth"), "{message}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[ignore = "parity: label removal on an adopted item is accepted, Python refuses it as append-only (WI-1745 review blocker 2; work item not filed yet)"]
+fn a_label_removal_on_an_adopted_item_is_refused() {
+    let (built, _) = forgejo_with(four_issues(), true);
+    onboard(&built);
+    let reference = adopt(&built, &subject(9));
+
+    match update_op(
+        &built,
+        json!({"ref": reference, "remove_labels": ["bug"], "reason": WHY}),
+    ) {
+        Err(VogtError::InvalidRequest(message)) => {
+            assert!(message.contains("append-only"), "{message}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
