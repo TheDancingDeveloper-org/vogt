@@ -487,10 +487,11 @@ fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
                     ("declared_schema_version", outcome.declared.version.into()),
                     ("observed_schema_version", outcome.observed.version.into()),
                     ("migrations_applied", applied.into()),
-                    // Rust does not mint or adopt bootstrap tokens, so both stay
-                    // at the default Python reports when neither file is set.
-                    ("bootstrap_core_token", "not_configured".into()),
-                    ("bootstrap_agent_token", "not_configured".into()),
+                    ("bootstrap_core_token", outcome.bootstrap_core_token.into()),
+                    (
+                        "bootstrap_agent_token",
+                        outcome.bootstrap_agent_token.into(),
+                    ),
                 ]
                 .into_iter()
                 .map(|(key, value)| (key.to_string(), value))
