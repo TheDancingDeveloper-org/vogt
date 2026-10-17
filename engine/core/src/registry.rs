@@ -213,6 +213,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "bugs" => Some(crate::application::views::bugs_op),
         "work.list" => Some(crate::application::services::work::list_op),
         "work.get" => Some(crate::application::services::work::get_op),
+        "work.get_many" => Some(crate::application::services::work::get_many_op),
         "work.create" => Some(crate::application::services::work::create_op),
         "work.update" => Some(crate::application::services::work::update_op),
         "work.comment" => Some(crate::application::services::work::comment_op),

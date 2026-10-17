@@ -140,7 +140,7 @@ gain tests; it does not move down.
 | test_upstream_truth.py | ported | Upstream-truth overlay in `application/upstream.rs` and the work service. |
 | test_view_paging.py | ported | Ranked backlog and bugs paging in `application/views.rs`. |
 | test_voice_capabilities.py | retired | Voice sidecar policy. `voice/` is a separate workspace. |
-| test_work_get_many.py | unported | `work.get_many` batched chip read (WI-1224). Owner WI-1068. |
+| test_work_get_many.py | ported | `work.get_many` batched chip read (WI-1224). Owner WI-1068. |
 | test_workflow.py | ported | Workflow machines in `decisions.rs`. |
 | test_workspace_disk.py | unported | Workspace-volume row on engine status and sweep (WI-1304). Owner WI-1066. |
 | test_writes.py | ported | `application/writes_test.rs`. |
