@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::core::{
     default_workflow, from_iso, to_iso, Actor, ActorKind, ActorPreference, AuditRecord,
-    AuthDecision, Clock, CodingSession, Comment, ContractExemption, DriftProposal, Event,
+    AuthDecision, Clock, CodingSession, Comment, ContractExemption, Decision, DriftProposal, Event,
     ForgeAccount, IdFactory, InboxTriage, Initiative, InitiativeState, Label, Moment,
     PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression, Token,
     WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackAction, WriteBackOutcome, WriteBackRecord,
@@ -1332,6 +1332,49 @@ impl ReadView for SqliteReadView {
             row_session_grant,
         )
     }
+    fn decision(&self, decision_id: &str) -> Result<Option<Decision>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT * FROM decisions WHERE id = ?",
+            [decision_id],
+            row_decision,
+        )
+    }
+    fn list_decisions(
+        &self,
+        state: Option<&str>,
+        work_item_id: Option<&str>,
+        asker_actor_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Decision>, VogtError> {
+        let mut clauses: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        for (column, value) in [
+            ("state", state),
+            ("work_item_id", work_item_id),
+            ("asker_actor_id", asker_actor_id),
+        ] {
+            if let Some(value) = value {
+                clauses.push(format!("{column} = ?"));
+                params.push(Box::new(value.to_string()));
+            }
+        }
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", clauses.join(" AND "))
+        };
+        params.push(Box::new(limit));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        many(
+            &self.conn,
+            &format!(
+                "SELECT * FROM decisions {where_sql}ORDER BY created_at DESC, id DESC LIMIT ?"
+            ),
+            refs.as_slice(),
+            row_decision,
+        )
+    }
     fn list_sessions(
         &self,
         project_id: Option<&str>,
@@ -1635,6 +1678,18 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
         c: i64,
     ) -> Result<Vec<SessionGrant>, VogtError> {
         self.view.list_session_grants(a, b, c)
+    }
+    fn decision(&self, a: &str) -> Result<Option<Decision>, VogtError> {
+        self.view.decision(a)
+    }
+    fn list_decisions(
+        &self,
+        a: Option<&str>,
+        b: Option<&str>,
+        c: Option<&str>,
+        d: i64,
+    ) -> Result<Vec<Decision>, VogtError> {
+        self.view.list_decisions(a, b, c, d)
     }
     fn list_sessions(
         &self,
@@ -2244,6 +2299,27 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .map(|_| ())
             .map_err(sql_err)
     }
+    fn insert_decision(&mut self, decision: &Decision) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO decisions (id, asker_actor_id, asker_session, work_item_id, question, options_json, context, state, answer_json, answered_by_actor_id, created_at, answered_at, expires_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                decision.id, decision.asker_actor_id, decision.asker_session, decision.work_item_id,
+                decision.question, decision_options_json(decision), decision.context,
+                vocab_text(decision.state), decision_answer_json(decision),
+                decision.answered_by_actor_id, to_iso(decision.created_at),
+                decision.answered_at.map(to_iso), to_iso(decision.expires_at), decision.reason,
+            ],
+        ).map(|_| ()).map_err(sql_err)
+    }
+    fn update_decision(&mut self, decision: &Decision) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "UPDATE decisions SET state = ?, answer_json = ?, answered_by_actor_id = ?, answered_at = ? WHERE id = ?",
+            params![
+                vocab_text(decision.state), decision_answer_json(decision),
+                decision.answered_by_actor_id, decision.answered_at.map(to_iso), decision.id,
+            ],
+        ).map(|_| ()).map_err(sql_err)
+    }
     fn insert_session_grant(&mut self, grant: &SessionGrant) -> Result<(), VogtError> {
         self.view.conn.execute(
             "INSERT INTO session_grants (id, target_engine_session_id, kind, var, project_id, secret_name, capability, uses, ttl_seconds, reason, requested_by, requested_at, state, decided_by, decided_at, decision_reason, expires_at, revoked_by, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2690,6 +2766,59 @@ fn row_session(row: &Row<'_>) -> rusqlite::Result<CodingSession> {
         reason: row.get("reason")?,
         started_at: moment(row, "started_at")?,
         stopped_at: opt_moment(row, "stopped_at")?,
+    })
+}
+
+fn row_decision(row: &Row<'_>) -> rusqlite::Result<Decision> {
+    let options_text: String = row.get("options_json")?;
+    let options = serde_json::from_str(&options_text).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    let answer = row
+        .get::<_, Option<String>>("answer_json")?
+        .map(|text| {
+            serde_json::from_str(&text).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })
+        })
+        .transpose()?;
+    Ok(Decision {
+        id: row.get("id")?,
+        asker_actor_id: row.get("asker_actor_id")?,
+        asker_session: row.get("asker_session")?,
+        work_item_id: row.get("work_item_id")?,
+        question: row.get("question")?,
+        options,
+        context: row.get("context")?,
+        state: vocab_cell(row, "state")?,
+        answer,
+        answered_by_actor_id: row.get("answered_by_actor_id")?,
+        created_at: moment(row, "created_at")?,
+        answered_at: opt_moment(row, "answered_at")?,
+        expires_at: moment(row, "expires_at")?,
+        reason: row.get("reason")?,
+    })
+}
+
+/// The options as Python's `json.dumps` writes them, in field order.
+fn decision_options_json(decision: &Decision) -> String {
+    crate::decisions::python_json_dumps(
+        &serde_json::to_value(&decision.options).expect("options are plain data"),
+        false,
+    )
+}
+
+/// The answer as Python's `json.dumps` writes it, or NULL while unanswered.
+fn decision_answer_json(decision: &Decision) -> Option<String> {
+    decision.answer.as_ref().map(|answer| {
+        crate::decisions::python_json_dumps(
+            &serde_json::to_value(answer).expect("an answer is plain data"),
+            false,
+        )
     })
 }
 

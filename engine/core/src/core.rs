@@ -1611,6 +1611,70 @@ impl SessionGrant {
     }
 }
 
+vocab!(DecisionState {
+    Pending,
+    Answered,
+    Withdrawn
+});
+
+/// One answer a decision offers. Exactly one per decision is recommended.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub recommended: bool,
+}
+
+/// The option a person chose, and what they added.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionAnswer {
+    pub label: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// A question an agent put to a person, with options (WI-1321). Shaped like
+/// `SessionGrant`. `expired` is not a state: it is a pending decision past
+/// `expires_at`, computed on read, and it implies no answer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Decision {
+    pub id: String,
+    pub asker_actor_id: String,
+    pub asker_session: Option<String>,
+    pub work_item_id: Option<String>,
+    pub question: String,
+    pub options: Vec<DecisionOption>,
+    #[serde(default)]
+    pub context: String,
+    #[serde(default = "decision_state_default")]
+    pub state: DecisionState,
+    pub answer: Option<DecisionAnswer>,
+    pub answered_by_actor_id: Option<String>,
+    pub created_at: Moment,
+    pub answered_at: Option<Moment>,
+    pub expires_at: Moment,
+    pub reason: String,
+}
+
+impl Decision {
+    /// `expired` for a pending decision past its expiry, else the stored state.
+    pub fn effective_state(&self, now: Moment) -> String {
+        if self.state == DecisionState::Pending && self.expires_at <= now {
+            return "expired".to_string();
+        }
+        self.state.to_string()
+    }
+}
+
+fn decision_state_default() -> DecisionState {
+    DecisionState::Pending
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Label {

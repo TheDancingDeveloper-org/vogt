@@ -392,7 +392,7 @@ fn check_requester<C: Clock, I: IdFactory>(
 }
 
 /// The engine session the calling agent runs in, from its identity.
-fn own_engine_session<C: Clock, I: IdFactory>(
+pub(crate) fn own_engine_session<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
 ) -> Result<Option<String>, VogtError> {
     let reference = &ctx.principal.identity_ref;
