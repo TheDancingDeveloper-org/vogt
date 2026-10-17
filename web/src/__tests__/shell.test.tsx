@@ -29,6 +29,7 @@ import { fireEvent, getConfig, render, waitFor } from "@solidjs/testing-library"
 import App from "../App";
 import { APP_ROUTES } from "../routes";
 import { setToken } from "../api";
+import { DISCONNECT_GRACE_MS } from "../store";
 import { replaceTabs, tabsStore } from "../tabs";
 import {
   fakeVogt,
@@ -503,21 +504,27 @@ describe("shared live steering", () => {
   });
 
   it("keeps the last session values stale when a refresh goes offline", async () => {
+    // The engine goes away as a whole: its stream refuses too. An open stream
+    // is the engine saying the front door is reachable (store.ts), so only a
+    // refused stream lets the refresh's failure read as offline.
     const { container } = mountShell("/sessions", {
       engine: {
         "GET /api/sessions": {
           status: 503,
           body: { error: "session service offline" },
         },
+        "GET /api/events": { status: 503, body: { error: "engine offline" } },
       },
     });
 
+    // "Offline" waits out the disconnect grace period (store.ts), so the
+    // wait has to outlast it rather than the default 1 s.
     await waitFor(() => {
       expect(container.querySelector('.places-nav .place-count[data-state="stale"]')).toBeTruthy();
       expect(container.querySelector('.places-section-label .place-count[data-state="stale"]')).toBeTruthy();
       expect(container.querySelector(".rail-connection.offline .rail-connection-dot")).toBeTruthy();
       expect(container.textContent).toContain("Offline");
-    });
+    }, { timeout: Math.max(DISCONNECT_GRACE_MS + 2_000, getConfig().asyncUtilTimeout) });
   });
 
   it("opens, bookmarks, and closes a session entirely from the keyboard", async () => {
