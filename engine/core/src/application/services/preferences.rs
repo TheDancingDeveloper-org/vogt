@@ -69,9 +69,8 @@ where
     let reason = require_string(&params, "reason")?;
 
     let (declared, _, principal, clock, ids, _) = context_parts(ctx);
-    let updated_at = now_of(&clock);
     let mut writing = write_context(declared, principal, Arc::clone(&clock), Arc::clone(&ids));
-    let stored = set_preference(&mut writing, &key, &value, expected, &reason, updated_at)?;
+    let stored = set_preference(&mut writing, &key, &value, expected, &reason, clock)?;
     Ok(stored)
 }
 
@@ -90,7 +89,7 @@ fn set_preference<C: Clock + 'static, I: IdFactory + 'static>(
     value: &Value,
     expected: Option<i64>,
     reason: &str,
-    updated_at: crate::core::Moment,
+    clock: Arc<std::sync::Mutex<C>>,
 ) -> Result<Value, VogtError> {
     let key = key.to_string();
     let value = canonical_value(&key, value)?;
@@ -106,6 +105,9 @@ fn set_preference<C: Clock + 'static, I: IdFactory + 'static>(
                 return Err(VogtError::PreferenceVersionConflict(message));
             }
         }
+        // Read after the conflict check, as Python does: a refused write must
+        // not spend a clock tick that the next write's timestamps would show.
+        let updated_at = now_of(&clock);
         let stored = ActorPreference {
             actor_id: actor.id.clone(),
             key: key.clone(),

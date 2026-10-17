@@ -297,8 +297,16 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
                 );
             }
         }
+        // Python's stdio server dispatches every registry operation by its tool
+        // name, including the local-only ones it does not list. Only the remote
+        // HTTP transport refuses them, so the exposure gate is for that path.
         let operation = match self.registry.by_mcp_tool(name) {
-            Ok(operation) if exposed_over_mcp(self.registry, operation) => operation,
+            Ok(operation)
+                if self.transport == McpTransport::Stdio
+                    || exposed_over_mcp(self.registry, operation) =>
+            {
+                operation
+            }
             Ok(_) | Err(_) => {
                 return match self.transport {
                     McpTransport::Http => error(
@@ -689,16 +697,20 @@ mod tests {
     }
 
     #[test]
-    fn a_local_only_tool_cannot_be_called_either() {
+    fn a_local_only_tool_is_callable_on_stdio_as_python_is() {
+        // Python's stdio server dispatches every registry operation by tool name,
+        // local-only ones included, and only the HTTP transport refuses them. The
+        // call is to `mcp_stdio`, which has no side effect, so the test does not
+        // touch a data directory.
         let response = &responses(&line(json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "init"}
+            "params": {"name": "mcp_stdio", "arguments": {}}
         })))[0];
-        assert_eq!(response["result"]["isError"], true);
-        assert!(response["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("error: internal error"));
+        // The harness has no instance context, so the operation answers its own
+        // refusal. The point is that it ran: a gate would answer "internal error".
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("internal error"), "{text}");
+        assert!(text.contains("mcp.stdio"), "{text}");
     }
 
     #[test]

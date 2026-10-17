@@ -980,6 +980,10 @@ where
             Err(error) => return Err(error),
         },
     };
+    // Python's session list reads the clock once here, after the engine
+    // answers or does not, and before the rows are assembled. The value is
+    // the attention reference; the tick is spent in the same place.
+    let _now = super::now_of(&ctx.clock);
     let mut sessions = rows_of(ctx, params, &live, detail.as_deref())?;
     if params.order == "rss" {
         // Stable: sessions with no sample keep their order, after the

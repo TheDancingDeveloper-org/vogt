@@ -658,7 +658,7 @@ fn forge_writeback_sets_the_policy_on_an_unlinked_project() {
 /// missing provider and a forge that names no identity are one
 /// `InvalidRequest`. The token never appears in the result or the audit.
 #[test]
-fn forge_account_link_checks_the_cipher_first_and_never_echoes_the_token() {
+fn forge_account_link_checks_the_host_then_the_cipher_and_never_echoes_the_token() {
     use crate::application::services::forge_accounts;
 
     let unconfigured = match opened() {
@@ -669,9 +669,11 @@ fn forge_account_link_checks_the_cipher_first_and_never_echoes_the_token() {
         }
         other => other,
     };
+    // A supported host reaches the cipher check: the host is checked first, as
+    // Python's link does, so an unsupported host is refused before the key.
     let refused = forge_accounts::account_link_op(
         &unconfigured,
-        json!({"token": "ghp_secret_value", "reason": "link me"}),
+        json!({"host": "github.com", "token": "ghp_secret_value", "reason": "link me"}),
     );
     match refused {
         Err(VogtError::ForgeAccountsNotConfigured(_)) => {}
@@ -703,13 +705,13 @@ fn forge_account_link_checks_the_cipher_first_and_never_echoes_the_token() {
     };
     let refused = forge_accounts::account_link_op(
         &keyed,
-        json!({"token": "ghp_secret_value", "reason": "link me"}),
+        json!({"host": "github.com", "token": "ghp_secret_value", "reason": "link me"}),
     );
     match refused {
         Err(VogtError::InvalidRequest(message)) => {
             assert_eq!(
                 message,
-                "the forge did not accept this token; nothing was stored"
+                "the forge did not accept this token; it did not return an identity"
             )
         }
         other => panic!("unexpected {other:?}"),

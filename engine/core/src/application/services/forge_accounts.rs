@@ -54,10 +54,11 @@ where
     let token = present_string(&params, "token")?;
     let reason = present_string(&params, "reason")?;
     let (_, _, _, _, _, config) = context_parts(ctx);
-    // The cipher comes first. An unconfigured instance refuses before a
-    // pasted token is ever handed to the forge (forge_accounts.py).
-    let cipher = crate::adapters::forge::load_cipher(config)?;
+    // The host is checked first, then the cipher, as forge_accounts.py does:
+    // an unsupported host is refused before the key is read, and an
+    // unconfigured instance refuses before a pasted token reaches the forge.
     require_supported_host(ctx, &host)?;
+    let cipher = crate::adapters::forge::load_cipher(config)?;
     let provider = crate::adapters::forge::registry::provider_for_token(
         &host,
         &token,
@@ -65,19 +66,17 @@ where
         ctx.forge_transport(),
     )
     .ok_or_else(|| {
-        VogtError::InvalidRequest(format!(
-            "{} has no provider to validate a token against; \
-             configure the host under forge_token_files first",
-            crate::core::py_repr(&host)
-        ))
+        VogtError::InvalidRequest(
+            "the forge did not accept this token; it may be invalid, expired, \
+             or lack the scope to read its own identity"
+                .to_owned(),
+        )
     })?;
-    // Python maps both "no provider" (already refused above) and "the forge
-    // did not name an identity" to one InvalidRequest. A transport error
-    // from identity() stays a GitHubUnavailable, which is what the client
-    // raises when the forge is unreachable.
+    // A transport error from identity() stays a GitHubUnavailable, which is
+    // what the client raises when the forge is unreachable.
     let (login, scopes) = provider.identity()?.ok_or_else(|| {
         VogtError::InvalidRequest(
-            "the forge did not accept this token; nothing was stored".to_owned(),
+            "the forge did not accept this token; it did not return an identity".to_owned(),
         )
     })?;
     let encrypted = cipher.encrypt(

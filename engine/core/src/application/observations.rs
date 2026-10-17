@@ -91,10 +91,8 @@ fn deps<C: Clock, I: IdFactory>(
         .get("project")
         .and_then(Value::as_str)
         .ok_or_else(|| VogtError::InvalidRequest("deps needs a project".to_string()))?;
-    let freshness = crate::application::services::freshness::freshness_of(
-        &ctx.observed,
-        crate::application::services::now_of(&ctx.clock),
-    )?;
+    let freshness =
+        crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?;
     if !ctx.observed.has_evidence_tables()? {
         return Ok(json!({
             "project": slug,
