@@ -501,7 +501,9 @@ pub struct SessionApproval {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionBlocked {
-    pub reason: String,
+    /// What the session is blocked on, in its words. Python's `SessionBlocked`
+    /// names this `blocker`, so the wire does too.
+    pub blocker: String,
     pub items: Vec<String>,
     pub since: Option<String>,
 }
@@ -1181,7 +1183,7 @@ where
             summary
                 .blocked
                 .as_ref()
-                .map(|blocked| blocked.reason.as_str()),
+                .map(|blocked| blocked.blocker.as_str()),
             summary
                 .approval
                 .as_ref()
@@ -2403,7 +2405,7 @@ fn approval_of(approval: &EngineApproval) -> SessionApproval {
 
 fn blocked_of(blocked: &EngineBlocked) -> SessionBlocked {
     SessionBlocked {
-        reason: blocked.reason.clone(),
+        blocker: blocked.reason.clone(),
         items: blocked.items.clone(),
         since: blocked.since.clone(),
     }
