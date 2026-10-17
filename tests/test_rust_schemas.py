@@ -65,6 +65,9 @@ def _python_dump() -> dict[str, Any]:
 def dumps() -> tuple[dict[str, Any], dict[str, Any]]:
     if shutil.which("cargo") is None:
         pytest.skip("cargo is not installed; the Rust registry cannot be dumped")
+    if not (ENGINE / "Cargo.toml").is_file():
+        # The "core alone" CI job deletes engine/. There is no Rust side to compare.
+        pytest.skip("engine/ is absent; the Rust registry cannot be dumped")
     return _rust_dump(), _python_dump()
 
 
