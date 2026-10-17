@@ -53,7 +53,6 @@ def test_public_delivery_defaults_to_the_current_product_release() -> None:
     for path in (
         PUBLIC_COMPOSE,
         PUBLIC_ENV,
-        ENGINE_OVERLAY,
         REPO_ROOT / "docs" / "CUSTOMISATION.md",
         REPO_ROOT / "docs" / "DEPLOYMENT.md",
     ):
@@ -272,13 +271,13 @@ def test_the_engine_overlay_builds_the_engine_and_fronts_the_core() -> None:
     """An overlay states differences only, and this one adds the engine.
 
     No engine image is published, so the overlay always builds one from
-    `engine/Dockerfile`, lifting the published core in via `CORE_IMAGE`; it
-    then proxies to the sibling core by service name rather than running one.
+    `engine/Dockerfile`, which builds its own vogt-core; it then proxies to the
+    sibling core by service name rather than running one.
     """
     overlay = _without_comments(ENGINE_OVERLAY.read_text(encoding="utf-8"))
     assert "engine:" in overlay
     assert "dockerfile: engine/Dockerfile" in overlay
-    assert "CORE_IMAGE:" in overlay
+    assert "CORE_IMAGE" not in overlay, "the engine builds its own core now"
     assert "INSTALL_AI_CLIENTS:" in overlay
     assert "CODEX_VERSION:" in overlay
     assert 'VOGT_CORE_URL: "http://vogt:8000"' in overlay

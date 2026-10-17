@@ -49,9 +49,9 @@ permissions:
   contents: read
 
 env:
-  # The core alone. Built and pushed per commit because the merged image
-  # below copies `/opt/vogt` out of it by digest — a build input, not
-  # a deployment target (DEPLOYMENT.md).
+  # The core alone. Built and pushed per commit until I7 retires the root
+  # Dockerfile. The merged image no longer takes its core from here (WI-1078),
+  # so nothing downstream reads it; it is not a deployment target (DEPLOYMENT.md).
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
   # The product — the Python core *and* the session engine in one container,
   # which is what `deploy/stack.compose.yml` runs and the one supported
@@ -133,10 +133,6 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    # The merged image derives its core from this one by digest, so the
-    # digest has to leave this job rather than being re-derived from a tag.
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -271,9 +267,9 @@ jobs:
           {
             echo "### Built the core from \`${GITHUB_SHA:0:7}\`"
             echo
-            echo "A build input: the merged image job lifts its core from this"
-            echo "digest. This is not the image to pin — pin the *merged* stack"
-            echo "digest reported below."
+            echo "A standalone core image. The stack image no longer takes its"
+            echo "core from this one, so this is not the image to pin: pin the"
+            echo "*merged* stack digest reported below."
             echo
             echo '```'
             echo "${IMAGE}@${DIGEST}"
@@ -615,10 +611,9 @@ jobs:
 
   stack-image:
     name: build and publish the merged image
-    # `needs: image` is not ordering for its own sake: the merged image copies
-    # /opt/vogt out of the core image this run just published, by digest.
-    # `needs: pod-base` supplies the toolchain base it now builds `FROM`.
-    needs: [base-images, pod-base, image]
+    # `needs: pod-base` supplies the toolchain base it now builds `FROM`. The
+    # core-image job is not a dependency: the stack builds its own vogt-core.
+    needs: [base-images, pod-base]
     runs-on: [self-hosted, publish]
     timeout-minutes: 60
     permissions:
@@ -691,7 +686,6 @@ jobs:
         id: push
         env:
           POD_BASE_IMAGE: ${{ needs.pod-base.outputs.image }}
-          CORE_IMAGE: ${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
           VOGT_SOURCE_REF: ${{ github.ref_name }}
           VOGT_SOURCE_SHA: ${{ github.sha }}
           # metadata-action's `labels` output is newline-separated key=value
@@ -712,7 +706,6 @@ jobs:
             # buildx refuses a local write without an explicit entitlement.
             --allow "fs.write=${E2E_DIR}"
             --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
-            --set "*.args.CORE_IMAGE=${CORE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
             --set "*.args.VOGT_PRODUCT_VERSION=0.7.17"
@@ -839,7 +832,7 @@ jobs:
 
   stack-workbench-image:
     name: build and publish the workbench stack image
-    needs: [base-images, pod-base-workbench, image]
+    needs: [base-images, pod-base-workbench]
     runs-on: [self-hosted, publish]
     timeout-minutes: 60
     permissions:
@@ -884,7 +877,6 @@ jobs:
         id: push
         env:
           POD_BASE_IMAGE: ${{ needs.pod-base-workbench.outputs.image }}
-          CORE_IMAGE: ${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
           VOGT_SOURCE_REF: ${{ github.ref_name }}
           VOGT_SOURCE_SHA: ${{ github.sha }}
           LABELS: ${{ steps.meta.outputs.labels }}
@@ -896,7 +888,6 @@ jobs:
             --file .github/workbench-bake.hcl
             --metadata-file "$META_FILE"
             --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
-            --set "*.args.CORE_IMAGE=${CORE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
             --set "*.args.VOGT_PRODUCT_VERSION=0.7.17"

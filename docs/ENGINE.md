@@ -102,16 +102,13 @@ the git routes.
 The merged image is built from the **repository root**, not from `engine/`:
 
 ```bash
-docker build -f engine/Dockerfile \
-  --build-arg CORE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt:latest \
-  -t vogt-engine .
+docker build -f engine/Dockerfile -t vogt-engine .
 ```
 
 The Dockerfile's stages are the PWA bundle, the Rust binary with that bundle
-embedded, the published core image (lifted whole, so the merged image runs
-*the* public core rather than a second build of it — `CORE_IMAGE` defaults to
-the public `:latest` tag as a placeholder for a local build, and CI overrides
-it with a digest), and the runtime. The runtime stage starts `FROM` a
+embedded, and `vogt-core` built beside it from the same source (there is no
+Python core in the image and no `CORE_IMAGE` argument), and the runtime. The
+runtime stage starts `FROM` a
 **dev-pod base** (`engine/Dockerfile.pod`, published as
 `ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean-*`): an Ubuntu image
 carrying the toolchains an agent working *inside* a session is likely to want
@@ -124,9 +121,9 @@ built on it as `vogt-stack-workbench`; nothing in this repository deploys
 that image. It is a
 development pod rather than a hardened service image — it runs as a named
 user with `sudo`, with a writable home — which is why the core image at the
-repository root is a separate build rather than a stage of this one: it is
-the hardened input this image lifts its core from, not something to deploy on
-its own (`DEPLOYMENT.md`).
+repository root is a separate build rather than a stage of this one: it is the
+hardened core-only image, not something to deploy on its own (`DEPLOYMENT.md`).
+The merged image no longer takes its core from it; that image is retired at I7.
 
 Build arguments worth knowing: `INSTALL_AI_CLIENTS=true` bakes in the `claude`
 and `opencode` CLIs at the Renovate-pinned versions in

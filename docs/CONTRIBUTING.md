@@ -173,8 +173,9 @@ VOGT_IMAGE=vogt-core:local docker compose \
   -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d
 ```
 
-`VOGT_IMAGE` names both the core the base runs and the `CORE_IMAGE` the engine
-build lifts into its own image, so one variable points both at your build. The
+`VOGT_IMAGE` names the core the base runs. The engine image builds its own
+`vogt-core` from the same source rather than lifting one, so this variable is
+the only thing to point at your build. The
 engine is then the front door at `http://127.0.0.1:8910`: the PWA at `/`,
 `/api/vogt/*` proxied to the core, `/mcp` for agents, `ENGINE_TOKEN` as the
 bearer. Both containers read the core token from `deploy/vogt-core-token`, so
