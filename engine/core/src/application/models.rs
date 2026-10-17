@@ -31,9 +31,29 @@ pub const DERIVED: &[&str] = &[
     "chat.interrupt",
     "chat.archive",
     "chat.promote",
+    "mcp.stdio",
+    "contract.adopt",
+    "contract.decline",
+    "project.scaffold",
+    "forge.account_unlink",
+    "forge.account_link",
+    "forge.account_status",
+    "forge.onboard",
+    "session.token",
+    "session.log_tail",
+    "session.commit_for",
+    "export",
+    "backup",
+    "restore",
+    "serve",
+    "connect",
 ];
 
+mod admin;
 mod chat;
+mod forge;
+mod project;
+mod session;
 
 /// `(operation name, params schema, result schema)` for every name in
 /// [`DERIVED`], as `registry::dump()` emits them.
@@ -100,6 +120,86 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             schema_of::<chat::ChatPromoteParams>(),
             schema_of::<chat::ChatPromoteResult>(),
         ),
+        (
+            "mcp.stdio",
+            schema_of::<admin::McpStdioParams>(),
+            schema_of::<admin::McpStdioResult>(),
+        ),
+        (
+            "contract.adopt",
+            schema_of::<project::ContractAdoptParams>(),
+            schema_of::<project::ContractAdoptResult>(),
+        ),
+        (
+            "contract.decline",
+            schema_of::<project::ContractAdoptParams>(),
+            schema_of::<project::ContractAdoptResult>(),
+        ),
+        (
+            "project.scaffold",
+            schema_of::<project::ScaffoldProjectParams>(),
+            schema_of::<project::ScaffoldProjectResult>(),
+        ),
+        (
+            "forge.account_unlink",
+            schema_of::<forge::ForgeAccountUnlinkParams>(),
+            schema_of::<forge::ForgeAccountResult>(),
+        ),
+        (
+            "forge.account_link",
+            schema_of::<forge::ForgeAccountLinkParams>(),
+            schema_of::<forge::ForgeAccountResult>(),
+        ),
+        (
+            "forge.account_status",
+            schema_of::<forge::ForgeAccountStatusParams>(),
+            schema_of::<forge::ForgeAccountStatusResult>(),
+        ),
+        (
+            "forge.onboard",
+            schema_of::<forge::OnboardParams>(),
+            schema_of::<forge::OnboardResult>(),
+        ),
+        (
+            "session.token",
+            schema_of::<session::EngineSessionTokenParams>(),
+            schema_of::<session::EngineSessionTokenResult>(),
+        ),
+        (
+            "session.log_tail",
+            schema_of::<session::LogTailParams>(),
+            schema_of::<session::LogTailResult>(),
+        ),
+        (
+            "session.commit_for",
+            schema_of::<session::CommitForSessionParams>(),
+            schema_of::<session::CommitForSessionResult>(),
+        ),
+        (
+            "export",
+            schema_of::<admin::ExportParams>(),
+            schema_of::<admin::ExportResult>(),
+        ),
+        (
+            "backup",
+            schema_of::<admin::BackupParams>(),
+            schema_of::<admin::BackupResult>(),
+        ),
+        (
+            "restore",
+            schema_of::<admin::RestoreParams>(),
+            schema_of::<admin::RestoreResult>(),
+        ),
+        (
+            "serve",
+            schema_of::<admin::ServeParams>(),
+            schema_of::<admin::ServeResult>(),
+        ),
+        (
+            "connect",
+            schema_of::<admin::ConnectParams>(),
+            schema_of::<admin::ConnectResult>(),
+        ),
     ]
 }
 
@@ -153,6 +253,12 @@ fn pydantic_shape(value: &mut serde_json::Value) {
             if let Some(Value::Object(properties)) = map.get_mut("properties") {
                 for (name, schema) in properties.iter_mut() {
                     if let Value::Object(property) = schema {
+                        // `default_factory=list` records no default, where
+                        // serde's `default` always does: an empty-list default
+                        // is that factory, so it is dropped.
+                        if property.get("default") == Some(&json!([])) {
+                            property.remove("default");
+                        }
                         if !property.contains_key("$ref") && !property.contains_key("title") {
                             property.insert("title".into(), Value::String(pydantic_title(name)));
                         }
@@ -229,6 +335,21 @@ fn keep_order(value: serde_json::Value) -> serde_json::Value {
 /// does not emit, so every integer field names this instead.
 pub(super) fn integer(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "integer" })
+}
+
+/// pydantic's `datetime`: a string in the `date-time` format.
+pub(super) fn date_time(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "string", "format": "date-time" })
+}
+
+/// `str | None` with no default: a string, or null, and required.
+pub(super) fn optional_string(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "anyOf": [{ "type": "string" }, { "type": "null" }] })
+}
+
+/// `datetime | None`: a `date-time` string, or null.
+pub(super) fn optional_date_time(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] })
 }
 
 fn not_configured() -> String {
