@@ -627,6 +627,10 @@ export interface SessionSummary {
   alive?: boolean | null;
   /** `oversight` or `worker` (WI-957); null when the engine was not asked. */
   role?: SessionRole | null;
+  /** The engine session id of the session that started this one (WI-1323);
+   *  null for a person's start. The rail nests workers under it (WI-1736). */
+  started_by_session?: string | null;
+  started_by_kind?: "person" | "oversight" | "worker" | null;
 }
 
 /** One branch bound to a work item.
