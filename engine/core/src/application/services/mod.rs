@@ -24,6 +24,7 @@ pub mod history;
 pub mod install;
 pub mod work;
 
+pub mod decisions;
 pub mod import_merge;
 pub mod inbox;
 pub mod initiatives;
@@ -56,6 +57,8 @@ use crate::core::{Clock, IdFactory, Moment, Principal};
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
 use std::sync::Arc;
 
+#[cfg(test)]
+mod decisions_test;
 #[cfg(test)]
 mod services_test;
 

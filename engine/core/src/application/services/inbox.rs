@@ -645,6 +645,13 @@ where
         }
     }
 
+    // Decisions waiting for a person (WI-1321): one entry per question.
+    for decision in
+        crate::application::services::decisions::pending_decisions(view, now_of(&ctx.clock))?
+    {
+        entries.push(decision_entry(view, &decision)?);
+    }
+
     for session in &live {
         let declared = view.session_by_engine_id(&session.id)?;
         if let Some(blocked) = &session.blocked {
@@ -1162,6 +1169,100 @@ fn grant_entry(
                 "secret_name": grant.secret_name,
                 "uses": grant.uses.to_string(),
                 "ttl_seconds": grant.ttl_seconds,
+            },
+        }),
+    }))
+}
+
+/// A question an agent asked and a person has yet to answer (WI-1321). The
+/// question, options and context are the asking agent's text: untrusted, shown
+/// verbatim, never acted on. Nothing is applied when the person answers.
+fn decision_entry(
+    view: &impl ReadView,
+    decision: &crate::core::Decision,
+) -> Result<Value, VogtError> {
+    let recommended = decision
+        .options
+        .iter()
+        .find(|option| option.recommended)
+        .or(decision.options.first())
+        .map_or("", |option| option.label.as_str());
+    let options = decision
+        .options
+        .iter()
+        .map(|option| {
+            if option.recommended {
+                format!("{} (recommended)", option.label)
+            } else {
+                option.label.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let asker_actor = view.actor_by_id(&decision.asker_actor_id)?;
+    let asker = asker_actor.as_ref().map_or_else(
+        || decision.asker_actor_id.clone(),
+        |actor| actor.identity_ref.clone(),
+    );
+    let summary = truncate(
+        &format!("{asker} asks: {} Options: {options}.", decision.question),
+        1000,
+    );
+    let item = match decision.work_item_id.as_deref() {
+        Some(id) => view.work_item_by_id(id)?,
+        None => None,
+    };
+    let project = match item.as_ref().and_then(|item| item.project_id.as_deref()) {
+        Some(id) => view.project_by_id(id)?,
+        None => None,
+    };
+    let work_item_ref = item.as_ref().map(|item| item.reference.clone());
+    let actor_kind = match view.actor_by_identity(&asker)? {
+        Some(actor) if actor.kind == crate::core::ActorKind::Human => actors::ActorKind::Human,
+        _ => actors::ActorKind::Bot,
+    };
+    let actor = ActorClass {
+        login: Some(asker.clone()),
+        kind: Some(actor_kind),
+        relation: actors::ActorRelation::OrgMember,
+    };
+    let title = format!("Decision: {}", truncate(&decision.question, 120));
+    Ok(entry(EntrySpec {
+        entry_key: format!("agent:decision:{}", decision.id),
+        source: "agent",
+        kind: "decision.pending",
+        occurred_at: Some(decision.created_at),
+        observed_at: None,
+        title: &title,
+        summary: &summary,
+        project_slug: project.as_ref().map(|project| project.slug.as_str()),
+        work_item_ref: work_item_ref.as_deref(),
+        source_subject_key: &decision.id,
+        source_url: None,
+        trust_state: "unverified".to_string(),
+        freshness: "live",
+        action: action_of(
+            "decision",
+            json!({"decision_id": decision.id, "session_id": decision.asker_session}),
+        ),
+        actor: &actor,
+        extra: json!({
+            "session_id": decision.asker_session,
+            "provisional": true,
+            "evidence_snapshot": {
+                "decision_id": decision.id,
+                "asker": asker,
+                "asker_session": decision.asker_session,
+                "work_item": work_item_ref,
+                "question": decision.question,
+                "options": decision.options.iter().map(|option| json!({
+                    "label": option.label,
+                    "description": option.description,
+                    "recommended": option.recommended,
+                })).collect::<Vec<_>>(),
+                "recommended": recommended,
+                "context": decision.context,
+                "expires_at": crate::core::to_iso(decision.expires_at),
             },
         }),
     }))

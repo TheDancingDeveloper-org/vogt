@@ -52,7 +52,7 @@ gain tests; it does not move down.
 | test_contract_config.py | ported | Contract sourced from configuration, in `config.rs` and `collectors/contract_checker.rs`. |
 | test_contracts.py | ported | `collectors/contract_checker.rs`. |
 | test_core.py | ported | `core.rs` (ids, time, digests, principals). |
-| test_decisions.py | unported | Decision entity and `decision.*` operations (WI-1321, migration 0023). Owner WI-1069. |
+| test_decisions.py | ported | Decision entity and `decision.*` operations (WI-1321, migration 0023): `application/services/decisions_test.rs`. |
 | test_delivery.py | ported | `delivery.rs`. |
 | test_demo_delivery.py | retired | Browser-only public demo delivery. Not the core. |
 | test_diagnostics.py | ported | Instance diagnostics service. |

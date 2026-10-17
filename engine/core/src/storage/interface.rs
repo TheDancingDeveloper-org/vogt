@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::{
     Actor, ActorPreference, AuditRecord, AuthDecision, CodingSession, Comment, ContractExemption,
-    DepRef, DriftProposal, Event, ForgeAccount, InboxTriage, Initiative, Label, Moment,
+    Decision, DepRef, DriftProposal, Event, ForgeAccount, InboxTriage, Initiative, Label, Moment,
     Observation, PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression,
     Sweep, SweepOutcome, Token, WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackRecord,
 };
@@ -436,6 +436,15 @@ pub trait ReadView {
         target_engine_session_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<SessionGrant>, crate::errors::VogtError>;
+    fn decision(&self, decision_id: &str) -> Result<Option<Decision>, crate::errors::VogtError>;
+    /// Newest first, by `created_at` then id, up to `limit`.
+    fn list_decisions(
+        &self,
+        state: Option<&str>,
+        work_item_id: Option<&str>,
+        asker_actor_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Decision>, crate::errors::VogtError>;
     fn list_sessions(
         &self,
         project_id: Option<&str>,
@@ -606,6 +615,8 @@ pub trait WriteTxn: ReadView {
         &mut self,
         grant: &SessionGrant,
     ) -> Result<(), crate::errors::VogtError>;
+    fn insert_decision(&mut self, decision: &Decision) -> Result<(), crate::errors::VogtError>;
+    fn update_decision(&mut self, decision: &Decision) -> Result<(), crate::errors::VogtError>;
     fn set_session_work_item(
         &mut self,
         session_id: &str,
