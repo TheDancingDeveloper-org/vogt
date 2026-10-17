@@ -1,6 +1,6 @@
 
 # HTTP test map: Python suites to Rust counterparts
-Totals across the four suites: covered 74, partial 2, gap 0, not core 1 (of 77).
+Totals across the four suites: covered 76, partial 0, gap 0, not core 1 (of 77).
 
 
 Generated from the Python suites named in WI-1061 Done means. Status:
@@ -41,12 +41,12 @@ tests are mapped by the rows below where they cover the same behaviour.
 | `test_the_scheme_follows_the_certificate` | covered | app::tests::the_forwarded_scheme_is_trusted_only_from_loopback (listener scheme fallback) |
 | `test_new_voice_writes_over_mcp_enforce_scope_reason_and_persist_approver_audit` | not core | tests the engine's voice approval path, not the core HTTP adapter; owned by the engine port |
 
-## test_front_door.py (5 tests: covered 3, partial 2, gap 0)
+## test_front_door.py (5 tests: covered 5, partial 0, gap 0)
 
 | Python test | status | Rust counterpart |
 |---|---|---|
-| `test_a_write_through_the_front_door_is_audited_as_the_caller` | partial | engine/server/tests/front_door.rs::a_write_through_the_front_door_is_audited_as_the_caller (stand-in core: the audit row is not the real `vogt audit list`) |
-| `test_the_break_glass_token_writes_as_the_stack_secrets_actor` | partial | engine/server/tests/front_door.rs::the_break_glass_token_writes_as_the_stack_secrets_actor (stand-in core names the actor; the real audit table is not read) |
+| `test_a_write_through_the_front_door_is_audited_as_the_caller` | covered | engine/server/tests/front_door.rs::a_write_through_the_front_door_is_audited_as_the_caller (boots the real `vogt-core`, reads `vogt-core audit list`) |
+| `test_the_break_glass_token_writes_as_the_stack_secrets_actor` | covered | engine/server/tests/front_door.rs::the_break_glass_token_writes_as_the_stack_secrets_actor (real `vogt-core` audit row for `agent:vogt-engine`) |
 | `test_the_front_doors_gate_and_the_cores_gate_both_stand` | covered | engine/server/tests/front_door.rs::the_front_doors_gate_and_the_cores_gate_both_stand |
 | `test_an_unknown_credential_is_refused_at_the_door` | covered | engine/server/tests/front_door.rs::an_unknown_credential_is_refused_at_the_door |
 | `test_a_person_signs_in_with_a_password_and_writes_as_themselves` | covered | engine/server/tests/front_door.rs::a_person_signs_in_with_a_password_and_writes_as_themselves |
@@ -114,19 +114,14 @@ tests are mapped by the rows below where they cover the same behaviour.
 
 ## Open items
 
-WI-1742 ported the 39 gap and 13 partial rows as Rust tests. Two rows stay
-partial, both in `test_front_door.py`:
+WI-1742 ported the 39 gap and 13 partial rows as Rust tests. WI-1747 closed the
+last two partial rows, both in `test_front_door.py`, by booting the real
+`vogt-core` binary inside `engine/server/tests/front_door.rs`. Those two tests
+write through the engine's door and read the audit table back with
+`vogt-core audit list`, as the Python test does.
 
-- `test_a_write_through_the_front_door_is_audited_as_the_caller` and
-  `test_the_break_glass_token_writes_as_the_stack_secrets_actor`.
-
-The front-door tests in `engine/server/tests/front_door.rs` run against a
-stand-in core, because `cargo test` cannot boot the Python core. The door
-itself is real: the bearer gate, the capability gate, identity caching,
-credential forwarding and logout eviction. What the stand-in does not do is
-write a real audit table, so the audit-row checks compare against the
-stand-in. Closing the two rows needs an integration harness that boots the
-core and reads `vogt audit list`.
-
-The `vogt` project's write-back policy refused creating a follow-up work item
-from the session, so no item has been filed for these two rows.
+The other front-door tests still run against a stand-in core. The door itself
+is real in all of them: the bearer gate, the capability gate, identity caching,
+credential forwarding and logout eviction. The real-core tests need
+`cargo build -p vogt-core` first and fail, rather than skip, when the binary is
+missing.
