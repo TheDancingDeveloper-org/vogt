@@ -32,13 +32,13 @@ use crate::application::views::{backlog_op, bugs_op};
 use crate::config::VogtConfig;
 use crate::core::{SequentialIds, StepClock};
 
-const WHY: &str = "forge module test";
-const SLUG: &str = "acme";
+pub(super) const WHY: &str = "forge module test";
+pub(super) const SLUG: &str = "acme";
 
 /// Four issues, the shapes the Python fixture pinned: an open labelled bug, two
 /// closed ones (one of them a labelled bug, the case `bugs` once hid behind a
 /// filter), and an open issue with no labels at all.
-fn four_issues() -> Value {
+pub(super) fn four_issues() -> Value {
     json!([
         issue(
             12,
@@ -82,7 +82,7 @@ fn issue(number: i64, title: &str, state: &str, labels: &[&str], closed_at: Opti
 
 /// A Forgejo-hosted project `acme` over `issues`, linked when asked. The fake's
 /// request log is cleared after linking, so a test sees only its own traffic.
-fn forgejo_with(issues: Value, linked: bool) -> (Built, Forgejo) {
+pub(super) fn forgejo_with(issues: Value, linked: bool) -> (Built, Forgejo) {
     let forgejo = Forgejo::new();
     *forgejo.issues.lock().unwrap() = issues;
     *forgejo.labels.lock().unwrap() = json!([{"name": "bug", "color": "d73a4a"}]);
@@ -96,7 +96,7 @@ fn forgejo_with(issues: Value, linked: bool) -> (Built, Forgejo) {
 }
 
 /// Move one upstream issue to `state`, the way a maintainer does between sweeps.
-fn set_upstream_state(issues: &Arc<Mutex<Value>>, number: i64, state: &str) {
+pub(super) fn set_upstream_state(issues: &Arc<Mutex<Value>>, number: i64, state: &str) {
     let mut issues = issues.lock().unwrap();
     for issue in issues.as_array_mut().unwrap() {
         if issue["number"] == json!(number) {
@@ -105,7 +105,7 @@ fn set_upstream_state(issues: &Arc<Mutex<Value>>, number: i64, state: &str) {
     }
 }
 
-fn onboard(built: &Built) -> Value {
+pub(super) fn onboard(built: &Built) -> Value {
     onboard_op(built, json!({"project": SLUG, "reason": WHY})).unwrap()
 }
 
@@ -118,7 +118,7 @@ fn titles(page: &Value) -> Vec<String> {
         .collect()
 }
 
-fn reference(value: &Value) -> String {
+pub(super) fn reference(value: &Value) -> String {
     value["item"]["ref"]
         .as_str()
         .or_else(|| value["ref"].as_str())
@@ -126,7 +126,7 @@ fn reference(value: &Value) -> String {
         .to_owned()
 }
 
-fn finish(built: &Built, reference: &str) {
+pub(super) fn finish(built: &Built, reference: &str) {
     for state in ["in_progress", "review", "done"] {
         transition_op(
             built,
@@ -136,7 +136,7 @@ fn finish(built: &Built, reference: &str) {
     }
 }
 
-fn adopt(built: &Built, subject: &str) -> String {
+pub(super) fn adopt(built: &Built, subject: &str) -> String {
     let adopted = adopt_op(
         built,
         json!({"subject": subject, "reason": "taking this on"}),
@@ -315,7 +315,7 @@ fn a_consolidation_that_read_nothing_is_audited_too() {
 }
 
 /// The audit rows for one operation, newest first.
-fn audit_rows(built: &Built, operation: &str) -> Vec<Value> {
+pub(super) fn audit_rows(built: &Built, operation: &str) -> Vec<Value> {
     let listed = audit_list_op(built, json!({"limit": 100})).unwrap();
     listed["records"]
         .as_array()
