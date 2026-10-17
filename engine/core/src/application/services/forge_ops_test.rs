@@ -15,7 +15,9 @@ use serde_json::json;
 
 use crate::adapters::forge::registry::provider_for_host;
 use crate::adapters::forge::ForgeProvider;
-use crate::adapters::git::{push_branch, CloneOutcome, CloneRequest, PushOutcome, PushRequest};
+use crate::adapters::git::{
+    inspect_publish_source, push_branch, CloneOutcome, CloneRequest, PushOutcome, PushRequest,
+};
 use crate::application::context::{build_context, Built};
 use crate::application::forge_standin::StandInForge;
 use crate::application::services::{
@@ -255,6 +257,7 @@ fn forge_publish_never_overwrites_a_repository_a_project_already_names() {
     match forge_publish::publish_op(&built, json!({"project": "widget", "reason": "publish it"})) {
         Err(VogtError::PublishRefused(message)) => {
             assert!(message.contains("already names a repository"), "{message}");
+            assert!(message.contains("forge link"), "{message}");
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -277,6 +280,68 @@ fn forge_publish_refuses_a_directory_that_is_not_a_repository_before_creating_an
         other => panic!("unexpected {other:?}"),
     }
     assert_eq!(project_link_state(&built, "scratch"), "unlinked");
+}
+
+/// The read-only source gate, on its own: each refusal names its cause, and a
+/// settled checkout reads its branch and revision.
+#[test]
+fn the_publish_gate_refuses_an_empty_repository() {
+    let root = a_directory_that_is_not_a_repository();
+    git(&["init", "-q", "-b", "main"], &root);
+    match inspect_publish_source(&root) {
+        Err(VogtError::PublishSourceInvalid(message)) => {
+            assert!(message.contains("no commits"), "{message}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn the_publish_gate_refuses_a_detached_head() {
+    let (root, _) = a_publishable_checkout("detached");
+    git(&["checkout", "-q", "--detach", "HEAD"], &root);
+    match inspect_publish_source(&root) {
+        Err(VogtError::PublishSourceInvalid(message)) => {
+            assert!(message.contains("detached"), "{message}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn the_publish_gate_reads_the_branch_and_revision() {
+    let (root, revision) = a_publishable_checkout("clean");
+    let source = inspect_publish_source(&root).unwrap();
+    assert_eq!(source.branch, "main");
+    assert_eq!(source.revision, revision);
+}
+
+#[test]
+fn the_publish_gate_refuses_a_dirty_tree_by_name() {
+    let (root, _) = a_publishable_checkout("dirty");
+    std::fs::write(root.join("unsaved.txt"), "wip\n").unwrap();
+    match inspect_publish_source(&root) {
+        Err(VogtError::PublishWorkingTreeDirty(message)) => {
+            assert!(message.contains("unsaved.txt"), "{message}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// The gate passes, then the credential check refuses. Nothing is created.
+#[test]
+fn forge_publish_without_any_credential_is_refused_before_creating_anything() {
+    let built = opened();
+    let (root, _) = a_publishable_checkout("uncredentialed");
+    insert_project(&built, "demo", None, &root.display().to_string(), false);
+    match forge_publish::publish_op(&built, json!({"project": "demo", "reason": "publish it"})) {
+        Err(VogtError::PublishRefused(message)) => {
+            assert!(message.contains("no usable forge credential"), "{message}");
+            assert!(message.contains("forge account link"), "{message}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(project_link_state(&built, "demo"), "unlinked");
 }
 
 #[test]
