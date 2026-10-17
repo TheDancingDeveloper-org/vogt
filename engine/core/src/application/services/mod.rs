@@ -13,6 +13,7 @@
 pub mod agent_activity;
 pub mod agent_clis;
 pub mod auth;
+pub mod bootstrap;
 pub mod chats;
 pub mod forge_accounts;
 pub mod forge_repos;

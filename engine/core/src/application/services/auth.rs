@@ -918,7 +918,7 @@ pub(super) fn username_of(raw: &str) -> Result<String, VogtError> {
     auth::normalise_username(raw).map_err(VogtError::InvalidRequest)
 }
 
-fn scopes_of(raw: &str) -> Result<Vec<String>, VogtError> {
+pub(super) fn scopes_of(raw: &str) -> Result<Vec<String>, VogtError> {
     auth::parse_scopes(raw)
         .map(|scopes| scopes.into_iter().map(str::to_string).collect())
         .map_err(VogtError::InvalidRequest)
