@@ -1,7 +1,8 @@
 //! The committed disposition of every Python `tests/test_*.py`.
 //!
-//! WI-1080: a file is ported or retired-with-reason, and a new Python test
-//! with neither fails this test. The ledger is `docs/PYTHON_TEST_DISPOSITION.md`.
+//! WI-1080: a file is ported, retired-with-reason, or unported and deferred
+//! to a named work item, and a new Python test with none of these fails
+//! this test. The ledger is `docs/PYTHON_TEST_DISPOSITION.md`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -26,6 +27,10 @@ fn ledger_files() -> BTreeSet<String> {
                 "{file} has disposition {disposition:?}, want ported, retired or unported"
             );
             assert!(!why.is_empty(), "{file} has an empty reason");
+            assert!(
+                disposition != "unported" || why.contains("Deferred to WI-"),
+                "{file} is unported without an owner: say \"Deferred to WI-<n>\""
+            );
             assert!(file.starts_with("test_") && file.ends_with(".py"));
             file.to_string()
         })
