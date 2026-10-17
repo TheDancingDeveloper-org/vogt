@@ -27,9 +27,9 @@ fn openapi() -> serde_json::Value {
     let registry = default_registry();
     let mut paths = serde_json::Map::new();
     for operation in registry.for_transport(Transport::Http) {
-        let path = format!("/api{}", operation.route.path);
+        let path = format!("/api{}", operation.http_route().path);
         let entry = paths.entry(path).or_insert_with(|| serde_json::json!({}));
-        entry[method_name(operation.route.method)] = operation_object(operation);
+        entry[method_name(operation.http_route().method)] = operation_object(operation);
     }
     serde_json::json!({
         "openapi": "3.1.0",

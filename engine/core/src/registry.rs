@@ -297,7 +297,9 @@ pub struct Operation {
     /// mutating operation (enforced at construction) and for the few reads
     /// that also audit a reason.
     pub reason_required: bool,
-    pub route: HttpRoute,
+    /// `None` for an operation with no REST route. The registry requires a
+    /// route for every operation on the HTTP transport.
+    pub route: Option<HttpRoute>,
     pub cli: CliBinding,
     pub handler: Handler,
 }
@@ -320,10 +322,39 @@ impl Operation {
             scope,
             mutating,
             reason_required: mutating,
-            route,
+            route: Some(route),
             cli,
             handler: Handler::NotPorted,
         }
+    }
+
+    /// Build an operation with no REST route, for one that must not be
+    /// mounted over HTTP at all.
+    fn local_only(
+        name: &'static str,
+        summary: &'static str,
+        scope: Scope,
+        mutating: bool,
+        cli: CliBinding,
+    ) -> Self {
+        Self {
+            name,
+            summary,
+            scope,
+            mutating,
+            reason_required: mutating,
+            route: None,
+            cli,
+            handler: Handler::NotPorted,
+        }
+    }
+
+    /// The REST route. Only an HTTP-transport operation has one, and the
+    /// registry checks that when it is built, so an HTTP adapter may rely on it.
+    pub fn http_route(&self) -> &HttpRoute {
+        self.route
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} has no HTTP route", self.name))
     }
 
     /// MCP tool names use underscores; everything else is identical.
@@ -539,6 +570,7 @@ impl OperationRegistry {
 
     fn validate(&self) -> Result<(), RegistryError> {
         self.validate_unique_bindings()?;
+        self.validate_http_routes()?;
         self.validate_reasons()?;
         self.validate_exclusions()
     }
@@ -548,12 +580,14 @@ impl OperationRegistry {
         let mut cli_paths: HashMap<&[&str], &str> = HashMap::new();
         let mut tools: HashMap<String, &str> = HashMap::new();
         for operation in &self.operations {
-            let route_key = (operation.route.method.as_str(), operation.route.path);
-            if let Some(owner) = routes.insert(route_key, operation.name) {
-                return Err(RegistryError(format!(
-                    "route {} {} is claimed by both {owner} and {}",
-                    route_key.0, route_key.1, operation.name
-                )));
+            if let Some(route) = &operation.route {
+                let route_key = (route.method.as_str(), route.path);
+                if let Some(owner) = routes.insert(route_key, operation.name) {
+                    return Err(RegistryError(format!(
+                        "route {} {} is claimed by both {owner} and {}",
+                        route_key.0, route_key.1, operation.name
+                    )));
+                }
             }
             if let Some(owner) = cli_paths.insert(operation.cli.path, operation.name) {
                 return Err(RegistryError(format!(
@@ -602,6 +636,24 @@ impl OperationRegistry {
     /// a missing field and an optional one look the same — so it is read
     /// from the recorded schema: a mutating operation whose `reason` property
     /// is absent from `required` is the optional-reason shape.
+    /// An operation on the HTTP transport must have a REST route. The reverse
+    /// is allowed: a local-only operation carries none.
+    fn validate_http_routes(&self) -> Result<(), RegistryError> {
+        for operation in &self.operations {
+            if self
+                .transports_for(operation.name)
+                .contains(&Transport::Http)
+                && operation.route.is_none()
+            {
+                return Err(RegistryError(format!(
+                    "{} is on the HTTP transport but declares no route",
+                    operation.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_reasons(&self) -> Result<(), RegistryError> {
         let schemas = parsed_schemas();
         for operation in &self.operations {
@@ -684,8 +736,8 @@ pub struct OperationManifest {
     pub scope: &'static str,
     pub mutating: bool,
     pub reason_required: bool,
-    pub http_method: &'static str,
-    pub http_path: &'static str,
+    pub http_method: Option<&'static str>,
+    pub http_path: Option<&'static str>,
     pub mcp_tool: String,
     pub cli_path: Vec<&'static str>,
     /// Recorded from pydantic until the models are ported to Rust. See
@@ -767,8 +819,8 @@ pub fn dump() -> serde_json::Value {
                 scope: operation.scope.as_str(),
                 mutating: operation.mutating,
                 reason_required: operation.reason_required,
-                http_method: operation.route.method.as_str(),
-                http_path: operation.route.path,
+                http_method: operation.route.as_ref().map(|route| route.method.as_str()),
+                http_path: operation.route.as_ref().map(|route| route.path),
                 mcp_tool: operation.mcp_tool_name(),
                 cli_path: operation.cli.path.to_vec(),
                 params_schema,
@@ -896,6 +948,25 @@ mod tests {
     }
 
     #[test]
+    fn clone_is_local_only_and_declares_no_route() {
+        let registry = registry();
+        assert!(registry.get("clone").unwrap().route.is_none());
+        assert_eq!(registry.transports_for("clone"), vec![Transport::Cli]);
+    }
+
+    #[test]
+    fn an_http_operation_must_declare_a_route() {
+        let mut operations = operations::build_operations();
+        let work_get = operations
+            .iter_mut()
+            .find(|operation| operation.name == "work.get")
+            .unwrap();
+        work_get.route = None;
+        let error = OperationRegistry::new(operations).unwrap_err();
+        assert!(error.0.contains("declares no route"), "{}", error.0);
+    }
+
+    #[test]
     fn bindings_are_unique() {
         let mut operations = operations::build_operations();
         let work_get = operations
@@ -908,7 +979,7 @@ mod tests {
             "a duplicate route",
             Scope::Read,
             false,
-            HttpRoute::new(work_get.route.method, work_get.route.path),
+            HttpRoute::new(work_get.http_route().method, work_get.http_route().path),
             work_get.cli.clone(),
         ));
         let error = OperationRegistry::new(operations).unwrap_err();

@@ -133,22 +133,38 @@ class OperationRegistry:
 
     def _validate(self) -> None:
         self._validate_unique_bindings()
+        self._validate_http_routes()
         self._validate_reasons()
         self._validate_exclusions()
+
+    def _validate_http_routes(self) -> None:
+        """An operation on the HTTP transport must have a REST route.
+
+        The reverse is allowed: a local-only operation may carry none. Keeping
+        the route off the operation is how a removed HTTP surface stays removed,
+        rather than leaving a path in the registry that nothing serves.
+        """
+        for operation in self:
+            if "http" not in self.transports_for(operation.name):
+                continue
+            if operation.route is None:
+                msg = f"{operation.name} is on the HTTP transport but declares no route"
+                raise RegistryError(msg)
 
     def _validate_unique_bindings(self) -> None:
         routes: dict[tuple[str, str], str] = {}
         cli_paths: dict[tuple[str, ...], str] = {}
         tools: dict[str, str] = {}
         for operation in self:
-            route_key = (operation.route.method, operation.route.path)
-            if route_key in routes:
-                msg = (
-                    f"route {route_key[0]} {route_key[1]} is claimed by both "
-                    f"{routes[route_key]} and {operation.name}"
-                )
-                raise RegistryError(msg)
-            routes[route_key] = operation.name
+            if operation.route is not None:
+                route_key = (operation.route.method, operation.route.path)
+                if route_key in routes:
+                    msg = (
+                        f"route {route_key[0]} {route_key[1]} is claimed by both "
+                        f"{routes[route_key]} and {operation.name}"
+                    )
+                    raise RegistryError(msg)
+                routes[route_key] = operation.name
 
             if operation.cli.path in cli_paths:
                 msg = (

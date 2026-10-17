@@ -433,12 +433,26 @@
                 "type": "boolean"
               },
               "http_method": {
-                "title": "Http Method",
-                "type": "string"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Http Method"
               },
               "http_path": {
-                "title": "Http Path",
-                "type": "string"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Http Path"
               },
               "mcp_tool": {
                 "title": "Mcp Tool",
@@ -49867,8 +49881,8 @@
       "scope": "admin",
       "mutating": true,
       "reason_required": true,
-      "http_method": "POST",
-      "http_path": "/instance/clone",
+      "http_method": null,
+      "http_path": null,
       "mcp_tool": "clone",
       "cli_path": [
         "clone"

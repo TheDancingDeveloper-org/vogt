@@ -58,8 +58,19 @@ class Operation(Generic[P, R]):
     params_model: type[P]
     result_model: type[R]
     handler: Callable[[AppContext, P], R]
-    route: HttpRoute
+    #: `None` for an operation with no REST route. The registry requires a
+    #: route for every operation confined to, or open to, the HTTP transport.
+    route: HttpRoute | None
     cli: CliBinding
+
+    @property
+    def http_route(self) -> HttpRoute:
+        """The REST route. Only an HTTP-transport operation has one, and the
+        registry checks that when it is built, so an HTTP adapter may rely on it."""
+        if self.route is None:
+            msg = f"{self.name} has no HTTP route"
+            raise ValueError(msg)
+        return self.route
 
     @property
     def mcp_tool_name(self) -> str:

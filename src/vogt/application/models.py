@@ -390,8 +390,9 @@ class RegistryOperationManifest(Result):
     scope: str
     mutating: bool
     reason_required: bool
-    http_method: str
-    http_path: str
+    #: Both `None` for an operation with no REST route (`clone`, a local-only one).
+    http_method: str | None
+    http_path: str | None
     mcp_tool: str
     cli_path: list[str]
     params_schema: dict[str, object]
