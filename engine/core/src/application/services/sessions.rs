@@ -16,7 +16,7 @@
 //! share a transaction, so the ordering is: start the terminal, then record it;
 //! if the write fails, kill what was started and raise the original failure.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -30,7 +30,7 @@ use crate::adapters::engine::{
     EngineScreen, EngineSession, EngineSweepEntry,
 };
 use crate::adapters::transcripts;
-use crate::application::brief;
+use crate::application::brief::{self, ComposedBrief, WhyResult, WorkBrief};
 use crate::application::context::{write_of, AppContext};
 use crate::application::dispatch as dispatch_profiles;
 use crate::application::resolve;
@@ -129,22 +129,32 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let parsed = StartSessionParams {
-        project: optional_string(&params, "project")?,
-        work_item: optional_string(&params, "work_item")?,
-        name: optional_string(&params, "name")?,
-        template: optional_string(&params, "template")?,
-        task: optional_string(&params, "task")?,
-        reason: require_string(&params, "reason")?,
-        model: optional_string(&params, "model")?,
-        effort: optional_string(&params, "effort")?,
-        resume: optional_string(&params, "resume")?,
-        permission_mode: optional_string(&params, "permission_mode")?
-            .unwrap_or_else(|| "default".to_string()),
-        autopilot: optional_bool(&params, "autopilot")?,
-        role: optional_string(&params, "role")?.unwrap_or_else(|| "worker".to_string()),
-        purpose: optional_string(&params, "purpose")?,
-    };
+    let parsed =
+        StartSessionParams {
+            project: optional_string(&params, "project")?,
+            work_item: optional_string(&params, "work_item")?,
+            name: optional_string(&params, "name")?,
+            template: optional_string(&params, "template")?,
+            task: optional_string(&params, "task")?,
+            reason: require_string(&params, "reason")?,
+            model: optional_string(&params, "model")?,
+            effort: optional_string(&params, "effort")?,
+            resume: optional_string(&params, "resume")?,
+            permission_mode: optional_string(&params, "permission_mode")?
+                .unwrap_or_else(|| "default".to_string()),
+            autopilot: optional_bool(&params, "autopilot")?,
+            role: optional_string(&params, "role")?.unwrap_or_else(|| "worker".to_string()),
+            purpose: optional_string(&params, "purpose")?,
+            review_of: optional_string(&params, "review_of")?,
+            budget: match params.get("budget") {
+                None | Some(Value::Null) => None,
+                Some(raw) => Some(serde_json::from_value(raw.clone()).map_err(|error| {
+                    VogtError::InvalidRequest(format!("invalid budget: {error}"))
+                })?),
+            },
+            worktree: optional_bool(&params, "worktree")?,
+            repo_map: optional_bool(&params, "repo_map")?,
+        };
     Ok(serde_json::to_value(start_session(ctx, &parsed)?).expect("a session result serialises"))
 }
 
@@ -390,6 +400,106 @@ pub struct StartSessionParams {
     pub role: String,
     /// The dispatch purpose (WI-1323). Unset, the start takes no profile.
     pub purpose: Option<String>,
+    /// The work item a review is of (Python `review_of`). A review's brief
+    /// checks the item's diff rather than carrying the work on.
+    pub review_of: Option<String>,
+    /// The limits the start asks for. Unset, the default rule applies.
+    pub budget: Option<SessionBudget>,
+    /// Cut a worktree for the session. Unset, the profile decides.
+    pub worktree: Option<bool>,
+    /// Draw a repo map into the brief. Unset, the profile decides.
+    pub repo_map: Option<bool>,
+}
+
+/// The limits a start carries (Python `SessionBudgetParams`). Each field is one
+/// limit; a field left out is not set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionBudget {
+    pub turns: Option<i64>,
+    pub context_tokens: Option<i64>,
+    pub wall_clock_minutes: Option<i64>,
+    pub session_wall_clock_minutes: Option<i64>,
+}
+
+/// The engine's `budget` object: the fields that are set, and `{}` for a
+/// budget that names no limit, which the engine reads as "no limits".
+fn budget_wire(budget: &SessionBudget) -> Value {
+    let mut wire = serde_json::Map::new();
+    for (key, value) in [
+        ("turns", budget.turns),
+        ("context_tokens", budget.context_tokens),
+        ("wall_clock_minutes", budget.wall_clock_minutes),
+        (
+            "session_wall_clock_minutes",
+            budget.session_wall_clock_minutes,
+        ),
+    ] {
+        if let Some(value) = value {
+            wire.insert(key.to_string(), json!(value));
+        }
+    }
+    Value::Object(wire)
+}
+
+/// Python's `_budget`: the limits a start carries. Asked explicitly, that
+/// object is the answer, even an empty one. Asked nothing, a worker running an
+/// agent template on a task gets the default, plus the project's whole-session
+/// wall clock when its policy sets one. Any other start gets none.
+fn effective_budget(
+    params: &StartSessionParams,
+    policy: &crate::core::AgentPolicy,
+) -> Option<SessionBudget> {
+    if let Some(budget) = &params.budget {
+        return Some(budget.clone());
+    }
+    let has_task = params
+        .task
+        .as_deref()
+        .is_some_and(|task| !task.trim().is_empty());
+    if params.template.is_some() && has_task && params.role == "worker" {
+        return Some(SessionBudget {
+            turns: Some(120),
+            context_tokens: None,
+            wall_clock_minutes: Some(90),
+            session_wall_clock_minutes: policy.session_wall_clock_minutes,
+        });
+    }
+    None
+}
+
+/// Python's `_worktree_branch`: `<work item or project>-<session>`, with the
+/// head flattened to one path component.
+fn worktree_branch(subject: &Subject, session_id: &str) -> String {
+    let head = subject
+        .work_item_ref
+        .as_deref()
+        .unwrap_or(subject.project_slug.as_str());
+    let mut flat = String::new();
+    let mut in_gap = false;
+    for character in head.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+            flat.push(character);
+            in_gap = false;
+        } else if !in_gap {
+            flat.push('-');
+            in_gap = true;
+        }
+    }
+    let flat = flat.trim_matches('-');
+    let flat = if flat.is_empty() { "session" } else { flat };
+    let tail = session_id.strip_prefix("ses_").unwrap_or(session_id);
+    format!("{flat}-{tail}")
+}
+
+/// Python's `_worktree_base`: the project's integration branch, else `main`.
+fn worktree_base(policy: &crate::core::AgentPolicy) -> String {
+    let stated = policy.base_branch.trim();
+    if stated.is_empty() {
+        "main".to_string()
+    } else {
+        stated.to_string()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -740,7 +850,7 @@ where
     // Resolved after the guards above: a profile carries neither a role nor a
     // permission posture, so naming a purpose cannot raise a start past what
     // the caller could ask for directly (WI-1323).
-    let (resolved, read_only) = resolve_purpose(ctx, params)?;
+    let (resolved, read_only, overrides) = resolve_purpose(ctx, params)?;
     let params = &resolved;
     let (started_by_session, started_by_kind) = started_by(ctx, engine)?;
     let mut writing = write_of(ctx);
@@ -749,7 +859,23 @@ where
     let actor_ref = format!("agent:session:{session_id}");
     let scopes = session_scopes(ctx)?;
     let (secret, token_hash) = minted_token()?;
-    let spec = build_spec(ctx, params, &subject, &secret, read_only)?;
+    let policy = ctx
+        .declared
+        .read()?
+        .project_by_id(&subject.project_id)?
+        .map(|project| project.agent_policy)
+        .unwrap_or_default();
+    let budget = effective_budget(params, &policy);
+    let worktree = params.worktree.unwrap_or(false);
+    let repo_map = params.repo_map.unwrap_or(false);
+    let mut spec = build_spec(ctx, params, &subject, &secret, read_only)?;
+    spec.budget = budget.as_ref().map(budget_wire);
+    if worktree {
+        spec.worktree = Some(json!({
+            "branch": worktree_branch(&subject, &session_id),
+            "base_ref": worktree_base(&policy),
+        }));
+    }
     // How long the engine took to accept the session: on the audit row, and
     // logged, so a slow or refused start is attributable afterwards.
     let spawn_started = std::time::Instant::now();
@@ -776,7 +902,7 @@ where
     // A resumed conversation starts in the directory its transcript records,
     // which may be below or beside the project root. Record where it actually
     // runs; every other session runs at the registry's root.
-    let cwd = match (params.resume.is_some(), started.cwd.as_str()) {
+    let cwd = match (params.resume.is_some() || worktree, started.cwd.as_str()) {
         (true, resumed) if !resumed.is_empty() => resumed.to_string(),
         _ => subject.cwd.clone(),
     };
@@ -808,6 +934,8 @@ where
         let purpose = params.purpose.clone();
         let started_by = started_by_session.clone();
         let started_by_kind = started_by_kind.clone();
+        let audit_overrides = overrides.clone();
+        let audit_budget = budget.as_ref().map(budget_wire);
         audited_write(
             &mut writing,
             SESSION_START,
@@ -887,6 +1015,10 @@ where
                         "role": role,
                         "permission_mode": permission_mode,
                         "purpose": purpose,
+                        "overrides": audit_overrides,
+                        "budget": audit_budget,
+                        "worktree": worktree,
+                        "repo_map": repo_map,
                         "started_by_session": started_by_session,
                         "started_by_kind": started_by_kind,
                         "engine_spawn_ms": engine_spawn_ms,
@@ -1851,7 +1983,7 @@ struct Subject {
     work_item_ref: Option<String>,
     cwd: String,
     name: String,
-    brief: String,
+    brief: ComposedBrief,
     is_scratch: bool,
 }
 
@@ -1874,7 +2006,18 @@ where
             "give at most one of --work-item or --project".to_string(),
         ));
     }
-    let work_item = match &params.work_item {
+    // A review is of one work item: `review_of` names it, and a different
+    // `work_item` beside it is a contradiction, refused before anything starts.
+    let work_ref = match (&params.review_of, &params.work_item) {
+        (Some(review), Some(work)) if review != work => {
+            return Err(VogtError::InvalidRequest(format!(
+                "review_of names {review}, but work_item names {work}"
+            )));
+        }
+        (Some(review), _) => Some(review.clone()),
+        (None, work) => work.clone(),
+    };
+    let work_item = match &work_ref {
         Some(reference) => Some(resolve::work_item(&ctx.declared.read()?, reference)?),
         None => None,
     };
@@ -1944,22 +2087,42 @@ where
             None => project.slug.clone(),
         });
     let brief = match &work_item {
-        // The score explanation is optional on purpose: a brief that refused
-        // to be written because a score could not be computed would make the
-        // ranking a precondition for starting work.
         Some(item) => {
-            let ranking = crate::application::views::why(ctx, &item.reference)
-                .ok()
-                .and_then(|value| serde_json::from_value(value).ok());
-            crate::application::brief::brief_for_work_item(
-                &ctx.declared.read()?,
+            let review = params.review_of.is_some();
+            // The score explanation is optional on purpose: a brief that
+            // refused to be written because a score could not be computed
+            // would make the ranking a precondition for starting work. A
+            // review does not rank the item it checks.
+            let ranking: Option<WhyResult> = if review {
+                None
+            } else {
+                crate::application::views::why(ctx, &item.reference)
+                    .ok()
+                    .and_then(|value| serde_json::from_value(value).ok())
+            };
+            let view = ctx.declared.read()?;
+            let comments = view.comments_for(&item.id, 200, true)?;
+            let mut related = BTreeMap::new();
+            for relation in &item.relations {
+                if let Some(found) = view.work_item_by_id(&relation.related_id)? {
+                    related.insert(relation.related_id.clone(), found);
+                }
+            }
+            let input = WorkBrief {
                 item,
                 session_id,
-                ranking.as_ref(),
-                Some(&project),
-            )?
+                ranking: ranking.as_ref(),
+                project: Some(&project),
+                comments: &comments,
+                related: &related,
+            };
+            if review {
+                brief::review_brief_for_work_item(&input)
+            } else {
+                brief::brief_for_work_item(&input)?
+            }
         }
-        None => crate::application::brief::brief_for_project(&project, session_id),
+        None => brief::brief_for_project(&project.slug, session_id, Some(&project)),
     };
     Ok(Subject {
         session_id: session_id.to_string(),
@@ -2092,19 +2255,20 @@ where
 }
 
 /// Python's `_resolve_purpose`: fill a start's unset fields from its purpose's
-/// dispatch profile. Returns the filled params and whether the profile asks for
-/// a read-only session. A start with no purpose is returned unchanged. The
-/// profile is the deployment's, written by a person, over the code defaults.
+/// dispatch profile. Returns the filled params, whether the profile asks for a
+/// read-only session, and the profile fields the caller set itself (the
+/// overrides). A start with no purpose is returned unchanged. The profile is
+/// the deployment's, written by a person, over the code defaults.
 fn resolve_purpose<C, I>(
     ctx: &AppContext<C, I>,
     params: &StartSessionParams,
-) -> Result<(StartSessionParams, bool), VogtError>
+) -> Result<(StartSessionParams, bool, Vec<&'static str>), VogtError>
 where
     C: Clock,
     I: IdFactory,
 {
     let Some(purpose) = params.purpose.as_deref() else {
-        return Ok((params.clone(), false));
+        return Ok((params.clone(), false, Vec::new()));
     };
     if !dispatch_profiles::PURPOSES.contains(&purpose) {
         return Err(VogtError::InvalidRequest(format!(
@@ -2117,12 +2281,35 @@ where
     let profile = settings.profile(purpose).ok_or_else(|| {
         VogtError::InvalidRequest(format!("no dispatch profile for {}", py_repr(purpose)))
     })?;
+    let overrides = [
+        ("template", params.template.is_some()),
+        ("model", params.model.is_some()),
+        ("effort", params.effort.is_some()),
+        ("budget", params.budget.is_some()),
+        ("worktree", params.worktree.is_some()),
+        ("repo_map", params.repo_map.is_some()),
+        ("autopilot", params.autopilot.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, given)| given.then_some(name))
+    .collect();
     let mut filled = params.clone();
     filled.template = filled.template.or_else(|| Some(profile.template.clone()));
     filled.model = filled.model.or_else(|| Some(profile.model.clone()));
     filled.effort = filled.effort.or_else(|| profile.effort.clone());
+    filled.budget = filled.budget.or_else(|| {
+        (profile.budget_turns.is_some() || profile.budget_wall_clock_minutes.is_some()).then(|| {
+            SessionBudget {
+                turns: profile.budget_turns,
+                wall_clock_minutes: profile.budget_wall_clock_minutes,
+                ..SessionBudget::default()
+            }
+        })
+    });
+    filled.worktree = filled.worktree.or(Some(profile.worktree));
+    filled.repo_map = filled.repo_map.or(Some(profile.repo_map));
     filled.autopilot = filled.autopilot.or(Some(profile.autopilot));
-    Ok((filled, profile.read_only))
+    Ok((filled, profile.read_only, overrides))
 }
 
 /// The `dispatch.*` values a person last wrote, by key. A key nobody wrote is
@@ -2215,11 +2402,13 @@ where
     spec.work_item = subject.work_item_ref.clone();
     spec.autopilot = autopilot;
     spec.prompt = Some(brief_with_task(
-        &subject.brief,
+        &subject.brief.text,
         params.task.as_deref(),
         autopilot,
         read_only,
+        params.review_of.is_some(),
     ));
+    spec.companion = (!subject.brief.companion.is_empty()).then(|| subject.brief.companion.clone());
     spec.env = Some(session_env(
         ctx,
         &subject.session_id,
@@ -2229,29 +2418,30 @@ where
     Ok(spec)
 }
 
-/// The brief's read-only note, said when a profile asks for a review-shaped
-/// session (Python `READ_ONLY`).
-const READ_ONLY: &str = "## Read only\n\nThis session was started to review. Read, run the checks and report; do not edit, commit or push.";
-
-/// The brief plus the task and the autopilot and read-only notes, matching
-/// `_brief_with_task`.
-fn brief_with_task(brief: &str, task: Option<&str>, autopilot: bool, read_only: bool) -> String {
+/// The brief plus the autopilot and read-only notes and the task, matching
+/// Python's `_brief_with_task`. A review's task is recorded as what the review
+/// was asked to look at, not as new work. Touch points (files, symbols, a repo
+/// map drawn from them) are not carried by the Rust start parameters yet.
+fn brief_with_task(
+    brief: &str,
+    task: Option<&str>,
+    autopilot: bool,
+    read_only: bool,
+    review: bool,
+) -> String {
     let mut text = brief.to_string();
     if autopilot {
-        text = format!(
-            "{}\n\n{}",
-            text.trim_end(),
-            crate::application::brief::AUTOPILOT
-        );
+        text = format!("{}\n\n{}", text.trim_end(), brief::AUTOPILOT);
     }
     if read_only {
-        text = format!("{}\n\n{READ_ONLY}", text.trim_end());
+        text = format!("{}\n\n{}", text.trim_end(), brief::READ_ONLY);
     }
     let task = task.unwrap_or("").trim();
-    if task.is_empty() {
-        return text;
+    if !task.is_empty() {
+        let heading = if review { "## Also asked" } else { "## Task" };
+        text = format!("{}\n\n{heading}\n\n{task}\n", text.trim_end());
     }
-    format!("{}\n\n## Task\n\n{task}\n", text.trim_end())
+    text
 }
 
 /// Add the branch a session will use to the item's overlay, idempotently.
@@ -3361,12 +3551,6 @@ pub(super) fn person_required(kind: ActorKind, action: &str) -> Result<(), VogtE
 #[allow(dead_code)]
 fn _sweep_entry(entry: &EngineSweepEntry) -> &EngineSession {
     &entry.session
-}
-
-/// The brief a session's task becomes, when the work item is known.
-#[allow(dead_code)]
-fn task_brief(view: &dyn ReadView, item: &WorkItem, session_id: &str) -> Result<String, VogtError> {
-    brief::brief_for_work_item(view, item, session_id, None, None)
 }
 
 /// A started session's clock read, so a test can pin it.

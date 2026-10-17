@@ -283,6 +283,10 @@ fn default_triage_states() -> Vec<String> {
 /// as their defaults. An empty object clears the setting and is stored as given.
 /// Any other key is stored verbatim.
 fn canonical_value(key: &str, value: &Value) -> Result<Value, VogtError> {
+    if key.starts_with(crate::application::dispatch::KEY_PREFIX) {
+        return crate::application::dispatch::validate(key, value)
+            .map_err(VogtError::InvalidPreference);
+    }
     if key != INBOX_FILTER_KEY || value.as_object().is_some_and(|object| object.is_empty()) {
         return Ok(value.clone());
     }
@@ -338,5 +342,30 @@ pub(super) fn optional_i64(params: &Value, field: &str, default: i64) -> Result<
         Some(_) => Err(VogtError::InvalidRequest(format!(
             "{field} must be an integer"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_value;
+    use crate::errors::VogtError;
+    use serde_json::json;
+
+    #[test]
+    fn a_dispatch_write_is_checked_before_it_is_stored() {
+        assert_eq!(
+            canonical_value("dispatch.max_workers_per_overseer", &json!({"value": 3})).unwrap(),
+            json!({"value": 3})
+        );
+        let refused = canonical_value("dispatch.profiles", &json!({"ship": {"model": "x"}}));
+        assert!(
+            matches!(refused, Err(VogtError::InvalidPreference(ref message)) if message.contains("unknown purpose 'ship'")),
+            "{refused:?}"
+        );
+        let unknown = canonical_value("dispatch.typo", &json!({"value": 1}));
+        assert!(
+            matches!(unknown, Err(VogtError::InvalidPreference(_))),
+            "{unknown:?}"
+        );
     }
 }
