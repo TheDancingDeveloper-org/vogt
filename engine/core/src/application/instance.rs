@@ -844,4 +844,157 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A fresh scratch data directory for one adoption test.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-adopt-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Set env vars for one test and return the previous values, so the
+    /// caller restores them while still holding the lock.
+    fn set_env(pairs: &[(&str, String)]) -> Vec<(String, Option<String>)> {
+        pairs
+            .iter()
+            .map(|(key, value)| {
+                let saved = std::env::var(key).ok();
+                unsafe { std::env::set_var(key, value) };
+                ((*key).to_string(), saved)
+            })
+            .collect()
+    }
+
+    fn restore_env(saved: Vec<(String, Option<String>)>) {
+        for (key, previous) in saved {
+            match previous {
+                Some(value) => unsafe { std::env::set_var(&key, value) },
+                None => unsafe { std::env::remove_var(&key) },
+            }
+        }
+    }
+
+    #[test]
+    fn the_agent_token_carries_agent_session_scopes() {
+        let _guard = crate::config::env_lock();
+        let dir = scratch("agent-scopes");
+        let secret = "agent-token-scopes-abcdef1234";
+        let path = dir.join("agent-token");
+        std::fs::write(&path, secret).unwrap();
+        let saved = set_env(&[
+            (
+                "VOGT_BOOTSTRAP_AGENT_TOKEN_FILE",
+                path.display().to_string(),
+            ),
+            ("VOGT_AGENT_SESSION_SCOPES", "read,work.write".to_string()),
+        ]);
+        let mut clock = None;
+        let mut ids = None;
+        let outcome = super::init(&dir, &mut clock, &mut ids);
+        restore_env(saved);
+        assert_eq!(
+            outcome.expect("init adopts").bootstrap_agent_token,
+            "adopted"
+        );
+        let conn = crate::storage::sqlite::connection::connect(
+            &crate::storage::sqlite::declared_path(&dir),
+        )
+        .unwrap();
+        let scopes: String = conn
+            .query_row(
+                "SELECT scopes FROM tokens WHERE token_hash = ?1",
+                rusqlite::params![crate::auth::hash_token(secret)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut held: Vec<String> = serde_json::from_str(&scopes).unwrap();
+        held.sort();
+        assert_eq!(held, vec!["read".to_string(), "work.write".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_agent_scope_fails_startup() {
+        let _guard = crate::config::env_lock();
+        let dir = scratch("agent-bad-scope");
+        let path = dir.join("agent-token");
+        std::fs::write(&path, "agent-token-scopes-abcdef1234").unwrap();
+        let saved = set_env(&[
+            (
+                "VOGT_BOOTSTRAP_AGENT_TOKEN_FILE",
+                path.display().to_string(),
+            ),
+            ("VOGT_AGENT_SESSION_SCOPES", "read,not-a-scope".to_string()),
+        ]);
+        let mut clock = None;
+        let mut ids = None;
+        let result = super::init(&dir, &mut clock, &mut ids);
+        restore_env(saved);
+        let message = result
+            .err()
+            .expect("unknown scope refuses startup")
+            .to_string();
+        assert!(message.contains("not-a-scope"), "{message}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_short_secret_fails_startup_for_either_token() {
+        let _guard = crate::config::env_lock();
+        for (env, tag) in [
+            ("VOGT_BOOTSTRAP_CORE_TOKEN_FILE", "short-core"),
+            ("VOGT_BOOTSTRAP_AGENT_TOKEN_FILE", "short-agent"),
+        ] {
+            let dir = scratch(tag);
+            let path = dir.join("token");
+            std::fs::write(&path, "changeme").unwrap();
+            let saved = set_env(&[(env, path.display().to_string())]);
+            let mut clock = None;
+            let mut ids = None;
+            let result = super::init(&dir, &mut clock, &mut ids);
+            restore_env(saved);
+            let message = result
+                .err()
+                .expect("short secret refuses startup")
+                .to_string();
+            assert!(message.contains("at least"), "{env}: {message}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn core_and_agent_tokens_coexist_in_one_init() {
+        let _guard = crate::config::env_lock();
+        let dir = scratch("coexist");
+        let core_path = dir.join("core-token");
+        let agent_path = dir.join("agent-token");
+        std::fs::write(&core_path, "vogt_bootstrap_core_secret_long_enough_0123").unwrap();
+        std::fs::write(&agent_path, "agent-token-coexist-abcdef1234").unwrap();
+        let saved = set_env(&[
+            (
+                "VOGT_BOOTSTRAP_CORE_TOKEN_FILE",
+                core_path.display().to_string(),
+            ),
+            (
+                "VOGT_BOOTSTRAP_AGENT_TOKEN_FILE",
+                agent_path.display().to_string(),
+            ),
+        ]);
+        let mut clock = None;
+        let mut ids = None;
+        let outcome = super::init(&dir, &mut clock, &mut ids);
+        restore_env(saved);
+        let outcome = outcome.expect("both adopt");
+        assert_eq!(outcome.bootstrap_core_token, "adopted");
+        assert_eq!(outcome.bootstrap_agent_token, "adopted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
