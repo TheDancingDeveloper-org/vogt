@@ -600,6 +600,10 @@ jobs:
 
   stack-image:
     name: build and publish the merged image
+    # CORE_IMPL stays `python` here. The Rust core (`--build-arg CORE_IMPL=rust`)
+    # is selectable in engine/Dockerfile and is what `rust-core` builds locally
+    # to compare; wiring it into this job — and dropping the `image` dependency
+    # that supplies CORE_IMAGE — is the swap (WI-1082), not this change.
     # `needs: image` is not ordering for its own sake: the merged image copies
     # /opt/vogt out of the core image this run just published, by digest.
     # `needs: pod-base` supplies the toolchain base it now builds `FROM`.

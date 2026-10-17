@@ -96,13 +96,21 @@ ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.9.18
 # lives in the workflow rather than in this line, unlike the mirrored bases
 # above whose digests Renovate maintains here.
 ARG POD_BASE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean
-# The published public core image, lifted whole in stage 3. The default names
-# the public `:latest` tag so `docker build -f engine/Dockerfile .` works from a
-# clean clone with no `--build-arg`; it is a readable placeholder for a local
-# build, not a supported way to produce a shipped image. CI always overrides it
-# with a **digest** so a commit-identified build pins both halves — see stage 3
-# and `.github/workflows/build.yml`, exactly as `POD_BASE_IMAGE` above.
+# The published public core image, lifted whole in stage 3 when CORE_IMPL is
+# `python`. The default names the public `:latest` tag so
+# `docker build -f engine/Dockerfile .` works from a clean clone with no
+# `--build-arg`; it is a readable placeholder for a local build, not a
+# supported way to produce a shipped image. CI always overrides it with a
+# **digest** so a commit-identified build pins both halves — see stage 3 and
+# `.github/workflows/build.yml`, exactly as `POD_BASE_IMAGE` above.
 ARG CORE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt:latest
+# Which core the stack image ships. `python` (the default, and what CI builds
+# today) lifts the published core image. `rust` compiles `vogt-core` in the
+# server-build stage and installs that binary as `vogt` instead — the same
+# listen address, the same `/health/ready`, no Python interpreter. The Python
+# path stays until the swap (WI-1082) retires the root Dockerfile; this arg is
+# how the two images are built and compared before that.
+ARG CORE_IMPL=python
 ARG VOGT_SOURCE_REF=local
 ARG VOGT_SOURCE_SHA=0000000000000000000000000000000000000000
 ARG VOGT_PRODUCT_VERSION=local/dev
@@ -230,6 +238,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release -p vogt-engine-server \
     && cp target/release/vogt-engine /usr/local/bin/vogt-engine \
     && strip /usr/local/bin/vogt-engine
+# The Rust core, built only for CORE_IMPL=rust so the Python variant (what CI
+# publishes today) does not pay a second release compile. The two binaries
+# share the warm target dir when both are built. The runtime stage still
+# bind-mounts this path for both variants, so the placeholder keeps the mount
+# resolvable when the binary was not built.
+ARG CORE_IMPL
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/engine/target \
+    if [ "$CORE_IMPL" = rust ]; then \
+        cargo build --release -p vogt-core \
+        && cp target/release/vogt-core /usr/local/bin/vogt-core \
+        && strip /usr/local/bin/vogt-core; \
+    else \
+        printf 'unused\n' > /usr/local/bin/vogt-core; \
+    fi
 
 FROM ${UV_IMAGE} AS uv
 
@@ -511,21 +535,40 @@ RUN set -eu; \
 COPY --from=server-build /usr/local/bin/vogt-engine /usr/local/bin/vogt-engine
 RUN chmod +x /usr/local/bin/vogt-engine
 
-# The other half. `/opt/vogt` carries the standalone interpreter *and* the
-# venv built against it — see stage 3; splitting them here is how you get a
-# `vogt` that reports its own script as missing.
+# The other half. Which one depends on CORE_IMPL, declared with the other
+# global args because a stage-local ARG would not see the value passed to the
+# build.
 #
-# Symlinked onto PATH rather than prepending the venv's `bin` to it. That
-# directory also holds `python` and `python3`, and a dev pod whose `python3`
-# is silently the core's private interpreter is a pod where every agent's
-# `pip install` goes somewhere surprising. Three names, no PATH surgery — and
-# `vogt` on PATH is also what makes the core reachable from a session inside
-# this container, which is the whole point of merging the trees.
-COPY --from=core /opt/vogt /opt/vogt
-RUN ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt \
-    && ln -s /opt/vogt/.venv/bin/vogt-mcp /usr/local/bin/vogt-mcp \
-    && ln -s /opt/vogt/.venv/bin/vogt-mcp-remote /usr/local/bin/vogt-mcp-remote \
-    && vogt --version
+# `python` (default): `/opt/vogt` carries the standalone interpreter *and* the
+# venv built against it — see stage 3; splitting them here is how you get a
+# `vogt` that reports its own script as missing. Symlinked onto PATH rather
+# than prepending the venv's `bin` to it. That directory also holds `python`
+# and `python3`, and a dev pod whose `python3` is silently the core's private
+# interpreter is a pod where every agent's `pip install` goes somewhere
+# surprising. Three names, no PATH surgery — and `vogt` on PATH is also what
+# makes the core reachable from a session inside this container, which is the
+# whole point of merging the trees.
+#
+# `rust`: the `vogt-core` binary built in stage 2, installed as `vogt`. It
+# speaks the same `vogt init` / `vogt serve --host --port` the entrypoint
+# already runs, and answers the same `/health/ready`. No interpreter, no venv,
+# no MCP console scripts — those stay on the Python path until the swap.
+ARG CORE_IMPL
+RUN --mount=type=bind,from=core,source=/opt/vogt,target=/mnt/core \
+    --mount=type=bind,from=server-build,source=/usr/local/bin/vogt-core,target=/mnt/vogt-core \
+    case "$CORE_IMPL" in \
+        python) \
+            cp -a /mnt/core /opt/vogt; \
+            ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt; \
+            ln -s /opt/vogt/.venv/bin/vogt-mcp /usr/local/bin/vogt-mcp; \
+            ln -s /opt/vogt/.venv/bin/vogt-mcp-remote /usr/local/bin/vogt-mcp-remote; \
+            vogt --version ;; \
+        rust) \
+            install -m 755 /mnt/vogt-core /usr/local/bin/vogt-core; \
+            ln -s /usr/local/bin/vogt-core /usr/local/bin/vogt; \
+            vogt --version ;; \
+        *) echo "CORE_IMPL must be python or rust, got '$CORE_IMPL'" >&2; exit 1 ;; \
+    esac
 
 # The core's data directory (declared.sqlite3, observed.sqlite3, backups).
 # Owned by the pod's user rather than root:0 group-writable as in the
