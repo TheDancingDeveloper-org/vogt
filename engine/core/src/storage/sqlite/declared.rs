@@ -1267,6 +1267,14 @@ impl ReadView for SqliteReadView {
             row_actor_preference,
         )
     }
+    fn latest_human_preference(&self, key: &str) -> Result<Option<ActorPreference>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT p.actor_id, p.key, p.value, p.version, p.updated_at FROM actor_preferences p JOIN actors a ON a.id = p.actor_id WHERE p.key = ? AND a.kind = 'human' ORDER BY p.updated_at DESC, p.actor_id LIMIT 1",
+            params![key],
+            row_actor_preference,
+        )
+    }
     fn actor_preferences(&self, actor_id: &str) -> Result<Vec<ActorPreference>, VogtError> {
         many(
             &self.conn,
@@ -1661,6 +1669,9 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
     }
     fn actor_preferences(&self, a: &str) -> Result<Vec<ActorPreference>, VogtError> {
         self.view.actor_preferences(a)
+    }
+    fn latest_human_preference(&self, key: &str) -> Result<Option<ActorPreference>, VogtError> {
+        self.view.latest_human_preference(key)
     }
     fn session_by_id(&self, a: &str) -> Result<Option<CodingSession>, VogtError> {
         self.view.session_by_id(a)
@@ -2277,11 +2288,12 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
     }
     fn insert_session(&mut self, session: &CodingSession) -> Result<(), VogtError> {
         self.view.conn.execute(
-            "INSERT INTO coding_sessions (id, engine_session_id, project_id, work_item_id, actor_id, cwd, template, model, effort, reason, started_at, stopped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO coding_sessions (id, engine_session_id, project_id, work_item_id, actor_id, cwd, template, model, effort, reason, started_at, stopped_at, purpose, started_by_session, started_by_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 session.id, session.engine_session_id, session.project_id, session.work_item_id,
                 session.actor_id, session.cwd, session.template, session.model, session.effort,
                 session.reason, to_iso(session.started_at), session.stopped_at.map(to_iso),
+                session.purpose, session.started_by_session, session.started_by_kind,
             ],
         ).map(|_| ()).map_err(sql_err)
     }
@@ -2766,6 +2778,9 @@ fn row_session(row: &Row<'_>) -> rusqlite::Result<CodingSession> {
         reason: row.get("reason")?,
         started_at: moment(row, "started_at")?,
         stopped_at: opt_moment(row, "stopped_at")?,
+        purpose: row.get("purpose")?,
+        started_by_session: row.get("started_by_session")?,
+        started_by_kind: row.get("started_by_kind")?,
     })
 }
 
@@ -4669,6 +4684,9 @@ mod more {
             model: Some("sonnet".into()),
             effort: None,
             reason: "look".into(),
+            purpose: None,
+            started_by_session: None,
+            started_by_kind: None,
             started_at: now,
             stopped_at: None,
         })

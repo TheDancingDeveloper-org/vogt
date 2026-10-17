@@ -315,6 +315,9 @@ fn summarize_asked<C: Clock, I: IdFactory>(
         model: session.model.clone(),
         effort: session.effort.clone(),
         reason: Some(session.reason.clone()),
+        purpose: session.purpose.clone(),
+        started_by_session: session.started_by_session.clone(),
+        started_by_kind: session.started_by_kind.clone(),
         started_at: Some(session.started_at),
         stopped_at: session.stopped_at,
         name: None,
@@ -371,6 +374,9 @@ fn unlinked_summary<C: Clock, I: IdFactory>(
         model: None,
         effort: None,
         reason: None,
+        purpose: None,
+        started_by_session: None,
+        started_by_kind: None,
         started_at: session
             .created_at
             .as_deref()
@@ -650,6 +656,9 @@ mod tests {
                     model: None,
                     effort: None,
                     reason: "test".to_string(),
+                    purpose: None,
+                    started_by_session: None,
+                    started_by_kind: None,
                     started_at: Moment::from_unix(1_700_000_000, 0),
                     stopped_at: None,
                 })?;
