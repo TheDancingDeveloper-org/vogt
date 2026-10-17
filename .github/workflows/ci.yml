@@ -198,7 +198,7 @@ jobs:
       - run: uv sync --locked
 
       - name: canonical product version is aligned
-        run: uv run --no-sync python scripts/check_product_version.py 0.7.17
+        run: cargo run --quiet --manifest-path engine/core/Cargo.toml --bin vogt-core -- check-product-version 0.7.17
 
       - name: ruff (lint)
         run: uv run --no-sync ruff check .
