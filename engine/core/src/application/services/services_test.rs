@@ -13,23 +13,23 @@ use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn};
 use crate::storage::observed_types::PendingObservation;
 
-fn moment() -> Moment {
+pub(super) fn moment() -> Moment {
     Moment::from_unix(1_700_000_000, 0)
 }
 
-fn unique() -> u64 {
+pub(super) fn unique() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-fn principal() -> Principal {
+pub(super) fn principal() -> Principal {
     Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()
 }
 
 /// A migrated, bootstrapped pair of stores under a temporary data directory,
 /// held by a context with a step clock.
-fn opened() -> Built {
+pub(super) fn opened() -> Built {
     let dir = std::env::temp_dir().join(format!("vogt-s4-{}-{}", std::process::id(), unique()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

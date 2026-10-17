@@ -41,8 +41,9 @@ pub use kinds::{
     COLLECTOR_PULLS, KIND_CHECK, KIND_DEPLOY_LANE, KIND_ISSUE, KIND_LABEL, KIND_NOTIFICATION,
     KIND_PULL_REQUEST, KIND_RELEASE,
 };
+pub use models::RepoRef;
 pub use provider::ForgeProvider;
 pub use registry::has_configured_forge;
 pub use sync::{commit_sync, ForgeDirectory, ForgeSyncCollector, PendingSync};
 pub use transport::{api_path, ForgeResponse, ForgeTransport, WriteMethod};
-pub use writeback::permits;
+pub use writeback::{permits, WriteBackOutcome};

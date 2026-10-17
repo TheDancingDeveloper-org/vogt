@@ -42,7 +42,7 @@ pub fn onboard_op(built: &Built, params: Value) -> Result<Value, VogtError> {
 /// A project on a host this instance cannot read, or on a host with no usable
 /// token, comes back as a result that says so: zeros on their own would read as
 /// "there is nothing there", which is not what happened.
-fn onboard<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+pub(crate) fn onboard<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
