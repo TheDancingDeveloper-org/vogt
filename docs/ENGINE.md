@@ -1346,18 +1346,16 @@ ENGINE_ASSISTANT_STT_API_KEY=sk-...   # used only by the entry that needs it
 ENGINE_ASSISTANT_TTS_API_KEY=sk-...
 ```
 
-An optional first-party alternative is the Rust `voice/` sidecar. Its native
-providers are `whisper-rs` (GGML Whisper) and `piper-rs` over ONNX. They load
-operator-mounted model files in-process; no executable or shell is involved,
-and audio is not retained. The first-party Compose path is
-`deploy/voice.firstparty.overlay.yml`; it requires an operator model directory
-and keeps that mount read-only. A missing or invalid required model keeps the
-sidecar unhealthy. If native model paths are absent, either half can instead
-use the explicit JSON-argv subprocess adapter, or remain unconfigured. See
-[`voice/README.md`](../voice/README.md) for model naming, supported
-WAV/WebM/Opus/Ogg input and WAV output limits, placeholders, and the contract.
-The existing
-`deploy/voice.overlay.yml` third-party overlay is independent and unchanged.
+An optional first-party alternative is the Rust `voice/` sidecar. Its default
+providers are still unconfigured; when `VOGT_VOICE_STT_COMMAND` and/or
+`VOGT_VOICE_TTS_COMMAND` is set, it runs the operator's configured inference
+executable directly (JSON argv, never a shell), forwarding STT audio through
+a temporary file and TTS text through stdin. The executable must provide the
+real transcription or audio bytes on stdout. No command, model runtime, or
+weights are included by default, so this path is opt-in and requires an
+operator-built image or mounted runtime/model files. See [`voice/README.md`](../voice/README.md)
+for the exact placeholders and contract. The existing `deploy/voice.overlay.yml`
+third-party overlay is independent and unchanged.
 
 #### Provider profiles (FR-T9, r16)
 
@@ -1680,68 +1678,6 @@ Example task payload for the Hisense PX3 monitor:
 The command is intentionally user-supplied. The engine does not depend on a
 specific AI CLI, because production deliberately leaves Codex, Claude and
 other agents user-managed.
-
-#### External workflow providers
-
-For a task whose agent loop is owned by a workflow service, add
-`workflow_engine` with `engine_url`, a non-empty `workflow` label, and the
-optional `token_file`/`repo_ref` fields. The original `/api/runs` REST + SSE
-contract remains available for compatible services.
-
-Fabro is supported through the explicit `workflow_engine.fabro` object. It
-uses the immutable workflow-intent API when `workflow_version_id` is supplied,
-and can use the self-contained manifest lane with `workflow_source` for Fabro
-0.254 servers. It never derives a workflow identity from a repository ref:
-
-```json
-{
-  "engine_url": "https://fabro.example",
-  "workflow": "nightly audit",
-  "token_file": "/run/secrets/fabro-token",
-  "fabro": {
-    "workflow_version_id": "<64 hexadecimal characters>",
-    "target": {"kind": "git", "repo": "acme/project", "branch": "main"},
-    "environment_id": "default",
-    "model": "<optional model>",
-    "provider": "<optional provider>"
-  }
-}
-```
-
-For Fabro 0.254, use the compatibility form instead:
-
-```json
-"fabro": {
-  "workflow_source": "digraph Smoke { start [shape=Mdiamond] exit [shape=Msquare] start -> exit }",
-  "workflow_path": ".fabro/workflows/smoke/workflow.fabro",
-  "target": {"kind": "folder", "path": "/srv/workspaces/project"},
-  "environment_id": "local"
-}
-```
-
-The engine creates a run with `POST /api/v1/runs`, explicitly starts it with
-`POST /api/v1/runs/:id/start`, polls `GET /api/v1/runs/:id`, and follows the
-ordered `GET /api/v1/runs/:id/attach?since_seq=1` SSE stream. Pending
-questions are read from `/questions` and answered using Fabro's keyed answer
-forms; steering is sent to `/steer`. Git targets require `repo` and
-`branch`; folder targets require an absolute existing server-side directory;
-`none` is an empty target. Git-target polling reads Fabro’s durable timeline
-and records its stage entries against the provider run branch. Fabro folder
-runs execute in place and therefore do not provide git checkpoint branches;
-Vogt reports no fabricated checkpoint for them. Canonical billing, diff
-summary, final commit and terminal status are retained when Fabro returns them.
-A failed or unreachable optional
-provider records the workflow run as errored and does not break the engine.
-The manifest path was live-smoked against Fabro 0.254 on 2026-08-26. The
-immutable workflow-intent Git path was also live-smoked against Fabro
-0.337.0-nightly.1 on 2026-08-26, targeting Vogt's public `dev` branch: version
-creation, Git clone, run start, durable `fabro/run/<run-id>` and `start@1`
-timeline checkpoint projection, attach SSE replay, and successful terminal
-diff projection all completed. That smoke used no model, so Fabro correctly
-returned no charge; the adapter retains `total_usd_micros` when supplied, as
-covered by its wire-shape tests. The repository also carries an ignored Rust
-test for repeating the manifest smoke with `FABRO_LIVE_URL`,
-`FABRO_LIVE_TOKEN`, `FABRO_LIVE_FOLDER`, and `FABRO_LIVE_WORKFLOW_SOURCE`.
 
 ### Approval gates and mid-run steering (#289)
 
