@@ -240,6 +240,7 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
         "projects": projects.len(),
         "subjects": subjects,
         "dep_refs": dep_refs,
+        "disk": crate::application::instance::workspace_disk(ctx).unwrap_or(Value::Null),
         "reports": reports.iter().map(report_view).collect::<Vec<_>>(),
     }))
 }

@@ -436,7 +436,7 @@ fn status<C: Clock, I: IdFactory>(
 /// The engine's report of the workspace volume, or nothing when it cannot be
 /// asked. A failure to answer is logged and read as absent, never as an error
 /// in status.
-fn workspace_disk<C: Clock, I: IdFactory>(
+pub(crate) fn workspace_disk<C: Clock, I: IdFactory>(
     ctx: &crate::application::context::AppContext<C, I>,
 ) -> Option<serde_json::Value> {
     let engine = ctx.engine.as_ref()?;
