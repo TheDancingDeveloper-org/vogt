@@ -4639,10 +4639,7 @@ class SessionListResult(Result):
         default=0,
         description=(
             "How many sessions match the filters, before `limit`/`offset`. "
-            "`truncated` is set when this page is not all of them. When more "
-            "declared links match than `session.list` reads (500), `total` is "
-            "one past the number actually read and `truncated` stays true on "
-            "every page, including an empty one past the end."
+            "`truncated` is set when this page is not all of them."
         ),
     )
     truncated: bool = Field(

@@ -600,7 +600,7 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
             live = {row.id: row for row in ctx.engine.list_sessions()}
         except EngineUnavailable as exc:
             detail = str(exc)
-    joined, declared_overflow = _rows(ctx, params, live, detail)
+    joined = _rows(ctx, params, live, detail)
     now = ctx.clock()
     stall_after = timedelta(minutes=params.stall_after_minutes)
     kept = [
@@ -621,14 +621,7 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
         )
     total = len(kept)
     page = kept[params.offset : params.offset + params.limit]
-    # The declared half is fetched with a ceiling one past the operation's own
-    # maximum page (`_DECLARED_FETCH`). When that ceiling is hit, more declared
-    # links match than were joined, so the counted `total` is a floor and the
-    # list is partial even when this page holds everything that was fetched
-    # (WI-1266 review).
-    truncated = params.offset + len(page) < total or declared_overflow
-    if declared_overflow:
-        total += 1
+    truncated = params.offset + len(page) < total
     if params.mode == "full":
         return SessionListResult(
             sessions=page, engine=detail, total=total, truncated=truncated
@@ -691,14 +684,11 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
         )
     live = {entry.session.id: entry.session for entry in entries}
     tails = {entry.session.id: entry for entry in entries}
-    summaries, _declared_overflow = _rows(
+    summaries = _rows(
         ctx,
-        # Unstopped links only. The declared half is capped, and a history of
-        # stopped links would fill that cap with rows the sweep then discards
-        # (it keeps only sessions the engine still runs), pushing a live link
-        # older than the newest 500 starts out of the table entirely (WI-1266
-        # review).
-        ListSessionsParams(project=params.project, limit=500, offset=0),
+        ListSessionsParams(
+            project=params.project, include_stopped=True, limit=500, offset=0
+        ),
         live,
         None,
     )
@@ -782,16 +772,11 @@ def _rows(
     params: ListSessionsParams,
     live: dict[str, EngineSession],
     detail: str | None,
-) -> tuple[list[SessionSummary], bool]:
+) -> list[SessionSummary]:
     """The rows `session.list` and `session.sweep` share: Vogt's links joined
     with what the engine reported (`live`, empty when `detail` says why it
     could not be asked), unlinked engine sessions appended, and reply
-    excerpts read from the agents' transcripts.
-
-    The second element is true when more declared links match than were
-    fetched: the declared half is capped, so past the cap the joined set is
-    not the whole answer and the caller must say so.
-    """
+    excerpts read from the agents' transcripts."""
     with ctx.declared.read() as view:
         project_id = (
             None
@@ -808,15 +793,11 @@ def _rows(
             work_item_id=work_item_id,
             include_stopped=params.include_stopped,
             # The page is cut after the state filter, so the declared half
-            # has to be the whole filtered set. One past the operation's own
-            # ceiling (`ListSessionsParams.limit` max 500) so a match beyond
-            # it is visible as overflow instead of a silently complete list.
-            limit=_DECLARED_FETCH,
+            # has to be the whole filtered set. 500 is the operation's own
+            # ceiling (`ListSessionsParams.limit`).
+            limit=500,
             offset=0,
         )
-        declared_overflow = len(sessions) == _DECLARED_FETCH
-        if declared_overflow:
-            sessions = sessions[: _DECLARED_FETCH - 1]
         summaries = [
             _summarize(
                 view,
@@ -876,7 +857,7 @@ def _rows(
             if excerpt is not None:
                 update["last_reply_excerpt"] = excerpt
         summaries[index] = summary.model_copy(update=update)
-    return summaries, declared_overflow
+    return summaries
 
 
 def _opencode_replies(
@@ -2759,12 +2740,6 @@ SESSION_REPORT_BLOCKED = "session.report_blocked"
 SESSION_REPORT_UNBLOCKED = "session.report_unblocked"
 SESSION_BLOCKED_EVENT = "session.blocked"
 SESSION_UNBLOCKED_EVENT = "session.unblocked"
-
-# One past the largest page `session.list` will return. Fetching exactly the
-# ceiling hides a match beyond it: the response would report the capped count
-# as complete. The extra row is dropped before the join; it only marks the
-# overflow so the caller can keep `truncated` true.
-_DECLARED_FETCH = 501
 
 
 def report_blocked(
