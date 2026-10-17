@@ -216,6 +216,9 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
         "subjects": subjects,
         "dep_refs": dep_refs,
         "reports": reports.iter().map(report_view).collect::<Vec<_>>(),
+        // The workspace volume, as `status` reports it. Python's sweep answers
+        // with the same key, null when no session engine can be asked.
+        "disk": crate::application::instance::workspace_disk(ctx),
     }))
 }
 
