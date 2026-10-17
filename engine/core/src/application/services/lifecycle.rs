@@ -569,8 +569,6 @@ pub fn clone_instance<C: Clock + 'static, I: IdFactory + 'static>(
     }))
 }
 
-/// Copy the allowlisted session history, or say why nothing was copied. Never
-/// fatal: by the time this runs the stores are already in place.
 /// The staging directory's time label. Keeps the microsecond fraction so two
 /// clones in one second get different directories. Python uses `%f`.
 fn staging_label(moment: Moment) -> String {
@@ -579,6 +577,8 @@ fn staging_label(moment: Moment) -> String {
     format!("{}Z", body.replace(['-', ':', '.'], ""))
 }
 
+/// Copy the allowlisted session history, or say why nothing was copied. Never
+/// fatal: by the time this runs the stores are already in place.
 fn clone_engine_state(source: &Path, target: Option<&Path>, include: bool) -> String {
     let left_behind =
         "push subscriptions and agent tasks are never copied by a clone; this engine keeps its own";
@@ -1800,5 +1800,113 @@ mod tests {
         let later = Moment::from_unix(1_700_000_000, 2_000);
         assert_ne!(staging_label(earlier), staging_label(later));
         assert!(staging_label(Moment::from_unix(1_700_000_000, 0)).ends_with('Z'));
+    }
+
+    #[test]
+    fn a_backup_from_an_older_schema_is_migrated_in_staging() {
+        // Same rule as restore: older comes forward, and the sanitising runs on
+        // the migrated copy, here across 0017, which adds the password table
+        // the carry writes into.
+        use crate::auth::hash_token;
+        use crate::storage::interface::DeclaredStore;
+        use crate::storage::sqlite::{connection::connect, embedded, migrator};
+
+        let dir = std::env::temp_dir().join(format!("vogt-old-schema-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let old_dir = dir.join("old-build");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        for (id, sql) in embedded::DECLARED {
+            let number: i64 = id[..4].parse().unwrap();
+            if number <= 16 {
+                std::fs::write(old_dir.join(format!("{id}.sql")), sql).unwrap();
+            }
+        }
+
+        let old_backup = dir.join("old-backup");
+        std::fs::create_dir_all(&old_backup).unwrap();
+        let mut conn = connect(&old_backup.join("declared.sqlite3")).unwrap();
+        migrator::migrate(
+            &mut conn,
+            "declared",
+            Some(&old_dir),
+            "old/1",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        for (key, value) in [
+            ("instance_id", "ins_old_prod"),
+            ("revision", "0"),
+            ("work_ref_seq", "0"),
+            ("created_at", "2026-01-01T00:00:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+                [key, value],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at) \
+             VALUES ('act_old', 'agent', 'old bot', 'agent:old', 0, '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, created_at) \
+             VALUES ('tok_old', 'act_old', 'old', ?1, '[\"read\"]', '2026-01-01T00:00:00Z')",
+            [hash_token("old-prod-secret-0123456789")],
+        )
+        .unwrap();
+        drop(conn);
+
+        // The observed store of a fresh instance stands in for the old one's.
+        let scratch = opened();
+        let taken = backup(
+            ctx(&scratch),
+            &json!({
+                "destination": dir.join("scratch-b").display().to_string(),
+                "reason": "why",
+            }),
+        )
+        .unwrap();
+        let taken_path = PathBuf::from(taken["path"].as_str().unwrap());
+        std::fs::copy(
+            taken_path.join("observed.sqlite3"),
+            old_backup.join("observed.sqlite3"),
+        )
+        .unwrap();
+        let mut manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(taken_path.join(MANIFEST_NAME)).unwrap())
+                .unwrap();
+        manifest["instance_id"] = json!("ins_old_prod");
+        manifest["declared_schema_version"] = json!(16);
+        std::fs::write(old_backup.join(MANIFEST_NAME), manifest.to_string()).unwrap();
+
+        let target = opened();
+        seed_credentials(&target, "dev", "dev-secret-0123456789abcdef", "devlogin");
+        let result = clone_instance(
+            ctx(&target),
+            &json!({"source": old_backup.display().to_string(), "confirm": true, "reason": "why"}),
+        )
+        .unwrap();
+
+        let applied = result["migrations_applied"].as_array().unwrap();
+        assert!(applied
+            .iter()
+            .any(|name| name.as_str().unwrap_or("").contains("0017")));
+        let view = ctx(&target).declared.read().unwrap();
+        let kept = view
+            .token_by_hash(&hash_token("dev-secret-0123456789abcdef"))
+            .unwrap()
+            .unwrap();
+        assert!(kept.revoked_at.is_none(), "the target's token stays live");
+        if let Some(old) = view
+            .token_by_hash(&hash_token("old-prod-secret-0123456789"))
+            .unwrap()
+        {
+            assert!(old.revoked_at.is_some(), "the source's token is revoked");
+        }
+        drop(view);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
