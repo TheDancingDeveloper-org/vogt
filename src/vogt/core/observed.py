@@ -25,7 +25,7 @@ from vogt.core.entities import (
     WorkKind,
     WorkOverlay,
 )
-from vogt.core.workflow import DONE, TERMINAL_STATES, Workflow
+from vogt.core.workflow import DONE, TERMINAL_STATES, WONT_DO, Workflow
 
 #: Observation kinds that represent work somebody might do. Everything else
 #: a collector finds — checkouts, releases, dependency references, CI checks
@@ -132,6 +132,17 @@ def lifecycle_of(observation: Observation) -> str:
     return LIFECYCLE_UNKNOWN
 
 
+def closed_state(observation: Observation) -> str:
+    """The finished state an upstream close lands in.
+
+    A close the forge says was not planned is `wont_do`, not `done`: the work
+    was declined, not delivered. Anything else that closed is `done`.
+    """
+    if observation.payload.get("state_reason") == "not_planned":
+        return WONT_DO
+    return DONE
+
+
 def upstream_state(
     observation: Observation, overlay: WorkOverlay | None, workflow: Workflow
 ) -> str:
@@ -149,7 +160,7 @@ def upstream_state(
     if lifecycle_of(observation) == LIFECYCLE_CLOSED:
         if overlay and overlay.workflow_state in TERMINAL_STATES:
             return str(overlay.workflow_state)
-        return DONE
+        return closed_state(observation)
     if overlay and overlay.workflow_state:
         return overlay.workflow_state
     return workflow.initial_state

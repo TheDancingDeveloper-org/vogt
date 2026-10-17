@@ -25,7 +25,8 @@ from vogt.application.models import (
     SweepParams,
 )
 from vogt.application.services import backlog, register_project, sweep
-from vogt.core.observed import LIFECYCLE_CLOSED, lifecycle_of
+from vogt.core.observed import LIFECYCLE_CLOSED, closed_state, lifecycle_of
+from vogt.core.workflow import WONT_DO
 
 WHY = "forge sync test"
 REPO = "https://github.com/TheDancingDeveloper-org/rustnzb"
@@ -350,3 +351,31 @@ def test_a_page_of_pull_requests_does_not_wedge_the_issue_watermark(
     )
     assert latest is not None, "the closure behind a page of PRs is observed"
     assert lifecycle_of(latest) == LIFECYCLE_CLOSED
+
+
+def test_a_not_planned_close_finishes_as_wont_do(
+    instance: AppContext, forge: FakeForge
+) -> None:
+    """A close the forge says was not planned lands as `wont_do`, not `done`."""
+    forge.issues = [
+        {
+            "number": 9,
+            "title": "maybe",
+            "state": "open",
+            "updated_at": "2026-08-01T00:00:00Z",
+        }
+    ]
+    sweep(instance, SweepParams(reason=WHY))
+    forge.issues = [
+        {
+            "number": 9,
+            "title": "maybe",
+            "state": "closed",
+            "state_reason": "not_planned",
+            "updated_at": "2026-08-02T00:00:00Z",
+        }
+    ]
+    sweep(instance, SweepParams(reason=WHY))
+    latest = instance.observed.latest_by_subject("gh:TheDancingDeveloper-org/rustnzb#9")
+    assert latest is not None
+    assert closed_state(latest) == WONT_DO
