@@ -245,6 +245,56 @@ async fn the_front_door_resolves_the_stack_secret_through_the_rust_core() {
 }
 
 #[tokio::test]
+async fn the_followers_cursor_sees_a_write_made_after_it_started() {
+    // The follower's own client and cursor logic, against the Rust feed: the
+    // cursor starts at the head, a write lands while the follower is running,
+    // and the next poll from the cursor returns that write and moves it on.
+    let core = boot_core();
+    wait_ready(&core.url).await;
+    let follower = vogt_engine_server::vogt_core::VogtCore::from_config(&config_against(&core.url))
+        .expect("the follower has a core client");
+    let (_, mut cursor) = follower.events_after(0, 1).await.expect("head poll");
+
+    let status = Command::new(binary())
+        .arg("--data-dir")
+        .arg(core._dir.path())
+        .args([
+            "project",
+            "register",
+            "--name",
+            "Follower Probe",
+            "--root-path",
+            "/srv/follower-probe",
+            "--reason",
+            "follower test",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the write must succeed: {status}");
+
+    let (events, next) = follower
+        .events_after(cursor, 50)
+        .await
+        .expect("poll from the cursor");
+    let kinds: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"project.registered"),
+        "the follower must see the write: {kinds:?}"
+    );
+    assert!(next > cursor, "the cursor moves past the write");
+    cursor = next;
+    // Nothing new: the cursor is returned unchanged, so a poller never rewinds.
+    let (empty, again) = follower.events_after(cursor, 50).await.expect("idle poll");
+    assert!(empty.is_empty(), "an idle poll is empty: {empty:?}");
+    assert_eq!(again, cursor);
+}
+
+#[tokio::test]
 async fn a_dead_rust_core_is_an_outage_not_a_rejected_credential() {
     let core = boot_core();
     wait_ready(&core.url).await;
