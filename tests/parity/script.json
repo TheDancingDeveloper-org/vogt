@@ -1176,82 +1176,71 @@
    }
   },
   {
+   "why": "a person asks for a grant on a live engine session; the stand-in engine answers the session as alive",
    "operation": "session.grant_request",
    "cli": [
     "session",
     "grant-request"
    ],
+   "engine": true,
    "params": {
-    "target": "ses_00000000000000000000000000",
+    "target": "parity-worker",
     "kind": "credential",
     "secret_name": "PARITY_TOKEN",
     "project_id": "parity-project",
     "uses": "once",
+    "ttl_seconds": 60,
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 0
    },
    "http": {
     "method": "POST",
     "path": "/api/sessions/grants",
     "auth": "admin",
     "body": {
-     "target": "ses_00000000000000000000000000",
+     "target": "parity-worker",
      "kind": "credential",
      "secret_name": "PARITY_TOKEN",
      "project_id": "parity-project",
      "uses": "once",
+     "ttl_seconds": 60,
      "reason": "parity"
     }
    }
   },
   {
+   "why": "WI-983: the decision is a person's, and it reads the grant the request step made (a real grant, not a made-up id); the engine applies it before the record says approved",
    "operation": "session.grant_decide",
    "cli": [
     "session",
     "grant-decide"
    ],
+   "engine": true,
    "params": {
-    "id": "grt_00000000000000000000000000",
+    "id": "{seen:session.grant_request#grant.id}",
     "decision": "approve",
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/grants/decide",
-    "auth": "admin",
-    "body": {
-     "id": "grt_00000000000000000000000000",
-     "decision": "approve",
-     "reason": "parity"
-    }
+    "exit": 0
    }
   },
   {
+   "why": "the same real grant, now approved, is revoked: the engine takes it back and the record says revoked",
    "operation": "session.grant_revoke",
    "cli": [
     "session",
     "grant-revoke"
    ],
+   "engine": true,
    "params": {
-    "id": "grt_00000000000000000000000000",
+    "id": "{seen:session.grant_request#grant.id}",
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/grants/revoke",
-    "auth": "admin",
-    "body": {
-     "id": "grt_00000000000000000000000000",
-     "reason": "parity"
-    }
+    "exit": 0
    }
   },
   {

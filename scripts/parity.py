@@ -23,12 +23,15 @@ import argparse
 import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -317,12 +320,86 @@ def _child_env() -> dict[str, str]:
     return env
 
 
+class _StandInHandler(BaseHTTPRequestHandler):
+    """The engine routes the grant steps reach: every session answers alive as
+    a worker, a grant apply is echoed back, and a revoke is acknowledged."""
+
+    def _reply(self, status: int, payload: Any) -> None:
+        body = json.dumps(payload).encode() if payload is not None else b""
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _parts(self) -> list[str]:
+        return self.path.split("?", 1)[0].strip("/").split("/")
+
+    def do_GET(self) -> None:
+        parts = self._parts()
+        if parts[:2] == ["api", "sessions"] and len(parts) == 3:
+            return self._reply(
+                200,
+                {
+                    "id": parts[2],
+                    "name": parts[2],
+                    "activity": "idle",
+                    "alive": True,
+                    "exit_code": None,
+                    "role": "worker",
+                    "cwd": "/work",
+                },
+            )
+        self._reply(404, None)
+
+    def do_POST(self) -> None:
+        parts = self._parts()
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        if (
+            len(parts) == 4
+            and parts[:2] == ["api", "sessions"]
+            and parts[3] == "grants"
+        ):
+            return self._reply(200, payload)
+        self._reply(404, None)
+
+    def do_DELETE(self) -> None:
+        parts = self._parts()
+        if (
+            len(parts) == 5
+            and parts[:2] == ["api", "sessions"]
+            and parts[3] == "grants"
+        ):
+            return self._reply(200, {"revoked": True})
+        self._reply(404, None)
+
+    def log_message(self, *args: Any) -> None:
+        return
+
+
+class _StandInEngine:
+    """A loopback stand-in for the session engine, for the steps that set
+    `"engine": true`. Every other step runs with VOGT_ENGINE_URL unset."""
+
+    def __enter__(self) -> str:
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _StandInHandler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        return f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def __exit__(self, *exc: object) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
 def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     root = Path(tempfile.mkdtemp(prefix="vogt-parity-"))
     data = root / "instance"
     env = _child_env()
     answers: list[dict[str, Any]] = []
     seen: dict[str, Any] = {}
+    engine = _StandInEngine()
+    engine_url = engine.__enter__()
     try:
         root.mkdir(parents=True, exist_ok=True)
         init = subprocess.run(
@@ -362,8 +439,11 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             # is the `session log` subcommand.
             words = step["cli"] if "cli" in step else step["operation"].split(".")
             argv = [binary, "--json", "--data-dir", str(data), *words, *_flags(params)]
+            step_env = (
+                {**env, "VOGT_ENGINE_URL": engine_url} if step.get("engine") else env
+            )
             completed = subprocess.run(
-                argv, env=env, capture_output=True, text=True, check=False
+                argv, env=step_env, capture_output=True, text=True, check=False
             )
             expect = step["expect"]
             if completed.returncode != expect.get("exit", 0):
@@ -395,6 +475,7 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 answer["error"] = _normalise(line, root, data, step["operation"])
             answers.append(answer)
     finally:
+        engine.__exit__(None, None, None)
         shutil.rmtree(root, ignore_errors=True)
     return answers
 
@@ -485,6 +566,14 @@ def _substitute(
     def one(value: Any) -> Any:
         if not isinstance(value, str):
             return value
+        # `{seen:<operation>#<dotted.key>}` is a field of an earlier step's
+        # answer, so a step can name what an earlier one created.
+        match = re.fullmatch(r"\{seen:([^#}]+)#([^}]+)\}", value)
+        if match:
+            found: Any = seen[match.group(1)]
+            for key in match.group(2).split("."):
+                found = found[key]
+            return found
         value = value.replace("{root}", str(root))
         return value
 
