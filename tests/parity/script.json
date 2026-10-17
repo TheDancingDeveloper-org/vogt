@@ -6,7 +6,8 @@
    "core-token": "vogt_bootstrap_core_secret_long_enough_0123",
    "agent-token": "vogt_agent_bootstrap_secret_long_enough_4567",
    "ada-password": "correct horse battery",
-   "ada-passphrase": "another passphrase"
+   "ada-passphrase": "another passphrase",
+   "broken/.git": "gitdir: {root}/nowhere\n"
   },
   "env": {
    "VOGT_BOOTSTRAP_CORE_TOKEN_FILE": "{root}/core-token",
@@ -816,6 +817,42 @@
    }
   },
   {
+   "operation": "project.register",
+   "http": {
+    "method": "POST",
+    "path": "/api/projects",
+    "auth": "admin",
+    "body": {
+     "name": "Second",
+     "root_path": "{root}/second",
+     "reason": "parity harness"
+    }
+   },
+   "why": "HTTP has no project of its own: the same registration the CLI made for Second, here so the HTTP sweep has a project to sweep"
+  },
+  {
+   "operation": "project.register",
+   "params": {
+    "name": "Broken",
+    "root_path": "{root}/broken",
+    "reason": "parity harness"
+   },
+   "why": "a checkout whose .git cannot be read: git-local fails for this project, so its sweep is partial and coverage says so",
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/projects",
+    "auth": "admin",
+    "body": {
+     "name": "Broken",
+     "root_path": "{root}/broken",
+     "reason": "parity harness"
+    }
+   }
+  },
+  {
    "operation": "session.list",
    "params": {},
    "expect": {
@@ -886,6 +923,14 @@
     "method": "GET",
     "path": "/api/coverage",
     "auth": "admin"
+   }
+  },
+  {
+   "operation": "dump.observed",
+   "dump": "observed",
+   "why": "the findings and coverage rows the sweeps above wrote, after every sweep has run",
+   "expect": {
+    "exit": 0
    }
   },
   {

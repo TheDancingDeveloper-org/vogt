@@ -41,6 +41,19 @@ const NOTICE_MAX_CHARS: usize = 400;
 /// The check observations read per project for the announce. Python's limit.
 const CHECKS_PER_PROJECT: i64 = 2000;
 
+/// The announce's failure seam. A test sets `FAIL` and the next announce fails
+/// the way an engine that fell over would, after counting the attempt in
+/// `ATTEMPTS`. Thread-local, so each test owns its own switch.
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(crate) static FAIL: Cell<bool> = const { Cell::new(false) };
+        pub(crate) static ATTEMPTS: Cell<u32> = const { Cell::new(0) };
+    }
+}
+
 /// One branch a still-open work item is bound to, and its CI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundBranch {
@@ -227,6 +240,15 @@ fn fresh(concluded_at: Option<&str>, now_unix: i64) -> bool {
 pub fn announce_concluded<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
 ) -> Result<usize, VogtError> {
+    #[cfg(test)]
+    {
+        seam::ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+        if seam::FAIL.with(std::cell::Cell::get) {
+            return Err(VogtError::EngineUnavailable(
+                "announce failure injected by the test seam".to_owned(),
+            ));
+        }
+    }
     let found = {
         let view = ctx.declared.read()?;
         let mut projects: Vec<String> = view
@@ -342,7 +364,10 @@ mod tests {
     use crate::application::projects::register_op;
     use crate::application::services::work::{bind_branch_op, create_op};
     use crate::config::VogtConfig;
-    use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock, SweepOutcome};
+    use crate::core::{
+        ActorKind, CodingSession, Moment, Principal, SequentialIds, StepClock, SweepOutcome,
+    };
+    use crate::storage::interface::WriteTxn;
     use crate::storage::observed_types::PendingObservation;
     use std::sync::{Arc, Mutex};
 
@@ -490,6 +515,71 @@ mod tests {
         )
     }
 
+    /// A transport that answers every request as a session showing a
+    /// permission prompt does: the engine refuses input with `person required`.
+    fn prompting_engine() -> (Arc<Mutex<Vec<String>>>, EngineClient) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let transport: Transport = Arc::new(move |url, _headers, body, method| {
+            record
+                .lock()
+                .unwrap()
+                .push(format!("{method} {url} {}", String::from_utf8_lossy(body)));
+            (
+                403,
+                br#"{"error":"forbidden: person required: a permission prompt"}"#.to_vec(),
+            )
+        });
+        (
+            seen,
+            EngineClient::new("http://engine", Some("tok".to_string()), Some(transport)),
+        )
+    }
+
+    /// Start a live session for the item `WI-1` is in: a declared row with the
+    /// engine id the nudge types into. Written the way `start_session` writes
+    /// one, so the announce finds it through the item.
+    fn live_session(ctx: &AppContext<StepClock, SequentialIds>, engine_id: &str) {
+        let (project_id, work_item_id, actor_id) = {
+            let view = ctx.declared.read().unwrap();
+            let project_id = view
+                .list_projects(10, 0)
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap()
+                .id;
+            let work_item_id = view
+                .work_item_by_ref("WI-1")
+                .unwrap()
+                .expect("WI-1 exists")
+                .id;
+            let actor_id = view
+                .actor_by_identity("local:test-user")
+                .unwrap()
+                .expect("the test principal is an actor")
+                .id;
+            (project_id, work_item_id, actor_id)
+        };
+        let mut txn = ctx.declared.write().unwrap();
+        txn.insert_session(&CodingSession {
+            id: format!("ses_{engine_id}"),
+            engine_session_id: engine_id.to_owned(),
+            project_id,
+            work_item_id: Some(work_item_id),
+            actor_id,
+            cwd: "/tmp/app".to_owned(),
+            template: None,
+            model: None,
+            effort: None,
+            reason: "test".to_owned(),
+            started_at: moment_now(ctx),
+            stopped_at: None,
+        })
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
     fn settled_ci(state: BranchState, failing: &[&str]) -> BranchCi {
         BranchCi {
             branch: "wi-9".to_owned(),
@@ -577,6 +667,61 @@ mod tests {
 
         assert_eq!(announce_concluded(ctx).unwrap(), 0, "once per conclusion");
         assert_eq!(concluded_events(&built).len(), 1);
+    }
+
+    #[test]
+    fn a_bound_session_is_nudged_once_with_the_notice_then_enter() {
+        let (seen, engine) = recording_engine();
+        let built = bound_instance("nudge", Some(engine));
+        let ctx = context(&built);
+        live_session(ctx, "eng-nudge");
+        let at = stamp(ctx);
+
+        seed(
+            ctx,
+            &[("ci", Some("failure")), ("lint", Some("success"))],
+            &at,
+        );
+        assert_eq!(announce_concluded(ctx).unwrap(), 1);
+
+        // The notice is typed, then the Enter that submits it, and nothing
+        // else: the person flag stays off, so the engine can refuse a prompt.
+        let sent = seen.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent[0].starts_with("POST ") && sent[0].contains("/eng-nudge/input"));
+        assert!(sent[0].contains(r#""submit":false"#), "{}", sent[0]);
+        assert!(sent[0].contains("[vogt] CI FAILED on wi-1"), "{}", sent[0]);
+        assert!(sent[0].contains(r#""person":false"#), "{}", sent[0]);
+        assert!(sent[1].contains(r#""text":"""#), "{}", sent[1]);
+        assert!(sent[1].contains(r#""submit":true"#), "{}", sent[1]);
+
+        let events = concluded_events(&built);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["sessions_notified"], 1);
+
+        // Once per conclusion: the next announce types nothing new.
+        assert_eq!(announce_concluded(ctx).unwrap(), 0);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_session_at_a_permission_prompt_gets_no_enter_and_the_announce_stands() {
+        let (seen, engine) = prompting_engine();
+        let built = bound_instance("prompt", Some(engine));
+        let ctx = context(&built);
+        live_session(ctx, "eng-prompt");
+        let at = stamp(ctx);
+
+        seed(ctx, &[("ci", Some("failure"))], &at);
+        assert_eq!(announce_concluded(ctx).unwrap(), 1);
+
+        // The engine refused the notice, so the Enter after it was never sent.
+        let sent = seen.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].contains(r#""submit":false"#), "{}", sent[0]);
+        let events = concluded_events(&built);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["sessions_notified"], 0);
     }
 
     #[test]

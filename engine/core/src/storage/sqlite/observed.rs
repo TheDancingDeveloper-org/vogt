@@ -23,6 +23,10 @@ use crate::storage::sqlite::migrator::{self, migrations_root, table_exists};
 
 const META_INSTANCE_ID: &str = "instance_id";
 const META_CREATED_AT: &str = "created_at";
+/// Moves on every rebuild of `latest_observations`, as Python's
+/// `META_LATEST_GENERATION` does: a cache keyed on it sees a new generation
+/// exactly when the projection changed.
+const META_LATEST_GENERATION: &str = "latest_generation";
 const WITHHELD: &str = "[withheld: configuration or environment output]";
 const OPEN_STATE_SQL: &str =
     "lower(coalesce(json_extract(payload, '$.state'), '')) NOT IN ('closed', 'merged')";
@@ -639,6 +643,11 @@ where
     fn rebuild_latest(&self) -> Result<i64, VogtError> {
         let conn = self.open(true)?;
         let outcome = write_tx(&conn, || {
+            // Same transaction as the rebuild, as Python's `_bump_latest_generation`.
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, '1') ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
+                [META_LATEST_GENERATION],
+            )?;
             conn.execute("DELETE FROM latest_observations", [])?;
             conn.execute(
                 "INSERT INTO latest_observations (subject_key, observation_id, collector, kind, project_id, payload, content_digest, source_url, promoted, observed_at) SELECT o.subject_key, o.id, o.collector, o.kind, o.project_id, o.payload, o.content_digest, o.source_url, o.promoted, o.observed_at FROM observations o WHERE o.id = (SELECT id FROM observations x WHERE x.subject_key = o.subject_key ORDER BY x.observed_at DESC, x.id DESC LIMIT 1)",

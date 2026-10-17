@@ -63,7 +63,10 @@ def main(argv: list[str] | None = None) -> int:
         return _selftest(args.golden)
 
     binary = _resolve(args.impl)
-    steps = _load_steps(args.only)
+    # `--only dump` runs the whole script and keeps only the dumps: a dump
+    # step reads what the sweeps wrote, and a script cut down to the dumps
+    # would dump an empty observed store.
+    steps = _load_steps("" if args.only == "dump" else args.only)
     if not steps and args.only != "dump":
         print(f"no steps match --only {args.only!r}", file=sys.stderr)
         return 2
@@ -87,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     golden = json.loads((args.golden / f"{args.transport}.json").read_text())
     if args.only == "dump":
         golden = [step for step in golden if step["operation"].startswith("dump.")]
+        recorded = [step for step in recorded if step["operation"].startswith("dump.")]
     elif args.only:
         golden = [step for step in golden if step["operation"].startswith(args.only)]
         # A CLI run always records dump.after_init first, even when the script
@@ -126,15 +130,19 @@ def _load_steps(prefix: str) -> list[dict[str, Any]]:
 
 
 def _prepare_init(root: Path, env: dict[str, str]) -> dict[str, str]:
-    """Write the init pre-step's token files and return the env `init` runs with.
+    """Write the init pre-step's files and return the env `init` runs with.
 
-    The script's `init` block names bootstrap token files and the environment
-    that points at them. Every transport runs `init` with the same block, so
-    the adoption shows up in the after-init dump of each one.
+    The script's `init` block names the bootstrap token files, and any
+    fixture a step needs before it runs (a repository whose `.git` is broken,
+    for one). A name may sit in a subdirectory, which is created. Every
+    transport runs `init` with the same block, so the adoption shows up in the
+    after-init dump of each one.
     """
     spec = json.loads(SCRIPT_PATH.read_text()).get("init", {})
     for name, content in spec.get("files", {}).items():
-        (root / name).write_text(content, encoding="utf-8")
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content.replace("{root}", str(root)), encoding="utf-8")
     init_env = dict(env)
     for key, value in spec.get("env", {}).items():
         init_env[key] = value.replace("{root}", str(root))
@@ -165,7 +173,7 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     recorded first, as the CLI run does. No final dump: the session token that
     the HTTP login mints is random, and nothing in this transport captures it.
     """
-    steps = [step for step in steps if "params" in step]
+    steps = [step for step in steps if "params" in step or "dump" in step]
     with tempfile.TemporaryDirectory(prefix="vogt-parity-mcp-") as scratch:
         root = Path(scratch)
         data = root / "instance"
@@ -235,6 +243,14 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
             server.stdin.flush()
             for step in steps:
+                if "dump" in step:
+                    recorded.append(
+                        {
+                            "operation": step["operation"],
+                            "body": _dump(data, (step["dump"],)),
+                        }
+                    )
+                    continue
                 arguments = _substitute(step["params"], {}, root)
                 tool = step.get("mcp_tool", step["operation"].replace(".", "_"))
                 reply = request("tools/call", {"name": tool, "arguments": arguments})
@@ -320,6 +336,15 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
         for step in steps:
+            if "dump" in step:
+                answers.append(
+                    {
+                        "operation": step["operation"],
+                        "exit": 0,
+                        "body": _dump(data, (step["dump"],)),
+                    }
+                )
+                continue
             if "params" not in step:
                 continue
             # A step may give the CLI its own params where the CLI reads a
@@ -367,8 +392,14 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return answers
 
 
-def _dump(data: Path) -> dict[str, Any]:
-    """Every non-empty table in both stores, after init.
+def _dump(
+    data: Path, names: tuple[str, ...] = ("declared", "observed")
+) -> dict[str, Any]:
+    """Every non-empty table in the named stores.
+
+    Both stores after init by default. A dump step names the one it wants:
+    the observed store after a sweep holds the findings and the coverage rows
+    that the sweep wrote, and those are the evidence the sweep is judged on.
 
     The data directory is blanked because the run owns a temporary root.
     Everything else compares verbatim: the step clock fixes `applied_at` the
@@ -378,7 +409,7 @@ def _dump(data: Path) -> dict[str, Any]:
     import sqlite3
 
     stores: dict[str, Any] = {}
-    for name in ("declared", "observed"):
+    for name in names:
         path = data / f"{name}.sqlite3"
         conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
@@ -441,7 +472,7 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     import socket
     import urllib.request
 
-    steps = [step for step in steps if "http" in step]
+    steps = [step for step in steps if "http" in step or "dump" in step]
     recorded: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="vogt-parity-http-") as scratch:
         data = Path(scratch) / "instance"
@@ -486,6 +517,18 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             credentials: dict[str, str] = {}
             secrets: list[str] = []
             for step in steps:
+                if "dump" in step:
+                    # The store is read while the server runs: sqlite serves
+                    # the committed rows, and nothing writes between steps.
+                    recorded.append(
+                        {
+                            "operation": step["operation"],
+                            "result": _normalise(
+                                _dump(data, (step["dump"],)), Path(scratch), data
+                            ),
+                        }
+                    )
+                    continue
                 spec = step["http"]
                 headers = dict(spec.get("headers") or {})
                 if "auth" in spec:
@@ -634,6 +677,8 @@ def _walk(
         blank_version = top and operation in set(version.get("operations", []))
         version_key = version.get("key")
         accepted = _product_versions() if blank_version else set()
+        digests = rules.get("digests", {})
+        path_bearing = set(digests.get("path_bearing_operations", []))
         walked = {
             key: (
                 "<version>"
@@ -645,6 +690,8 @@ def _walk(
             for key, item in value.items()
             if key not in drop
         }
+        if walked.get("operation") in path_bearing and "payload_digest" in walked:
+            walked["payload_digest"] = "<path-bearing>"
         if (
             in_schema
             and schema["sort_any_of"]

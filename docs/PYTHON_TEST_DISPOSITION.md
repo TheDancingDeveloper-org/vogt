@@ -41,7 +41,7 @@ gain tests; it does not move down.
 | test_check_rust_version.py | retired | `scripts/check_rust_version.py`. A Python lint over the engine toolchain pin. |
 | test_check_workflow_policy.py | retired | `scripts/check_workflow_policy.py` over GitHub workflow YAML. CI policy, not product behaviour. |
 | test_checks.py | ported | CI-revision reads in the collectors and the project brief. |
-| test_ci_watch.py | unported | Watched-ref and deployed-version reads are in `application/deployed.rs`. The bound-branch announce is in `application/ci_watch.rs`: the feed event once per conclusion, staleness, and the notice text. Still unported, owner WI-1071: `test_a_sweep_announces_and_survives_an_announce_failure`, which needs an announce failure injected into a sweep. The containment is in `application/collect.rs` and logs rather than failing. |
+| test_ci_watch.py | ported | Watched-ref and deployed-version reads are in `application/deployed.rs`. The bound-branch announce is in `application/ci_watch.rs`: the feed event once per conclusion, staleness, the notice text, and the session nudge (notice, then Enter; none at a permission prompt). `test_a_sweep_announces_and_survives_an_announce_failure` is `a_failed_announce_does_not_fail_the_sweep` in `application/collect.rs`, driven by the `ci_watch::seam` failure switch. |
 | test_claude_profile.py | unported | Claude Code account profiles and their bootstrap. Named accounts land on `session.start` in WI-1306 (triage row 7782a7e8, under WI-1074). |
 | test_cli.py | ported | `adapters/cli.rs`. |
 | test_clone.py | ported | Clone service under `application/services`. |
