@@ -998,4 +998,466 @@ mod tests {
             .unwrap()
             .is_none());
     }
+
+    /// The Python suite's fake transport and recorder in one. A read answers by
+    /// a fragment of its path and query, a missing fragment is a 404, and every
+    /// request is recorded so a test can assert its verb, path and shape.
+    /// A read's path and its query pairs, as the provider sent them.
+    type RecordedRead = (String, Vec<(String, String)>);
+
+    struct Recorder {
+        routes: Vec<(String, serde_json::Value)>,
+        reads: RefCell<Vec<RecordedRead>>,
+        writes: RefCell<Vec<(WriteMethod, String, Option<serde_json::Value>)>>,
+        write_error: Option<String>,
+    }
+
+    impl Recorder {
+        fn new(routes: Vec<(&str, serde_json::Value)>) -> Self {
+            Self {
+                routes: routes
+                    .into_iter()
+                    .map(|(fragment, value)| (fragment.to_owned(), value))
+                    .collect(),
+                reads: RefCell::new(Vec::new()),
+                writes: RefCell::new(Vec::new()),
+                write_error: None,
+            }
+        }
+    }
+
+    impl ForgeTransport for Recorder {
+        fn api_root(&self) -> &str {
+            "https://forge.example/api/v1"
+        }
+        fn token(&self) -> Option<&str> {
+            Some("x")
+        }
+        fn get(&self, path: &str, query: &[(&str, String)]) -> Result<ForgeResponse, VogtError> {
+            let query: Vec<(String, String)> = query
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect();
+            let rendered = query
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join("&");
+            let haystack = format!("{path}?{rendered}");
+            self.reads.borrow_mut().push((path.to_owned(), query));
+            Ok(self
+                .routes
+                .iter()
+                .find(|(fragment, _)| haystack.contains(fragment.as_str()))
+                .map_or(ForgeResponse::Missing, |(_, value)| {
+                    ForgeResponse::Json(value.clone())
+                }))
+        }
+        fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
+            Ok(None)
+        }
+        fn send(
+            &self,
+            method: WriteMethod,
+            path: &str,
+            body: Option<&serde_json::Value>,
+        ) -> Result<serde_json::Value, VogtError> {
+            self.writes
+                .borrow_mut()
+                .push((method, path.to_owned(), body.cloned()));
+            if let Some(message) = &self.write_error {
+                return Err(VogtError::UpstreamWriteFailed(message.clone()));
+            }
+            // A write answers with the created object: number, URL and, for a
+            // repository create, the owner and visibility.
+            Ok(serde_json::json!({
+                "number": 12,
+                "html_url": "https://forge.example/acme/Widgets/issues/12",
+                "name": "widgets",
+                "owner": {"login": "acme"},
+                "private": true,
+                "default_branch": "main",
+            }))
+        }
+    }
+
+    fn recorded(routes: Vec<(&str, serde_json::Value)>) -> ForgejoProvider<Recorder> {
+        ForgejoProvider::new(Recorder::new(routes), "forge.example")
+    }
+
+    fn widgets() -> RepoRef {
+        RepoRef {
+            host: "forge.example".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "Widgets".to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_provider_declares_what_the_api_offers() {
+        let provider = recorded(vec![]);
+        let as_dyn: &dyn ForgeProvider = &provider;
+        let caps = as_dyn.capabilities();
+        assert_eq!(caps.hosts, vec!["forge.example".to_owned()]);
+        assert!(caps.supports_since, "the issues endpoint takes `since`");
+        assert!(
+            !caps.supports_posture,
+            "no Dependabot-style posture surface"
+        );
+        assert!(caps.supports_notifications, "per-repo notifications exist");
+        assert!(!caps.supports_webhooks, "deferred by name, like GitHub");
+    }
+
+    #[test]
+    fn subject_keys_are_host_qualified_and_round_trip() {
+        let provider = recorded(vec![]);
+        let key = provider.subject_key(&widgets(), 42);
+        assert_eq!(key, "forge:forge.example/acme/Widgets#42");
+        assert_eq!(provider.number_of(Some(&key)), Some(42));
+        assert!(
+            !key.starts_with("gh:"),
+            "cannot collide with github.com's legacy keys"
+        );
+    }
+
+    #[test]
+    fn number_of_declines_a_key_that_names_no_number() {
+        let provider = recorded(vec![]);
+        assert_eq!(
+            provider.number_of(Some("posture:forge.example/acme/Widgets")),
+            None
+        );
+        assert_eq!(provider.number_of(None), None);
+        assert_eq!(
+            provider.number_of(Some("forge:forge.example/acme/Widgets#notanumber")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_urls_and_the_clone_token_come_from_the_provider() {
+        let provider = recorded(vec![]);
+        assert_eq!(
+            provider.clone_url(&widgets()),
+            "https://forge.example/acme/Widgets.git"
+        );
+        assert_eq!(
+            provider.web_url(&widgets()),
+            "https://forge.example/acme/Widgets"
+        );
+        assert_eq!(
+            provider.clone_token().as_deref(),
+            Some("x"),
+            "the clone authenticates as the token"
+        );
+    }
+
+    #[test]
+    fn issues_normalise_ascending_and_drop_disguised_pulls() {
+        let provider = recorded(vec![(
+            "/issues",
+            serde_json::json!([
+                {"number": 9, "title": "newer", "state": "open", "labels": [{"name": "bug"}],
+                 "user": {"login": "alice"}, "updated_at": "2026-08-10T00:00:00Z",
+                 "html_url": "https://forge.example/acme/Widgets/issues/9"},
+                {"number": 7, "title": "older", "state": "closed", "labels": [],
+                 "user": {"username": "bob"}, "updated_at": "2026-08-01T00:00:00Z",
+                 "closed_at": "2026-08-01T00:00:00Z"},
+                {"number": 8, "title": "a PR in disguise", "pull_request": {}}
+            ]),
+        )]);
+        let issues = provider.issues_updated_since(&widgets(), None).unwrap();
+        assert_eq!(
+            issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
+            vec![7, 9],
+            "ascending by update, PRs dropped"
+        );
+        assert_eq!(issues[1].labels, vec!["bug".to_owned()]);
+        assert_eq!(issues[1].author.as_deref(), Some("alice"));
+        assert_eq!(
+            issues[0].author.as_deref(),
+            Some("bob"),
+            "`username` satisfies when `login` is absent"
+        );
+        assert_eq!(issues[0].state, "closed");
+        assert!(issues[0].closed_at.is_some());
+    }
+
+    #[test]
+    fn issues_ask_for_issues_only_and_carry_since_upstream() {
+        let provider = recorded(vec![]);
+        provider
+            .issues_updated_since(&widgets(), Some("2026-08-01T00:00:00Z"))
+            .unwrap();
+        let reads = provider.transport.reads.borrow();
+        let (path, query) = &reads[0];
+        assert_eq!(path, "/repos/acme/Widgets/issues");
+        for expected in [
+            ("type", "issues"),
+            ("state", "all"),
+            ("since", "2026-08-01T00:00:00Z"),
+        ] {
+            assert!(
+                query
+                    .iter()
+                    .any(|(key, value)| (key.as_str(), value.as_str()) == expected),
+                "{expected:?} missing from {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pulls_filter_by_since_locally_and_yield_ascending() {
+        let provider = recorded(vec![(
+            "/pulls",
+            serde_json::json!([
+                {"number": 3, "title": "new", "state": "open", "draft": true,
+                 "head": {"sha": "abc"}, "base": {"ref": "main"},
+                 "updated_at": "2026-08-10T00:00:00Z"},
+                {"number": 1, "title": "old", "state": "closed",
+                 "updated_at": "2026-07-01T00:00:00Z"}
+            ]),
+        )]);
+        let pulls = provider
+            .pulls_updated_since(&widgets(), Some("2026-08-01T00:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            pulls.iter().map(|pull| pull.number).collect::<Vec<_>>(),
+            vec![3],
+            "the stale PR is filtered locally"
+        );
+        assert!(pulls[0].draft);
+        assert_eq!(pulls[0].head.as_deref(), Some("abc"));
+        assert_eq!(pulls[0].base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn releases_and_labels_normalise() {
+        let provider = recorded(vec![
+            (
+                "/releases",
+                serde_json::json!([{"tag_name": "v1.2.0", "name": "1.2.0", "prerelease": true}]),
+            ),
+            (
+                "/labels",
+                serde_json::json!([{"name": "bug", "color": "ee0701", "description": "broken"}]),
+            ),
+        ]);
+        let releases = provider.releases(&widgets()).unwrap();
+        assert_eq!(releases[0].tag, "v1.2.0");
+        assert!(releases[0].prerelease);
+        let labels = provider.labels(&widgets()).unwrap();
+        assert_eq!(labels[0].name, "bug");
+        assert_eq!(labels[0].color.as_deref(), Some("ee0701"));
+    }
+
+    #[test]
+    fn action_tasks_become_generic_checks() {
+        let provider = recorded(vec![(
+            "/actions/tasks",
+            serde_json::json!({"total_count": 2, "workflow_runs": [
+                {"name": "ci", "head_sha": "abc123", "head_branch": "main",
+                 "status": "failure", "run_number": 8},
+                {"name": "ci", "head_sha": "def456", "status": "running"}
+            ]}),
+        )]);
+        let checks = provider.checks(&widgets()).unwrap();
+        assert_eq!(checks[0].conclusion.as_deref(), Some("failure"));
+        assert_eq!(checks[1].status.as_deref(), Some("running"));
+        assert_eq!(
+            checks[1].conclusion, None,
+            "in flight honestly has no conclusion yet"
+        );
+    }
+
+    #[test]
+    fn an_install_without_actions_reports_no_checks_not_an_error() {
+        // No route answers, so the tasks endpoint is a 404.
+        let provider = recorded(vec![]);
+        assert!(provider.checks(&widgets()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn notifications_are_repo_scoped_and_honest_about_missing_fields() {
+        let provider = recorded(vec![(
+            "/notifications",
+            serde_json::json!([{
+                "id": 55,
+                "unread": true,
+                "updated_at": "2026-08-10T00:00:00Z",
+                "subject": {
+                    "title": "Crashes on empty segment",
+                    "type": "Issue",
+                    "url": "https://forge.example/api/v1/repos/acme/Widgets/issues/9"
+                }
+            }]),
+        )]);
+        let notes = provider.notifications(&widgets()).unwrap();
+        assert_eq!(notes[0].thread, "55");
+        assert!(notes[0].unread);
+        assert_eq!(
+            notes[0].source_url.as_deref(),
+            Some("https://forge.example/acme/Widgets/issues/9")
+        );
+        // Forgejo's thread model has no reason and no per-thread read time:
+        // `None`, never a guess.
+        assert!(notes[0].reason.is_none() && notes[0].last_read_at.is_none());
+    }
+
+    #[test]
+    fn the_posture_gap_is_three_unknowns_not_three_offs() {
+        let provider = recorded(vec![]);
+        assert!(!provider.capabilities().supports_posture);
+        let posture = provider.posture(&widgets()).unwrap();
+        assert!(posture.version_updates_config.is_none());
+        assert!(posture.vulnerability_alerts.is_none());
+        assert!(posture.automated_security_fixes.is_none());
+    }
+
+    #[test]
+    fn list_repos_enumerates_what_the_credential_sees() {
+        let provider = recorded(vec![(
+            "/user/repos",
+            serde_json::json!([
+                {"name": "Widgets", "owner": {"login": "acme"}, "private": true,
+                 "default_branch": "main", "html_url": "https://forge.example/acme/Widgets"},
+                {"name": "orphan"}
+            ]),
+        )]);
+        let repos = provider.list_repos().unwrap();
+        assert_eq!(
+            repos.iter().map(|repo| repo.slug()).collect::<Vec<_>>(),
+            vec!["acme/Widgets".to_owned()],
+            "an entry with no owner is skipped, not invented"
+        );
+        assert_eq!(repos[0].visibility, "private");
+        assert_eq!(repos[0].web_url, "https://forge.example/acme/Widgets");
+    }
+
+    #[test]
+    fn comment_posts_and_reports_the_host_qualified_key() {
+        let provider = recorded(vec![]);
+        let result = provider.comment(&widgets(), 5, "hello").unwrap();
+        assert_eq!(result.outcome, WriteBackOutcome::Succeeded);
+        assert_eq!(
+            result.subject_key.as_deref(),
+            Some("forge:forge.example/acme/Widgets#12")
+        );
+        let writes = provider.transport.writes.borrow();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, WriteMethod::Post);
+        assert_eq!(writes[0].2, Some(serde_json::json!({"body": "hello"})));
+    }
+
+    #[test]
+    fn create_issue_appends_twice_because_labels_ride_their_own_endpoint() {
+        let provider = recorded(vec![]);
+        let result = provider
+            .create_issue(&widgets(), "t", "b", Some(&["bug".to_owned()]))
+            .unwrap();
+        assert_eq!(result.outcome, WriteBackOutcome::Succeeded);
+        let writes = provider.transport.writes.borrow();
+        assert_eq!(
+            writes.iter().map(|write| write.0).collect::<Vec<_>>(),
+            vec![WriteMethod::Post, WriteMethod::Post]
+        );
+        assert!(
+            writes[1].1.ends_with("/issues/12/labels"),
+            "{}",
+            writes[1].1
+        );
+        assert_eq!(
+            writes[0].2,
+            Some(serde_json::json!({"title": "t", "body": "b"}))
+        );
+        assert_eq!(writes[1].2, Some(serde_json::json!({"labels": ["bug"]})));
+    }
+
+    #[test]
+    fn add_labels_appends_and_never_replaces() {
+        let provider = recorded(vec![]);
+        provider
+            .add_labels(&widgets(), 5, &["triage".to_owned()])
+            .unwrap();
+        let writes = provider.transport.writes.borrow();
+        assert!(!writes.is_empty());
+        assert!(
+            writes.iter().all(|write| write.0 == WriteMethod::Post),
+            "POST appends; the type has no replacing verb to speak"
+        );
+    }
+
+    #[test]
+    fn set_state_patches_and_refuses_a_non_state() {
+        let provider = recorded(vec![]);
+        let closed = provider.set_state(&widgets(), 5, "closed").unwrap();
+        assert_eq!(closed.outcome, WriteBackOutcome::Succeeded);
+        {
+            let writes = provider.transport.writes.borrow();
+            let last = writes.last().unwrap();
+            assert_eq!(last.0, WriteMethod::Patch);
+            assert_eq!(last.2, Some(serde_json::json!({"state": "closed"})));
+        }
+        let refused = provider.set_state(&widgets(), 5, "deleted").unwrap_err();
+        assert!(
+            matches!(refused, VogtError::InvalidRequest(_)),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn an_upstream_refusal_is_a_failed_result_not_an_exception() {
+        // Never fatal to the declared write: the ledger records the miss.
+        let mut provider = recorded(vec![]);
+        provider.transport.write_error =
+            Some("Forgejo answered 500 Internal Server Error".to_owned());
+        let result = provider.comment(&widgets(), 5, "hello").unwrap();
+        assert_eq!(result.outcome, WriteBackOutcome::Failed);
+        assert!(result.detail.is_some_and(|detail| detail.contains("500")));
+    }
+
+    #[test]
+    fn create_repo_lands_under_the_credential_without_auto_init() {
+        let provider = recorded(vec![]);
+        let repo = provider.create_repo("widgets", true, Some("d")).unwrap();
+        assert_eq!(repo.slug(), "acme/widgets");
+        assert_eq!(repo.visibility, "private");
+        let writes = provider.transport.writes.borrow();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, WriteMethod::Post);
+        assert_eq!(writes[0].1, "/user/repos");
+        let body = writes[0].2.as_ref().unwrap();
+        assert_eq!(
+            body["auto_init"],
+            serde_json::json!(false),
+            "the first push must be clean"
+        );
+        assert_eq!(body["description"], serde_json::json!("d"));
+    }
+
+    #[test]
+    fn an_empty_description_is_omitted_not_sent_blank() {
+        let provider = recorded(vec![]);
+        provider.create_repo("widgets", false, Some("")).unwrap();
+        let writes = provider.transport.writes.borrow();
+        assert!(writes[0].2.as_ref().unwrap().get("description").is_none());
+    }
+
+    #[test]
+    fn parse_repo_url_rejects_injection_metacharacters() {
+        // Owner and repo are interpolated raw into API URLs, so a crafted
+        // `repo_url` must read as "not mine", never as a ref.
+        let hosts = ["forge.example"];
+        let ok = parse_repo_url(Some("https://forge.example/acme/Widgets"), &hosts).unwrap();
+        assert_eq!((ok.owner.as_str(), ok.repo.as_str()), ("acme", "Widgets"));
+        for bad in [
+            "https://forge.example/a?x=1/b",
+            "https://forge.example/../../user/repos",
+            "https://forge.example/o/..",
+            "https://forge.example/o/r%2f..",
+            "forge.example/o/r%23frag",
+        ] {
+            assert!(parse_repo_url(Some(bad), &hosts).is_none(), "{bad}");
+        }
+    }
 }

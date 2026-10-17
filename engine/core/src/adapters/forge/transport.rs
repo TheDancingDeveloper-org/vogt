@@ -83,3 +83,21 @@ pub fn api_path(api_url: &str, api_root: &str) -> Option<String> {
     }
     Some(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_write_verbs_are_append_and_toggle_only() {
+        // Exhaustive on purpose: a new verb fails to compile here until someone
+        // decides it keeps the layer append-only.
+        for method in [WriteMethod::Post, WriteMethod::Patch] {
+            let spoken = match method {
+                WriteMethod::Post => "POST",
+                WriteMethod::Patch => "PATCH",
+            };
+            assert_eq!(method.as_str(), spoken);
+        }
+    }
+}

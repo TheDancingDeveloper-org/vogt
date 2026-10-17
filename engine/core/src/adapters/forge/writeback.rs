@@ -127,4 +127,31 @@ mod tests {
         }
         assert!(!permits("full", "delete"));
     }
+
+    #[test]
+    fn there_is_no_destructive_capability_at_all() {
+        // Not disabled, not gated, absent. The match is exhaustive on purpose:
+        // a new action fails to compile here until someone decides it is additive.
+        let every = [
+            WriteBackAction::Create,
+            WriteBackAction::Comment,
+            WriteBackAction::Label,
+            WriteBackAction::Close,
+            WriteBackAction::Reopen,
+        ];
+        for action in every {
+            match action {
+                WriteBackAction::Create
+                | WriteBackAction::Comment
+                | WriteBackAction::Label
+                | WriteBackAction::Close
+                | WriteBackAction::Reopen => {}
+            }
+        }
+        let names: Vec<&str> = every.iter().map(|action| action.as_str()).collect();
+        assert_eq!(names, ["create", "comment", "label", "close", "reopen"]);
+        for forbidden in ["delete", "force", "rewrite", "purge", "merge"] {
+            assert!(!permits("full", forbidden), "{forbidden}");
+        }
+    }
 }

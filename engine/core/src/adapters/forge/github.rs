@@ -1308,6 +1308,40 @@ mod tests {
         assert_eq!(jobs[0].name, "test");
     }
 
+    #[test]
+    fn a_closed_issue_that_is_labelled_keeps_its_state_and_labels() {
+        // WI-8's shape: closed upstream and labelled `bug`. The state has to
+        // survive normalisation, or the ranked views cannot tell it is finished.
+        let provider = GitHubProvider::new(Fixture::new(vec![(
+            "/repos/acme/widget/issues",
+            serde_json::json!([
+                {"number": 7, "title": "Fixed weeks ago", "state": "closed",
+                 "labels": [{"name": "bug"}], "closed_at": "2025-02-01T00:00:00Z"},
+                {"number": 9, "title": "Open and unlabelled", "state": "open", "labels": []}
+            ]),
+        )]));
+        let issues = provider.issues_updated_since(&repo(), None).unwrap();
+        let closed = issues.iter().find(|issue| issue.number == 7).unwrap();
+        assert_eq!(closed.state, "closed");
+        assert_eq!(closed.labels, vec!["bug".to_owned()]);
+        assert!(closed.closed_at.is_some());
+        let open = issues.iter().find(|issue| issue.number == 9).unwrap();
+        assert_eq!(open.state, "open");
+        assert!(open.labels.is_empty(), "no label is reported, not invented");
+    }
+
+    #[test]
+    fn labels_normalise_name_and_colour() {
+        let provider = GitHubProvider::new(Fixture::new(vec![(
+            "/repos/acme/widget/labels",
+            serde_json::json!([{"name": "bug", "color": "d73a4a"}]),
+        )]));
+        let labels = provider.labels(&repo()).unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].name, "bug");
+        assert_eq!(labels[0].color.as_deref(), Some("d73a4a"));
+    }
+
     fn repo() -> RepoRef {
         RepoRef {
             host: HOST.to_owned(),
