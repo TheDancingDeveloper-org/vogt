@@ -61,11 +61,11 @@ gain tests; it does not move down.
 | test_engine_parity.py | retired | Rust engine wire parity. Owned by `engine/server` tests, not `engine/core`. |
 | test_fake_agent.py | retired | `scripts/fake-agent` test double for the engine. Not product behaviour. |
 | test_forge_accounts.py | ported | `adapters/forge/accounts.rs` and the forge-account service. |
-| test_forge_import.py | ported | Forge import path in the forge services. |
+| test_forge_import.py | unported | `forge.import` refusals and the shared clone, register and consolidate core are ported (`forge_import.rs`, `projects.rs` `import_repository`, tests in `forge_ops_test.rs`). The clone-and-register success path needs a stand-in describe route. Owner WI-1072. |
 | test_forge_live.py | retired | Live forge network. The port keeps the offline stand-in tests; a live call is not a unit of the core crate. |
 | test_forge_module.py | ported | `adapters/forge/` (kinds, edges, payloads, sync). |
 | test_forge_provider.py | ported | GitHub and Forgejo provider stand-ins in `adapters/forge/github.rs` and `forgejo.rs`. |
-| test_forge_publish.py | ported | Forge publish service. |
+| test_forge_publish.py | unported | `forge.publish` refusals and the source gate are ported (`forge_publish.rs`, tests in `forge_ops_test.rs`). The create-and-push success path needs a stand-in create route and a fake pusher. Owner WI-1072. |
 | test_forge_repos.py | ported | Forge repo listing service. |
 | test_forge_sync.py | ported | `adapters/forge/sync.rs`. |
 | test_forgejo.py | ported | `adapters/forgejo.rs`. |

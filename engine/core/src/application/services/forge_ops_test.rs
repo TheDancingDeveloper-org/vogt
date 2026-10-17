@@ -120,7 +120,7 @@ fn forge_link_refuses_a_host_it_cannot_read() {
     );
     match forge_link::link_op(&built, json!({"project": "stray", "reason": "link it"})) {
         Err(VogtError::LinkRefused(message)) => {
-            assert!(message.starts_with("cannot link \"stray\""), "{message}");
+            assert!(message.starts_with("cannot link 'stray'"), "{message}");
         }
         other => panic!("unexpected {other:?}"),
     }

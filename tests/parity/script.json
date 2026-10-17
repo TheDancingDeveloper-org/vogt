@@ -569,6 +569,104 @@
    }
   },
   {
+   "operation": "forge.link",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "forge.link",
+   "params": {
+    "project": "missing",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "forge.publish",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "forge.publish",
+   "params": {
+    "project": "missing",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "forge.import",
+   "params": {
+    "owner": "acme",
+    "name": "widget",
+    "host": "no.such.host",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "forge.import",
+   "params": {
+    "owner": "acme",
+    "name": "widget",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "forge.onboard",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "forge.onboard",
+   "params": {
+    "project": "missing",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "forge.account_unlink",
+   "cli": [
+    "forge",
+    "account",
+    "unlink"
+   ],
+   "params": {
+    "host": "no.such.host",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
    "operation": "install.bootstrap",
    "http": {
     "method": "POST",

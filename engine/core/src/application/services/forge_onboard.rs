@@ -22,7 +22,7 @@ use crate::application::writes::audited_action;
 use crate::collectors::{CollectorContext, Registered, Sweeper};
 use crate::core::{Clock, IdFactory, Moment, Project};
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
+use crate::storage::interface::{DeclaredStore, ObservedStore};
 
 pub const FORGE_ONBOARDED_EVENT: &str = "forge.onboarded";
 
@@ -52,8 +52,7 @@ where
     max_pages_of(&params)?;
     let project = {
         let view = ctx.declared.read()?;
-        view.project_by_slug(&slug)?
-            .ok_or_else(|| VogtError::NotFound(format!("no project {slug:?}")))?
+        crate::application::resolve::project(&view, &slug)?
     };
 
     // Asked before the adapter is built: "this host is not supported" and
