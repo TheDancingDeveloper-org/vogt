@@ -799,6 +799,11 @@ pub fn params_schema_for(name: &str) -> Option<&'static serde_json::Value> {
     parsed_schemas().get(name).map(|(params, _)| params)
 }
 
+/// The result schema an operation returns, as pydantic emits it.
+pub fn result_schema_for(name: &str) -> Option<&'static serde_json::Value> {
+    parsed_schemas().get(name).map(|(_, result)| result)
+}
+
 /// The `registry.dump` result: every operation, in registration order.
 pub fn dump() -> serde_json::Value {
     let registry = default_registry();
