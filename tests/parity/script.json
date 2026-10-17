@@ -1208,6 +1208,11 @@
     },
     "expect": {
       "exit": 0
+    },
+    "http": {
+      "method": "GET",
+      "path": "/api/events?after=0&limit=5",
+      "auth": "admin"
     }
   },
   {
@@ -1218,6 +1223,11 @@
     },
     "expect": {
       "exit": 0
+    },
+    "http": {
+      "method": "GET",
+      "path": "/api/events?after=1&limit=2",
+      "auth": "admin"
     }
   },
   {
@@ -1227,6 +1237,11 @@
     },
     "expect": {
       "exit": 0
+    },
+    "http": {
+      "method": "GET",
+      "path": "/api/audit?limit=5",
+      "auth": "admin"
     }
   },
   {
@@ -1237,6 +1252,11 @@
     },
     "expect": {
       "exit": 0
+    },
+    "http": {
+      "method": "GET",
+      "path": "/api/audit?limit=2&offset=1",
+      "auth": "admin"
     }
   },
   {
@@ -1249,7 +1269,17 @@
     "expect": {
       "exit": 1
     },
-    "why": "a clone refuses without confirmation and touches nothing"
+    "why": "a clone refuses without confirmation and touches nothing",
+    "http": {
+      "method": "POST",
+      "path": "/api/instance/clone",
+      "auth": "admin",
+      "body": {
+        "source": "{root}/backup",
+        "confirm": false,
+        "reason": "parity harness"
+      }
+    }
   },
   {
     "operation": "clone",
@@ -1261,7 +1291,17 @@
     "expect": {
       "exit": 1
     },
-    "why": "a backup of this instance is not a clone source"
+    "why": "a backup of this instance is not a clone source",
+    "http": {
+      "method": "POST",
+      "path": "/api/instance/clone",
+      "auth": "admin",
+      "body": {
+        "source": "{root}/backup",
+        "confirm": true,
+        "reason": "parity harness"
+      }
+    }
   },
   {
     "operation": "clone",
@@ -1273,7 +1313,17 @@
     "expect": {
       "exit": 1
     },
-    "why": "a source with no manifest is refused"
+    "why": "a source with no manifest is refused",
+    "http": {
+      "method": "POST",
+      "path": "/api/instance/clone",
+      "auth": "admin",
+      "body": {
+        "source": "{root}/missing",
+        "confirm": true,
+        "reason": "parity harness"
+      }
+    }
   },
   {
     "operation": "project.import",
@@ -1285,7 +1335,17 @@
     "expect": {
       "exit": 1
     },
-    "why": "a reference that names no repository is refused before any clone"
+    "why": "a reference that names no repository is refused before any clone",
+    "http": {
+      "method": "POST",
+      "path": "/api/projects/import",
+      "auth": "admin",
+      "body": {
+        "repo": "not a repo!",
+        "reason": "parity harness",
+        "consolidate": false
+      }
+    }
   },
   {
     "operation": "project.import",
@@ -1297,7 +1357,17 @@
     "expect": {
       "exit": 1
     },
-    "why": "the reference check runs before the consolidate refusal, as in Python"
+    "why": "the reference check runs before the consolidate refusal, as in Python",
+    "http": {
+      "method": "POST",
+      "path": "/api/projects/import",
+      "auth": "admin",
+      "body": {
+        "repo": "not a repo!",
+        "reason": "parity harness",
+        "consolidate": true
+      }
+    }
   }
  ]
 }
