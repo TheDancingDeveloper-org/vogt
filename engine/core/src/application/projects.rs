@@ -11,8 +11,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::adapters::forge::registry::{identity_for, provider_for_host};
-use crate::adapters::forge::ForgeProvider;
+use crate::adapters::forge::registry::{identity_for, provider_for_host, ForgeClient};
+use crate::adapters::forge::{ForgeProvider, RepoRef};
 use crate::adapters::git::CloneRequest;
 use crate::application::context::{write_of, AppContext, Built};
 use crate::application::resolve;
@@ -477,7 +477,7 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
     params: Value,
 ) -> Result<Value, VogtError> {
     let params = parse::<ImportProjectParams>(params)?;
-    let (declared, _, principal, clock, ids, config) = context_parts(ctx);
+    let (_, _, _, _, _, config) = context_parts(ctx);
     let reference = normalise_reference(&params.repo);
     let Some((_, repo)) = identity_for(Some(&reference), config, ctx.forge_transport()) else {
         return Err(VogtError::InvalidRequest(format!(
@@ -497,7 +497,51 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
         ));
     }
     let provider = provider_for_host(&repo.host, config, ctx.forge_transport())?;
-    if let Some(root) = &params.root_path {
+    import_repository(
+        ctx,
+        &repo,
+        provider,
+        ImportRequest {
+            name: params.name,
+            root_path: params.root_path,
+            lifecycle_state: params.lifecycle_state,
+            consolidate: params.consolidate,
+            reason: &params.reason,
+            operation: PROJECT_IMPORT,
+            event_kind: PROJECT_IMPORTED_EVENT,
+        },
+    )
+}
+
+/// What one import asks for. Shared by `project.import` and `forge.import`.
+pub(crate) struct ImportRequest<'a> {
+    pub name: Option<String>,
+    pub root_path: Option<String>,
+    pub lifecycle_state: String,
+    pub consolidate: bool,
+    pub reason: &'a str,
+    pub operation: &'static str,
+    pub event_kind: &'static str,
+}
+
+/// Clone the repository, register it, and consolidate it when asked. Ports
+/// `imports.py`'s `import_from_ref`, which both `project.import` and
+/// `forge.import` share. The caller resolves `provider`: the instance file token
+/// for `project.import`, the acting actor's linked credential for `forge.import`.
+/// `None` is the honest unconfigured case: a public repository still clones, and
+/// consolidation is skipped with a "not collected" detail.
+///
+/// Ordering is load-bearing. The clone happens before the declared write, so a
+/// half-finished import leaves a directory nobody registered, never a project
+/// pointing at nothing.
+pub(crate) fn import_repository<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    repo: &RepoRef,
+    provider: Option<ForgeClient>,
+    request: ImportRequest<'_>,
+) -> Result<Value, VogtError> {
+    let (declared, _, principal, clock, ids, config) = context_parts(ctx);
+    if let Some(root) = &request.root_path {
         guard_remote_root_path(
             &principal.identity_ref,
             &config.resolved_import_root(),
@@ -517,8 +561,8 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
             repo.host
         )));
     };
-    let remote = identity_provider.clone_url(&repo);
-    let name = params.name.clone().unwrap_or_else(|| repo.repo.clone());
+    let remote = identity_provider.clone_url(repo);
+    let name = request.name.clone().unwrap_or_else(|| repo.repo.clone());
     let slug = slug_for(&name)?;
 
     // A read, not a gate: cloning a large repository only to fail on a name
@@ -532,7 +576,7 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
 
     let metadata = match &provider {
         None => serde_json::Map::new(),
-        Some(forge) => forge.describe(&repo)?.ok_or_else(|| {
+        Some(forge) => forge.describe(repo)?.ok_or_else(|| {
             VogtError::NotFound(format!(
                 "the forge has no repository {} visible to this instance's token",
                 repo.slug()
@@ -540,7 +584,7 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
         })?,
     };
 
-    let destination = match &params.root_path {
+    let destination = match &request.root_path {
         Some(root) => expand_user(Path::new(root)),
         None => config.resolved_import_root().join(&slug),
     };
@@ -551,27 +595,48 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
         helper_dir: Some(config.resolved_data_dir().join("tmp")),
     })?;
 
+    // A clone and consolidation of a forge repository is one of the explicit acts
+    // that make a project upstream-truth. Without a provider, or without a
+    // consolidation, the project stays unlinked and `forge.link` opts it in later.
+    let consolidating = request.consolidate && provider.is_some();
     let project_id = next_id(&ids, "prj");
     let now = now_of(&clock);
     let mut writing = write_of(ctx);
     let project = record_registration(
         &mut writing,
-        &params.reason,
+        request.reason,
         Registration {
-            operation: PROJECT_IMPORT,
-            event_kind: PROJECT_IMPORTED_EVENT,
+            operation: request.operation,
+            event_kind: request.event_kind,
             name,
             root_path: outcome.destination.display().to_string(),
-            repo_url: Some(identity_provider.web_url(&repo)),
-            lifecycle_state: params.lifecycle_state,
+            repo_url: Some(identity_provider.web_url(repo)),
+            lifecycle_state: request.lifecycle_state,
             exclusions: None,
             adopts_contract: false,
-            link_state: LinkState::Unlinked,
+            link_state: if consolidating {
+                LinkState::Linked
+            } else {
+                LinkState::Unlinked
+            },
             now,
             project_id,
         },
     )?;
 
+    let consolidated = if consolidating {
+        Some(crate::application::services::forge_onboard::onboard(
+            ctx,
+            json!({"project": project.slug, "reason": request.reason}),
+        )?)
+    } else {
+        None
+    };
+    let consolidation_detail = (request.consolidate && provider.is_none()).then(|| {
+        "cloned and registered, but the forge adapter is not configured, so nothing upstream \
+         was read — which is 'not collected', not 'there is nothing'"
+            .to_string()
+    });
     let default_branch = outcome.default_branch.or_else(|| {
         metadata
             .get("default_branch")
@@ -579,11 +644,13 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
             .filter(|branch| !branch.is_empty())
             .map(str::to_string)
     });
-    let detail = outcome.reused.then(|| {
-        format!(
-            "{} already held a clone of this remote; it was registered as it stood",
-            destination.display()
-        )
+    let detail = consolidation_detail.or_else(|| {
+        outcome.reused.then(|| {
+            format!(
+                "{} already held a clone of this remote; it was registered as it stood",
+                destination.display()
+            )
+        })
     });
     Ok(json!({
         "project": project,
@@ -592,7 +659,7 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
         "revision": outcome.revision,
         "default_branch": default_branch,
         "cloned": !outcome.reused,
-        "consolidated": null,
+        "consolidated": consolidated,
         "detail": detail,
     }))
 }

@@ -16,12 +16,16 @@ pub mod auth;
 pub mod bootstrap;
 pub mod chats;
 pub mod forge_accounts;
+pub mod forge_import;
+pub mod forge_link;
 pub mod forge_onboard;
+pub mod forge_publish;
 pub mod forge_repos;
 pub mod forge_writeback;
 pub mod freshness;
 pub mod history;
 pub mod install;
+pub mod native_migration;
 pub mod work;
 
 pub mod decisions;
@@ -59,6 +63,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod decisions_test;
+mod forge_ops_test;
 #[cfg(test)]
 mod services_test;
 

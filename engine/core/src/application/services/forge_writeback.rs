@@ -7,6 +7,9 @@
 
 use serde_json::{json, Value};
 
+use crate::adapters::forge::registry::{
+    identity_for, provider_for, provider_for_token, ForgeClient,
+};
 use crate::application::context::{write_of, AppContext, Built};
 use crate::application::services::{context_parts, dispatch, now_of};
 use crate::application::writes::{audited_write, WriteOutcome};
@@ -24,9 +27,9 @@ pub fn writeback_list_op(built: &Built, params: Value) -> Result<Value, VogtErro
     dispatch!(built, list_write_backs, params)
 }
 
-/// Set a project's write-back policy. The project must be linked first:
-/// a policy on an unlinked project would describe a behaviour that cannot
-/// happen, which is worse than refusing.
+/// Set a project's write-back policy. An unlinked project may take a policy: it
+/// is stored and has nothing to do until a later link, as Python's
+/// `set_write_back` does.
 fn set_write_back<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
@@ -128,6 +131,47 @@ where
             }))
             .collect::<Vec<_>>(),
     }))
+}
+
+/// The ledger identity for a write made under the instance file token.
+pub(crate) const FILE_TOKEN_IDENTITY: &str = "instance file token";
+
+/// The provider a write lands under, and whose identity it is. Ports
+/// `writeback.py`'s `_writer_provider`.
+///
+/// Prefers the acting actor's linked PAT for the target host, which works even
+/// when the instance has no file token. Falls back to the file-token provider,
+/// which is `None` when neither is configured. The actor lookup is skipped when
+/// linking is not configured, so an instance with no key pays nothing. `actor`
+/// is `None` for a principal with no actor row yet, who has no linked PAT.
+pub(crate) fn writer_provider<C, I>(
+    ctx: &AppContext<C, I>,
+    actor: Option<&crate::core::Actor>,
+    repo_url: Option<&str>,
+) -> Result<(Option<ForgeClient>, String), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let config = &ctx.config;
+    let host = identity_for(repo_url, config, None).map(|(_, repo)| repo.host);
+    if let (Some(actor), Some(host)) = (actor, host) {
+        if crate::adapters::forge::account_linking_enabled(config) {
+            let view = ctx.declared.read()?;
+            let secret = view.forge_account_secret(&actor.id, &host)?;
+            let account = view.forge_account(&actor.id, &host)?;
+            if let (Some(secret), Some(account)) = (secret, account) {
+                let pat = crate::adapters::forge::load_cipher(config)?.decrypt(&secret)?;
+                if let Some(provider) =
+                    provider_for_token(&host, &pat, Some(config), ctx.forge_transport())
+                {
+                    return Ok((Some(provider), account.login));
+                }
+            }
+        }
+    }
+    let file_provider = provider_for(repo_url, config, ctx.forge_transport())?;
+    Ok((file_provider, FILE_TOKEN_IDENTITY.to_owned()))
 }
 
 fn resolve_project(view: &impl ReadView, slug: &str) -> Result<crate::core::Project, VogtError> {

@@ -277,6 +277,9 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         // The public name is `forge.actions`. `forge.writeback_list` is not a
         // Python operation, so it is not an alias here.
         "forge.actions" => Some(crate::application::services::forge_writeback::writeback_list_op),
+        "forge.link" => Some(crate::application::services::forge_link::link_op),
+        "forge.publish" => Some(crate::application::services::forge_publish::publish_op),
+        "forge.import" => Some(crate::application::services::forge_import::import_op),
         _ => None,
     }
 }

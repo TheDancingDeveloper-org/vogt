@@ -6,6 +6,7 @@
 
 use serde_json::{json, Value};
 
+use crate::adapters::forge::registry::ForgeClient;
 use crate::adapters::forge::registry::{provider_for_host, provider_for_token, supported_hosts};
 use crate::adapters::forge::ForgeProvider;
 use crate::application::context::{AppContext, Built};
@@ -39,7 +40,7 @@ where
             ))
         }
     };
-    let (declared, _, principal, _, _, config) = context_parts(ctx);
+    let (declared, _, _, _, _, config) = context_parts(ctx);
     if !supported_hosts(Some(config)).contains(&host) {
         return Err(VogtError::InvalidRequest(format!(
             "{} is not a configured forge host; add it to forge_token_files \
@@ -52,29 +53,8 @@ where
     // the stored PAT raises, as Python's `_reader_provider` does — falling
     // back to the instance token while reporting the linked login would list
     // one person's repositories under another's name.
-    let linking = crate::adapters::forge::account_linking_enabled(config);
     let view = declared.read()?;
-    let mut linked_login: Option<String> = None;
-    let provider = if linking {
-        let actor = view.actor_by_identity(&principal.identity_ref)?;
-        let account = match &actor {
-            Some(actor) => view.forge_account(&actor.id, &host)?,
-            None => None,
-        };
-        let secret = match &actor {
-            Some(actor) => view.forge_account_secret(&actor.id, &host)?,
-            None => None,
-        };
-        if let (Some(account), Some(secret)) = (account, secret) {
-            let pat = crate::adapters::forge::load_cipher(config)?.decrypt(&secret)?;
-            linked_login = Some(account.login);
-            provider_for_token(&host, &pat, Some(config), ctx.forge_transport())
-        } else {
-            provider_for_host(&host, config, ctx.forge_transport())?
-        }
-    } else {
-        provider_for_host(&host, config, ctx.forge_transport())?
-    };
+    let (provider, linked_login) = reader_provider(ctx, &host)?;
     let Some(provider) = provider else {
         return Ok(json!({
             "repos": [],
@@ -103,6 +83,42 @@ where
         "login": linked_login,
         "detail": Value::Null,
     }))
+}
+
+/// The provider a read lists or imports through, and whose login it is. Ports
+/// `forge_repos.py`'s `_reader_provider`.
+///
+/// Prefers the acting actor's linked PAT for the host, which reaches their
+/// private repositories even with no instance file token. A PAT that cannot be
+/// decrypted is an error, never a silent fallback, because falling back would
+/// list one person's repositories under another's name. The file-token provider
+/// is the answer otherwise, and `None` means neither is configured.
+pub(crate) fn reader_provider<C, I>(
+    ctx: &AppContext<C, I>,
+    host: &str,
+) -> Result<(Option<ForgeClient>, Option<String>), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let config = &ctx.config;
+    if crate::adapters::forge::account_linking_enabled(config) {
+        let view = ctx.declared.read()?;
+        if let Some(actor) = view.actor_by_identity(&ctx.principal.identity_ref)? {
+            let secret = view.forge_account_secret(&actor.id, host)?;
+            let account = view.forge_account(&actor.id, host)?;
+            if let (Some(secret), Some(account)) = (secret, account) {
+                let pat = crate::adapters::forge::load_cipher(config)?.decrypt(&secret)?;
+                if let Some(provider) =
+                    provider_for_token(host, &pat, Some(config), ctx.forge_transport())
+                {
+                    return Ok((Some(provider), Some(account.login)));
+                }
+            }
+        }
+    }
+    let file_provider = provider_for_host(host, config, ctx.forge_transport())?;
+    Ok((file_provider, None))
 }
 
 /// The declared projects' forge keys, `host/owner/name` lowercased.
