@@ -15,6 +15,25 @@ pub enum ForgeResponse {
     Missing,
 }
 
+/// The only verbs a write may use. There is no DELETE and no PUT: the forge
+/// layer is append-only by construction, and a closed set makes that a type
+/// fact rather than a runtime check each client repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteMethod {
+    Post,
+    Patch,
+}
+
+impl WriteMethod {
+    /// The HTTP verb, as sent and as recorded in a write's detail.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Post => "POST",
+            Self::Patch => "PATCH",
+        }
+    }
+}
+
 /// The transport. A provider builds paths and reads shapes; this sends them.
 ///
 /// `get` returns the three read outcomes. `send` is a write and reports a
@@ -34,7 +53,7 @@ pub trait ForgeTransport {
 
     fn send(
         &self,
-        method: &str,
+        method: WriteMethod,
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value, VogtError>;

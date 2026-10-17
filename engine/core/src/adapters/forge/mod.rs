@@ -45,5 +45,5 @@ pub use payloads::{comparison, decoded_content, quote_path};
 pub use provider::ForgeProvider;
 pub use registry::has_configured_forge;
 pub use sync::{commit_sync, ForgeSyncCollector, PendingSync};
-pub use transport::{api_path, ForgeResponse, ForgeTransport};
+pub use transport::{api_path, ForgeResponse, ForgeTransport, WriteMethod};
 pub use writeback::{permits, WriteBackAction, WriteBackOutcome, WriteBackPolicy, WriteBackResult};

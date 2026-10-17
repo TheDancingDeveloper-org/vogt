@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::adapters::forge::{self, ForgeResponse, ForgeTransport};
+use crate::adapters::forge::{self, ForgeResponse, ForgeTransport, WriteMethod};
 use crate::errors::VogtError;
 
 pub const API_ROOT: &str = "https://api.github.com";
@@ -109,22 +109,27 @@ impl GitHubClient {
     /// Make a change upstream. The only mutating method, and deliberately not
     /// called `request`: every call site that changes somebody else's data is
     /// greppable, and there is no DELETE anywhere.
-    pub fn send(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, VogtError> {
-        if method != "POST" && method != "PATCH" {
-            return Err(VogtError::GitHubUnavailable(format!(
-                "{method} is not an additive operation; write-back is forward-only"
-            )));
-        }
+    pub fn send(
+        &self,
+        method: WriteMethod,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, VogtError> {
+        let verb = method.as_str();
         let url = self.url(path, &[]);
         let encoded = body.map(|value| value.to_string()).unwrap_or_default();
-        let (status, response, _) =
-            self.fetch(&url, &self.headers(true), encoded.as_bytes(), method)?;
+        let (status, response, _) = self.fetch(
+            &url,
+            &self.headers(true),
+            encoded.as_bytes(),
+            method.as_str(),
+        )?;
         if status == 404 {
             return Ok(Value::Null);
         }
         if status >= 400 {
             return Err(VogtError::GitHubUnavailable(format!(
-                "GitHub returned {status} for {method} {path}"
+                "GitHub returned {status} for {verb} {path}"
             )));
         }
         if response.iter().all(u8::is_ascii_whitespace) {
@@ -132,7 +137,7 @@ impl GitHubClient {
         }
         serde_json::from_slice(&response).map_err(|_| {
             VogtError::GitHubUnavailable(format!(
-                "GitHub answered {method} {path} with something that is not JSON"
+                "GitHub answered {verb} {path} with something that is not JSON"
             ))
         })
     }
@@ -264,7 +269,12 @@ impl ForgeTransport for GitHubClient {
         Ok(GitHubClient::identity(self)?.map(|who| (who.login, who.scopes)))
     }
 
-    fn send(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, VogtError> {
+    fn send(
+        &self,
+        method: WriteMethod,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, VogtError> {
         self.send(method, path, body)
     }
 }
@@ -391,12 +401,12 @@ mod tests {
     }
 
     #[test]
-    fn send_refuses_anything_but_post_and_patch() {
+    fn send_answers_the_verb_it_was_given() {
         let (_, client) = scripted(200, "{}");
-        assert!(matches!(
-            client.send("DELETE", "/repos/org/vogt", None).unwrap_err(),
-            VogtError::GitHubUnavailable(_)
-        ));
+        let sent = client
+            .send(WriteMethod::Patch, "/repos/org/vogt", None)
+            .unwrap();
+        assert_eq!(sent, serde_json::json!({}));
     }
 
     #[test]

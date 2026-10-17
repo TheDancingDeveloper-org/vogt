@@ -12,7 +12,7 @@ use super::models::{
 };
 use super::payloads::{comparison, decoded_content, quote_path};
 use super::provider::ForgeProvider;
-use super::transport::{api_path, as_list, ForgeResponse, ForgeTransport};
+use super::transport::{api_path, as_list, ForgeResponse, ForgeTransport, WriteMethod};
 use super::writeback::{WriteBackOutcome, WriteBackResult};
 use crate::core::py_repr;
 use crate::errors::VogtError;
@@ -459,7 +459,7 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
             ),
             &serde_json::json!({"body": body}),
             Some(number),
-            "POST",
+            WriteMethod::Post,
         )
     }
 
@@ -481,7 +481,7 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
             &format!("/repos/{}/{}/issues", repo.owner, repo.repo),
             &payload,
             None,
-            "POST",
+            WriteMethod::Post,
         )
     }
 
@@ -497,7 +497,7 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
             &format!("/repos/{}/{}/issues/{number}/labels", repo.owner, repo.repo),
             &serde_json::json!({"labels": labels}),
             Some(number),
-            "POST",
+            WriteMethod::Post,
         )
     }
 
@@ -518,7 +518,7 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
             &format!("/repos/{}/{}/issues/{number}", repo.owner, repo.repo),
             &serde_json::json!({"state": state}),
             Some(number),
-            "PATCH",
+            WriteMethod::Patch,
         )
     }
 
@@ -533,7 +533,7 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
             &format!("/repos/{}/{}/issues/{number}", repo.owner, repo.repo),
             &serde_json::json!({"body": body}),
             Some(number),
-            "PATCH",
+            WriteMethod::Patch,
         )
     }
 
@@ -554,7 +554,10 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         if let Some(description) = description.filter(|text| !text.is_empty()) {
             payload["description"] = serde_json::Value::String(description.to_owned());
         }
-        let response = match self.transport.send("POST", "/user/repos", Some(&payload)) {
+        let response = match self
+            .transport
+            .send(WriteMethod::Post, "/user/repos", Some(&payload))
+        {
             Err(error) if error.message().contains("422") => {
                 return Err(VogtError::RemoteRepoExists(format!(
                     "github.com already has a repository named {} reachable by this \
@@ -611,7 +614,7 @@ impl<T: ForgeTransport> GitHubProvider<T> {
         endpoint: &str,
         payload: &serde_json::Value,
         number: Option<i64>,
-        method: &str,
+        method: WriteMethod,
     ) -> Result<WriteBackResult, VogtError> {
         let response = match self.transport.send(method, endpoint, Some(payload)) {
             Err(error) => return Ok(WriteBackResult::failed(error.message().to_owned())),
@@ -633,7 +636,9 @@ impl<T: ForgeTransport> GitHubProvider<T> {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
             subject_key: upstream_number.map(|number| self.subject_key(repo, number)),
-            detail: Some(serde_json::json!({"method": method, "endpoint": endpoint}).to_string()),
+            detail: Some(
+                serde_json::json!({"method": method.as_str(), "endpoint": endpoint}).to_string(),
+            ),
         })
     }
 
@@ -1078,7 +1083,7 @@ mod tests {
         }
         fn send(
             &self,
-            _method: &str,
+            _method: WriteMethod,
             path: &str,
             body: Option<&serde_json::Value>,
         ) -> Result<serde_json::Value, VogtError> {
