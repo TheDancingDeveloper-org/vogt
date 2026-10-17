@@ -12652,3 +12652,26 @@ a.vogt-projects-tag:hover {
     min-height: 44px;
   }
 }
+
+/* State badges on a session row (WI-1736, design §4): one glyph each, with the
+   words in the title and the accessible name. */
+.session-row .session-badges {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.session-row .session-badge {
+  font-size: 10px;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+}
+/* The count of pinned sessions that need a person, on the Pinned header. */
+.session-list-needs {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--activity-waiting);
+}

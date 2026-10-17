@@ -7,6 +7,7 @@ import {
   createMemo,
   createSignal,
   lazy,
+  on,
   onCleanup,
   onMount,
   untrack,
@@ -144,11 +145,13 @@ import {
   RAIL_SECTION_TITLES,
   buildRailModel,
   flattenRail,
+  railBadges,
   railFinished,
+  railSectionOf,
   type RailEntry,
   type RailHeadEntry,
 } from "./sessionRail";
-import { createRailStarters } from "./railStarters";
+import { noteRailSessions, railStarters } from "./railStarters";
 import { setExpanded } from "./fileTreeState";
 import { demoManifest, resetDemoData } from "./runtimeTransport";
 import {
@@ -571,7 +574,7 @@ const App: Component = () => {
   // The rail's sections (WI-1736): the engine's list grouped by what needs a
   // person, with workers nested under the oversight session that started them.
   // Who started whom is Vogt's, read on its own cycle (railStarters.ts).
-  const railStarters = createRailStarters(() => sessionsStore.order.join("\n"));
+  createEffect(on(() => sessionsStore.order.join("\n"), noteRailSessions));
   const [railQuery, setRailQuery] = createSignal("");
   const [railFolded, setRailFolded] = createSignal<ReadonlySet<string>>(new Set());
   const toggleRailFolded = (id: string) =>
@@ -597,6 +600,7 @@ const App: Component = () => {
       starters: railStarters(),
       collapsed: railFolded(),
       query: railQuery(),
+      hiddenCount: sessionsStore.hiddenCount,
       held,
     });
     // A session-list refresh builds new objects for the same ids. <For> keys
@@ -653,6 +657,7 @@ const App: Component = () => {
         title: RAIL_SECTION_TITLES.running,
         count: 0,
         open: railSections.running,
+        needs: 0,
       }];
     }
     return flat;
@@ -664,13 +669,38 @@ const App: Component = () => {
       type="button"
       class="places-section-toggle places-section-label places-section-label--counted rail-section-head"
       aria-expanded={railSections[entry.id]}
-      onClick={() => setRailSection(entry.id, !railSections[entry.id])}
+      onClick={() => {
+        const open = railSections[entry.id];
+        setRailSection(entry.id, !open);
+        // Opening Older pages in what the engine hid, so its rows exist to show.
+        if (!open && entry.id === "older" && !railSections.showHidden) setRailSection("showHidden", true);
+      }}
     >
       <span class="places-section-caret" aria-hidden="true">{railSections[entry.id] ? "▾" : "▸"}</span>
       <span>{entry.title}</span>
       <PlaceCount metric={{ value: entry.count, state: sessionMetric().state }} label={`${entry.title.toLowerCase()} sessions`} />
+      <Show when={entry.needs > 0}>
+        <span class="session-list-needs" title={`${entry.needs} pinned ${entry.needs === 1 ? "session needs" : "sessions need"} you`}>
+          {entry.needs} need you
+        </span>
+      </Show>
     </button>
   );
+  // The Places link's tally (WI-1736, R2): how many sessions need a person and
+  // how many run, counted over every session, pinned and filtered alike.
+  const railTally = createMemo(() => {
+    const now = railNow();
+    let needs = 0;
+    let running = 0;
+    for (const id of sessionsStore.order) {
+      const s = sessionsStore.sessions[id];
+      if (!s) continue;
+      const section = railSectionOf(s, now);
+      if (section === "needs") needs += 1;
+      else if (section === "running") running += 1;
+    }
+    return { needs, running };
+  });
   const waitingSessionList = () =>
     sessionsStore.ready
       ? sessionsStore.order
@@ -1809,7 +1839,7 @@ const App: Component = () => {
                 class={currentPlace("sessions") ? "active" : ""}
                 aria-current={currentPlace("sessions") && !["git", "history", "oversight", "tasks", "gui", "assistant", "chat", "files"].includes(currentTool() ?? "") ? "page" : undefined}
                 href="#/sessions"
-              ><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /></a>
+              ><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /><PlaceCount metric={{ value: sessionsStore.ready ? railTally().needs : null, state: sessionMetric().state }} label="sessions need you" tone="drift" /><PlaceCount metric={{ value: sessionsStore.ready ? railTally().running : null, state: sessionMetric().state }} label="running sessions" /></a>
               <a class={isCurrentTool(routeOutcome(), "files") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "files") ? "page" : undefined} href="#/files">Files</a>
               <a class={isCurrentTool(routeOutcome(), "git") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "git") ? "page" : undefined} href="#/g">Git</a>
               <a class={isCurrentTool(routeOutcome(), "oversight") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "oversight") ? "page" : undefined} href="#/oversight">Oversight</a>
@@ -1931,6 +1961,13 @@ const App: Component = () => {
                           </span>
                         )}
                       </Show>
+                      <span class="session-badges">
+                        <For each={railBadges(s, railNow())}>
+                          {(badge) => (
+                            <span class="session-badge" title={badge.label} aria-label={badge.label}>{badge.glyph}</span>
+                          )}
+                        </For>
+                      </span>
                       {/* The work item it serves (WI-998): the engine's label,
                           named with the item's title and muted once the item
                           is finished. Opens the item, not the terminal. */}
