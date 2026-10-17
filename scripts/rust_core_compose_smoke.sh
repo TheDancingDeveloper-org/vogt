@@ -32,12 +32,13 @@ cleanup() {
 trap cleanup EXIT
 
 export VOGT_IMAGE="vogt-core:rust"
-export VOGT_PUBLIC_URL="http://127.0.0.1:18080"
-export ENGINE_PUBLIC_URL="http://127.0.0.1:18910"
+# Ports come from the caller when a job shares the daemon with another stack.
+export VOGT_PORT="${VOGT_PORT:-18080}"
+export ENGINE_PORT="${ENGINE_PORT:-18910}"
+export VOGT_PUBLIC_URL="http://127.0.0.1:${VOGT_PORT}"
+export ENGINE_PUBLIC_URL="http://127.0.0.1:${ENGINE_PORT}"
 export ENGINE_BIND="127.0.0.1"
-export ENGINE_PORT="18910"
 export VOGT_BIND_IP="127.0.0.1"
-export VOGT_PORT="18080"
 # Named-volume tokens, not host files. The runner's filesystem is not the
 # daemon's, so a Compose file-secret bind fails before the stack starts.
 # The core refuses a secret under 24 characters, and an empty one is treated
