@@ -80,6 +80,156 @@
     "status": 200
   },
   {
+    "operation": "why",
+    "result": {
+      "error": {
+        "code": "not_found",
+        "message": "no work item or observed subject 'WI-1'"
+      }
+    },
+    "status": 404
+  },
+  {
+    "operation": "why",
+    "result": {
+      "error": {
+        "code": "not_found",
+        "message": "no work item or observed subject 'WI-404'"
+      }
+    },
+    "status": 404
+  },
+  {
+    "operation": "work.list",
+    "result": {
+      "detail": null,
+      "items": [],
+      "link_state": null,
+      "mode": "full",
+      "next_offset": null,
+      "total": 0
+    },
+    "status": 200
+  },
+  {
+    "operation": "work.list",
+    "result": {
+      "detail": null,
+      "items": [],
+      "link_state": null,
+      "mode": "summary",
+      "next_offset": null,
+      "total": 0
+    },
+    "status": 200
+  },
+  {
+    "operation": "work.get_many",
+    "result": {
+      "items": [],
+      "missing": [
+        "WI-1",
+        "WI-404",
+        "WI-2"
+      ]
+    },
+    "status": 200
+  },
+  {
+    "operation": "audit.list",
+    "result": {
+      "records": [
+        {
+          "actor_id": "act_0004",
+          "actor_identity_ref": "human:ada-lovelace",
+          "at": "2026-01-02T03:04:07Z",
+          "entity_id": "tok_0003",
+          "entity_kind": "token",
+          "id": "aud_0005",
+          "operation": "install.bootstrap",
+          "payload_digest": "sha256:b19d0ae7d972de7a7d247d64fc4db90184619cd1db18a41a4d0e6b2a31a72d32",
+          "reason": "first-run install bootstrap for human:ada-lovelace",
+          "revision": 3,
+          "txn_id": "txn_0004"
+        },
+        {
+          "actor_id": "act_0004",
+          "actor_identity_ref": "human:ada-lovelace",
+          "at": "2026-01-02T03:04:06Z",
+          "entity_id": "act_0004",
+          "entity_kind": "actor",
+          "id": "aud_0004",
+          "operation": "actor.auto_register",
+          "payload_digest": "sha256:87af525aec71a14661415e1c50dcf914634e2707473b601ae5fe8254bca3cf4d",
+          "reason": "first authenticated use by human:ada-lovelace; auto-registered so the write it accompanies can be attributed",
+          "revision": 3,
+          "txn_id": "txn_0004"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:16Z",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0003",
+          "operation": "token.adopt",
+          "payload_digest": "sha256:f1942d83b32c6907f41a7053a5e2b379b085799a1b1a2bb7dd9e2a327080cefc",
+          "reason": "adopting the operator-supplied agent token at init",
+          "revision": 2,
+          "txn_id": "txn_0003"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:12Z",
+          "entity_id": "tok_0001",
+          "entity_kind": "token",
+          "id": "aud_0002",
+          "operation": "token.adopt",
+          "payload_digest": "sha256:59549779aa0cda6825e03092b441cacac09d0003597ed7fd262fc918fdedf350",
+          "reason": "adopting the operator-supplied core token at init",
+          "revision": 1,
+          "txn_id": "txn_0002"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:07Z",
+          "entity_id": "ins_0001",
+          "entity_kind": "instance",
+          "id": "aud_0001",
+          "operation": "instance.init",
+          "payload_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "reason": "instance bootstrap",
+          "revision": 0,
+          "txn_id": "txn_0001"
+        }
+      ],
+      "total": 5
+    },
+    "status": 200
+  },
+  {
+    "operation": "work.bind_branch",
+    "result": {
+      "error": {
+        "code": "not_found",
+        "message": "no work item 'WI-1'"
+      }
+    },
+    "status": 404
+  },
+  {
+    "operation": "work.adopt",
+    "result": {
+      "error": {
+        "code": "not_found",
+        "message": "no observed subject 'gh:parity-org/parity#404'"
+      }
+    },
+    "status": 404
+  },
+  {
     "operation": "session.list",
     "result": {
       "digests": [],
@@ -654,7 +804,7 @@
           "payload_digest": "sha256:1b0a972c9944e759355152203a12fb36104f692b1f1911217107dcd4f75b8ccd",
           "reason": "seed",
           "revision": 4,
-          "txn_id": "txn_0005"
+          "txn_id": "txn_0006"
         },
         {
           "actor_id": "act_0004",
@@ -666,7 +816,7 @@
           "payload_digest": "sha256:1efafbf3c435f850162b7fdb5f1a1f97b97eb7bae0490f291c1731c7a390ee5a",
           "reason": "a read token",
           "revision": 5,
-          "txn_id": "txn_0006"
+          "txn_id": "txn_0007"
         },
         {
           "actor_id": "act_0004",
@@ -678,7 +828,7 @@
           "payload_digest": "sha256:77f2ce31482b0061e1a20b86d2de25c0b43a6eaff6c025be826208b0dec15fe3",
           "reason": "done",
           "revision": 6,
-          "txn_id": "txn_0007"
+          "txn_id": "txn_0008"
         },
         {
           "actor_id": "act_0004",
@@ -690,7 +840,7 @@
           "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
           "reason": "parity harness",
           "revision": 7,
-          "txn_id": "txn_0008"
+          "txn_id": "txn_0009"
         },
         {
           "actor_id": "act_0004",
@@ -702,7 +852,7 @@
           "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
           "reason": "parity harness",
           "revision": 8,
-          "txn_id": "txn_0009"
+          "txn_id": "txn_0010"
         },
         {
           "actor_id": "act_0004",
@@ -714,7 +864,7 @@
           "payload_digest": "sha256:d331a6f9ffa337f5bbea02b91117f85c4a54fe0e8550538ef0ccbe9757a74c7a",
           "reason": "parity harness",
           "revision": 9,
-          "txn_id": "txn_0010"
+          "txn_id": "txn_0011"
         },
         {
           "actor_id": "act_0005",
@@ -726,7 +876,7 @@
           "payload_digest": "sha256:079f75e3b73e507a9203394b2f453386de6362973c6d3e9dfa6ddfee0201f931",
           "reason": "password login by ada",
           "revision": 10,
-          "txn_id": "txn_0011"
+          "txn_id": "txn_0012"
         },
         {
           "actor_id": "act_0004",
@@ -738,7 +888,7 @@
           "payload_digest": "sha256:c641563a061b879b4b32211c6b39a7a2eeb71a7a114359133e079bc16f1b4bfa",
           "reason": "parity harness",
           "revision": 11,
-          "txn_id": "txn_0012"
+          "txn_id": "txn_0013"
         }
       ],
       "auth_decisions": [
@@ -749,7 +899,7 @@
           "detail": null,
           "id": "aut_0001",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.list",
+          "operation": "why",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
@@ -762,7 +912,7 @@
           "detail": null,
           "id": "aut_0002",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.sweep",
+          "operation": "why",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
@@ -775,7 +925,7 @@
           "detail": null,
           "id": "aut_0003",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.log_tail",
+          "operation": "work.list",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
@@ -788,9 +938,9 @@
           "detail": null,
           "id": "aut_0004",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.start",
+          "operation": "work.list",
           "reason_code": "token_valid",
-          "scope": "work.write",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -801,9 +951,9 @@
           "detail": null,
           "id": "aut_0005",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.input",
+          "operation": "work.get_many",
           "reason_code": "token_valid",
-          "scope": "work.write",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -814,7 +964,7 @@
           "detail": null,
           "id": "aut_0006",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.screen",
+          "operation": "audit.list",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
@@ -827,9 +977,9 @@
           "detail": null,
           "id": "aut_0007",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.wait",
+          "operation": "work.bind_branch",
           "reason_code": "token_valid",
-          "scope": "read",
+          "scope": "work.write",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -840,7 +990,7 @@
           "detail": null,
           "id": "aut_0008",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.answer",
+          "operation": "work.adopt",
           "reason_code": "token_valid",
           "scope": "work.write",
           "token_id": "tok_0003",
@@ -853,9 +1003,9 @@
           "detail": null,
           "id": "aut_0009",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.hibernate",
+          "operation": "session.list",
           "reason_code": "token_valid",
-          "scope": "work.write",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -866,9 +1016,9 @@
           "detail": null,
           "id": "aut_0010",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.keep_awake",
+          "operation": "session.sweep",
           "reason_code": "token_valid",
-          "scope": "work.write",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -879,9 +1029,9 @@
           "detail": null,
           "id": "aut_0011",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.set_role",
+          "operation": "session.log_tail",
           "reason_code": "token_valid",
-          "scope": "work.write",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -892,7 +1042,7 @@
           "detail": null,
           "id": "aut_0012",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.wake",
+          "operation": "session.start",
           "reason_code": "token_valid",
           "scope": "work.write",
           "token_id": "tok_0003",
@@ -905,7 +1055,7 @@
           "detail": null,
           "id": "aut_0013",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.stop",
+          "operation": "session.input",
           "reason_code": "token_valid",
           "scope": "work.write",
           "token_id": "tok_0003",
@@ -918,6 +1068,110 @@
           "detail": null,
           "id": "aut_0014",
           "identity_ref": "human:ada-lovelace",
+          "operation": "session.screen",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0015",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.wait",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0016",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.answer",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0017",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.hibernate",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0018",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.keep_awake",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0019",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.set_role",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0020",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.wake",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0021",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.stop",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0022",
+          "identity_ref": "human:ada-lovelace",
           "operation": "label.create",
           "reason_code": "token_valid",
           "scope": "work.write",
@@ -929,7 +1183,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0015",
+          "id": "aut_0023",
           "identity_ref": "human:ada-lovelace",
           "operation": "token.issue",
           "reason_code": "token_valid",
@@ -942,7 +1196,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "deny",
           "detail": null,
-          "id": "aut_0016",
+          "id": "aut_0024",
           "identity_ref": "human:ada-lovelace",
           "operation": "label.create",
           "reason_code": "missing_scope",
@@ -955,7 +1209,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0017",
+          "id": "aut_0025",
           "identity_ref": "human:ada-lovelace",
           "operation": "auth.logout",
           "reason_code": "token_valid",
@@ -968,7 +1222,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0018",
+          "id": "aut_0026",
           "identity_ref": "human:ada-lovelace",
           "operation": "user.create",
           "reason_code": "token_valid",
@@ -981,7 +1235,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0019",
+          "id": "aut_0027",
           "identity_ref": "human:ada-lovelace",
           "operation": "user.list",
           "reason_code": "token_valid",
@@ -994,7 +1248,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0020",
+          "id": "aut_0028",
           "identity_ref": "human:ada-lovelace",
           "operation": "user.set_password",
           "reason_code": "token_valid",
@@ -1007,7 +1261,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0021",
+          "id": "aut_0029",
           "identity_ref": "human:ada-lovelace",
           "operation": "token.list",
           "reason_code": "token_valid",
@@ -1020,7 +1274,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0022",
+          "id": "aut_0030",
           "identity_ref": "human:ada-lovelace",
           "operation": "token.revoke",
           "reason_code": "token_valid",
@@ -1033,7 +1287,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0023",
+          "id": "aut_0031",
           "identity_ref": "human:ada-lovelace",
           "operation": "auth.whoami",
           "reason_code": "token_valid",
@@ -1046,7 +1300,7 @@
           "at": "2026-01-02T03:04:07+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0024",
+          "id": "aut_0032",
           "identity_ref": "human:ada",
           "operation": "auth.login",
           "reason_code": "login_ok",
@@ -1059,7 +1313,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0025",
+          "id": "aut_0033",
           "identity_ref": "human:ada",
           "operation": "auth.whoami",
           "reason_code": "token_valid",
@@ -1072,7 +1326,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0026",
+          "id": "aut_0034",
           "identity_ref": "human:ada-lovelace",
           "operation": "user.remove",
           "reason_code": "token_valid",

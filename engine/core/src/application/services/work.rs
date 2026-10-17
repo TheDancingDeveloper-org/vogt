@@ -1414,24 +1414,24 @@ where
         .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
     let given = text_of(&params, "branch");
     let reason = text_of(&params, "reason").unwrap_or_default();
-    let view = ctx.declared.read()?;
-    let item = upstream::resolve_work_ref(ctx, &view, &reference)?;
-    drop(view);
-    let branch = given
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| {
-            crate::branches::default_branch_name(
-                &item.reference,
-                &ctx.config.branch_binding_template,
-            )
-        });
+    // Python resolves the ref inside the write body, so a refused bind opens
+    // a transaction and burns its id; the same order keeps the audit ids equal.
     let mut writing = crate::application::context::write_of(ctx);
     let clock = std::sync::Arc::clone(writing.clock());
     let stored = audited_write(&mut writing, WORK_BIND, &reason, move |txn, _actor| {
         // Declared-only `resolve::work_item` misses an upstream subject key.
         // Resolve the same way Python does inside the transaction body.
         let fresh = upstream::resolve_work_ref(ctx, txn, &reference)?;
+        let branch = given
+            .clone()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| {
+                crate::branches::default_branch_name(
+                    &fresh.reference,
+                    &ctx.config.branch_binding_template,
+                )
+            });
         let Some(project_id) = fresh.project_id.clone() else {
             return Err(VogtError::InvalidRequest(format!(
                 "{} belongs to no project, so there is no branch to bind it to",
@@ -1483,16 +1483,21 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let subject = text_of(&params, "subject_key")
-        .ok_or_else(|| VogtError::InvalidRequest("subject_key is required".into()))?;
+    let subject = text_of(&params, "subject")
+        .ok_or_else(|| VogtError::InvalidRequest("subject is required".into()))?;
     let reason = text_of(&params, "reason").unwrap_or_default();
+    // Python's `_subject`: nothing swept is an invalid request, and an unknown
+    // subject is a not_found that names it.
     if !ctx.observed.has_evidence_tables()? {
-        return Err(VogtError::NotFound(format!("no observation {subject}")));
+        return Err(VogtError::InvalidRequest(
+            "nothing has been swept yet; there are no subjects to adopt".into(),
+        ));
     }
+    let unknown = || VogtError::NotFound(format!("no observed subject '{subject}'"));
     let observation = ctx
         .observed
         .latest_by_subject(&subject)?
-        .ok_or_else(|| VogtError::NotFound(format!("no observation {subject}")))?;
+        .ok_or_else(unknown)?;
     let project_id = observation.project_id.clone().ok_or_else(|| {
         VogtError::InvalidRequest(format!(
             "observation {subject} has no project and cannot be adopted"

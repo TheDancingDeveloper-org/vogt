@@ -48,7 +48,9 @@ where
     let project_slug = project.slug.clone();
     let id = project.id.clone();
     let mut writing = write_of(ctx);
-    let updated = audited_write(&mut writing, "forge.writeback", &reason, |txn, _actor| {
+    // The audit operation is Python's `WRITEBACK_SET`, which the parity audit
+    // trail compares by name.
+    let updated = audited_write(&mut writing, "project.writeback", &reason, |txn, _actor| {
         txn.update_project(
             &id,
             &ProjectUpdate {

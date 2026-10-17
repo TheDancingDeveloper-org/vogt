@@ -580,6 +580,144 @@
    }
   },
   {
+   "operation": "why",
+   "params": {
+    "ref": "WI-1"
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/why?ref=WI-1",
+    "auth": "admin"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "why",
+   "params": {
+    "ref": "WI-404"
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/why?ref=WI-404",
+    "auth": "admin"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "work.list",
+   "params": {
+    "mode": "full",
+    "limit": 1
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/work?mode=full&limit=1",
+    "auth": "admin"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "work.list",
+   "params": {
+    "limit": 1,
+    "offset": 1
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/work?limit=1&offset=1",
+    "auth": "admin"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "work.get_many",
+   "params": {
+    "refs": [
+     "WI-1",
+     "WI-404",
+     "WI-2"
+    ]
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/work/get-many?refs=WI-1&refs=WI-404&refs=WI-2",
+    "auth": "admin"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "cli": [
+    "work",
+    "get-many"
+   ]
+  },
+  {
+   "operation": "audit.list",
+   "params": {
+    "limit": 5
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/audit?limit=5",
+    "auth": "admin"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "work.bind_branch",
+   "params": {
+    "ref": "WI-1",
+    "branch": "wi-1-parity",
+    "reason": "parity"
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/work/bind-branch",
+    "auth": "admin",
+    "body": {
+     "ref": "WI-1",
+     "branch": "wi-1-parity",
+     "reason": "parity"
+    }
+   },
+   "expect": {
+    "exit": 1
+   },
+   "cli": [
+    "work",
+    "bind-branch"
+   ]
+  },
+  {
+   "operation": "work.adopt",
+   "params": {
+    "subject": "gh:parity-org/parity#404",
+    "reason": "parity"
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/work/adopt",
+    "auth": "admin",
+    "body": {
+     "subject": "gh:parity-org/parity#404",
+     "reason": "parity"
+    }
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
    "operation": "session.list",
    "params": {},
    "expect": {

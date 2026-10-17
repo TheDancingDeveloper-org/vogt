@@ -1986,6 +1986,241 @@
   },
   {
     "body": {
+      "contributions": [
+        {
+          "contribution": 55.0,
+          "detail": "p1",
+          "input": "priority",
+          "value": 1.0,
+          "weight": 55.0
+        },
+        {
+          "contribution": 0.0,
+          "detail": "0.0 days since last change",
+          "input": "staleness",
+          "value": 0.0,
+          "weight": 0.5
+        },
+        {
+          "contribution": 0.0,
+          "detail": "0 item(s) depend on this one",
+          "input": "blocking_fan_out",
+          "value": 0.0,
+          "weight": 8.0
+        },
+        {
+          "contribution": 0.0,
+          "detail": "no initiative",
+          "input": "initiative_weight",
+          "value": 0.0,
+          "weight": 0.25
+        },
+        {
+          "contribution": -3.0,
+          "detail": "trust state unverified",
+          "input": "trust_penalty",
+          "value": 1.0,
+          "weight": -3.0
+        },
+        {
+          "contribution": 0.0,
+          "detail": "no open pull request",
+          "input": "open_pr",
+          "value": 0.0,
+          "weight": 12.0
+        },
+        {
+          "contribution": 0.0,
+          "detail": "no branch observed",
+          "input": "branch_activity",
+          "value": 0.0,
+          "weight": 8.0
+        }
+      ],
+      "inputs_not_yet_available": {
+        "ci_red_boost": "arrives with the CI check observations it reads"
+      },
+      "ref": "WI-1",
+      "title": "parity item renamed",
+      "total": 52.0
+    },
+    "exit": 0,
+    "operation": "why"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "why"
+  },
+  {
+    "body": {
+      "detail": null,
+      "items": [
+        {
+          "assignee_actor_id": null,
+          "assignee_identity_ref": null,
+          "body": "",
+          "created_at": "2026-01-02T03:04:05Z",
+          "effort": null,
+          "id": "wrk_0001",
+          "initiative_id": null,
+          "kind": "chore",
+          "labels": [],
+          "origin": "created",
+          "priority": "p1",
+          "project_id": null,
+          "project_slug": null,
+          "ref": "WI-1",
+          "relations": [],
+          "state": "in_progress",
+          "superseded_by": null,
+          "title": "parity item renamed",
+          "trust_state": "unverified",
+          "updated_at": "2026-01-02T03:04:05Z"
+        }
+      ],
+      "link_state": null,
+      "mode": "full",
+      "next_offset": 1,
+      "total": 2
+    },
+    "exit": 0,
+    "operation": "work.list"
+  },
+  {
+    "body": {
+      "detail": null,
+      "items": [
+        {
+          "kind": "chore",
+          "priority": "p2",
+          "project_slug": null,
+          "ref": "WI-2",
+          "state": "open",
+          "title": "labelled item"
+        }
+      ],
+      "link_state": null,
+      "mode": "summary",
+      "next_offset": null,
+      "total": 2
+    },
+    "exit": 0,
+    "operation": "work.list"
+  },
+  {
+    "body": {
+      "items": [
+        {
+          "kind": "chore",
+          "priority": "p1",
+          "project_slug": null,
+          "ref": "WI-1",
+          "state": "in_progress",
+          "title": "parity item renamed"
+        },
+        {
+          "kind": "chore",
+          "priority": "p2",
+          "project_slug": null,
+          "ref": "WI-2",
+          "state": "open",
+          "title": "labelled item"
+        }
+      ],
+      "missing": [
+        "WI-404"
+      ]
+    },
+    "exit": 0,
+    "operation": "work.get_many"
+  },
+  {
+    "body": {
+      "records": [
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:06Z",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
+          "id": "aud_0022",
+          "operation": "project.writeback",
+          "payload_digest": "sha256:5160587a6bd4fd6e1c8cfdfbe9e7b71a0aff7cb411b75e8ad277bea16adfdf65",
+          "reason": "parity harness",
+          "revision": 21,
+          "txn_id": "txn_0023"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:05Z",
+          "entity_id": "wrk_0001",
+          "entity_kind": "work_item",
+          "id": "aud_0021",
+          "operation": "work.unrelate",
+          "payload_digest": "sha256:919ba7f4a526f308300142a25947bcafa3b9df9267bbef6a486125710e1f95b4",
+          "reason": "parity",
+          "revision": 20,
+          "txn_id": "txn_0022"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:06Z",
+          "entity_id": "wrk_0001",
+          "entity_kind": "work_item",
+          "id": "aud_0020",
+          "operation": "work.relate",
+          "payload_digest": "sha256:919ba7f4a526f308300142a25947bcafa3b9df9267bbef6a486125710e1f95b4",
+          "reason": "parity",
+          "revision": 19,
+          "txn_id": "txn_0021"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:06Z",
+          "entity_id": "wrk_0001",
+          "entity_kind": "work_item",
+          "id": "aud_0019",
+          "operation": "work.transition",
+          "payload_digest": "sha256:e29def8eb3987143cc71db472521260af60e6205bd7f2d4cb0cad1c34d95484e",
+          "reason": "parity",
+          "revision": 18,
+          "txn_id": "txn_0020"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:07Z",
+          "entity_id": "cmt_0001",
+          "entity_kind": "comment",
+          "id": "aud_0018",
+          "operation": "work.comment",
+          "payload_digest": "sha256:c0759a6538411595d62b368f304a00fa97626be794ec4750d566dfebaf313e68",
+          "reason": "parity",
+          "revision": 17,
+          "txn_id": "txn_0019"
+        }
+      ],
+      "total": 22
+    },
+    "exit": 0,
+    "operation": "audit.list"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "work.bind_branch"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "work.adopt"
+  },
+  {
+    "body": {
       "digests": [],
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
       "hidden_count": 0,
