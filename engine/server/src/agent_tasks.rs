@@ -2403,7 +2403,11 @@ impl AgentTaskRegistry {
     /// Mirror a provider-owned gate into the existing local gate API. The
     /// provider id remains internal: callers answer with Vogt's UUID and the
     /// registry translates it back before forwarding the decision upstream.
-    fn open_workflow_gate(&self, run_id: Uuid, provider_gate: &ProviderGate) -> Result<()> {
+    fn open_workflow_gate(
+        &self,
+        run_id: Uuid,
+        provider_gate: &ProviderGate,
+    ) -> Result<Option<GateRecord>> {
         {
             let tasks = self.tasks.lock();
             if tasks
@@ -2416,7 +2420,7 @@ impl AgentTaskRegistry {
                         .any(|gate| gate.provider_id.as_deref() == Some(provider_gate.id.as_str()))
                 })
             {
-                return Ok(());
+                return Ok(None);
             }
         }
         let spec = GateSpec {
@@ -2440,7 +2444,8 @@ impl AgentTaskRegistry {
             OffsetDateTime::now_utc(),
             Some(provider_gate.id.clone()),
         );
-        self.persist_open_gate(run_id, record)
+        self.persist_open_gate(run_id, record.clone())
+            .map(|()| Some(record))
     }
 
     fn persist_open_gate(&self, run_id: Uuid, record: GateRecord) -> Result<()> {
