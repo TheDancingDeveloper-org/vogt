@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 
 use crate::adapters::forge::registry::unsupported_reason;
 use crate::adapters::forge::ForgeProvider;
+use crate::application::resolve;
 use crate::application::context::{write_of, AppContext, Built};
 use crate::application::services::forge_writeback::writer_provider;
 use crate::application::services::native_migration::{
@@ -24,7 +25,7 @@ use crate::application::services::native_migration::{
 };
 use crate::application::services::{context_parts, dispatch};
 use crate::application::writes::{audited_write, WriteOutcome};
-use crate::core::{Clock, IdFactory, LinkState, Project};
+use crate::core::{py_repr, Clock, IdFactory, LinkState, Project};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ProjectUpdate, ReadView, WriteTxn};
 
@@ -52,7 +53,7 @@ where
     let (declared, _, principal, _, _, config) = context_parts(ctx);
     let (project, actor, pending) = {
         let view = declared.read()?;
-        let project = resolve_project(&view, &params.project)?;
+        let project = resolve::project(&view, &params.project)?;
         let actor = view.actor_by_identity(&principal.identity_ref)?;
         let pending = open_native_items(&view, &project)?;
         (project, actor, pending)
@@ -62,18 +63,18 @@ where
     // when `[forge_token_files]` names it.
     if let Some(unsupported) = unsupported_reason(project.repo_url.as_deref(), Some(config)) {
         return Err(VogtError::LinkRefused(format!(
-            "cannot link {:?}: {unsupported}. Set a supported repo_url with `project update`, \
+            "cannot link {}: {unsupported}. Set a supported repo_url with `project update`, \
              or import the repository through `project import`.",
-            project.slug
+            py_repr(&project.slug)
         )));
     }
     let repo_url = project.repo_url.clone();
     let (provider, identity) = writer_provider(ctx, actor.as_ref(), repo_url.as_deref())?;
     let Some(provider) = provider else {
         return Err(VogtError::LinkRefused(format!(
-            "cannot link {:?}: no usable credential for {} — link your own forge account \
+            "cannot link {}: no usable credential for {} — link your own forge account \
              (`forge account link`) or configure the instance token file, then retry.",
-            project.slug,
+            py_repr(&project.slug),
             repo_url.as_deref().unwrap_or("this project")
         )));
     };
@@ -128,9 +129,4 @@ where
         )?;
     }
     Ok(json!({"project": linked, "migrated": migrated}))
-}
-
-fn resolve_project(view: &impl ReadView, slug: &str) -> Result<Project, VogtError> {
-    view.project_by_slug(slug)?
-        .ok_or_else(|| VogtError::NotFound(format!("no project {slug:?}")))
 }

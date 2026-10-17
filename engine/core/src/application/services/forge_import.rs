@@ -18,7 +18,7 @@ use crate::application::context::{AppContext, Built};
 use crate::application::projects::{import_repository, ImportRequest};
 use crate::application::services::dispatch;
 use crate::application::services::forge_repos::reader_provider;
-use crate::core::{Clock, IdFactory};
+use crate::core::{py_repr, Clock, IdFactory};
 use crate::errors::VogtError;
 
 pub const FORGE_IMPORT: &str = "forge.import";
@@ -68,9 +68,9 @@ where
     let config = &ctx.config;
     if !supported_hosts(Some(config)).contains(&params.host) {
         return Err(VogtError::InvalidRequest(format!(
-            "{:?} is not a configured forge host; add it to forge_token_files before importing \
+            "{} is not a configured forge host; add it to forge_token_files before importing \
              by host",
-            params.host
+            py_repr(&params.host)
         )));
     }
 
@@ -81,7 +81,7 @@ where
     if provider.is_none() {
         return Err(VogtError::InvalidRequest(format!(
             "no forge credential is available for this host — neither a linked account \
-             (`forge account link`) nor the instance file token — so there is nothing to clone \
+             (`forge account link`) nor the instance file token  — so there is nothing to clone \
              {}/{}/{} with",
             params.host, params.owner, params.name
         )));

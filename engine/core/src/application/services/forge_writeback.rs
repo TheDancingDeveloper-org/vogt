@@ -175,8 +175,7 @@ where
 }
 
 fn resolve_project(view: &impl ReadView, slug: &str) -> Result<crate::core::Project, VogtError> {
-    view.project_by_slug(slug)?
-        .ok_or_else(|| VogtError::NotFound(format!("no project {slug:?}")))
+    crate::application::resolve::project(view, slug)
 }
 
 fn present_string(params: &Value, field: &str) -> Result<String, VogtError> {

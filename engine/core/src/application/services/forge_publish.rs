@@ -27,13 +27,14 @@ use serde_json::{json, Value};
 use crate::adapters::forge::ForgeProvider;
 use crate::adapters::git::{inspect_publish_source, PushRequest};
 use crate::application::context::{write_of, AppContext, Built};
+use crate::application::resolve;
 use crate::application::services::forge_writeback::writer_provider;
 use crate::application::services::native_migration::{
     migrate_open_native_items, open_native_items, require_migratable,
 };
 use crate::application::services::{context_parts, dispatch};
 use crate::application::writes::{audited_write, WriteOutcome};
-use crate::core::{Clock, IdFactory, LinkState, Project};
+use crate::core::{py_repr, Clock, IdFactory, LinkState, Project};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ProjectUpdate, ReadView, WriteTxn};
 
@@ -78,9 +79,7 @@ where
     let (declared, _, principal, _, _, config) = context_parts(ctx);
     let (project, actor, pending) = {
         let view = declared.read()?;
-        let project = view
-            .project_by_slug(&params.project)?
-            .ok_or_else(|| VogtError::NotFound(format!("no project {:?}", params.project)))?;
+        let project = resolve::project(&view, &params.project)?;
         let actor = view.actor_by_identity(&principal.identity_ref)?;
         let pending = open_native_items(&view, &project)?;
         (project, actor, pending)
@@ -88,17 +87,17 @@ where
 
     if project.link_state == LinkState::Linked {
         return Err(VogtError::PublishRefused(format!(
-            "{:?} is already linked to {}; publish creates a repository for a project that has none",
-            project.slug,
+            "{} is already linked to {}; publish creates a repository for a project that has none",
+            py_repr(&project.slug),
             project.repo_url.as_deref().unwrap_or("its repository"),
         )));
     }
     if let Some(existing) = &project.repo_url {
         return Err(VogtError::PublishRefused(format!(
-            "{:?} already names a repository ({existing}); publish never overwrites that \
+            "{} already names a repository ({existing}); publish never overwrites that \
              association — attach to it with `forge link`, or clear the repo_url first if it \
              is wrong",
-            project.slug
+            py_repr(&project.slug)
         )));
     }
 
@@ -108,9 +107,9 @@ where
     let (provider, identity) = writer_provider(ctx, actor.as_ref(), Some(HOST_PROBE_URL))?;
     let Some(provider) = provider else {
         return Err(VogtError::PublishRefused(format!(
-            "cannot publish {:?}: no usable forge credential — link your own forge account \
+            "cannot publish {}: no usable forge credential — link your own forge account \
              (`forge account link`) or configure the instance token file, then retry",
-            project.slug
+            py_repr(&project.slug)
         )));
     };
     // Same rule as `forge.link`: a policy that would refuse the migration's
@@ -125,9 +124,9 @@ where
         .parse(Some(created.web_url.as_str()))
         .ok_or_else(|| {
             VogtError::PublishRefused(format!(
-                "the forge created {:?} but the provider cannot parse its own repository address; \
+                "the forge created {} but the provider cannot parse its own repository address; \
              nothing local was changed",
-                created.web_url
+                py_repr(&created.web_url)
             ))
         })?;
     // A plain push, authenticated per invocation: the remote is the bare clone
