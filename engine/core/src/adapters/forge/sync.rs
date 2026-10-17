@@ -23,7 +23,6 @@
 //! registration is not per host. A project whose forge is not configured
 //! yields a receipt saying so — a zero count is never "there is nothing".
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
@@ -583,6 +582,7 @@ fn string_list(values: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     struct RecordingStore {
         watermark: RefCell<Option<String>>,

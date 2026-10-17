@@ -836,10 +836,6 @@ fn opened_with_account_key() -> Built {
 /// An unsupported host is refused before any adapter is built.
 #[test]
 fn forge_onboard_reads_history_and_refuses_an_unsupported_host() {
-    use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
-
-    use crate::application::forge_transport::SharedForgeTransport;
     use crate::application::services::forge_onboard;
     use crate::config::VogtConfig;
     use crate::core::Project;
@@ -869,47 +865,8 @@ fn forge_onboard_reads_history_and_refuses_an_unsupported_host() {
     )
     .unwrap();
 
-    // The stand-in answers the four reads onboarding makes and records every
-    // request it was asked to send.
-    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let recorded = Arc::clone(&seen);
-    let issue = json!({
-        "number": 7,
-        "title": "Onboard me",
-        "state": "open",
-        "html_url": "https://github.com/acme/widget/issues/7",
-        "updated_at": "2026-01-02T03:04:05Z",
-        "created_at": "2026-01-01T00:00:00Z",
-        "labels": [],
-        "user": {"login": "octo"},
-        "body": "",
-    });
-    let label = json!({"name": "bug", "color": "d73a4a"});
-    let release = json!({
-        "tag_name": "v1.0.0",
-        "name": "v1.0.0",
-        "html_url": "https://github.com/acme/widget/releases/tag/v1.0.0",
-        "published_at": "2026-01-03T00:00:00Z",
-        "draft": false,
-        "prerelease": false,
-    });
-    let transport: SharedForgeTransport = Arc::new(
-        move |url: &str, _headers: &BTreeMap<String, String>, _body: &[u8], method: &str| {
-            recorded.lock().unwrap().push(format!("{method} {url}"));
-            let answer = if url.contains("/issues?") {
-                json!([issue.clone()])
-            } else if url.contains("/labels?") {
-                json!([label.clone()])
-            } else if url.contains("/releases?") {
-                json!([release.clone()])
-            } else if url.contains("/pulls?") {
-                json!([])
-            } else {
-                return (404, Vec::new(), BTreeMap::new());
-            };
-            (200, answer.to_string().into_bytes(), BTreeMap::new())
-        },
-    );
+    let standin = crate::application::forge_standin::StandInForge::one_of_each();
+    let transport = standin.transport();
     let Built::StepSequential(ctx) = built else {
         panic!("expected a step clock");
     };
@@ -943,7 +900,7 @@ fn forge_onboard_reads_history_and_refuses_an_unsupported_host() {
         .as_str()
         .is_some_and(|text| !text.is_empty()));
     assert!(
-        seen.lock().unwrap().is_empty(),
+        standin.requests().is_empty(),
         "an unsupported host is never read"
     );
 
@@ -957,7 +914,7 @@ fn forge_onboard_reads_history_and_refuses_an_unsupported_host() {
     assert_eq!(done["issues"], 1, "{done}");
     assert_eq!(done["labels"], 1, "{done}");
     assert_eq!(done["releases"], 1, "{done}");
-    let requests = seen.lock().unwrap().clone();
+    let requests = standin.requests();
     assert!(!requests.is_empty());
     assert!(
         requests.iter().all(|request| request.starts_with("GET ")),

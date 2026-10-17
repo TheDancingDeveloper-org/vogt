@@ -30,7 +30,6 @@ use super::forgejo::ForgejoProvider;
 use super::github::{repo_of, GitHubProvider, HOST as GITHUB_HOST};
 use super::models::RepoRef;
 use super::provider::ForgeProvider;
-use super::transport::ForgeTransport;
 use crate::adapters::github::GitHubClient;
 use crate::adapters::{forgejo::ForgejoClient, github::Transport};
 use crate::config::VogtConfig;

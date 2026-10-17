@@ -5,12 +5,12 @@
 //! project and never widened by looking around. An unnamed sweep runs the core
 //! collectors that are not on-demand: dep-refs, git-local, source-markers and
 //! mirrored-source, plus session-outcomes when an engine is configured,
-//! agent-activity when transcript roots are, and forge-issues and forge-prs
-//! when a forge is configured. Contract-checker runs only when named. The five
-//! forge read collectors are not ported, so coverage lists them as `never_run`
-//! while a forge is configured rather than omitting them. Deploy-lanes is not
-//! ported either: a sweep refuses while a lane is configured rather than
-//! answering as if it did not exist. CI watch is not started here.
+//! agent-activity when transcript roots are, and when a forge is configured the
+//! forge sync pair (forge-issues, forge-prs) and the five forge read collectors
+//! (forge-checks, forge-releases, forge-labels, forge-posture,
+//! forge-notifications). Contract-checker runs only when named. Deploy-lanes is
+//! not ported: a sweep refuses while a lane is configured rather than answering
+//! as if it did not exist. CI watch is not started here.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -58,10 +58,7 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
 
     // Deploy-lanes is not ported. Python registers it whenever a lane is
     // configured, so a sweep that quietly omitted it would answer differently
-    // from Python on every deployment that has one. The five forge read
-    // collectors are not ported either, but they are read-only and coverage
-    // still lists them as `never_run`; forge-issues and forge-prs are real and
-    // registered below.
+    // from Python on every deployment that has one.
     if !ctx.config.deploy_lanes.is_empty() {
         return Err(VogtError::InvalidRequest(
             "sweep cannot run while a deploy lane is configured: the deploy-lanes collector is not ported yet"
@@ -126,7 +123,7 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
             .map_err(VogtError::InvalidRequest)?;
     }
     if crate::adapters::forge::has_configured_forge(&ctx.config)? {
-        register_forge_sync(&mut registry, ctx)?;
+        register_forge(&mut registry, ctx)?;
     }
     let mut selected: Vec<String> = registry
         .select(&named, offline_only)?
@@ -246,29 +243,146 @@ fn count_of(counts: &BTreeMap<String, i64>, key: &str) -> i64 {
     counts.get(key).copied().unwrap_or(0)
 }
 
-/// Register forge-issues and forge-prs, sharing one directory opened once.
+/// Register the forge sync pair and the five forge read collectors, sharing one
+/// directory opened once.
 ///
-/// The directory resolves every configured host at `open`, so neither collector
-/// re-reads a token file mid-sweep. Both hold the same `Arc`: the registry
-/// stores owned collectors, and a directory cannot be borrowed by two of them.
-fn register_forge_sync<C: Clock + 'static, I: IdFactory + 'static>(
+/// The directory resolves every configured host once at `open`, so no collector
+/// re-reads a token file mid-sweep. Every collector holds the same `Rc`: the
+/// registry stores owned collectors, and a directory cannot be borrowed by
+/// several of them.
+fn register_forge<C: Clock + 'static, I: IdFactory + 'static>(
     registry: &mut CollectorRegistry,
     ctx: &AppContext<C, I>,
 ) -> Result<(), VogtError> {
     let directory = Rc::new(crate::adapters::forge::ForgeClients::open(
         ctx.config.clone(),
-        None,
+        ctx.forge_transport(),
     )?);
+    let mut collectors = Vec::new();
     for kind in [ForgeSyncKind::Issues, ForgeSyncKind::Pulls] {
-        registry
-            .add(Registered::Collector(Box::new(OwnedForgeSync::new(
-                kind,
-                ctx.observed.clone(),
-                Rc::clone(&directory),
-            ))))
-            .map_err(VogtError::InvalidRequest)?;
+        collectors.push(Registered::Collector(Box::new(OwnedForgeSync::new(
+            kind,
+            ctx.observed.clone(),
+            Rc::clone(&directory),
+        ))));
+    }
+    for kind in ForgeReadKind::ALL {
+        collectors.push(owned_forge_read(ctx.observed.clone(), &directory, kind));
+    }
+    for collector in collectors {
+        registry.add(collector).map_err(VogtError::InvalidRequest)?;
     }
     Ok(())
+}
+
+/// Which provider read an [`OwnedForgeRead`] performs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForgeReadKind {
+    Checks,
+    Releases,
+    Labels,
+    Posture,
+    Notifications,
+}
+
+impl ForgeReadKind {
+    /// Every read, in the order the sweep registers them.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Checks,
+        Self::Releases,
+        Self::Labels,
+        Self::Posture,
+        Self::Notifications,
+    ];
+
+    /// The collector name the sweep records and coverage lists.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Checks => crate::adapters::forge::COLLECTOR_CHECKS,
+            Self::Releases => "forge-releases",
+            Self::Labels => "forge-labels",
+            Self::Posture => "forge-posture",
+            Self::Notifications => crate::adapters::forge::COLLECTOR_NOTIFICATIONS,
+        }
+    }
+}
+
+/// One provider read, registered as an owned collector.
+///
+/// It holds a share of the directory, a handle on the observed store (the
+/// previous observations the checks and notifications reads carry forward), and
+/// the actor resolver notifications use. The borrowing collectors are built per
+/// call, so the registry can hold this `'static` value.
+pub(crate) struct OwnedForgeRead<C: Clock + 'static, I: IdFactory + 'static> {
+    kind: ForgeReadKind,
+    store: crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
+    directory: Rc<crate::adapters::forge::ForgeClients>,
+    actors: crate::adapters::forge::ActorResolver,
+}
+
+/// The registry's form of one provider read.
+pub(crate) fn owned_forge_read<C: Clock + 'static, I: IdFactory + 'static>(
+    store: crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
+    directory: &Rc<crate::adapters::forge::ForgeClients>,
+    kind: ForgeReadKind,
+) -> Registered {
+    Registered::Collector(Box::new(OwnedForgeRead {
+        kind,
+        store,
+        directory: Rc::clone(directory),
+        actors: crate::adapters::forge::ActorResolver::new(),
+    }))
+}
+
+/// The previous observations of one kind, read from the observed store. The
+/// collectors only read through this, so the store is borrowed, not owned.
+struct StorePrior<'a, S: ObservedStore>(&'a S);
+
+impl<S: ObservedStore> crate::adapters::forge::PriorObservations for StorePrior<'_, S> {
+    fn latest(&self, kind: &str, project_id: &str, limit: i64) -> Vec<Observation> {
+        self.0
+            .latest(&[kind.to_owned()], Some(project_id), false, false, limit)
+            .unwrap_or_default()
+    }
+}
+
+impl<C: Clock + 'static, I: IdFactory + 'static> crate::collectors::Collector
+    for OwnedForgeRead<C, I>
+{
+    fn name(&self) -> &str {
+        self.kind.name()
+    }
+
+    fn requires_network(&self) -> bool {
+        true
+    }
+
+    fn collect(
+        &mut self,
+        ctx: &mut CollectorContext<'_>,
+        project: &crate::core::Project,
+        _now: &mut dyn FnMut() -> crate::core::Moment,
+    ) -> crate::collectors::Collection {
+        use crate::adapters::forge::{
+            ForgeChecksCollector, ForgeLabelsCollector, ForgeNotificationsCollector,
+            ForgePostureCollector, ForgeReleasesCollector,
+        };
+        let directory: &dyn crate::adapters::forge::ForgeDirectory = &*self.directory;
+        let prior = StorePrior(&self.store);
+        let found = match self.kind {
+            ForgeReadKind::Checks => {
+                ForgeChecksCollector::new(directory, Some(&prior)).collect(ctx.config, project)
+            }
+            ForgeReadKind::Releases => ForgeReleasesCollector::new(directory).collect(project),
+            ForgeReadKind::Labels => ForgeLabelsCollector::new(directory).collect(project),
+            ForgeReadKind::Posture => ForgePostureCollector::new(directory).collect(project),
+            ForgeReadKind::Notifications => {
+                ForgeNotificationsCollector::new(directory, Some(&prior), &self.actors)
+                    .collect(project)
+            }
+        };
+        found.into()
+    }
 }
 
 /// Which read an [`OwnedForgeSync`] performs.
@@ -828,6 +942,85 @@ mod tests {
         register_op(built, params).unwrap();
     }
 
+    /// A sweep of the forge read collectors goes through the stand-in: the
+    /// labels and releases it names are read, the counts come back, and every
+    /// request the sweep sent was a GET.
+    #[test]
+    fn a_named_forge_read_sweep_runs_through_the_stand_in_and_only_reads() {
+        use crate::application::forge_standin::StandInForge;
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-collect-standin-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = dir.join("forge-token");
+        std::fs::write(&token, "secret-token\n").unwrap();
+        let mut clock = Some(StepClock::new(moment()));
+        let mut ids = Some(SequentialIds::new(None).unwrap());
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let built = build_context(
+            VogtConfig {
+                data_dir: dir.clone(),
+                github_token_file: Some(token),
+                ..VogtConfig::default()
+            },
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            clock,
+            ids,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let standin = StandInForge::one_of_each();
+        let transport = standin.transport();
+        let Built::StepSequential(ctx) = built else {
+            panic!("expected a step clock");
+        };
+        let forged =
+            Built::StepSequential(ctx.with_forge_transport(move |url, headers, body, method| {
+                transport(url, headers, body, method)
+            }));
+        register(
+            &forged,
+            "widget",
+            &dir,
+            Some("https://github.com/acme/widget"),
+        );
+
+        let swept = sweep_op(
+            &forged,
+            json!({"project": "widget", "collectors": ["forge-labels", "forge-releases"]}),
+        )
+        .unwrap();
+        let reports = swept["reports"].as_array().unwrap();
+        for name in ["forge-labels", "forge-releases"] {
+            let report = reports
+                .iter()
+                .find(|report| report["collector"] == name)
+                .unwrap_or_else(|| panic!("{name} reported: {swept}"));
+            assert_eq!(report["new"], 2, "one item and its receipt: {report}");
+        }
+        let requests = standin.requests();
+        assert!(
+            requests.iter().any(|request| request.contains("/labels?")),
+            "{requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/releases?")),
+            "{requests:?}"
+        );
+        assert!(
+            requests.iter().all(|request| request.starts_with("GET ")),
+            "a sweep only reads: {requests:?}"
+        );
+    }
+
     /// A configured forge no longer refuses the sweep: forge-issues and
     /// forge-prs run. A project with no repository is the unsupported receipt,
     /// which needs no network, so this stays offline.
@@ -871,6 +1064,15 @@ mod tests {
             .collect();
         assert!(names.contains(&"forge-issues"), "{names:?}");
         assert!(names.contains(&"forge-prs"), "{names:?}");
+        for read in [
+            "forge-checks",
+            "forge-labels",
+            "forge-releases",
+            "forge-posture",
+            "forge-notifications",
+        ] {
+            assert!(names.contains(&read), "{read} is registered: {names:?}");
+        }
         for report in swept["reports"].as_array().unwrap() {
             if matches!(
                 report["collector"].as_str(),
@@ -894,6 +1096,18 @@ mod tests {
             "{offline_names:?}"
         );
         assert!(!offline_names.contains(&"forge-prs"), "{offline_names:?}");
+        for read in [
+            "forge-checks",
+            "forge-labels",
+            "forge-releases",
+            "forge-posture",
+            "forge-notifications",
+        ] {
+            assert!(
+                !offline_names.contains(&read),
+                "{read} needs the network: {offline_names:?}"
+            );
+        }
     }
 
     /// A deploy lane still refuses the whole sweep, and the refusal names the

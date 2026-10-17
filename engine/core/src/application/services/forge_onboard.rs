@@ -12,14 +12,14 @@ use serde_json::{json, Value};
 
 use crate::adapters::forge::registry::unsupported_reason;
 use crate::adapters::forge::{
-    ForgeClients, ForgeDirectory, ForgeLabelsCollector, ForgeReleasesCollector, ForgeSyncCollector,
-    KIND_ISSUE, KIND_LABEL, KIND_PULL_REQUEST, KIND_RELEASE,
+    ForgeClients, ForgeDirectory, ForgeSyncCollector, KIND_ISSUE, KIND_LABEL, KIND_PULL_REQUEST,
+    KIND_RELEASE,
 };
-use crate::application::collect::{ForgeSyncKind, OwnedForgeSync};
+use crate::application::collect::{owned_forge_read, ForgeReadKind, ForgeSyncKind, OwnedForgeSync};
 use crate::application::context::{write_of, AppContext, Built};
 use crate::application::services::{dispatch, now_of};
 use crate::application::writes::audited_action;
-use crate::collectors::{Collection, Collector, CollectorContext, Registered, Sweeper};
+use crate::collectors::{CollectorContext, Registered, Sweeper};
 use crate::core::{Clock, IdFactory, Moment, Project};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
@@ -98,8 +98,8 @@ where
     let collectors = vec![
         sync_collector(ctx, &directory, ForgeSyncKind::Issues),
         sync_collector(ctx, &directory, ForgeSyncKind::Pulls),
-        read_collector(&directory, ForgeReadKind::Labels),
-        read_collector(&directory, ForgeReadKind::Releases),
+        owned_forge_read(ctx.observed.clone(), &directory, ForgeReadKind::Labels),
+        owned_forge_read(ctx.observed.clone(), &directory, ForgeReadKind::Releases),
     ];
     let reports = {
         let mut clock = ctx
@@ -236,58 +236,6 @@ where
         ctx.observed.clone(),
         Rc::clone(directory),
     )))
-}
-
-/// Which current-state read onboarding runs.
-#[derive(Clone, Copy)]
-enum ForgeReadKind {
-    Labels,
-    Releases,
-}
-
-/// A provider read the sweep's registry can hold. It owns a share of the
-/// directory, the same way [`OwnedForgeSync`] does, so the collector is
-/// `'static` and the borrowing read collector is built per call.
-struct OwnedForgeRead {
-    name: &'static str,
-    kind: ForgeReadKind,
-    directory: Rc<ForgeClients>,
-}
-
-fn read_collector(directory: &Rc<ForgeClients>, kind: ForgeReadKind) -> Registered {
-    let name = match kind {
-        ForgeReadKind::Labels => "forge-labels",
-        ForgeReadKind::Releases => "forge-releases",
-    };
-    Registered::Collector(Box::new(OwnedForgeRead {
-        name,
-        kind,
-        directory: Rc::clone(directory),
-    }))
-}
-
-impl Collector for OwnedForgeRead {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    fn requires_network(&self) -> bool {
-        true
-    }
-
-    fn collect(
-        &mut self,
-        _ctx: &mut CollectorContext<'_>,
-        project: &Project,
-        _now: &mut dyn FnMut() -> Moment,
-    ) -> Collection {
-        let directory: &dyn ForgeDirectory = &*self.directory;
-        let found = match self.kind {
-            ForgeReadKind::Labels => ForgeLabelsCollector::new(directory).collect(project),
-            ForgeReadKind::Releases => ForgeReleasesCollector::new(directory).collect(project),
-        };
-        found.into()
-    }
 }
 
 fn max_pages_of(params: &Value) -> Result<i64, VogtError> {
