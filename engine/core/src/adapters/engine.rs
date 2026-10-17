@@ -407,6 +407,64 @@ impl EngineClient {
             .map(|_| EngineWait::from_payload(&payload)))
     }
 
+    /// Session deltas published after `since` (0 reads the whole ring). `ids`
+    /// restricts the page to those engine session ids; `None` is every
+    /// session. `Ok(None)` from an engine that predates the route.
+    pub fn session_changes(
+        &self,
+        since: i64,
+        ids: Option<&[String]>,
+        limit: i64,
+    ) -> Result<Option<EngineChanges>, VogtError> {
+        let mut query = format!("since={since}&limit={limit}");
+        if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
+            query.push_str(&format!("&ids={}", quote_strict(&ids.join(","))));
+        }
+        let payload = self.call(
+            &format!("/api/sessions/changes?{query}"),
+            "GET",
+            None,
+            true,
+            None,
+        )?;
+        Ok(payload
+            .as_object()
+            .map(|_| EngineChanges::from_payload(&payload)))
+    }
+
+    /// Block until one of `ids` publishes a kind in `until`, or `timeout_s`
+    /// passes. `cursor` is a seq or `now`. The HTTP timeout is the wait plus a
+    /// margin, so a wait that runs its course is answered, not cut off.
+    /// `Ok(None)` from an engine that predates the route.
+    pub fn wait_any(
+        &self,
+        ids: Option<&[String]>,
+        until: Option<&[String]>,
+        cursor: Option<&str>,
+        timeout_s: u64,
+    ) -> Result<Option<EngineWaitAny>, VogtError> {
+        let mut query = format!("timeout_s={timeout_s}");
+        if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
+            query.push_str(&format!("&ids={}", quote_strict(&ids.join(","))));
+        }
+        if let Some(until) = until.filter(|until| !until.is_empty()) {
+            query.push_str(&format!("&until={}", quote_strict(&until.join(","))));
+        }
+        if let Some(cursor) = cursor {
+            query.push_str(&format!("&cursor={}", quote_strict(cursor)));
+        }
+        let payload = self.call(
+            &format!("/api/sessions/wait-any?{query}"),
+            "GET",
+            None,
+            true,
+            Some(Duration::from_secs(timeout_s) + WAIT_TIMEOUT_MARGIN),
+        )?;
+        Ok(payload
+            .as_object()
+            .map(|_| EngineWaitAny::from_payload(&payload)))
+    }
+
     pub fn set_blocked(
         &self,
         session_id: &str,
@@ -1412,6 +1470,79 @@ impl EngineWait {
     }
 }
 
+/// One session delta from `GET /api/sessions/changes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineChange {
+    pub seq: i64,
+    pub at: String,
+    pub session: String,
+    pub kind: String,
+    pub summary: String,
+}
+
+impl EngineChange {
+    fn from_payload(payload: &Value) -> Self {
+        Self {
+            seq: optional_int(payload.get("seq")).unwrap_or(0),
+            at: optional_str(payload.get("at")).unwrap_or_default(),
+            session: python_str(payload, "session", ""),
+            kind: python_str(payload, "kind", ""),
+            summary: python_str(payload, "summary", ""),
+        }
+    }
+}
+
+/// A page of session deltas since a cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineChanges {
+    pub changes: Vec<EngineChange>,
+    pub next_cursor: i64,
+    pub truncated: bool,
+}
+
+impl EngineChanges {
+    fn from_payload(payload: &Value) -> Self {
+        Self {
+            changes: payload
+                .get("changes")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|row| row.is_object())
+                        .map(EngineChange::from_payload)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            next_cursor: optional_int(payload.get("next_cursor")).unwrap_or(0),
+            truncated: payload
+                .get("truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }
+    }
+}
+
+/// Why `GET /api/sessions/wait-any` returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineWaitAny {
+    pub outcome: String,
+    pub change: Option<EngineChange>,
+    pub next_cursor: i64,
+}
+
+impl EngineWaitAny {
+    fn from_payload(payload: &Value) -> Self {
+        Self {
+            outcome: python_str(payload, "outcome", ""),
+            change: payload
+                .get("change")
+                .filter(|value| value.is_object())
+                .map(EngineChange::from_payload),
+            next_cursor: optional_int(payload.get("next_cursor")).unwrap_or(0),
+        }
+    }
+}
+
 /// Something a bound agent-task run reported about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineTaskFinding {
@@ -2301,5 +2432,83 @@ mod tests {
             started.elapsed()
         );
         assert_eq!(error.code(), "engine_unavailable");
+    }
+
+    #[test]
+    fn a_changes_read_names_its_cursor_ids_and_limit() {
+        let (seen, transport) = scripted(
+            200,
+            r#"{"changes":[{"seq":3,"at":"2026-01-01T00:00:00Z","session":"u1","kind":"ready","summary":"ready"},7],"next_cursor":3,"truncated":true}"#,
+        );
+        let ids = vec!["u1".to_string(), "u2".to_string()];
+        let page = client(transport)
+            .session_changes(2, Some(&ids), 50)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            "GET http://engine/api/sessions/changes?since=2&limit=50&ids=u1%2Cu2 auth=true body="
+        );
+        assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].seq, 3);
+        assert_eq!(page.changes[0].session, "u1");
+        assert_eq!(page.changes[0].kind, "ready");
+        assert_eq!(page.next_cursor, 3);
+        assert!(page.truncated);
+    }
+
+    #[test]
+    fn a_changes_read_from_an_engine_without_the_route_is_none() {
+        let (seen, transport) = scripted(404, "");
+        assert!(client(transport)
+            .session_changes(0, None, 100)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            "GET http://engine/api/sessions/changes?since=0&limit=100 auth=true body="
+        );
+    }
+
+    #[test]
+    fn a_wait_any_names_its_filters_and_carries_the_change() {
+        let (seen, transport) = scripted(
+            200,
+            r#"{"outcome":"matched","change":{"seq":9,"at":"x","session":"u1","kind":"blocked","summary":"blocked: y"},"next_cursor":9}"#,
+        );
+        let ids = vec!["u1".to_string()];
+        let until = vec!["blocked".to_string(), "exited".to_string()];
+        let waited = client(transport)
+            .wait_any(Some(&ids), Some(&until), Some("now"), 30)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            "GET http://engine/api/sessions/wait-any?timeout_s=30&ids=u1&until=blocked%2Cexited&cursor=now auth=true body="
+        );
+        assert_eq!(waited.outcome, "matched");
+        assert_eq!(waited.change.unwrap().kind, "blocked");
+        assert_eq!(waited.next_cursor, 9);
+    }
+
+    #[test]
+    fn a_wait_any_timeout_has_no_change_and_a_conflict_stays_a_conflict() {
+        let (seen, transport) = scripted(200, r#"{"outcome":"timeout","change":null}"#);
+        let waited = client(transport)
+            .wait_any(None, None, None, 120)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            "GET http://engine/api/sessions/wait-any?timeout_s=120 auth=true body="
+        );
+        assert_eq!(waited.outcome, "timeout");
+        assert!(waited.change.is_none());
+        assert_eq!(waited.next_cursor, 0);
+        let (_, transport) = scripted(409, "");
+        assert!(matches!(
+            client(transport).wait_any(None, None, None, 1),
+            Err(VogtError::Conflict(_))
+        ));
     }
 }
