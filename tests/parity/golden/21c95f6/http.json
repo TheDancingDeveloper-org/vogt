@@ -689,6 +689,259 @@
     "status": 200
   },
   {
+    "operation": "events.list",
+    "result": {
+      "events": [
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:12Z",
+          "audit_id": "aud_0002",
+          "entity_id": "tok_0001",
+          "entity_kind": "token",
+          "kind": "token.adopted",
+          "seq": 1,
+          "summary": {
+            "actor": "agent:vogt-engine",
+            "scopes": [
+              "read",
+              "work.write",
+              "project.write"
+            ]
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:16Z",
+          "audit_id": "aud_0003",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "kind": "token.adopted",
+          "seq": 2,
+          "summary": {
+            "actor": "agent:vogt-sessions",
+            "scopes": [
+              "read",
+              "work.write",
+              "project.write",
+              "writeback"
+            ]
+          }
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:06Z",
+          "audit_id": "aud_0004",
+          "entity_id": "act_0004",
+          "entity_kind": "actor",
+          "kind": "actor.auto_register",
+          "seq": 3,
+          "summary": {
+            "identity_ref": "human:ada-lovelace",
+            "kind": "human"
+          }
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:07Z",
+          "audit_id": "aud_0005",
+          "entity_id": "tok_0003",
+          "entity_kind": "token",
+          "kind": "install.bootstrapped",
+          "seq": 4,
+          "summary": {
+            "actor": "human:ada-lovelace",
+            "scopes": [
+              "admin"
+            ]
+          }
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:07Z",
+          "audit_id": "aud_0006",
+          "entity_id": "lbl_0001",
+          "entity_kind": "label",
+          "kind": "label.created",
+          "seq": 5,
+          "summary": {
+            "name": "bug"
+          }
+        }
+      ],
+      "next_cursor": 5
+    },
+    "status": 200
+  },
+  {
+    "operation": "events.list",
+    "result": {
+      "events": [
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:16Z",
+          "audit_id": "aud_0003",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "kind": "token.adopted",
+          "seq": 2,
+          "summary": {
+            "actor": "agent:vogt-sessions",
+            "scopes": [
+              "read",
+              "work.write",
+              "project.write",
+              "writeback"
+            ]
+          }
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:06Z",
+          "audit_id": "aud_0004",
+          "entity_id": "act_0004",
+          "entity_kind": "actor",
+          "kind": "actor.auto_register",
+          "seq": 3,
+          "summary": {
+            "identity_ref": "human:ada-lovelace",
+            "kind": "human"
+          }
+        }
+      ],
+      "next_cursor": 3
+    },
+    "status": 200
+  },
+  {
+    "operation": "audit.list",
+    "result": {
+      "records": [
+        {
+          "actor_id": "act_0004",
+          "actor_identity_ref": "human:ada-lovelace",
+          "at": "2026-01-02T03:04:07Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0013",
+          "operation": "user.remove",
+          "payload_digest": "sha256:c641563a061b879b4b32211c6b39a7a2eeb71a7a114359133e079bc16f1b4bfa",
+          "reason": "parity harness",
+          "revision": 11,
+          "txn_id": "txn_0013"
+        },
+        {
+          "actor_id": "act_0005",
+          "actor_identity_ref": "human:ada",
+          "at": "2026-01-02T03:04:06Z",
+          "entity_id": "tok_0005",
+          "entity_kind": "token",
+          "id": "aud_0012",
+          "operation": "auth.login",
+          "payload_digest": "sha256:079f75e3b73e507a9203394b2f453386de6362973c6d3e9dfa6ddfee0201f931",
+          "reason": "password login by ada",
+          "revision": 10,
+          "txn_id": "txn_0012"
+        },
+        {
+          "actor_id": "act_0004",
+          "actor_identity_ref": "human:ada-lovelace",
+          "at": "2026-01-02T03:04:07Z",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0011",
+          "operation": "token.revoke",
+          "payload_digest": "sha256:d331a6f9ffa337f5bbea02b91117f85c4a54fe0e8550538ef0ccbe9757a74c7a",
+          "reason": "parity harness",
+          "revision": 9,
+          "txn_id": "txn_0011"
+        },
+        {
+          "actor_id": "act_0004",
+          "actor_identity_ref": "human:ada-lovelace",
+          "at": "2026-01-02T03:04:07Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0010",
+          "operation": "user.set_password",
+          "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
+          "reason": "parity harness",
+          "revision": 8,
+          "txn_id": "txn_0010"
+        },
+        {
+          "actor_id": "act_0004",
+          "actor_identity_ref": "human:ada-lovelace",
+          "at": "2026-01-02T03:04:07Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0009",
+          "operation": "user.create",
+          "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
+          "reason": "parity harness",
+          "revision": 7,
+          "txn_id": "txn_0009"
+        }
+      ],
+      "total": 13
+    },
+    "status": 200
+  },
+  {
+    "operation": "audit.list",
+    "result": {
+      "records": [
+        {
+          "actor_id": "act_0005",
+          "actor_identity_ref": "human:ada",
+          "at": "2026-01-02T03:04:06Z",
+          "entity_id": "tok_0005",
+          "entity_kind": "token",
+          "id": "aud_0012",
+          "operation": "auth.login",
+          "payload_digest": "sha256:079f75e3b73e507a9203394b2f453386de6362973c6d3e9dfa6ddfee0201f931",
+          "reason": "password login by ada",
+          "revision": 10,
+          "txn_id": "txn_0012"
+        },
+        {
+          "actor_id": "act_0004",
+          "actor_identity_ref": "human:ada-lovelace",
+          "at": "2026-01-02T03:04:07Z",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0011",
+          "operation": "token.revoke",
+          "payload_digest": "sha256:d331a6f9ffa337f5bbea02b91117f85c4a54fe0e8550538ef0ccbe9757a74c7a",
+          "reason": "parity harness",
+          "revision": 9,
+          "txn_id": "txn_0011"
+        }
+      ],
+      "total": 13
+    },
+    "status": 200
+  },
+  {
+    "operation": "project.import",
+    "result": {
+      "error": {
+        "code": "invalid_request",
+        "message": "'not a repo!' does not name a GitHub repository or a configured Forgejo repository; give owner/name, host/owner/name, or a repository URL"
+      }
+    },
+    "status": 400
+  },
+  {
+    "operation": "project.import",
+    "result": {
+      "error": {
+        "code": "invalid_request",
+        "message": "'not a repo!' does not name a GitHub repository or a configured Forgejo repository; give owner/name, host/owner/name, or a repository URL"
+      }
+    },
+    "status": 400
+  },
+  {
     "operation": "dump",
     "result": {
       "actors": [
@@ -1331,6 +1584,84 @@
           "operation": "user.remove",
           "reason_code": "token_valid",
           "scope": "admin",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0035",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "events.list",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0036",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "events.list",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0037",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "audit.list",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0038",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "audit.list",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0039",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "project.import",
+          "reason_code": "token_valid",
+          "scope": "project.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0040",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "project.import",
+          "reason_code": "token_valid",
+          "scope": "project.write",
           "token_id": "tok_0003",
           "transport": "http"
         }
