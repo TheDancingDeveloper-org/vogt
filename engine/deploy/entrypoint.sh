@@ -263,7 +263,7 @@ vogt_core_listen() {
 
     case "$host" in
         127.0.0.1|localhost|'[::1]')
-            # `vogt serve --host` wants a bare address; the brackets are URL
+            # `vogt-core serve --host` wants a bare address; the brackets are URL
             # syntax, not part of the address.
             printf '%s %s\n' "${host//[\[\]]/}" "$port"
             ;;
@@ -300,12 +300,12 @@ supervise_vogt_core() {
     # somebody restarts the container.
     while :; do
         started=$SECONDS
-        if ! vogt init; then
+        if ! vogt-core init; then
             echo "vogt-core: init failed — refusing to serve a store this" \
                  "build does not understand" >&2
         else
             echo "vogt-core: serving on ${host}:${port}"
-            if vogt serve --host "$host" --port "$port"; then
+            if vogt-core serve --host "$host" --port "$port"; then
                 echo "vogt-core: exited cleanly" >&2
             else
                 echo "vogt-core: exited with status $?" >&2
