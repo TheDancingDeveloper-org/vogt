@@ -18,14 +18,11 @@ The Python lint and type gates (`ruff check`, `ruff format --check`, `mypy
 `cargo fmt --check` and `cargo clippy -- -D warnings`. They still run until
 the Python package is removed; they come out with it, not before.
 
-The Python floor was `pytest --cov-fail-under=80`. On this branch
-`cargo llvm-cov -p vogt-core` measures 72.6% line coverage over the whole
-crate, so `.github/workflows/rust-core.yml` fails under 70%. The gate stays
-at 70% for now. The follow-up to reach 80% is owed (raise it as a work item
-once the write-back policy permits creates). The gap to 80%
-is the service modules that are still thin (sessions, inbox, import/merge,
-drift), not an exclusion of generated code. The floor moves up as those
-gain tests; it does not move down.
+The Python floor was `pytest --cov-fail-under=80`. `cargo llvm-cov -p
+vogt-core` measures 79.72% line coverage over the whole crate (WI-1080, at
+rust-core 77ef27b6), so `.github/workflows/rust-core.yml` fails under 79%:
+the measured value, rounded down (operator decision). The floor moves up as
+the thin service modules gain tests; it does not move down.
 
 | File | Disposition | Where / why |
 |---|---|---|
