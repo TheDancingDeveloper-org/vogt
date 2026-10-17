@@ -6,7 +6,8 @@
    "core-token": "vogt_bootstrap_core_secret_long_enough_0123",
    "agent-token": "vogt_agent_bootstrap_secret_long_enough_4567",
    "ada-password": "correct horse battery",
-   "ada-passphrase": "another passphrase"
+   "ada-passphrase": "another passphrase",
+   "second/Cargo.toml": "[package]\nname = \"parity\"\nversion = \"0.1.0\"\n\n[dependencies]\nghost = { path = \"../ghost\" }\n"
   },
   "env": {
    "VOGT_BOOTSTRAP_CORE_TOKEN_FILE": "{root}/core-token",
@@ -187,6 +188,184 @@
    "expect": {
     "exit": 0
    }
+  },
+  {
+   "operation": "coverage",
+   "params": {},
+   "expect": {
+    "exit": 0
+   },
+   "why": "before any sweep every collector is never_run: not collected, not zero"
+  },
+  {
+   "operation": "contract.adopt",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "contract.inapplicable",
+   "params": {
+    "project": "parity",
+    "rule": "required_file",
+    "target": "README.md",
+    "reason": "parity harness exemption"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "compliance",
+   "params": {
+    "project": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "contract.applicable",
+   "params": {
+    "project": "parity",
+    "rule": "required_file",
+    "target": "README.md",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "contract.decline",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "contract.check",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "contract.adopt",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "sweep",
+   "params": {
+    "offline_only": true,
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "coverage",
+   "params": {},
+   "expect": {
+    "exit": 0
+   },
+   "why": "after a sweep the collectors that ran report ok with their ages"
+  },
+  {
+   "operation": "observations.list",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "suppress",
+   "params": {
+    "subject": "git:parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "suppression.list",
+   "params": {
+    "include_revoked": true
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "suppression.revoke",
+   "params": {
+    "id": "sup_0001",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "observations.prune",
+   "params": {
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "drift.detect",
+   "params": {
+    "auto_accept": false,
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "drift.list",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "drift.resolve",
+   "params": {
+    "id": "dft_0001",
+    "resolution": "rejected",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "dump.s5",
+   "dump": true,
+   "tables": ["drift_proposals", "suppressions", "contract_exemptions", "observations", "latest_observations", "latest_dep_refs", "sweeps"],
+   "why": "the declared and observed stores after the S5 block: suppressions, observations, sweeps and drift proposals"
   },
   {
    "operation": "initiative.create",

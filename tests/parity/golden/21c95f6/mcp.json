@@ -36,7 +36,7 @@
             "entity_kind": "instance",
             "id": "aud_0001",
             "operation": "instance.init",
-            "payload_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "payload_digest": "<volatile>",
             "reason": "instance bootstrap",
             "revision": 0,
             "txn_id": "txn_0001"
@@ -48,7 +48,7 @@
             "entity_kind": "token",
             "id": "aud_0002",
             "operation": "token.adopt",
-            "payload_digest": "sha256:59549779aa0cda6825e03092b441cacac09d0003597ed7fd262fc918fdedf350",
+            "payload_digest": "<volatile>",
             "reason": "adopting the operator-supplied core token at init",
             "revision": 1,
             "txn_id": "txn_0002"
@@ -60,7 +60,7 @@
             "entity_kind": "token",
             "id": "aud_0003",
             "operation": "token.adopt",
-            "payload_digest": "sha256:f1942d83b32c6907f41a7053a5e2b379b085799a1b1a2bb7dd9e2a327080cefc",
+            "payload_digest": "<volatile>",
             "reason": "adopting the operator-supplied agent token at init",
             "revision": 2,
             "txn_id": "txn_0003"
@@ -1080,14 +1080,421 @@
   },
   {
     "body": {
+      "collectors": "<volatile>",
+      "swept_project_ids": [],
+      "unswept_project_ids": [
+        "prj_0001",
+        "prj_0002"
+      ]
+    },
+    "is_error": false,
+    "operation": "coverage"
+  },
+  {
+    "body": {
+      "adopted": true,
+      "adopted_at": "2026-01-02T03:04:11Z",
+      "detail": "parity already had that posture; nothing changed",
+      "project": "parity",
+      "status": "not_checked"
+    },
+    "is_error": false,
+    "operation": "contract.adopt"
+  },
+  {
+    "body": {
+      "declared": true,
+      "detail": "README.md is recorded as unmeetable by parity; it is reported, and not counted as a failure",
+      "exemptions": [
+        {
+          "declared_at": "2026-01-02T03:04:23Z",
+          "declared_by": "local:parity",
+          "reason": "parity harness exemption",
+          "rule": "required_file",
+          "target": "README.md"
+        }
+      ],
+      "project": "parity"
+    },
+    "is_error": false,
+    "operation": "contract.inapplicable"
+  },
+  {
+    "body": {
+      "adopted": true,
+      "adopted_at": "2026-01-02T03:04:11Z",
+      "contract_version": "v1",
+      "detail": "nobody has checked this project's contract; run `contract check`",
+      "failing": [],
+      "inapplicable": [
+        {
+          "applicable": false,
+          "detail": "declared inapplicable to this project: parity harness exemption",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "README.md"
+        }
+      ],
+      "project": "parity",
+      "status": "not_checked"
+    },
+    "is_error": false,
+    "operation": "compliance"
+  },
+  {
+    "body": {
+      "declared": false,
+      "detail": "README.md applies to parity again",
+      "exemptions": [],
+      "project": "parity"
+    },
+    "is_error": false,
+    "operation": "contract.applicable"
+  },
+  {
+    "body": {
+      "adopted": false,
+      "detail": "this project has not adopted the contract, so there is nothing for it to comply with \u2014 this is not a fault. `contract adopt` opts in.",
+      "project": "parity",
+      "status": "not_applicable"
+    },
+    "is_error": false,
+    "operation": "contract.decline"
+  },
+  {
+    "body": {
+      "contract_version": "v1",
+      "criteria": [],
+      "detail": "this project has not adopted the contract, so there is nothing for it to comply with \u2014 this is not a fault. `contract adopt` opts in.",
+      "failing": [],
+      "inapplicable": [],
+      "path": "<root>/proj",
+      "project": "parity",
+      "recommendations": [],
+      "recorded": false,
+      "status": "not_applicable"
+    },
+    "is_error": false,
+    "operation": "contract.check"
+  },
+  {
+    "body": {
+      "adopted": true,
+      "adopted_at": "2026-01-02T03:04:28Z",
+      "detail": "the contract applies to this project from now on; `contract check` evaluates it",
+      "project": "parity",
+      "status": "not_checked"
+    },
+    "is_error": false,
+    "operation": "contract.adopt"
+  },
+  {
+    "body": {
+      "dep_refs": 1,
+      "projects": 2,
+      "reports": [
+        {
+          "collector": "dep-refs",
+          "failures": {},
+          "new": 3,
+          "outcome": "ok",
+          "projects": 2,
+          "sweep_id": "swp_0001",
+          "unchanged": 0
+        },
+        {
+          "collector": "git-local",
+          "failures": {},
+          "new": 2,
+          "outcome": "ok",
+          "projects": 2,
+          "sweep_id": "swp_0002",
+          "unchanged": 0
+        },
+        {
+          "collector": "mirrored-source",
+          "failures": {},
+          "new": 0,
+          "outcome": "ok",
+          "projects": 2,
+          "sweep_id": "swp_0003",
+          "unchanged": 0
+        },
+        {
+          "collector": "source-markers",
+          "failures": {},
+          "new": 0,
+          "outcome": "ok",
+          "projects": 2,
+          "sweep_id": "swp_0004",
+          "unchanged": 0
+        }
+      ],
+      "scope": "all registered projects",
+      "subjects": 5
+    },
+    "is_error": false,
+    "operation": "sweep"
+  },
+  {
+    "body": {
+      "collectors": "<volatile>",
+      "swept_project_ids": [
+        "prj_0001",
+        "prj_0002"
+      ],
+      "unswept_project_ids": []
+    },
+    "is_error": false,
+    "operation": "coverage"
+  },
+  {
+    "body": {
+      "observations": [
+        {
+          "collector": "git-local",
+          "content_digest": "<volatile>",
+          "id": "obs_0004",
+          "kind": "git.checkout",
+          "observed_at": "2026-01-02T03:04:34Z",
+          "payload": {
+            "detail": "no .git directory; this project is a plain folder",
+            "is_git_repository": false
+          },
+          "project_id": "prj_0001",
+          "promoted": false,
+          "subject_key": "git:parity",
+          "sweep_id": ""
+        },
+        {
+          "collector": "git-local",
+          "content_digest": "<volatile>",
+          "id": "obs_0005",
+          "kind": "git.checkout",
+          "observed_at": "2026-01-02T03:04:34Z",
+          "payload": {
+            "detail": "no .git directory; this project is a plain folder",
+            "is_git_repository": false
+          },
+          "project_id": "prj_0002",
+          "promoted": false,
+          "subject_key": "git:second",
+          "sweep_id": ""
+        },
+        {
+          "collector": "dep-refs",
+          "content_digest": "<volatile>",
+          "id": "obs_0002",
+          "kind": "dep_ref",
+          "observed_at": "2026-01-02T03:04:31Z",
+          "payload": {
+            "manifest": "Cargo.toml",
+            "raw_target": "../ghost",
+            "ref_kind": "path",
+            "scope": "external"
+          },
+          "project_id": "prj_0002",
+          "promoted": false,
+          "subject_key": "depref:second/Cargo.toml->../ghost",
+          "sweep_id": ""
+        },
+        {
+          "collector": "dep-refs",
+          "content_digest": "<volatile>",
+          "id": "obs_0001",
+          "kind": "dep_scan",
+          "observed_at": "2026-01-02T03:04:31Z",
+          "payload": {
+            "manifests_read": 0,
+            "references": 0,
+            "root_exists": true,
+            "unreadable_manifests": [],
+            "unsupported_manifests": []
+          },
+          "project_id": "prj_0001",
+          "promoted": false,
+          "subject_key": "depscan:parity",
+          "sweep_id": ""
+        },
+        {
+          "collector": "dep-refs",
+          "content_digest": "<volatile>",
+          "id": "obs_0003",
+          "kind": "dep_scan",
+          "observed_at": "2026-01-02T03:04:31Z",
+          "payload": {
+            "manifests_read": 1,
+            "references": 1,
+            "root_exists": true,
+            "unreadable_manifests": [],
+            "unsupported_manifests": []
+          },
+          "project_id": "prj_0002",
+          "promoted": false,
+          "subject_key": "depscan:second",
+          "sweep_id": ""
+        }
+      ],
+      "total": 5
+    },
+    "is_error": false,
+    "operation": "observations.list"
+  },
+  {
+    "body": {
+      "suppression": "<volatile>"
+    },
+    "is_error": false,
+    "operation": "suppress"
+  },
+  {
+    "body": {
+      "suppressions": [
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "created_at": "2026-01-02T03:04:47Z",
+          "id": "sup_0001",
+          "match_kind": "exact",
+          "reason": "parity harness",
+          "subject_key_or_pattern": "git:parity"
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "suppression.list"
+  },
+  {
+    "body": {
+      "suppression": "<volatile>"
+    },
+    "is_error": false,
+    "operation": "suppression.revoke"
+  },
+  {
+    "body": {
+      "horizon_days": 180,
+      "kept_latest": 0,
+      "kept_referenced": 0,
+      "removed": 0
+    },
+    "is_error": false,
+    "operation": "observations.prune"
+  },
+  {
+    "body": {
+      "already_open": 0,
+      "auto_acceptable_kinds": [
+        "forge_state_mismatch",
+        "version_mismatch"
+      ],
+      "auto_accepted": [],
+      "not_collected": [],
+      "raised": [
+        {
+          "evidence_observation_id": "<volatile>",
+          "evidence_snapshot": "<volatile>",
+          "id": "dft_0001",
+          "kind": "unresolved_dependency",
+          "opened_at": "2026-01-02T03:04:53Z",
+          "project_id": "prj_0002",
+          "proposed_change": {
+            "action": "register_or_ignore",
+            "manifest": "Cargo.toml",
+            "raw_target": "../ghost"
+          },
+          "status": "open",
+          "subject_id": "depref:second/Cargo.toml->../ghost",
+          "subject_kind": "dependency",
+          "summary": "second references '../ghost' in Cargo.toml, which is not a registered project"
+        }
+      ],
+      "superseded": []
+    },
+    "is_error": false,
+    "operation": "drift.detect"
+  },
+  {
+    "body": {
+      "freshness": {
+        "age_seconds": 23,
+        "collectors": "<volatile>",
+        "oldest_relevant_sweep": "2026-01-02T03:04:32Z",
+        "status": "fresh"
+      },
+      "human_gated": {
+        "broken_path_dependency": "the target is inside this project and is not there; only somebody who knows whether it moved or was deleted can say what to do",
+        "ci_red_vs_healthy": "a red build is a fact about the build, not a decision about the project's lifecycle state \u2014 somebody has to say which is wrong",
+        "initiative_checkbox_drift": "a checkbox was ticked upstream and the member's workflow state was not; only somebody who knows which is right can say whether to move the item or let the next re-render restore the box",
+        "initiative_tracking_close": "the initiative is closed here; whether its tracking issue should be closed upstream is a person's call \u2014 Vogt proposes it, never writes it",
+        "referenced_issue_state_mismatch": "the reference was read out of the item's own text rather than adopted as a link, and only somebody who knows which register is right can say whether to close the issue or reopen the item",
+        "unresolved_dependency": "accepting this asserts the target is not a project; usually it is a project nobody has registered yet",
+        "update_automation_gap": "turning on a security toggle is a change to the repository's settings, not to Vogt's data; accepting only records the judgement",
+        "vanished_upstream": "accepting this asserts an upstream object is gone for good; a repo transfer or a permissions change looks identical from here"
+      },
+      "proposals": [
+        {
+          "evidence_observation_id": "<volatile>",
+          "evidence_snapshot": "<volatile>",
+          "id": "dft_0001",
+          "kind": "unresolved_dependency",
+          "opened_at": "2026-01-02T03:04:53Z",
+          "project_id": "prj_0002",
+          "project_slug": "second",
+          "proposed_change": {
+            "action": "register_or_ignore",
+            "manifest": "Cargo.toml",
+            "raw_target": "../ghost"
+          },
+          "status": "open",
+          "subject_id": "depref:second/Cargo.toml->../ghost",
+          "subject_kind": "dependency",
+          "summary": "second references '../ghost' in Cargo.toml, which is not a registered project"
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "drift.list"
+  },
+  {
+    "body": {
+      "change_applied": false,
+      "proposal": {
+        "evidence_observation_id": "<volatile>",
+        "evidence_snapshot": "<volatile>",
+        "id": "dft_0001",
+        "kind": "unresolved_dependency",
+        "opened_at": "2026-01-02T03:04:53Z",
+        "project_id": "prj_0002",
+        "project_slug": "second",
+        "proposed_change": {
+          "action": "register_or_ignore",
+          "manifest": "Cargo.toml",
+          "raw_target": "../ghost"
+        },
+        "resolution_reason": "parity harness",
+        "resolved_at": "2026-01-02T03:04:56Z",
+        "resolved_by_actor_id": "act_0001",
+        "resolved_by_identity_ref": "local:parity",
+        "status": "rejected",
+        "subject_id": "depref:second/Cargo.toml->../ghost",
+        "subject_kind": "dependency",
+        "summary": "second references '../ghost' in Cargo.toml, which is not a registered project"
+      }
+    },
+    "is_error": false,
+    "operation": "drift.resolve"
+  },
+  {
+    "body": {
       "initiative": {
         "body": "",
-        "created_at": "2026-01-02T03:04:20Z",
+        "created_at": "2026-01-02T03:04:58Z",
         "id": "ini_0001",
         "slug": "platform",
         "state": "open",
         "title": "Platform",
-        "updated_at": "2026-01-02T03:04:20Z",
+        "updated_at": "2026-01-02T03:04:58Z",
         "weight": 0
       }
     },
@@ -1099,12 +1506,12 @@
       "initiatives": [
         {
           "body": "",
-          "created_at": "2026-01-02T03:04:20Z",
+          "created_at": "2026-01-02T03:04:58Z",
           "id": "ini_0001",
           "slug": "platform",
           "state": "open",
           "title": "Platform",
-          "updated_at": "2026-01-02T03:04:20Z",
+          "updated_at": "2026-01-02T03:04:58Z",
           "weight": 0
         }
       ]
@@ -1116,12 +1523,12 @@
     "body": {
       "initiative": {
         "body": "",
-        "created_at": "2026-01-02T03:04:20Z",
+        "created_at": "2026-01-02T03:04:58Z",
         "id": "ini_0001",
         "slug": "platform",
         "state": "open",
         "title": "Platform work",
-        "updated_at": "2026-01-02T03:04:22Z",
+        "updated_at": "2026-01-02T03:05:00Z",
         "weight": 0
       }
     },
@@ -1155,7 +1562,7 @@
     "body": {
       "preference": {
         "key": "inbox.filter",
-        "updated_at": "2026-01-02T03:04:25Z",
+        "updated_at": "2026-01-02T03:05:03Z",
         "value": {
           "actor": "any",
           "sources": [
@@ -1183,9 +1590,10 @@
       "by_reason": {},
       "detail": "nothing collected \u2014 either there is nothing to say, or the configured token cannot read notifications; `coverage` distinguishes the two",
       "freshness": {
+        "age_seconds": 33,
         "collectors": "<volatile>",
-        "detail": "no collector has completed a sweep yet",
-        "status": "never_swept"
+        "oldest_relevant_sweep": "2026-01-02T03:04:32Z",
+        "status": "fresh"
       },
       "notifications": [],
       "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
@@ -1244,7 +1652,7 @@
       "github_scope": "registered projects only",
       "high_water": {},
       "instance_scope": "registered projects only",
-      "snapshot_at": "2026-01-02T03:04:27Z"
+      "snapshot_at": "2026-01-02T03:05:06Z"
     },
     "is_error": false,
     "operation": "inbox.list"
@@ -1276,7 +1684,7 @@
       "comments": [],
       "item": {
         "body": "",
-        "created_at": "2026-01-02T03:04:29Z",
+        "created_at": "2026-01-02T03:05:08Z",
         "id": "wrk_0001",
         "kind": "chore",
         "labels": [],
@@ -1287,7 +1695,7 @@
         "state": "open",
         "title": "parity item",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:29Z"
+        "updated_at": "2026-01-02T03:05:08Z"
       },
       "live_sessions": [],
       "sessions": [],
@@ -1302,7 +1710,7 @@
       "comments": [],
       "item": {
         "body": "",
-        "created_at": "2026-01-02T03:04:29Z",
+        "created_at": "2026-01-02T03:05:08Z",
         "id": "wrk_0001",
         "kind": "chore",
         "labels": [],
@@ -1313,7 +1721,7 @@
         "state": "open",
         "title": "parity item renamed",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:31Z"
+        "updated_at": "2026-01-02T03:05:10Z"
       },
       "live_sessions": [],
       "sessions": [],
@@ -1366,7 +1774,7 @@
       "comments": [],
       "item": {
         "body": "",
-        "created_at": "2026-01-02T03:04:29Z",
+        "created_at": "2026-01-02T03:05:08Z",
         "id": "wrk_0001",
         "kind": "chore",
         "labels": [],
@@ -1377,7 +1785,7 @@
         "state": "open",
         "title": "parity item renamed",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:31Z"
+        "updated_at": "2026-01-02T03:05:10Z"
       },
       "live_sessions": [],
       "sessions": [],
@@ -1392,7 +1800,7 @@
         "actor_display_name": "parity",
         "actor_id": "act_0001",
         "body": "parity note",
-        "created_at": "2026-01-02T03:04:36Z",
+        "created_at": "2026-01-02T03:05:15Z",
         "id": "cmt_0001",
         "kind": "note",
         "work_item_id": "wrk_0001"
@@ -1408,7 +1816,7 @@
       "comments": [],
       "item": {
         "body": "",
-        "created_at": "2026-01-02T03:04:29Z",
+        "created_at": "2026-01-02T03:05:08Z",
         "id": "wrk_0001",
         "kind": "chore",
         "labels": [],
@@ -1419,7 +1827,7 @@
         "state": "in_progress",
         "title": "parity item renamed",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:39Z"
+        "updated_at": "2026-01-02T03:05:18Z"
       },
       "live_sessions": [],
       "sessions": [],
@@ -1461,9 +1869,9 @@
       "lane_totals": {
         "": 1
       },
-      "revision": 17,
-      "snapshot": "eyJmaW5nZXJwcmludCI6InNoYTI1Njo2N2JkMGQ3MTUxN2JlYThkM2VkNmJjYWE0ZTFmZTY2YzYyNTM5MGRkNjg2ODI3MjM1Njk4MTUxMDg2ZDc0MDYzIiwiaGlnaF93YXRlciI6WyIyMDI2LTAxLTAyVDAzOjA0OjI5KzAwOjAwIiwiV0ktMSJdLCJraW5kIjoic25hcHNob3QiLCJyZXZpc2lvbiI6MTcsInNuYXBzaG90X2F0IjoiMjAyNi0wMS0wMlQwMzowNDo0MSswMDowMCJ9",
-      "snapshot_at": "2026-01-02T03:04:41Z",
+      "revision": 27,
+      "snapshot": "eyJmaW5nZXJwcmludCI6InNoYTI1Njo2N2JkMGQ3MTUxN2JlYThkM2VkNmJjYWE0ZTFmZTY2YzYyNTM5MGRkNjg2ODI3MjM1Njk4MTUxMDg2ZDc0MDYzIiwiaGlnaF93YXRlciI6WyIyMDI2LTAxLTAyVDAzOjA1OjA4KzAwOjAwIiwiV0ktMSJdLCJraW5kIjoic25hcHNob3QiLCJyZXZpc2lvbiI6MjcsInNuYXBzaG90X2F0IjoiMjAyNi0wMS0wMlQwMzowNToyMCswMDowMCJ9",
+      "snapshot_at": "2026-01-02T03:05:20Z",
       "total": 1
     },
     "is_error": false,
@@ -1475,9 +1883,10 @@
       "declared": 1,
       "excluded_unlinked": 0,
       "freshness": {
+        "age_seconds": 53,
         "collectors": "<volatile>",
-        "detail": "no collector has completed a sweep yet",
-        "status": "never_swept"
+        "oldest_relevant_sweep": "2026-01-02T03:04:32Z",
+        "status": "fresh"
       },
       "items": [
         {
@@ -1491,7 +1900,7 @@
           "state": "in_progress",
           "title": "parity item renamed",
           "trust_state": "unverified",
-          "updated_at": "2026-01-02T03:04:39Z"
+          "updated_at": "2026-01-02T03:05:18Z"
         }
       ],
       "observed": 0,
@@ -1515,9 +1924,10 @@
       "declared": 0,
       "excluded_unlinked": 0,
       "freshness": {
+        "age_seconds": 56,
         "collectors": "<volatile>",
-        "detail": "no collector has completed a sweep yet",
-        "status": "never_swept"
+        "oldest_relevant_sweep": "2026-01-02T03:04:32Z",
+        "status": "fresh"
       },
       "items": [],
       "observed": 0,
@@ -1556,7 +1966,7 @@
   {
     "body": {
       "applied": false,
-      "base": "2026-01-02T03:04:48Z",
+      "base": "2026-01-02T03:05:29Z",
       "base_source": "an export of this same instance: its exported_at",
       "by_entity": {
         "actor": {
@@ -1632,7 +2042,7 @@
           "test_recipe": ""
         },
         "compliance_status": "not_checked",
-        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "contract_adopted_at": "2026-01-02T03:04:28Z",
         "created_at": "2026-01-02T03:04:11Z",
         "exclusions": [
           ".venv/",
@@ -1651,7 +2061,7 @@
         "root_path": "<root>/proj",
         "slug": "parity",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:50Z",
+        "updated_at": "2026-01-02T03:05:31Z",
         "write_back": "full"
       }
     },
@@ -1663,7 +2073,7 @@
       "actions": [
         {
           "action": "comment",
-          "at": "2026-01-02T03:04:37Z",
+          "at": "2026-01-02T03:05:16Z",
           "detail": "write-back is off for this project",
           "id": "wbk_0001",
           "outcome": "skipped",
@@ -1680,7 +2090,7 @@
       "actions": [
         {
           "action": "comment",
-          "at": "2026-01-02T03:04:37Z",
+          "at": "2026-01-02T03:05:16Z",
           "detail": "write-back is off for this project",
           "id": "wbk_0001",
           "outcome": "skipped",
@@ -1788,7 +2198,7 @@
       "items": [
         {
           "body": "",
-          "created_at": "2026-01-02T03:04:29Z",
+          "created_at": "2026-01-02T03:05:08Z",
           "id": "wrk_0001",
           "kind": "chore",
           "labels": [],
@@ -1799,7 +2209,7 @@
           "state": "in_progress",
           "title": "parity item renamed",
           "trust_state": "unverified",
-          "updated_at": "2026-01-02T03:04:39Z"
+          "updated_at": "2026-01-02T03:05:18Z"
         }
       ],
       "mode": "full",
@@ -1842,70 +2252,70 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:51Z",
+          "at": "2026-01-02T03:05:32Z",
           "entity_id": "prj_0001",
           "entity_kind": "project",
-          "id": "aud_0019",
+          "id": "aud_0029",
           "operation": "project.writeback",
-          "payload_digest": "sha256:5160587a6bd4fd6e1c8cfdfbe9e7b71a0aff7cb411b75e8ad277bea16adfdf65",
+          "payload_digest": "<volatile>",
           "reason": "parity harness",
-          "revision": 18,
-          "txn_id": "txn_0022"
+          "revision": 28,
+          "txn_id": "txn_0036"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:40Z",
+          "at": "2026-01-02T03:05:19Z",
           "entity_id": "wrk_0001",
           "entity_kind": "work_item",
-          "id": "aud_0018",
+          "id": "aud_0028",
           "operation": "work.transition",
-          "payload_digest": "sha256:3e2a6091aa3749e51f7d31a8e33b394a832c09657e63217835f679d979d60c0e",
+          "payload_digest": "<volatile>",
           "reason": "parity",
-          "revision": 17,
-          "txn_id": "txn_0019"
+          "revision": 27,
+          "txn_id": "txn_0033"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:38Z",
+          "at": "2026-01-02T03:05:17Z",
           "entity_id": "cmt_0001",
           "entity_kind": "comment",
-          "id": "aud_0017",
+          "id": "aud_0027",
           "operation": "work.comment",
-          "payload_digest": "sha256:4b2f8d9eeac24ac39262aff03628f2c1fd35cf5d69ee46e22cb9297504bac702",
+          "payload_digest": "<volatile>",
           "reason": "parity",
-          "revision": 16,
-          "txn_id": "txn_0018"
+          "revision": 26,
+          "txn_id": "txn_0032"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:32Z",
+          "at": "2026-01-02T03:05:11Z",
           "entity_id": "wrk_0001",
           "entity_kind": "work_item",
-          "id": "aud_0016",
+          "id": "aud_0026",
           "operation": "work.update",
-          "payload_digest": "sha256:1b7bbf5cf7c7f958e503144a57ead6668ed52a60ad818983f2b53baccbe0ff89",
+          "payload_digest": "<volatile>",
           "reason": "parity",
-          "revision": 15,
-          "txn_id": "txn_0017"
+          "revision": 25,
+          "txn_id": "txn_0031"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:30Z",
+          "at": "2026-01-02T03:05:09Z",
           "entity_id": "wrk_0001",
           "entity_kind": "work_item",
-          "id": "aud_0015",
+          "id": "aud_0025",
           "operation": "work.create",
-          "payload_digest": "sha256:575870b9df83c702df7cfd73d439289a2e52b7dc3f37236710df812b0664db5b",
+          "payload_digest": "<volatile>",
           "reason": "parity",
-          "revision": 14,
-          "txn_id": "txn_0016"
+          "revision": 24,
+          "txn_id": "txn_0030"
         }
       ],
-      "total": 19
+      "total": 29
     },
     "is_error": false,
     "operation": "audit.list"
@@ -1944,7 +2354,7 @@
       },
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
       "rows": [],
-      "swept_at": "2026-01-02T03:04:55Z"
+      "swept_at": "2026-01-02T03:05:36Z"
     },
     "is_error": false,
     "operation": "session.sweep"
@@ -2049,13 +2459,13 @@
       "user": {
         "actor_id": "act_0005",
         "actor_identity_ref": "human:ada",
-        "created_at": "2026-01-02T03:04:56Z",
+        "created_at": "2026-01-02T03:05:37Z",
         "scopes": [
           "read",
           "work.write",
           "project.write"
         ],
-        "updated_at": "2026-01-02T03:04:56Z",
+        "updated_at": "2026-01-02T03:05:37Z",
         "username": "ada"
       }
     },
@@ -2068,13 +2478,13 @@
         {
           "actor_id": "act_0005",
           "actor_identity_ref": "human:ada",
-          "created_at": "2026-01-02T03:04:56Z",
+          "created_at": "2026-01-02T03:05:37Z",
           "scopes": [
             "read",
             "work.write",
             "project.write"
           ],
-          "updated_at": "2026-01-02T03:04:56Z",
+          "updated_at": "2026-01-02T03:05:37Z",
           "username": "ada"
         }
       ]
@@ -2087,13 +2497,13 @@
       "user": {
         "actor_id": "act_0005",
         "actor_identity_ref": "human:ada",
-        "created_at": "2026-01-02T03:04:56Z",
+        "created_at": "2026-01-02T03:05:37Z",
         "scopes": [
           "read",
           "work.write",
           "project.write"
         ],
-        "updated_at": "2026-01-02T03:04:58Z",
+        "updated_at": "2026-01-02T03:05:39Z",
         "username": "ada"
       }
     },
@@ -2144,7 +2554,7 @@
         "id": "tok_0002",
         "kind": "api",
         "name": "bootstrap agent token",
-        "revoked_at": "2026-01-02T03:05:00Z",
+        "revoked_at": "2026-01-02T03:05:41Z",
         "revoked_reason": "parity harness",
         "scopes": [
           "read",
@@ -2181,7 +2591,7 @@
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "path": "<root>/backup",
-      "taken_at": "2026-01-02T03:05:02Z"
+      "taken_at": "2026-01-02T03:05:43Z"
     },
     "is_error": false,
     "operation": "backup"
@@ -2194,7 +2604,7 @@
       "import_root_then": "<root>/instance/repos",
       "instance_id": "ins_0001",
       "migrations_applied": [],
-      "restored_from": "2026-01-02T03:05:02Z",
+      "restored_from": "2026-01-02T03:05:43Z",
       "source": "<root>/backup"
     },
     "is_error": false,
@@ -2207,5 +2617,271 @@
     },
     "is_error": false,
     "operation": "user.remove"
+  },
+  {
+    "body": {
+      "events": [
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:12Z",
+          "audit_id": "aud_0002",
+          "entity_id": "tok_0001",
+          "entity_kind": "token",
+          "kind": "token.adopted",
+          "seq": 1,
+          "summary": {
+            "actor": "agent:vogt-engine",
+            "scopes": [
+              "read",
+              "work.write",
+              "project.write"
+            ]
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:16Z",
+          "audit_id": "aud_0003",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "kind": "token.adopted",
+          "seq": 2,
+          "summary": {
+            "actor": "agent:vogt-sessions",
+            "scopes": [
+              "read",
+              "work.write",
+              "project.write",
+              "writeback"
+            ]
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:08Z",
+          "audit_id": "aud_0004",
+          "entity_id": "act_0004",
+          "entity_kind": "actor",
+          "kind": "actor.created",
+          "seq": 3,
+          "summary": {
+            "identity_ref": "agent:parity",
+            "kind": "agent"
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:10Z",
+          "audit_id": "aud_0005",
+          "entity_id": "lbl_0001",
+          "entity_kind": "label",
+          "kind": "label.created",
+          "seq": 4,
+          "summary": {
+            "name": "parity"
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:12Z",
+          "audit_id": "aud_0006",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
+          "kind": "project.registered",
+          "seq": 5,
+          "summary": {
+            "name": "Parity",
+            "slug": "parity"
+          }
+        }
+      ],
+      "next_cursor": 5
+    },
+    "is_error": false,
+    "operation": "events.list"
+  },
+  {
+    "body": {
+      "events": [
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:16Z",
+          "audit_id": "aud_0003",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "kind": "token.adopted",
+          "seq": 2,
+          "summary": {
+            "actor": "agent:vogt-sessions",
+            "scopes": [
+              "read",
+              "work.write",
+              "project.write",
+              "writeback"
+            ]
+          }
+        },
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:08Z",
+          "audit_id": "aud_0004",
+          "entity_id": "act_0004",
+          "entity_kind": "actor",
+          "kind": "actor.created",
+          "seq": 3,
+          "summary": {
+            "identity_ref": "agent:parity",
+            "kind": "agent"
+          }
+        }
+      ],
+      "next_cursor": 3
+    },
+    "is_error": false,
+    "operation": "events.list"
+  },
+  {
+    "body": {
+      "records": [
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:05:48Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0033",
+          "operation": "user.remove",
+          "payload_digest": "<volatile>",
+          "reason": "parity harness",
+          "revision": 32,
+          "txn_id": "txn_0042"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:05:42Z",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0032",
+          "operation": "token.revoke",
+          "payload_digest": "<volatile>",
+          "reason": "parity harness",
+          "revision": 31,
+          "txn_id": "txn_0040"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:05:40Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0031",
+          "operation": "user.set_password",
+          "payload_digest": "<volatile>",
+          "reason": "parity harness",
+          "revision": 30,
+          "txn_id": "txn_0039"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:05:38Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0030",
+          "operation": "user.create",
+          "payload_digest": "<volatile>",
+          "reason": "parity harness",
+          "revision": 29,
+          "txn_id": "txn_0038"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:05:32Z",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
+          "id": "aud_0029",
+          "operation": "project.writeback",
+          "payload_digest": "<volatile>",
+          "reason": "parity harness",
+          "revision": 28,
+          "txn_id": "txn_0036"
+        }
+      ],
+      "total": 33
+    },
+    "is_error": false,
+    "operation": "audit.list"
+  },
+  {
+    "body": {
+      "records": [
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:05:42Z",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0032",
+          "operation": "token.revoke",
+          "payload_digest": "<volatile>",
+          "reason": "parity harness",
+          "revision": 31,
+          "txn_id": "txn_0040"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:05:40Z",
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "id": "aud_0031",
+          "operation": "user.set_password",
+          "payload_digest": "<volatile>",
+          "reason": "parity harness",
+          "revision": 30,
+          "txn_id": "txn_0039"
+        }
+      ],
+      "total": 33
+    },
+    "is_error": false,
+    "operation": "audit.list"
+  },
+  {
+    "body": {
+      "text": "invalid_request: <root>/backup is a backup of this instance (ins_0001); a clone copies another instance. Use `restore` to put this one back."
+    },
+    "is_error": true,
+    "operation": "clone"
+  },
+  {
+    "body": {
+      "text": "invalid_request: <root>/backup is a backup of this instance (ins_0001); a clone copies another instance. Use `restore` to put this one back."
+    },
+    "is_error": true,
+    "operation": "clone"
+  },
+  {
+    "body": {
+      "text": "not_found: <root>/missing has no manifest.json; it is not a Vogt backup"
+    },
+    "is_error": true,
+    "operation": "clone"
+  },
+  {
+    "body": {
+      "text": "invalid_request: 'not a repo!' does not name a GitHub repository or a configured Forgejo repository; give owner/name, host/owner/name, or a repository URL"
+    },
+    "is_error": true,
+    "operation": "project.import"
+  },
+  {
+    "body": {
+      "text": "invalid_request: 'not a repo!' does not name a GitHub repository or a configured Forgejo repository; give owner/name, host/owner/name, or a repository URL"
+    },
+    "is_error": true,
+    "operation": "project.import"
   }
 ]

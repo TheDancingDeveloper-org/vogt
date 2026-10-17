@@ -87,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     golden = json.loads((args.golden / f"{args.transport}.json").read_text())
     if args.only == "dump":
         golden = [step for step in golden if step["operation"].startswith("dump.")]
+        recorded = [step for step in recorded if step["operation"].startswith("dump.")]
     elif args.only:
         golden = [step for step in golden if step["operation"].startswith(args.only)]
         # A CLI run always records dump.after_init first, even when the script
@@ -122,6 +123,10 @@ def _resolve(impl: str) -> str:
 
 def _load_steps(prefix: str) -> list[dict[str, Any]]:
     document = json.loads(SCRIPT_PATH.read_text())
+    # The dump steps read state the earlier steps build, so `--only dump` runs
+    # the whole script and keeps only the dumps.
+    if prefix == "dump":
+        return document["steps"]
     return [step for step in document["steps"] if step["operation"].startswith(prefix)]
 
 
@@ -134,6 +139,7 @@ def _prepare_init(root: Path, env: dict[str, str]) -> dict[str, str]:
     """
     spec = json.loads(SCRIPT_PATH.read_text()).get("init", {})
     for name, content in spec.get("files", {}).items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(content, encoding="utf-8")
     init_env = dict(env)
     for key, value in spec.get("env", {}).items():
@@ -320,6 +326,21 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
         for step in steps:
+            if step.get("dump"):
+                # A dump step names the point in the script where the stores
+                # are read, so a table only later steps fill is captured. A
+                # `tables` list keeps the dump to the tables that step is about.
+                dumped = _normalise(_dump(data), root, data)
+                wanted = step.get("tables")
+                if wanted is not None:
+                    dumped = {
+                        store: {t: rows for t, rows in tables.items() if t in wanted}
+                        for store, tables in dumped.items()
+                    }
+                answers.append(
+                    {"operation": step["operation"], "exit": 0, "body": dumped}
+                )
+                continue
             if "params" not in step:
                 continue
             # A step may give the CLI its own params where the CLI reads a

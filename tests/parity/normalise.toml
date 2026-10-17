@@ -11,7 +11,12 @@
 # collectors observed, which names the machine the sweep ran on.
 #
 # Compared verbatim, and why each is safe to compare:
-#   content_digest, payload_digest — pure functions of their input.
+#   content_digest, payload_digest — NOT comparable: a digest is taken over the
+#     raw payload, and a payload that names the run's temporary root (a project
+#     root_path, a contract target) hashes differently on every run, so two
+#     recordings of the same script disagree. The payload itself is compared
+#     verbatim wherever a step or dump shows it, which is what the digest was
+#     there to stand in for. Blanked here on every transport.
 #   last_used_at, expires_at — written by the clock, which the step clock fixes.
 #   instance_id — minted by the id factory, which sequential ids fixes.
 #   path — tokenised to <root>/<data> by the path rule below, so the remainder
@@ -35,7 +40,7 @@
 why = "collector evidence names the machine; everything the hooks make deterministic compares verbatim"
 keys = [
   "collectors", "suppression", "evidence_snapshot", "evidence_observation_id",
-  "secret", "data_dir",
+  "secret", "data_dir", "content_digest", "payload_digest",
 ]
 
 [paths]
