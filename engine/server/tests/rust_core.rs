@@ -342,8 +342,62 @@ async fn a_dead_rust_core_refuses_whoami_as_an_outage() {
     assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-// TODO(WI-1076): the SSE event stream (`/api/events`) is not exercised here. The
-// follower reads the poll feed (`events_after`) only; the stream test lands with I1.
+#[tokio::test]
+async fn the_sse_stream_carries_a_core_write_made_after_the_door_started() {
+    // The live half of the event path (WI-1075 deferred this to I1): the
+    // follower reads the Rust core's feed with the stack secret, republishes
+    // each change onto the bus, and a browser's `/api/events` stream gets it.
+    let core = boot_core();
+    wait_ready(&core.url).await;
+    let door = boot_door(config_against(&core.url)).await;
+    let client = reqwest::Client::new();
+    let mut stream = client
+        .get(format!("{door}/api/events"))
+        .headers(bearer())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+    // The follower takes the core's head on its first poll, which runs as
+    // soon as the door boots. The write has to land after that poll, or it
+    // becomes the head and the follower never sees it.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let status = Command::new(binary())
+        .arg("--data-dir")
+        .arg(core._dir.path())
+        .args([
+            "project",
+            "register",
+            "--name",
+            "Stream Probe",
+            "--root-path",
+            "/srv/stream-probe",
+            "--reason",
+            "sse test",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the write must succeed: {status}");
+
+    // The follower polls every five seconds, so the event is due within one
+    // interval; the deadline leaves room for a slow CI runner.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut seen = String::new();
+    while !(seen.contains("vogt-changed") && seen.contains("project.registered")) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let chunk = tokio::time::timeout(remaining, stream.chunk())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("no vogt-changed/project.registered on /api/events within 30s; saw: {seen}")
+            })
+            .expect("the SSE read failed")
+            .expect("the SSE stream ended");
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+}
+
 #[tokio::test]
 async fn the_event_follower_reads_the_rust_core_with_the_stack_secret() {
     let core = boot_core();
