@@ -459,6 +459,9 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
     let mut values: Map<String, Value> = Map::new();
     let mut secret_files: BTreeMap<String, String> = BTreeMap::new();
     let mut secret_sources: BTreeMap<String, String> = BTreeMap::new();
+    // stdin is read only after the required arguments are checked, so a usage
+    // error never consumes or waits on standard input.
+    let mut stdin_secrets: Vec<String> = Vec::new();
     let mut index = 0usize;
     while index < argv.len() {
         let token = &argv[index];
@@ -532,9 +535,7 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
                     return Err(format!("--{name} takes no value"));
                 }
                 index += 1;
-                // A repeated secret flag is the last one, matching argparse.
-                let text = read_secret_stdin().map_err(|message| format!("domain: {message}"))?;
-                values.insert(secret.to_string(), Value::String(text));
+                stdin_secrets.push(secret.to_string());
                 continue;
             }
             let value = take_value(argv, &mut index, inline, &name)?;
@@ -592,6 +593,23 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
             values.insert(field, parsed);
         }
     }
+    // Required arguments that are not secrets are a usage error, and that check
+    // runs before any secret is read, as argparse does before pydantic does.
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|name| {
+            !is_secret(name) && !is_nullable(properties.get(*name)) && !values.contains_key(*name)
+        })
+        .map(|name| format!("--{}", name.replace('_', "-")))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!("usage: {}", missing.join(", ")));
+    }
+    for secret in &stdin_secrets {
+        // A repeated secret flag is the last one, matching argparse.
+        let text = read_secret_stdin().map_err(|message| format!("domain: {message}"))?;
+        values.insert(secret.clone(), Value::String(text));
+    }
     for (secret, path) in &secret_files {
         // An unreadable file is a domain error (exit 1, on stderr), as the
         // secret-not-on-a-terminal case is. Python's uncaught OSError exits 1 too.
@@ -599,32 +617,17 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
         values.insert(secret.clone(), Value::String(text));
     }
 
-    for name in &required {
-        if is_secret(name) {
-            if !values.contains_key(name) {
-                let dashed = name.replace('_', "-");
-                // Off a terminal there is no prompt, so a missing secret is a
-                // domain error (exit 1), not a usage error.
-                if !io::stdin().is_terminal() {
-                    return Err(format!(
-                        "domain: --{dashed}-file or --{dashed}-stdin is required when not on a terminal"
-                    ));
-                }
-                return Err(format!("--{dashed}-file or --{dashed}-stdin is required"));
+    for name in required.iter().filter(|name| is_secret(name)) {
+        if !values.contains_key(name) {
+            let dashed = name.replace('_', "-");
+            // Off a terminal there is no prompt, so a missing secret is a
+            // domain error (exit 1), not a usage error.
+            if !io::stdin().is_terminal() {
+                return Err(format!(
+                    "domain: --{dashed}-file or --{dashed}-stdin is required when not on a terminal"
+                ));
             }
-            continue;
-        }
-        let missing: Vec<String> = required
-            .iter()
-            .filter(|name| {
-                !is_secret(name)
-                    && !is_nullable(properties.get(*name))
-                    && !values.contains_key(*name)
-            })
-            .map(|name| format!("--{}", name.replace('_', "-")))
-            .collect();
-        if !missing.is_empty() {
-            return Err(format!("usage: {}", missing.join(", ")));
+            return Err(format!("--{dashed}-file or --{dashed}-stdin is required"));
         }
     }
     Ok(Value::Object(values))
