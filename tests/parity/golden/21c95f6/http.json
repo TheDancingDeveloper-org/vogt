@@ -230,6 +230,100 @@
     "status": 404
   },
   {
+    "operation": "project.register",
+    "result": {
+      "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "landing": null,
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "review": null,
+          "rules": [],
+          "session_wall_clock_minutes": null,
+          "test_recipe": "",
+          "verification": null
+        },
+        "compliance_checked_at": null,
+        "compliance_status": "not_checked",
+        "contract_adopted_at": null,
+        "contract_version": null,
+        "created_at": "2026-01-02T03:04:06Z",
+        "current_version": null,
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "active",
+        "link_state": "unlinked",
+        "name": "Second",
+        "repo_url": null,
+        "root_path": "<root>/instance/repos/second",
+        "slug": "second",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:06Z",
+        "write_back": "none"
+      }
+    },
+    "status": 200
+  },
+  {
+    "operation": "project.register",
+    "result": {
+      "project": {
+        "agent_policy": {
+          "base_branch": "",
+          "commit_identity": "",
+          "deployed_setup": "",
+          "forbidden_text": [],
+          "landing": null,
+          "main_branches": [],
+          "merge_deploys_prod": false,
+          "review": null,
+          "rules": [],
+          "session_wall_clock_minutes": null,
+          "test_recipe": "",
+          "verification": null
+        },
+        "compliance_checked_at": null,
+        "compliance_status": "not_checked",
+        "contract_adopted_at": null,
+        "contract_version": null,
+        "created_at": "2026-01-02T03:04:06Z",
+        "current_version": null,
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0002",
+        "lifecycle_state": "active",
+        "link_state": "unlinked",
+        "name": "Broken",
+        "repo_url": null,
+        "root_path": "<root>/instance/repos/broken",
+        "slug": "broken",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:06Z",
+        "write_back": "none"
+      }
+    },
+    "status": 200
+  },
+  {
     "operation": "session.list",
     "result": {
       "digests": [],
@@ -253,6 +347,340 @@
       "swept_at": "2026-01-02T03:04:06Z"
     },
     "status": 200
+  },
+  {
+    "operation": "sweep",
+    "result": {
+      "dep_refs": 0,
+      "disk": null,
+      "projects": 2,
+      "reports": [
+        {
+          "collector": "dep-refs",
+          "failures": {},
+          "new": 2,
+          "outcome": "ok",
+          "projects": 2,
+          "sweep_id": "swp_0001",
+          "unchanged": 0
+        },
+        {
+          "collector": "git-local",
+          "failures": {
+            "broken": "CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere"
+          },
+          "new": 1,
+          "outcome": "partial",
+          "projects": 2,
+          "sweep_id": "swp_0002",
+          "unchanged": 0
+        },
+        {
+          "collector": "mirrored-source",
+          "failures": {},
+          "new": 0,
+          "outcome": "ok",
+          "projects": 2,
+          "sweep_id": "swp_0003",
+          "unchanged": 0
+        },
+        {
+          "collector": "source-markers",
+          "failures": {},
+          "new": 0,
+          "outcome": "ok",
+          "projects": 2,
+          "sweep_id": "swp_0004",
+          "unchanged": 0
+        }
+      ],
+      "scope": "all registered projects",
+      "subjects": 3
+    },
+    "status": 200
+  },
+  {
+    "operation": "sweep",
+    "result": {
+      "dep_refs": 0,
+      "disk": null,
+      "projects": 2,
+      "reports": [
+        {
+          "collector": "git-local",
+          "failures": {
+            "broken": "CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere"
+          },
+          "new": 0,
+          "outcome": "partial",
+          "projects": 2,
+          "sweep_id": "swp_0005",
+          "unchanged": 1
+        }
+      ],
+      "scope": "all registered projects",
+      "subjects": 3
+    },
+    "status": 200
+  },
+  {
+    "operation": "coverage",
+    "result": {
+      "collectors": [
+        {
+          "age_seconds": null,
+          "collector": "contract-checker",
+          "detail": "this collector has not completed a sweep",
+          "last_sweep_scope": 0,
+          "last_swept_at": "<volatile>",
+          "never_swept": 0,
+          "projects": 0,
+          "registered": 2,
+          "status": "never_run"
+        },
+        {
+          "age_seconds": -2,
+          "collector": "dep-refs",
+          "detail": null,
+          "last_sweep_scope": 2,
+          "last_swept_at": "<volatile>",
+          "never_swept": 0,
+          "projects": 2,
+          "registered": 2,
+          "status": "ok"
+        },
+        {
+          "age_seconds": -5,
+          "collector": "git-local",
+          "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
+          "last_sweep_scope": 2,
+          "last_swept_at": "<volatile>",
+          "never_swept": 0,
+          "projects": 2,
+          "registered": 2,
+          "status": "partial"
+        },
+        {
+          "age_seconds": -8,
+          "collector": "mirrored-source",
+          "detail": null,
+          "last_sweep_scope": 2,
+          "last_swept_at": "<volatile>",
+          "never_swept": 0,
+          "projects": 2,
+          "registered": 2,
+          "status": "ok"
+        },
+        {
+          "age_seconds": -11,
+          "collector": "source-markers",
+          "detail": null,
+          "last_sweep_scope": 2,
+          "last_swept_at": "<volatile>",
+          "never_swept": 0,
+          "projects": 2,
+          "registered": 2,
+          "status": "ok"
+        }
+      ],
+      "swept_project_ids": [
+        "prj_0001",
+        "prj_0002"
+      ],
+      "unswept_project_ids": []
+    },
+    "status": 200
+  },
+  {
+    "operation": "dump.observed",
+    "result": {
+      "observed": {
+        "latest_observations": [
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+            "kind": "dep_scan",
+            "observation_id": "obs_0001",
+            "observed_at": "2026-01-02T03:04:07+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0002",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:broken"
+          },
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
+            "kind": "dep_scan",
+            "observation_id": "obs_0002",
+            "observed_at": "2026-01-02T03:04:07+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:second"
+          },
+          {
+            "collector": "git-local",
+            "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+            "kind": "git.checkout",
+            "observation_id": "obs_0003",
+            "observed_at": "2026-01-02T03:04:10+00:00",
+            "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "git:second"
+          }
+        ],
+        "meta": [
+          {
+            "key": "instance_id",
+            "value": "ins_0001"
+          },
+          {
+            "key": "created_at",
+            "value": "2026-01-02T03:04:08+00:00"
+          },
+          {
+            "key": "latest_generation",
+            "value": "1"
+          }
+        ],
+        "migration_lock": [
+          {
+            "acquired_at": null,
+            "holder": null,
+            "id": 1
+          }
+        ],
+        "migrations": [
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "c050f9e4dba983119f045b8fb4ccbe8b1ee97473170eead7d28279e99468de4b",
+            "id": "0001_foundation"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "9cdc9c9179740af96606bab0b557c7b35639eaabc78faf16630c7705f1d368f5",
+            "id": "0002_evidence"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "8bf0b8533774a156762fddc2e56bbb9656ba3b6bf0e38ec85a66c9dc9c325ed1",
+            "id": "0003_inherited_dep_refs"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "8d5cffbb2acb6ff18099ad73384eaa4ea5ebca7a6f45afb79d353fb4cbbcaee6",
+            "id": "0004_forge_sync"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "e6902e6616ab9948f9d222b2763ce9bc421a136b6acb1422240e5957683e5e45",
+            "id": "0005_perf_indexes"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:06+00:00",
+            "checksum": "e0e959f4bf4f39db47d5e41ac11391d5f80a0b73bcce57d36168572062b1ab66",
+            "id": "0006_agent_activity"
+          }
+        ],
+        "observations": [
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+            "id": "obs_0001",
+            "kind": "dep_scan",
+            "observed_at": "2026-01-02T03:04:07+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0002",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:broken",
+            "sweep_id": "swp_0001"
+          },
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
+            "id": "obs_0002",
+            "kind": "dep_scan",
+            "observed_at": "2026-01-02T03:04:07+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:second",
+            "sweep_id": "swp_0001"
+          },
+          {
+            "collector": "git-local",
+            "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+            "id": "obs_0003",
+            "kind": "git.checkout",
+            "observed_at": "2026-01-02T03:04:10+00:00",
+            "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "git:second",
+            "sweep_id": "swp_0002"
+          }
+        ],
+        "sweeps": [
+          {
+            "collector": "dep-refs",
+            "detail": null,
+            "finished_at": "2026-01-02T03:04:08+00:00",
+            "id": "swp_0001",
+            "outcome": "ok",
+            "scope": "[\"prj_0002\", \"prj_0001\"]",
+            "started_at": "2026-01-02T03:04:06+00:00",
+            "stats": "{\"projects\": 2, \"new\": 2, \"unchanged\": 0, \"failed_projects\": 0}"
+          },
+          {
+            "collector": "git-local",
+            "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
+            "finished_at": "2026-01-02T03:04:11+00:00",
+            "id": "swp_0002",
+            "outcome": "partial",
+            "scope": "[\"prj_0002\", \"prj_0001\"]",
+            "started_at": "2026-01-02T03:04:09+00:00",
+            "stats": "{\"projects\": 2, \"new\": 1, \"unchanged\": 0, \"failed_projects\": 1}"
+          },
+          {
+            "collector": "mirrored-source",
+            "detail": null,
+            "finished_at": "2026-01-02T03:04:14+00:00",
+            "id": "swp_0003",
+            "outcome": "ok",
+            "scope": "[\"prj_0002\", \"prj_0001\"]",
+            "started_at": "2026-01-02T03:04:12+00:00",
+            "stats": "{\"projects\": 2, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
+          },
+          {
+            "collector": "source-markers",
+            "detail": null,
+            "finished_at": "2026-01-02T03:04:17+00:00",
+            "id": "swp_0004",
+            "outcome": "ok",
+            "scope": "[\"prj_0002\", \"prj_0001\"]",
+            "started_at": "2026-01-02T03:04:15+00:00",
+            "stats": "{\"projects\": 2, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
+          },
+          {
+            "collector": "git-local",
+            "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
+            "finished_at": "2026-01-02T03:04:08+00:00",
+            "id": "swp_0005",
+            "outcome": "partial",
+            "scope": "[\"prj_0002\", \"prj_0001\"]",
+            "started_at": "2026-01-02T03:04:06+00:00",
+            "stats": "{\"projects\": 2, \"new\": 0, \"unchanged\": 1, \"failed_projects\": 1}"
+          }
+        ]
+      }
+    }
   },
   {
     "operation": "session.log_tail",
@@ -759,12 +1187,13 @@
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07Z",
           "audit_id": "aud_0006",
-          "entity_id": "lbl_0001",
-          "entity_kind": "label",
-          "kind": "label.created",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
+          "kind": "project.registered",
           "seq": 5,
           "summary": {
-            "name": "bug"
+            "name": "Second",
+            "slug": "second"
           }
         }
       ],
@@ -822,12 +1251,12 @@
           "at": "2026-01-02T03:04:07Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0013",
+          "id": "aud_0015",
           "operation": "user.remove",
           "payload_digest": "sha256:c641563a061b879b4b32211c6b39a7a2eeb71a7a114359133e079bc16f1b4bfa",
           "reason": "parity harness",
-          "revision": 11,
-          "txn_id": "txn_0013"
+          "revision": 13,
+          "txn_id": "txn_0020"
         },
         {
           "actor_id": "act_0005",
@@ -835,12 +1264,12 @@
           "at": "2026-01-02T03:04:06Z",
           "entity_id": "tok_0005",
           "entity_kind": "token",
-          "id": "aud_0012",
+          "id": "aud_0014",
           "operation": "auth.login",
           "payload_digest": "sha256:079f75e3b73e507a9203394b2f453386de6362973c6d3e9dfa6ddfee0201f931",
           "reason": "password login by ada",
-          "revision": 10,
-          "txn_id": "txn_0012"
+          "revision": 12,
+          "txn_id": "txn_0019"
         },
         {
           "actor_id": "act_0004",
@@ -848,12 +1277,12 @@
           "at": "2026-01-02T03:04:07Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0011",
+          "id": "aud_0013",
           "operation": "token.revoke",
           "payload_digest": "sha256:d331a6f9ffa337f5bbea02b91117f85c4a54fe0e8550538ef0ccbe9757a74c7a",
           "reason": "parity harness",
-          "revision": 9,
-          "txn_id": "txn_0011"
+          "revision": 11,
+          "txn_id": "txn_0018"
         },
         {
           "actor_id": "act_0004",
@@ -861,12 +1290,12 @@
           "at": "2026-01-02T03:04:07Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0010",
+          "id": "aud_0012",
           "operation": "user.set_password",
           "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
           "reason": "parity harness",
-          "revision": 8,
-          "txn_id": "txn_0010"
+          "revision": 10,
+          "txn_id": "txn_0017"
         },
         {
           "actor_id": "act_0004",
@@ -874,15 +1303,15 @@
           "at": "2026-01-02T03:04:07Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0009",
+          "id": "aud_0011",
           "operation": "user.create",
           "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
           "reason": "parity harness",
-          "revision": 7,
-          "txn_id": "txn_0009"
+          "revision": 9,
+          "txn_id": "txn_0016"
         }
       ],
-      "total": 13
+      "total": 15
     },
     "status": 200
   },
@@ -896,12 +1325,12 @@
           "at": "2026-01-02T03:04:06Z",
           "entity_id": "tok_0005",
           "entity_kind": "token",
-          "id": "aud_0012",
+          "id": "aud_0014",
           "operation": "auth.login",
           "payload_digest": "sha256:079f75e3b73e507a9203394b2f453386de6362973c6d3e9dfa6ddfee0201f931",
           "reason": "password login by ada",
-          "revision": 10,
-          "txn_id": "txn_0012"
+          "revision": 12,
+          "txn_id": "txn_0019"
         },
         {
           "actor_id": "act_0004",
@@ -909,15 +1338,15 @@
           "at": "2026-01-02T03:04:07Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0011",
+          "id": "aud_0013",
           "operation": "token.revoke",
           "payload_digest": "sha256:d331a6f9ffa337f5bbea02b91117f85c4a54fe0e8550538ef0ccbe9757a74c7a",
           "reason": "parity harness",
-          "revision": 9,
-          "txn_id": "txn_0011"
+          "revision": 11,
+          "txn_id": "txn_0018"
         }
       ],
-      "total": 13
+      "total": 15
     },
     "status": 200
   },
@@ -1050,98 +1479,122 @@
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
-          "entity_id": "lbl_0001",
-          "entity_kind": "label",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
           "id": "aud_0006",
-          "operation": "label.create",
-          "payload_digest": "sha256:1b0a972c9944e759355152203a12fb36104f692b1f1911217107dcd4f75b8ccd",
-          "reason": "seed",
+          "operation": "project.register",
+          "payload_digest": "<path-bearing>",
+          "reason": "parity harness",
           "revision": 4,
           "txn_id": "txn_0006"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
-          "entity_id": "tok_0004",
-          "entity_kind": "token",
+          "entity_id": "prj_0002",
+          "entity_kind": "project",
           "id": "aud_0007",
-          "operation": "token.issue",
-          "payload_digest": "sha256:1efafbf3c435f850162b7fdb5f1a1f97b97eb7bae0490f291c1731c7a390ee5a",
-          "reason": "a read token",
+          "operation": "project.register",
+          "payload_digest": "<path-bearing>",
+          "reason": "parity harness",
           "revision": 5,
           "txn_id": "txn_0007"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
+          "entity_id": "lbl_0001",
+          "entity_kind": "label",
+          "id": "aud_0008",
+          "operation": "label.create",
+          "payload_digest": "sha256:1b0a972c9944e759355152203a12fb36104f692b1f1911217107dcd4f75b8ccd",
+          "reason": "seed",
+          "revision": 6,
+          "txn_id": "txn_0013"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:07+00:00",
           "entity_id": "tok_0004",
           "entity_kind": "token",
-          "id": "aud_0008",
+          "id": "aud_0009",
+          "operation": "token.issue",
+          "payload_digest": "sha256:1efafbf3c435f850162b7fdb5f1a1f97b97eb7bae0490f291c1731c7a390ee5a",
+          "reason": "a read token",
+          "revision": 7,
+          "txn_id": "txn_0014"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:07+00:00",
+          "entity_id": "tok_0004",
+          "entity_kind": "token",
+          "id": "aud_0010",
           "operation": "auth.logout",
           "payload_digest": "sha256:77f2ce31482b0061e1a20b86d2de25c0b43a6eaff6c025be826208b0dec15fe3",
           "reason": "done",
-          "revision": 6,
-          "txn_id": "txn_0008"
+          "revision": 8,
+          "txn_id": "txn_0015"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0009",
+          "id": "aud_0011",
           "operation": "user.create",
           "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
           "reason": "parity harness",
-          "revision": 7,
-          "txn_id": "txn_0009"
+          "revision": 9,
+          "txn_id": "txn_0016"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0010",
+          "id": "aud_0012",
           "operation": "user.set_password",
           "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
           "reason": "parity harness",
-          "revision": 8,
-          "txn_id": "txn_0010"
+          "revision": 10,
+          "txn_id": "txn_0017"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0011",
+          "id": "aud_0013",
           "operation": "token.revoke",
           "payload_digest": "sha256:d331a6f9ffa337f5bbea02b91117f85c4a54fe0e8550538ef0ccbe9757a74c7a",
           "reason": "parity harness",
-          "revision": 9,
-          "txn_id": "txn_0011"
+          "revision": 11,
+          "txn_id": "txn_0018"
         },
         {
           "actor_id": "act_0005",
           "at": "2026-01-02T03:04:06+00:00",
           "entity_id": "tok_0005",
           "entity_kind": "token",
-          "id": "aud_0012",
+          "id": "aud_0014",
           "operation": "auth.login",
           "payload_digest": "sha256:079f75e3b73e507a9203394b2f453386de6362973c6d3e9dfa6ddfee0201f931",
           "reason": "password login by ada",
-          "revision": 10,
-          "txn_id": "txn_0012"
+          "revision": 12,
+          "txn_id": "txn_0019"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0013",
+          "id": "aud_0015",
           "operation": "user.remove",
           "payload_digest": "sha256:c641563a061b879b4b32211c6b39a7a2eeb71a7a114359133e079bc16f1b4bfa",
           "reason": "parity harness",
-          "revision": 11,
-          "txn_id": "txn_0013"
+          "revision": 13,
+          "txn_id": "txn_0020"
         }
       ],
       "auth_decisions": [
@@ -1256,9 +1709,9 @@
           "detail": null,
           "id": "aut_0009",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.list",
+          "operation": "project.register",
           "reason_code": "token_valid",
-          "scope": "read",
+          "scope": "project.write",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -1269,9 +1722,9 @@
           "detail": null,
           "id": "aut_0010",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.sweep",
+          "operation": "project.register",
           "reason_code": "token_valid",
-          "scope": "read",
+          "scope": "project.write",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -1282,7 +1735,7 @@
           "detail": null,
           "id": "aut_0011",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.log_tail",
+          "operation": "session.list",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
@@ -1295,33 +1748,7 @@
           "detail": null,
           "id": "aut_0012",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.start",
-          "reason_code": "token_valid",
-          "scope": "work.write",
-          "token_id": "tok_0003",
-          "transport": "http"
-        },
-        {
-          "actor_id": "act_0004",
-          "at": "2026-01-02T03:04:05+00:00",
-          "decision": "allow",
-          "detail": null,
-          "id": "aut_0013",
-          "identity_ref": "human:ada-lovelace",
-          "operation": "session.input",
-          "reason_code": "token_valid",
-          "scope": "work.write",
-          "token_id": "tok_0003",
-          "transport": "http"
-        },
-        {
-          "actor_id": "act_0004",
-          "at": "2026-01-02T03:04:05+00:00",
-          "decision": "allow",
-          "detail": null,
-          "id": "aut_0014",
-          "identity_ref": "human:ada-lovelace",
-          "operation": "session.screen",
+          "operation": "session.sweep",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
@@ -1332,9 +1759,35 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
+          "id": "aut_0013",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "sweep",
+          "reason_code": "token_valid",
+          "scope": "project.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0014",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "sweep",
+          "reason_code": "token_valid",
+          "scope": "project.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
           "id": "aut_0015",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.wait",
+          "operation": "coverage",
           "reason_code": "token_valid",
           "scope": "read",
           "token_id": "tok_0003",
@@ -1347,9 +1800,9 @@
           "detail": null,
           "id": "aut_0016",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.answer",
+          "operation": "session.log_tail",
           "reason_code": "token_valid",
-          "scope": "work.write",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -1360,7 +1813,7 @@
           "detail": null,
           "id": "aut_0017",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.hibernate",
+          "operation": "session.start",
           "reason_code": "token_valid",
           "scope": "work.write",
           "token_id": "tok_0003",
@@ -1373,7 +1826,7 @@
           "detail": null,
           "id": "aut_0018",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.keep_awake",
+          "operation": "session.input",
           "reason_code": "token_valid",
           "scope": "work.write",
           "token_id": "tok_0003",
@@ -1386,9 +1839,9 @@
           "detail": null,
           "id": "aut_0019",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.set_role",
+          "operation": "session.screen",
           "reason_code": "token_valid",
-          "scope": "work.write",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -1399,9 +1852,9 @@
           "detail": null,
           "id": "aut_0020",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.wake",
+          "operation": "session.wait",
           "reason_code": "token_valid",
-          "scope": "work.write",
+          "scope": "read",
           "token_id": "tok_0003",
           "transport": "http"
         },
@@ -1412,7 +1865,7 @@
           "detail": null,
           "id": "aut_0021",
           "identity_ref": "human:ada-lovelace",
-          "operation": "session.stop",
+          "operation": "session.answer",
           "reason_code": "token_valid",
           "scope": "work.write",
           "token_id": "tok_0003",
@@ -1425,7 +1878,7 @@
           "detail": null,
           "id": "aut_0022",
           "identity_ref": "human:ada-lovelace",
-          "operation": "label.create",
+          "operation": "session.hibernate",
           "reason_code": "token_valid",
           "scope": "work.write",
           "token_id": "tok_0003",
@@ -1438,6 +1891,71 @@
           "detail": null,
           "id": "aut_0023",
           "identity_ref": "human:ada-lovelace",
+          "operation": "session.keep_awake",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0024",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.set_role",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0025",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.wake",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0026",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "session.stop",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0027",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "label.create",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0028",
+          "identity_ref": "human:ada-lovelace",
           "operation": "token.issue",
           "reason_code": "token_valid",
           "scope": "admin",
@@ -1449,7 +1967,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "deny",
           "detail": null,
-          "id": "aut_0024",
+          "id": "aut_0029",
           "identity_ref": "human:ada-lovelace",
           "operation": "label.create",
           "reason_code": "missing_scope",
@@ -1462,7 +1980,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0025",
+          "id": "aut_0030",
           "identity_ref": "human:ada-lovelace",
           "operation": "auth.logout",
           "reason_code": "token_valid",
@@ -1475,7 +1993,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0026",
+          "id": "aut_0031",
           "identity_ref": "human:ada-lovelace",
           "operation": "user.create",
           "reason_code": "token_valid",
@@ -1488,7 +2006,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0027",
+          "id": "aut_0032",
           "identity_ref": "human:ada-lovelace",
           "operation": "user.list",
           "reason_code": "token_valid",
@@ -1501,7 +2019,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0028",
+          "id": "aut_0033",
           "identity_ref": "human:ada-lovelace",
           "operation": "user.set_password",
           "reason_code": "token_valid",
@@ -1514,7 +2032,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0029",
+          "id": "aut_0034",
           "identity_ref": "human:ada-lovelace",
           "operation": "token.list",
           "reason_code": "token_valid",
@@ -1527,7 +2045,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0030",
+          "id": "aut_0035",
           "identity_ref": "human:ada-lovelace",
           "operation": "token.revoke",
           "reason_code": "token_valid",
@@ -1540,7 +2058,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0031",
+          "id": "aut_0036",
           "identity_ref": "human:ada-lovelace",
           "operation": "auth.whoami",
           "reason_code": "token_valid",
@@ -1553,7 +2071,7 @@
           "at": "2026-01-02T03:04:07+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0032",
+          "id": "aut_0037",
           "identity_ref": "human:ada",
           "operation": "auth.login",
           "reason_code": "login_ok",
@@ -1566,7 +2084,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0033",
+          "id": "aut_0038",
           "identity_ref": "human:ada",
           "operation": "auth.whoami",
           "reason_code": "token_valid",
@@ -1579,7 +2097,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0034",
+          "id": "aut_0039",
           "identity_ref": "human:ada-lovelace",
           "operation": "user.remove",
           "reason_code": "token_valid",
@@ -1592,7 +2110,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0035",
+          "id": "aut_0040",
           "identity_ref": "human:ada-lovelace",
           "operation": "events.list",
           "reason_code": "token_valid",
@@ -1605,7 +2123,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0036",
+          "id": "aut_0041",
           "identity_ref": "human:ada-lovelace",
           "operation": "events.list",
           "reason_code": "token_valid",
@@ -1618,7 +2136,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0037",
+          "id": "aut_0042",
           "identity_ref": "human:ada-lovelace",
           "operation": "audit.list",
           "reason_code": "token_valid",
@@ -1631,7 +2149,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0038",
+          "id": "aut_0043",
           "identity_ref": "human:ada-lovelace",
           "operation": "audit.list",
           "reason_code": "token_valid",
@@ -1644,7 +2162,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0039",
+          "id": "aut_0044",
           "identity_ref": "human:ada-lovelace",
           "operation": "project.import",
           "reason_code": "token_valid",
@@ -1657,7 +2175,7 @@
           "at": "2026-01-02T03:04:05+00:00",
           "decision": "allow",
           "detail": null,
-          "id": "aut_0040",
+          "id": "aut_0045",
           "identity_ref": "human:ada-lovelace",
           "operation": "project.import",
           "reason_code": "token_valid",
@@ -1711,80 +2229,150 @@
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "audit_id": "aud_0006",
-          "entity_id": "lbl_0001",
-          "entity_kind": "label",
-          "kind": "label.created",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
+          "kind": "project.registered",
           "seq": 5,
-          "summary": "{\"name\": \"bug\"}"
+          "summary": "{\"slug\": \"second\", \"name\": \"Second\"}"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "audit_id": "aud_0007",
-          "entity_id": "tok_0004",
-          "entity_kind": "token",
-          "kind": "token.issued",
+          "entity_id": "prj_0002",
+          "entity_kind": "project",
+          "kind": "project.registered",
           "seq": 6,
-          "summary": "{\"actor\": \"human:ada-lovelace\", \"scopes\": [\"read\"]}"
+          "summary": "{\"slug\": \"broken\", \"name\": \"Broken\"}"
+        },
+        {
+          "actor_id": null,
+          "at": "2026-01-02T03:04:18+00:00",
+          "audit_id": null,
+          "entity_id": "swp_0001",
+          "entity_kind": "sweep",
+          "kind": "sweep.completed",
+          "seq": 7,
+          "summary": "{\"collector\": \"dep-refs\", \"outcome\": \"ok\", \"projects\": 2, \"new\": 2, \"unchanged\": 0}"
+        },
+        {
+          "actor_id": null,
+          "at": "2026-01-02T03:04:19+00:00",
+          "audit_id": null,
+          "entity_id": "swp_0002",
+          "entity_kind": "sweep",
+          "kind": "sweep.completed",
+          "seq": 8,
+          "summary": "{\"collector\": \"git-local\", \"outcome\": \"partial\", \"projects\": 2, \"new\": 1, \"unchanged\": 0}"
+        },
+        {
+          "actor_id": null,
+          "at": "2026-01-02T03:04:20+00:00",
+          "audit_id": null,
+          "entity_id": "swp_0003",
+          "entity_kind": "sweep",
+          "kind": "sweep.completed",
+          "seq": 9,
+          "summary": "{\"collector\": \"mirrored-source\", \"outcome\": \"ok\", \"projects\": 2, \"new\": 0, \"unchanged\": 0}"
+        },
+        {
+          "actor_id": null,
+          "at": "2026-01-02T03:04:21+00:00",
+          "audit_id": null,
+          "entity_id": "swp_0004",
+          "entity_kind": "sweep",
+          "kind": "sweep.completed",
+          "seq": 10,
+          "summary": "{\"collector\": \"source-markers\", \"outcome\": \"ok\", \"projects\": 2, \"new\": 0, \"unchanged\": 0}"
+        },
+        {
+          "actor_id": null,
+          "at": "2026-01-02T03:04:09+00:00",
+          "audit_id": null,
+          "entity_id": "swp_0005",
+          "entity_kind": "sweep",
+          "kind": "sweep.completed",
+          "seq": 11,
+          "summary": "{\"collector\": \"git-local\", \"outcome\": \"partial\", \"projects\": 2, \"new\": 0, \"unchanged\": 1}"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "audit_id": "aud_0008",
-          "entity_id": "tok_0004",
-          "entity_kind": "token",
-          "kind": "auth.session_closed",
-          "seq": 7,
-          "summary": "{\"actor\": \"human:ada-lovelace\"}"
+          "entity_id": "lbl_0001",
+          "entity_kind": "label",
+          "kind": "label.created",
+          "seq": 12,
+          "summary": "{\"name\": \"bug\"}"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "audit_id": "aud_0009",
-          "entity_id": "act_0005",
-          "entity_kind": "user",
-          "kind": "user.created",
-          "seq": 8,
-          "summary": "{\"actor\": \"human:ada\", \"username\": \"ada\"}"
+          "entity_id": "tok_0004",
+          "entity_kind": "token",
+          "kind": "token.issued",
+          "seq": 13,
+          "summary": "{\"actor\": \"human:ada-lovelace\", \"scopes\": [\"read\"]}"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "audit_id": "aud_0010",
-          "entity_id": "act_0005",
-          "entity_kind": "user",
-          "kind": "user.password_set",
-          "seq": 9,
-          "summary": "{\"username\": \"ada\"}"
+          "entity_id": "tok_0004",
+          "entity_kind": "token",
+          "kind": "auth.session_closed",
+          "seq": 14,
+          "summary": "{\"actor\": \"human:ada-lovelace\"}"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "audit_id": "aud_0011",
-          "entity_id": "tok_0002",
-          "entity_kind": "token",
-          "kind": "token.revoked",
-          "seq": 10,
-          "summary": "{\"actor\": \"agent:vogt-sessions\"}"
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "kind": "user.created",
+          "seq": 15,
+          "summary": "{\"actor\": \"human:ada\", \"username\": \"ada\"}"
         },
         {
-          "actor_id": "act_0005",
-          "at": "2026-01-02T03:04:06+00:00",
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:07+00:00",
           "audit_id": "aud_0012",
-          "entity_id": "tok_0005",
-          "entity_kind": "token",
-          "kind": "auth.session_opened",
-          "seq": 11,
-          "summary": "{\"actor\": \"human:ada\"}"
+          "entity_id": "act_0005",
+          "entity_kind": "user",
+          "kind": "user.password_set",
+          "seq": 16,
+          "summary": "{\"username\": \"ada\"}"
         },
         {
           "actor_id": "act_0004",
           "at": "2026-01-02T03:04:07+00:00",
           "audit_id": "aud_0013",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "kind": "token.revoked",
+          "seq": 17,
+          "summary": "{\"actor\": \"agent:vogt-sessions\"}"
+        },
+        {
+          "actor_id": "act_0005",
+          "at": "2026-01-02T03:04:06+00:00",
+          "audit_id": "aud_0014",
+          "entity_id": "tok_0005",
+          "entity_kind": "token",
+          "kind": "auth.session_opened",
+          "seq": 18,
+          "summary": "{\"actor\": \"human:ada\"}"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:07+00:00",
+          "audit_id": "aud_0015",
           "entity_id": "act_0005",
           "entity_kind": "user",
           "kind": "user.removed",
-          "seq": 12,
+          "seq": 19,
           "summary": "{\"username\": \"ada\"}"
         }
       ],
@@ -1810,7 +2398,7 @@
         },
         {
           "key": "revision",
-          "value": "11"
+          "value": "13"
         },
         {
           "key": "work_ref_seq",
@@ -1948,6 +2536,48 @@
           "applied_at": "2026-01-02T03:04:05+00:00",
           "checksum": "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9",
           "id": "0024_session_started_by"
+        }
+      ],
+      "projects": [
+        {
+          "agent_policy": "{\"forbidden_text\":[],\"merge_deploys_prod\":false,\"main_branches\":[],\"base_branch\":\"\",\"commit_identity\":\"\",\"test_recipe\":\"\",\"deployed_setup\":\"\",\"rules\":[],\"session_wall_clock_minutes\":null,\"landing\":null,\"review\":null,\"verification\":null}",
+          "compliance_checked_at": null,
+          "compliance_status": "not_checked",
+          "contract_adopted_at": null,
+          "contract_version": null,
+          "created_at": "2026-01-02T03:04:06+00:00",
+          "current_version": null,
+          "exclusions": "[\".venv/\", \"node_modules/\", \"target/\", \"dist/\", \"build/\", \".git/\", \".claude/\"]",
+          "id": "prj_0001",
+          "lifecycle_state": "active",
+          "link_state": "unlinked",
+          "name": "Second",
+          "repo_url": null,
+          "root_path": "<root>/instance/repos/second",
+          "slug": "second",
+          "trust_state": "unverified",
+          "updated_at": "2026-01-02T03:04:06+00:00",
+          "write_back": "none"
+        },
+        {
+          "agent_policy": "{\"forbidden_text\":[],\"merge_deploys_prod\":false,\"main_branches\":[],\"base_branch\":\"\",\"commit_identity\":\"\",\"test_recipe\":\"\",\"deployed_setup\":\"\",\"rules\":[],\"session_wall_clock_minutes\":null,\"landing\":null,\"review\":null,\"verification\":null}",
+          "compliance_checked_at": null,
+          "compliance_status": "not_checked",
+          "contract_adopted_at": null,
+          "contract_version": null,
+          "created_at": "2026-01-02T03:04:06+00:00",
+          "current_version": null,
+          "exclusions": "[\".venv/\", \"node_modules/\", \"target/\", \"dist/\", \"build/\", \".git/\", \".claude/\"]",
+          "id": "prj_0002",
+          "lifecycle_state": "active",
+          "link_state": "unlinked",
+          "name": "Broken",
+          "repo_url": null,
+          "root_path": "<root>/instance/repos/broken",
+          "slug": "broken",
+          "trust_state": "unverified",
+          "updated_at": "2026-01-02T03:04:06+00:00",
+          "write_back": "none"
         }
       ],
       "tokens": [
