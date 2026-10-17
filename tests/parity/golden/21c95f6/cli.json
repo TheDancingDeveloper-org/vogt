@@ -3534,6 +3534,36 @@
   },
   {
     "body": {
+      "secret": "<volatile>",
+      "token": {
+        "actor_id": "act_0005",
+        "actor_identity_ref": "human:ada",
+        "created_at": "2026-01-02T03:04:05Z",
+        "expires_at": null,
+        "id": "tok_0003",
+        "kind": "api",
+        "last_used_at": null,
+        "name": "claude-code",
+        "revoked_at": null,
+        "revoked_reason": null,
+        "scopes": [
+          "read",
+          "work.write"
+        ]
+      },
+      "warning": "This is the only time the secret is shown. Store it in a file and point VOGT_TOKEN_FILE at it \u2014 never in argv or a URL."
+    },
+    "exit": 0,
+    "operation": "token.issue"
+  },
+  {
+    "body": null,
+    "error": "error: invalid arguments for token.issue:",
+    "exit": 2,
+    "operation": "token.issue"
+  },
+  {
+    "body": {
       "tokens": [
         {
           "actor_id": "act_0003",
@@ -3568,6 +3598,22 @@
             "read",
             "work.write",
             "project.write"
+          ]
+        },
+        {
+          "actor_id": "act_0005",
+          "actor_identity_ref": "human:ada",
+          "created_at": "2026-01-02T03:04:05Z",
+          "expires_at": null,
+          "id": "tok_0003",
+          "kind": "api",
+          "last_used_at": null,
+          "name": "claude-code",
+          "revoked_at": null,
+          "revoked_reason": null,
+          "scopes": [
+            "read",
+            "work.write"
           ]
         }
       ]
@@ -3628,6 +3674,18 @@
     },
     "exit": 0,
     "operation": "backup"
+  },
+  {
+    "body": null,
+    "error": "error: conflict: <root>/backup already exists and is not empty",
+    "exit": 1,
+    "operation": "backup"
+  },
+  {
+    "body": null,
+    "error": "error: invalid_request: this replaces the stores in <root>/instance with the backup taken at 2026-01-02T03:04:05+00:00. Pass --confirm.",
+    "exit": 1,
+    "operation": "restore"
   },
   {
     "body": {
@@ -3782,12 +3840,12 @@
           "at": "2026-01-02T03:04:06Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0028",
+          "id": "aud_0029",
           "operation": "user.remove",
           "payload_digest": "sha256:6cb1b570d1a756565af0191ec35d1fed1dc103ed9b82afa000b68a0172b6f711",
           "reason": "parity harness",
-          "revision": 27,
-          "txn_id": "txn_0036"
+          "revision": 28,
+          "txn_id": "txn_0037"
         },
         {
           "actor_id": "act_0001",
@@ -3795,9 +3853,22 @@
           "at": "2026-01-02T03:04:06Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0027",
+          "id": "aud_0028",
           "operation": "token.revoke",
           "payload_digest": "sha256:5b5962b852bf72720c110fabfda9bea2589305bb33f47f25d1361ce815fa78c9",
+          "reason": "parity harness",
+          "revision": 27,
+          "txn_id": "txn_0035"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:06Z",
+          "entity_id": "tok_0003",
+          "entity_kind": "token",
+          "id": "aud_0027",
+          "operation": "token.issue",
+          "payload_digest": "sha256:095bcb2a75c36880ea4d27397304f88e0afd90440f45bee38fabb4431e383f55",
           "reason": "parity harness",
           "revision": 26,
           "txn_id": "txn_0034"
@@ -3827,22 +3898,9 @@
           "reason": "parity harness",
           "revision": 24,
           "txn_id": "txn_0032"
-        },
-        {
-          "actor_id": "act_0001",
-          "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:06Z",
-          "entity_id": "prj_0003",
-          "entity_kind": "project",
-          "id": "aud_0024",
-          "operation": "project.register",
-          "payload_digest": "<path-bearing>",
-          "reason": "parity harness",
-          "revision": 23,
-          "txn_id": "txn_0026"
         }
       ],
-      "total": 28
+      "total": 29
     },
     "exit": 0,
     "operation": "audit.list"
@@ -3856,28 +3914,28 @@
           "at": "2026-01-02T03:04:06Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0027",
+          "id": "aud_0028",
           "operation": "token.revoke",
           "payload_digest": "sha256:5b5962b852bf72720c110fabfda9bea2589305bb33f47f25d1361ce815fa78c9",
           "reason": "parity harness",
-          "revision": 26,
-          "txn_id": "txn_0034"
+          "revision": 27,
+          "txn_id": "txn_0035"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
           "at": "2026-01-02T03:04:06Z",
-          "entity_id": "act_0005",
-          "entity_kind": "user",
-          "id": "aud_0026",
-          "operation": "user.set_password",
-          "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
+          "entity_id": "tok_0003",
+          "entity_kind": "token",
+          "id": "aud_0027",
+          "operation": "token.issue",
+          "payload_digest": "sha256:095bcb2a75c36880ea4d27397304f88e0afd90440f45bee38fabb4431e383f55",
           "reason": "parity harness",
-          "revision": 25,
-          "txn_id": "txn_0033"
+          "revision": 26,
+          "txn_id": "txn_0034"
         }
       ],
-      "total": 28
+      "total": 29
     },
     "exit": 0,
     "operation": "audit.list"

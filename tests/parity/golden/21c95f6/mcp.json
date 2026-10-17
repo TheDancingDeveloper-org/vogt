@@ -1195,7 +1195,7 @@
             "entity_kind": "project",
             "id": "aud_0007",
             "operation": "project.update",
-            "payload_digest": "sha256:85cef2a14b2915d804f8a1f0719eda74903a43d1a02acb5cd724a7116e91b517",
+            "payload_digest": "sha256:1f9f892df27e35a0a5098a2419d32395f31d2b6a81f7ca3a6502eaf32744fc00",
             "reason": "parity harness",
             "revision": 6,
             "txn_id": "txn_0007"
@@ -1207,7 +1207,7 @@
             "entity_kind": "project",
             "id": "aud_0008",
             "operation": "project.transition",
-            "payload_digest": "sha256:d0cff29b2f2ccbadaec9a3c59ffe9f147af198d477b8a01ca760d9dd27247a2a",
+            "payload_digest": "sha256:ef72486698b013b76de8d9a55095b56cef8897ac29fc98f7759ed848ab6f5c79",
             "reason": "parity harness",
             "revision": 7,
             "txn_id": "txn_0008"
@@ -1219,7 +1219,7 @@
             "entity_kind": "project",
             "id": "aud_0009",
             "operation": "project.scaffold",
-            "payload_digest": "sha256:63107a85166b692b1819b975af61afe2e585b9921f36531a77717420e2922fd6",
+            "payload_digest": "sha256:bd2600c2370f8743a2c4ae1d595aec4a459745b14e3d16323948dd47878c48e8",
             "reason": "parity harness",
             "revision": 8,
             "txn_id": "txn_0009"
@@ -3240,7 +3240,46 @@
   },
   {
     "body": {
+      "secret": "<volatile>",
+      "token": {
+        "actor_id": "act_0005",
+        "actor_identity_ref": "human:ada",
+        "created_at": "2026-01-02T03:05:30Z",
+        "id": "tok_0003",
+        "kind": "api",
+        "name": "claude-code",
+        "scopes": [
+          "read",
+          "work.write"
+        ]
+      },
+      "warning": "This is the only time the secret is shown. Store it in a file and point VOGT_TOKEN_FILE at it \u2014 never in argv or a URL."
+    },
+    "is_error": false,
+    "operation": "token.issue"
+  },
+  {
+    "body": {
+      "text": "invalid_params: expires_in_days: Input should be greater than or equal to 1. token_issue takes required: actor, name, reason; optional: scopes, expires_in_days"
+    },
+    "is_error": true,
+    "operation": "token.issue"
+  },
+  {
+    "body": {
       "tokens": [
+        {
+          "actor_id": "act_0005",
+          "actor_identity_ref": "human:ada",
+          "created_at": "2026-01-02T03:05:30Z",
+          "id": "tok_0003",
+          "kind": "api",
+          "name": "claude-code",
+          "scopes": [
+            "read",
+            "work.write"
+          ]
+        },
         {
           "actor_id": "act_0003",
           "actor_identity_ref": "agent:vogt-sessions",
@@ -3282,7 +3321,7 @@
         "id": "tok_0002",
         "kind": "api",
         "name": "bootstrap agent token",
-        "revoked_at": "2026-01-02T03:05:30Z",
+        "revoked_at": "2026-01-02T03:05:32Z",
         "revoked_reason": "parity harness",
         "scopes": [
           "read",
@@ -3319,10 +3358,24 @@
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "path": "<root>/backup",
-      "taken_at": "2026-01-02T03:05:32Z"
+      "taken_at": "2026-01-02T03:05:34Z"
     },
     "is_error": false,
     "operation": "backup"
+  },
+  {
+    "body": {
+      "text": "conflict: <root>/backup already exists and is not empty"
+    },
+    "is_error": true,
+    "operation": "backup"
+  },
+  {
+    "body": {
+      "text": "invalid_request: this replaces the stores in <root>/instance with the backup taken at 2026-01-02T03:05:34+00:00. Pass --confirm."
+    },
+    "is_error": true,
+    "operation": "restore"
   },
   {
     "body": {
@@ -3332,7 +3385,7 @@
       "import_root_then": "<root>/instance/repos",
       "instance_id": "ins_0001",
       "migrations_applied": [],
-      "restored_from": "2026-01-02T03:05:32Z",
+      "restored_from": "2026-01-02T03:05:34Z",
       "source": "<root>/backup"
     },
     "is_error": false,
@@ -3474,25 +3527,38 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:37Z",
+          "at": "2026-01-02T03:05:40Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0025",
+          "id": "aud_0026",
           "operation": "user.remove",
           "payload_digest": "sha256:6cb1b570d1a756565af0191ec35d1fed1dc103ed9b82afa000b68a0172b6f711",
           "reason": "parity harness",
+          "revision": 25,
+          "txn_id": "txn_0036"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:05:33Z",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0025",
+          "operation": "token.revoke",
+          "payload_digest": "sha256:ea023b94520fee9aa219311231038a5eafff92a036bb0970996d28607a1ddf1e",
+          "reason": "parity harness",
           "revision": 24,
-          "txn_id": "txn_0035"
+          "txn_id": "txn_0034"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
           "at": "2026-01-02T03:05:31Z",
-          "entity_id": "tok_0002",
+          "entity_id": "tok_0003",
           "entity_kind": "token",
           "id": "aud_0024",
-          "operation": "token.revoke",
-          "payload_digest": "sha256:8df0a912a481d9f60a40b1711ebc52960d101752220f6647c5fa559b92df773a",
+          "operation": "token.issue",
+          "payload_digest": "sha256:095bcb2a75c36880ea4d27397304f88e0afd90440f45bee38fabb4431e383f55",
           "reason": "parity harness",
           "revision": 23,
           "txn_id": "txn_0033"
@@ -3522,22 +3588,9 @@
           "reason": "parity harness",
           "revision": 21,
           "txn_id": "txn_0031"
-        },
-        {
-          "actor_id": "act_0001",
-          "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:02Z",
-          "entity_id": "prj_0003",
-          "entity_kind": "project",
-          "id": "aud_0021",
-          "operation": "project.register",
-          "payload_digest": "<path-bearing>",
-          "reason": "parity harness",
-          "revision": 20,
-          "txn_id": "txn_0025"
         }
       ],
-      "total": 25
+      "total": 26
     },
     "is_error": false,
     "operation": "audit.list"
@@ -3548,31 +3601,31 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:31Z",
+          "at": "2026-01-02T03:05:33Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0024",
+          "id": "aud_0025",
           "operation": "token.revoke",
-          "payload_digest": "sha256:8df0a912a481d9f60a40b1711ebc52960d101752220f6647c5fa559b92df773a",
+          "payload_digest": "sha256:ea023b94520fee9aa219311231038a5eafff92a036bb0970996d28607a1ddf1e",
           "reason": "parity harness",
-          "revision": 23,
-          "txn_id": "txn_0033"
+          "revision": 24,
+          "txn_id": "txn_0034"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:05:29Z",
-          "entity_id": "act_0005",
-          "entity_kind": "user",
-          "id": "aud_0023",
-          "operation": "user.set_password",
-          "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
+          "at": "2026-01-02T03:05:31Z",
+          "entity_id": "tok_0003",
+          "entity_kind": "token",
+          "id": "aud_0024",
+          "operation": "token.issue",
+          "payload_digest": "sha256:095bcb2a75c36880ea4d27397304f88e0afd90440f45bee38fabb4431e383f55",
           "reason": "parity harness",
-          "revision": 22,
-          "txn_id": "txn_0032"
+          "revision": 23,
+          "txn_id": "txn_0033"
         }
       ],
-      "total": 25
+      "total": 26
     },
     "is_error": false,
     "operation": "audit.list"
@@ -3617,8 +3670,8 @@
       "decision": {
         "asker": "local:parity",
         "context": "CI is green.",
-        "created_at": "2026-01-02T03:05:38Z",
-        "expires_at": "2026-01-03T03:05:38Z",
+        "created_at": "2026-01-02T03:05:41Z",
+        "expires_at": "2026-01-03T03:05:41Z",
         "id": "dec_0001",
         "options": [
           {
@@ -3645,8 +3698,8 @@
       "decision": {
         "asker": "local:parity",
         "context": "",
-        "created_at": "2026-01-02T03:05:41Z",
-        "expires_at": "2026-01-03T03:05:41Z",
+        "created_at": "2026-01-02T03:05:44Z",
+        "expires_at": "2026-01-03T03:05:44Z",
         "id": "dec_0002",
         "options": [
           {
@@ -3674,8 +3727,8 @@
         {
           "asker": "local:parity",
           "context": "",
-          "created_at": "2026-01-02T03:05:41Z",
-          "expires_at": "2026-01-03T03:05:41Z",
+          "created_at": "2026-01-02T03:05:44Z",
+          "expires_at": "2026-01-03T03:05:44Z",
           "id": "dec_0002",
           "options": [
             {
@@ -3696,8 +3749,8 @@
         {
           "asker": "local:parity",
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:05:38Z",
-          "expires_at": "2026-01-03T03:05:38Z",
+          "created_at": "2026-01-02T03:05:41Z",
+          "expires_at": "2026-01-03T03:05:41Z",
           "id": "dec_0001",
           "options": [
             {
@@ -3726,8 +3779,8 @@
         {
           "asker": "local:parity",
           "context": "",
-          "created_at": "2026-01-02T03:05:41Z",
-          "expires_at": "2026-01-03T03:05:41Z",
+          "created_at": "2026-01-02T03:05:44Z",
+          "expires_at": "2026-01-03T03:05:44Z",
           "id": "dec_0002",
           "options": [
             {
@@ -3748,8 +3801,8 @@
         {
           "asker": "local:parity",
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:05:38Z",
-          "expires_at": "2026-01-03T03:05:38Z",
+          "created_at": "2026-01-02T03:05:41Z",
+          "expires_at": "2026-01-03T03:05:41Z",
           "id": "dec_0001",
           "options": [
             {
@@ -3830,7 +3883,7 @@
           "evidence_snapshot": "<volatile>",
           "freshness": "live",
           "kind": "decision.pending",
-          "occurred_at": "2026-01-02T03:05:41Z",
+          "occurred_at": "2026-01-02T03:05:44Z",
           "provisional": true,
           "source": "agent",
           "source_subject_key": "dec_0002",
@@ -3851,7 +3904,7 @@
           "evidence_snapshot": "<volatile>",
           "freshness": "live",
           "kind": "decision.pending",
-          "occurred_at": "2026-01-02T03:05:38Z",
+          "occurred_at": "2026-01-02T03:05:41Z",
           "provisional": true,
           "source": "agent",
           "source_subject_key": "dec_0001",
@@ -3863,10 +3916,10 @@
       ],
       "github_scope": "registered projects only",
       "high_water": {
-        "agent": "2026-01-02T03:05:41Z"
+        "agent": "2026-01-02T03:05:44Z"
       },
       "instance_scope": "registered projects only",
-      "snapshot_at": "2026-01-02T03:05:48Z"
+      "snapshot_at": "2026-01-02T03:05:51Z"
     },
     "is_error": false,
     "operation": "inbox.list"
@@ -3878,12 +3931,12 @@
           "label": "Merge",
           "note": "reviewed"
         },
-        "answered_at": "2026-01-02T03:05:54Z",
+        "answered_at": "2026-01-02T03:05:57Z",
         "answered_by": "local:parity",
         "asker": "local:parity",
         "context": "CI is green.",
-        "created_at": "2026-01-02T03:05:38Z",
-        "expires_at": "2026-01-03T03:05:38Z",
+        "created_at": "2026-01-02T03:05:41Z",
+        "expires_at": "2026-01-03T03:05:41Z",
         "id": "dec_0001",
         "options": [
           {
@@ -3924,8 +3977,8 @@
       "decision": {
         "asker": "local:parity",
         "context": "",
-        "created_at": "2026-01-02T03:05:41Z",
-        "expires_at": "2026-01-03T03:05:41Z",
+        "created_at": "2026-01-02T03:05:44Z",
+        "expires_at": "2026-01-03T03:05:44Z",
         "id": "dec_0002",
         "options": [
           {
@@ -3955,12 +4008,12 @@
             "label": "Merge",
             "note": "reviewed"
           },
-          "answered_at": "2026-01-02T03:05:54Z",
+          "answered_at": "2026-01-02T03:05:57Z",
           "answered_by": "local:parity",
           "asker": "local:parity",
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:05:38Z",
-          "expires_at": "2026-01-03T03:05:38Z",
+          "created_at": "2026-01-02T03:05:41Z",
+          "expires_at": "2026-01-03T03:05:41Z",
           "id": "dec_0001",
           "options": [
             {
@@ -4032,7 +4085,7 @@
       "github_scope": "registered projects only",
       "high_water": {},
       "instance_scope": "registered projects only",
-      "snapshot_at": "2026-01-02T03:06:02Z"
+      "snapshot_at": "2026-01-02T03:06:05Z"
     },
     "is_error": false,
     "operation": "inbox.list"
