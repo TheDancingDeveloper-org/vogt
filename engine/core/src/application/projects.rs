@@ -477,15 +477,6 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
     params: Value,
 ) -> Result<Value, VogtError> {
     let params = parse::<ImportProjectParams>(params)?;
-    // Refused before anything is cloned: Python would clone, register and
-    // then call forge.onboard, and that step has no Rust port yet.
-    if params.consolidate {
-        return Err(VogtError::InvalidRequest(
-            "consolidate is not yet ported to the Rust core (forge.onboard); \
-             pass consolidate: false to clone and register only"
-                .to_string(),
-        ));
-    }
     let (declared, _, principal, clock, ids, config) = context_parts(ctx);
     let reference = normalise_reference(&params.repo);
     let Some((_, repo)) = identity_for(Some(&reference), config, ctx.forge_transport()) else {
@@ -495,6 +486,16 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
             py_repr(&params.repo)
         )));
     };
+    // Refused after the reference check, so a bad reference gets Python's
+    // message, and before anything is cloned: Python would clone, register and
+    // then call forge.onboard, which has no Rust port yet (WI-1725).
+    if params.consolidate {
+        return Err(VogtError::InvalidRequest(
+            "consolidate is not yet ported to the Rust core (forge.onboard, WI-1725); \
+             pass consolidate: false to clone and register only"
+                .to_string(),
+        ));
+    }
     let provider = provider_for_host(&repo.host, config, ctx.forge_transport())?;
     if let Some(root) = &params.root_path {
         guard_remote_root_path(
