@@ -364,6 +364,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_missing_transcript_is_an_honest_detail() {
+        let dir = std::env::temp_dir().join(format!("vogt-econ-empty-{}", std::process::id()));
+        fs::create_dir_all(dir.join("claude")).unwrap();
+        let engine = engine_row(json!({"id": "eng-1", "alive": true, "cwd": "/work",
+            "command": "claude"}));
+        let built = built(
+            "no-transcript",
+            vec![("claude".to_string(), dir.join("claude"))],
+            Some(engine),
+        );
+        seed(&built);
+        let result = run(&built, "session.economics", json!({"id": "ses_0001"})).unwrap();
+        assert_eq!(result["turns"], 0);
+        assert!(result["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("no agent transcript found"));
+        assert!(result["cost_usd"].is_null());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_engine_reading_answers_without_a_file() {
         let engine = engine_row(json!({
             "id": "eng-1", "alive": true,

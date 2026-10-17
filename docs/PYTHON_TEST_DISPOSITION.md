@@ -6,8 +6,10 @@ covered by `engine/core` tests, or by the black-box harness in
 `scripts/parity.py`, which drives both cores. A file is **retired** when
 it tests a Python-only tool, a packaging step, a web or engine surface the
 core crate does not own, or a demo script. Retired is a decision, not a
-gap: the reason is the row. **Unported** is a gap with an owner: the row names
-the work item that will port it.
+gap: the reason is the row. **Unported** is a deferral with an owner: the row names
+the work item that will port it, and every unported row has one. A deferral
+is a disposition (operator decision, WI-1080 review): the behaviour is not in
+the Rust core yet, so its test is ported with the feature, not here.
 
 `tests/fixtures/` stays. Both cores and the harness read it.
 
@@ -49,7 +51,7 @@ gain tests; it does not move down.
 | test_check_workflow_policy.py | retired | `scripts/check_workflow_policy.py` over GitHub workflow YAML. CI policy, not product behaviour. |
 | test_checks.py | ported | CI-revision reads in the collectors and the project brief. |
 | test_ci_watch.py | ported | Watched-ref and deployed-version reads are in `application/deployed.rs`. The bound-branch announce is in `application/ci_watch.rs`: the feed event once per conclusion, staleness, the notice text, and the session nudge (notice, then Enter; none at a permission prompt). `test_a_sweep_announces_and_survives_an_announce_failure` is `a_failed_announce_does_not_fail_the_sweep` in `application/collect.rs`, driven by the `ci_watch::seam` failure switch. |
-| test_claude_profile.py | unported | Claude Code account profiles and their bootstrap. Named accounts land on `session.start` in WI-1306 (triage row 7782a7e8, under WI-1074). |
+| test_claude_profile.py | unported | Claude Code account profiles and their bootstrap. Named accounts land on `session.start`. Deferred to WI-1306 (triage row 7782a7e8, under WI-1074). |
 | test_cli.py | ported | `adapters/cli.rs`. |
 | test_clone.py | ported | Clone service under `application/services`. |
 | test_collectors.py | ported | `collectors/` and `application/collect.rs`. |
@@ -73,7 +75,7 @@ gain tests; it does not move down.
 | test_forge_live.py | retired | Live forge network. The port keeps the offline stand-in tests; a live call is not a unit of the core crate. |
 | test_forge_module.py | ported | `adapters/forge/` (kinds, edges, payloads, sync). |
 | test_forge_provider.py | ported | GitHub and Forgejo provider stand-ins in `adapters/forge/github.rs` and `forgejo.rs`. |
-| test_forge_publish.py | unported | Ported in `forge_ops_test.rs`: create-and-push-and-link, the name and visibility choice, the 422 existing-remote refusal (nothing pushed, nothing changed), the non-fast-forward refusal on a real `git push` (the remote history stands), the source gate and the refusals. Write-through after publish is checked at the provider, which creates the issue upstream on the published repository. Not ported: the `work.create` write-through on a linked project (`write_through_gaps` in `work.rs` still refuses with the credential gate unmet; owner WI-1068), so the upstream-truth test is open. Also not ported: the git argv spy that asserts no `--force` on every path, since `push_branch` runs its fixed argument list internally. Owner WI-1072. |
+| test_forge_publish.py | unported | Ported in `forge_ops_test.rs`: create-and-push-and-link, the name and visibility choice, the 422 existing-remote refusal (nothing pushed, nothing changed), the non-fast-forward refusal on a real `git push` (the remote history stands), the source gate and the refusals. Write-through after publish is checked at the provider, which creates the issue upstream on the published repository. Not ported: the `work.create` write-through on a linked project (`write_through_gaps` in `work.rs` still refuses with the credential gate unmet; owner WI-1068), so the upstream-truth test is open. Also not ported: the git argv spy that asserts no `--force` on every path, since `push_branch` runs its fixed argument list internally. Deferred to WI-1072. |
 | test_forge_repos.py | ported | Forge repo listing service. |
 | test_forge_sync.py | ported | `adapters/forge/sync.rs`. |
 | test_forgejo.py | ported | `adapters/forgejo.rs`. |
@@ -131,8 +133,8 @@ gain tests; it does not move down.
 | test_session_bind_work.py | ported | `application/session_work.rs`. |
 | test_session_digest_op.py | ported | `application/session_digest.rs`: the six `session.digest` cases (economics carried by the row, absent economics, no window, blocked report, transcript excerpt, unknown session). |
 | test_session_drive.py | ported | Session input and screen reads in `application/session_reads.rs` and `delivery.rs`. |
-| test_session_economics.py | unported | Transcript parser cases (Claude usage and compaction, Klaudia, Codex payloads, shared fixtures). Only four metering cases are ported in `session_economics.rs`. A follow-up work item is owed for the parser cases; not yet raised. |
-| test_session_economics_op.py | ported | `application/session_economics.rs`: metering, no transcript, engine reading, unknown session, and the account name. |
+| test_session_economics.py | unported | Transcript parser cases (Claude usage and compaction, Klaudia, Codex payloads, shared fixtures). The metering path is ported in `session_economics.rs`. Deferred to WI-1765. |
+| test_session_economics_op.py | ported | `application/session_economics.rs`: metering (with the account name), no transcript, reading off with no roots, the engine reading, and an unknown session. |
 | test_session_hibernation.py | ported | Hibernate and wake in `application/services/lifecycle.rs`. |
 | test_session_last_reply.py | ported | Transcript reply reads in `adapters/transcripts.rs`. |
 | test_session_outcomes.py | ported | `collectors/session_outcomes.rs`. |
