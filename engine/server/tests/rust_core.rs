@@ -519,3 +519,93 @@ fn the_engine_image_builds_its_own_rust_core() {
         "the Rust image no longer installs where the stack expects a core"
     );
 }
+
+/// What the stub model has been asked and what it will answer next.
+#[derive(Default)]
+struct Model {
+    script: Vec<Value>,
+    seen: Vec<Value>,
+}
+
+async fn model_chat(
+    axum::extract::State(model): axum::extract::State<std::sync::Arc<std::sync::Mutex<Model>>>,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::Json<Value> {
+    let mut model = model.lock().unwrap();
+    model.seen.push(body);
+    let message = if model.script.is_empty() {
+        serde_json::json!({"role": "assistant", "content": "script exhausted"})
+    } else {
+        model.script.remove(0)
+    };
+    axum::Json(serde_json::json!({"choices": [{"message": message}]}))
+}
+
+/// An OpenAI-compatible endpoint the assistant's turn talks to. Returns the
+/// `/v1` base the config names.
+async fn stub_model(model: std::sync::Arc<std::sync::Mutex<Model>>) -> String {
+    let app = axum::Router::new()
+        .route("/v1/chat/completions", axum::routing::post(model_chat))
+        .with_state(model);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}/v1")
+}
+
+#[tokio::test]
+async fn an_assistant_turn_reads_the_real_rust_core() {
+    // The assistant's tool loop against a real vogt-core, not the stub core
+    // the assistant's unit tests use. The model asks for `vogt_status`; the
+    // answer that goes back to it must be the Rust core's own status.
+    let core = boot_core();
+    wait_ready(&core.url).await;
+    let model = std::sync::Arc::new(std::sync::Mutex::new(Model {
+        script: vec![
+            serde_json::json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "vogt_status", "arguments": "{}"}
+                }]
+            }),
+            serde_json::json!({"role": "assistant", "content": "the core answered"}),
+        ],
+        seen: vec![],
+    }));
+    let base = stub_model(std::sync::Arc::clone(&model)).await;
+    let mut cfg = config_against(&core.url);
+    // The assistant's routes need the `assistant` capability, which the stack
+    // identity alone does not hold. The break-glass token has full capability
+    // and lends the stack secret to the core, which is how the engine runs
+    // its own assistant turns.
+    cfg.token = Some(SECRET.to_string());
+    cfg.assistant_api_key = Some("sk-test".into());
+    cfg.assistant_base_url = base;
+    cfg.assistant_model = "test-model".into();
+    let door = boot_door(cfg).await;
+    let client = reqwest::Client::new();
+    let reply = client
+        .post(format!("{door}/api/assistant/message"))
+        .headers(bearer())
+        .json(&serde_json::json!({"text": "what is the status"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    let body: Value = reply.json().await.unwrap();
+    assert!(body.to_string().contains("the core answered"), "{body}");
+
+    // The second model request carries the tool result. It has to be the
+    // real core's status, which names its data dir or principal.
+    let model = model.lock().unwrap();
+    assert_eq!(model.seen.len(), 2, "one tool round, then the answer");
+    let tool_result = model.seen[1].to_string();
+    assert!(
+        tool_result.contains("data_dir") || tool_result.contains("principal"),
+        "the tool result did not come from the core: {tool_result}"
+    );
+}
