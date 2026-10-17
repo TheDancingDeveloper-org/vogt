@@ -178,4 +178,7 @@ pub struct ActivitySessionRow {
     pub wait_ms: i64,
     pub tools: BTreeMap<String, i64>,
     pub services: BTreeMap<String, i64>,
+    /// The newest indexed file for the conversation. The index stores no
+    /// context or compaction counts; this is the path a live meter reads.
+    pub transcript_path: Option<String>,
 }
