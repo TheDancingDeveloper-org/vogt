@@ -115,6 +115,15 @@ const MAX_SESSION_NAME_BYTES: usize = 256;
 /// be gone before it gives up and leaves the directory alone (WI-1304).
 const CLEAN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Whose processes a worktree cleanup waits on before it deletes anything.
+enum Leader {
+    /// A session just stopped: its leader (unknown means skip) and the tree
+    /// read before it was signalled.
+    Process(Option<u32>, Vec<u32>),
+    /// A session with no process left (hibernated, being removed).
+    Stopped,
+}
+
 /// Which sessions a hibernation may take, and how a session was created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
@@ -1289,7 +1298,9 @@ impl SessionRegistry {
         }
         self.sessions.remove(&id);
         self.secret_broker.revoke(id);
-        self.clean_worktree(id, &session.cwd, session.pid(), tree);
+        if self.cfg.worktree_clean_on_hibernate {
+            self.clean_worktree(id, &session.cwd, session.pid(), tree);
+        }
         self.bus
             .publish(ServerEvent::SessionHibernated { id, trigger });
         tracing::info!(session = %id, ?trigger, "session hibernated");
@@ -1970,7 +1981,7 @@ impl SessionRegistry {
     /// exactly what it was.
     fn tree_for_clean(&self, s: &Session) -> Vec<u32> {
         match s.pid() {
-            Some(pid) if self.cfg.worktree_clean_on_hibernate => hibernation::descendants(pid),
+            Some(pid) if self.cfg.worktree_clean_on_stop => hibernation::descendants(pid),
             _ => Vec::new(),
         }
     }
@@ -1979,7 +1990,7 @@ impl SessionRegistry {
     /// of the tree too (a cargo or node grandchild in its own group would
     /// otherwise keep writing into the directory), then clean.
     fn finish_for_clean(&self, id: Uuid, s: &Session, tree: Vec<u32>) {
-        if !self.cfg.worktree_clean_on_hibernate {
+        if !self.cfg.worktree_clean_on_stop {
             return;
         }
         if let Some(pid) = s.pid() {
@@ -1989,8 +2000,9 @@ impl SessionRegistry {
     }
 
     /// Drop regenerable build output in a session's linked worktree, when the
-    /// deployment asked for it (WI-1304). Off unless
-    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` is set. Best-effort and off the
+    /// deployment asked for it (WI-1304). Callers check the policy: on stop
+    /// and remove by default (WI-1750), on hibernation only when
+    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` is true. Best-effort and off the
     /// runtime: a cleanup that fails must not fail the hibernation or stop.
     ///
     /// Fails closed. Nothing is removed when the session's leader pid is
@@ -1999,15 +2011,31 @@ impl SessionRegistry {
     /// hibernated, which a wake brings back — has its directory inside the
     /// same worktree. An exited session left in the registry builds nothing.
     fn clean_worktree(&self, id: Uuid, cwd: &str, pid: Option<u32>, tree: Vec<u32>) {
-        if !self.cfg.worktree_clean_on_hibernate {
-            return;
-        }
+        self.clean_worktree_after(id, cwd, Leader::Process(pid, tree));
+    }
+
+    /// `clean_worktree` for a session whose processes are already gone: a
+    /// hibernated one being removed, whose tree its hibernation stopped.
+    fn clean_stopped_worktree(&self, id: Uuid, cwd: &str) {
+        self.clean_worktree_after(id, cwd, Leader::Stopped);
+    }
+
+    fn clean_worktree_after(&self, id: Uuid, cwd: &str, leader: Leader) {
         let Some(root) = crate::worktree_clean::linked_worktree(std::path::Path::new(cwd)) else {
             return;
         };
         // Off Linux the process tree cannot be read, so whether a grandchild
         // still writes into the worktree cannot be known.
-        let Some(pid) = pid.filter(|_| cfg!(target_os = "linux")) else {
+        let pids = match leader {
+            _ if !cfg!(target_os = "linux") => None,
+            Leader::Process(Some(pid), mut tree) => {
+                tree.push(pid);
+                Some(tree)
+            }
+            Leader::Process(None, _) => None,
+            Leader::Stopped => Some(Vec::new()),
+        };
+        let Some(pids) = pids else {
             tracing::info!(session = %id, "worktree cleanup skipped: the session's process tree cannot be read");
             return;
         };
@@ -2031,8 +2059,6 @@ impl SessionRegistry {
             );
             return;
         }
-        let mut pids = tree;
-        pids.push(pid);
         let job = move || {
             if !crate::worktree_clean::tree_gone(&pids, CLEAN_WAIT) {
                 tracing::warn!(
@@ -2076,7 +2102,8 @@ impl SessionRegistry {
                 );
             }
         }
-        let recorded = recorded.is_some();
+        let recorded_record = recorded;
+        let recorded = recorded_record.is_some();
         hibernation::remove(&self.cfg.state_dir, id);
         if live.is_none() && !recorded {
             return Err(ApiError::NotFound);
@@ -2085,6 +2112,14 @@ impl SessionRegistry {
             let tree = self.tree_for_clean(&s);
             let _ = s.kill();
             self.finish_for_clean(id, &s, tree);
+        } else if self.cfg.worktree_clean_on_stop {
+            // A hibernated session has no process left: its hibernation
+            // stopped the tree, so removing it is the stop that cleans.
+            if let Some((_, record)) = recorded_record.as_ref() {
+                if let Some(cwd) = record.cwd.as_deref() {
+                    self.clean_stopped_worktree(id, cwd);
+                }
+            }
         }
         // Forgetting the session forgets its leave to ask the broker.
         self.secret_broker.revoke(id);
