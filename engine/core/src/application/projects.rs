@@ -491,8 +491,8 @@ fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
     // then call forge.onboard, which has no Rust port yet (WI-1725).
     if params.consolidate {
         return Err(VogtError::InvalidRequest(
-            "consolidate is not yet ported to the Rust core (forge.onboard, WI-1725); \
-             pass consolidate: false to clone and register only"
+            "consolidate: true is not available in the Rust core yet: it needs the \
+             forge.onboard port (WI-1725). Pass consolidate: false to clone and register only"
                 .to_string(),
         ));
     }

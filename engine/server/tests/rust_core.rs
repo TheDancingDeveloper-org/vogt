@@ -342,6 +342,8 @@ async fn a_dead_rust_core_refuses_whoami_as_an_outage() {
     assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+// TODO(WI-1076): the SSE event stream (`/api/events`) is not exercised here. The
+// follower reads the poll feed (`events_after`) only; the stream test lands with I1.
 #[tokio::test]
 async fn the_event_follower_reads_the_rust_core_with_the_stack_secret() {
     let core = boot_core();
