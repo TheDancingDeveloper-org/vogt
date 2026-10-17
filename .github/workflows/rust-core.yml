@@ -159,12 +159,67 @@ jobs:
           docker compose $COMPOSE_FILES --profile live run --rm -T \
             -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright \
             -g "Login and authentication errors present|stale provenance cannot activate demo mode|terminal replay budget \(live acceptance\) symptom 1"
-          # The rest of the live run stays advisory: those specs assert
-          # fixtures the live stack does not carry yet, and fail for reasons
-          # unrelated to the Rust core. A failure is printed, not fatal.
+  # The whole live Playwright run, required. Operator decision, 2026-10-17:
+  # the rust-core Playwright browser e2e is a required check for rust-core
+  # PRs. It is its own job so the check name is stable for branch protection
+  # and its failures are not hidden behind the smoke above. Branch protection
+  # must list `live Playwright against the Rust core (required)` only once
+  # this job has been green on rust-core: it is not verified green yet.
+  playwright:
+    name: live Playwright against the Rust core (required)
+    runs-on: [self-hosted, docker]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # One step, one shell: the stack's teardown trap belongs to the shell
+      # that brought it up, so the smoke and the live run cannot be split
+      # across steps. The live run needs the first-person state the smoke
+      # leaves behind, which is why this repeats the bring-up `compose` does
+      # rather than sharing its stack.
+      - name: build, walk the stack, then the whole live Playwright run
+        env:
+          COMPOSE_FILES: "-f deploy/vogt.compose.yml -f deploy/engine.overlay.yml -f deploy/e2e.overlay.yml -f deploy/rust-core.overlay.yml"
+          VOGT_IMAGE: vogt-core:rust
+          VOGT_PUBLIC_URL: http://127.0.0.1:18080
+          ENGINE_PUBLIC_URL: http://127.0.0.1:18910
+        run: |
+          set -euo pipefail
+          docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
+          docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:rust .
+          docker build -t vogt-engine-e2e:local -f deploy/e2e.engine.Dockerfile .
+          docker build -t vogt-e2e-playwright:local -f deploy/e2e.playwright.Dockerfile .
+          # Tokens go through the named volume, never a host file (see `compose`).
+          export VOGT_CORE_TOKEN_VALUE="$(openssl rand -hex 32)"
+          export ENGINE_TOKEN_VALUE="$(openssl rand -hex 32)"
+          export ENGINE_TOKEN="$ENGINE_TOKEN_VALUE"
+          # shellcheck disable=SC2086
+          docker compose $COMPOSE_FILES up -d
+          trap 'docker compose $COMPOSE_FILES down -v || true' EXIT
+          ok=""
+          for _ in $(seq 1 60); do
+            if docker compose $COMPOSE_FILES exec -T engine curl -fsS http://vogt:8000/health/ready >/dev/null 2>&1; then
+              ok=yes; break
+            fi
+            sleep 5
+          done
+          test -n "$ok" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
+          front=""
+          for _ in $(seq 1 60); do
+            if docker compose $COMPOSE_FILES exec -T engine curl -fsS http://127.0.0.1:8910/healthz >/dev/null 2>&1; then
+              front=yes; break
+            fi
+            sleep 5
+          done
+          test -n "$front" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
+          docker compose $COMPOSE_FILES exec -T engine mkdir -p /tmp/e2e/scripts /tmp/e2e/tests/fixtures
+          docker compose $COMPOSE_FILES cp scripts/e2e_stack_smoke.sh engine:/tmp/e2e/scripts/e2e_stack_smoke.sh
+          # No VOGT_SMOKE_TOKEN, for the reason given in `compose`.
+          docker compose $COMPOSE_FILES exec -T engine \
+            bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
+          # Fatal: a failing spec fails this job.
           docker compose $COMPOSE_FILES --profile live run --rm -T \
-            -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright \
-            || echo "live Playwright (rest of the suite) failed against the Rust core (advisory)"
+            -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright
 
   parity:
     name: parity
