@@ -346,12 +346,14 @@ fn list<C: Clock, I: IdFactory>(
     } else {
         state
     };
-    let now = clock_now(&ctx.clock);
     let view = ctx.declared.read()?;
     let rows = view.list_session_grants(stored, target.as_deref(), limit)?;
     let mut grants = Vec::new();
     for row in &rows {
-        grants.push(view_of(&view, row, now)?);
+        // The clock is read once per row, as Python's view does, so a step
+        // clock shared across calls advances the same number of ticks in both
+        // cores. A read up front would tick once even for an empty list.
+        grants.push(view_of(&view, row, clock_now(&ctx.clock))?);
     }
     if matches!(state, Some("approved" | "expired")) {
         grants.retain(|grant| grant["state"].as_str() == state);
