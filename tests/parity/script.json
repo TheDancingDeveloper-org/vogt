@@ -1936,7 +1936,7 @@
     "expect": {
       "exit": 1
     },
-    "why": "the reference check runs before the consolidate refusal, as in Python",
+    "why": "the reference check runs before consolidation, as in Python",
     "http": {
       "method": "POST",
       "path": "/api/projects/import",
