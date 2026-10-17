@@ -417,6 +417,13 @@ pub trait ReadView {
         &self,
         actor_id: &str,
     ) -> Result<Vec<ActorPreference>, crate::errors::VogtError>;
+    /// The newest preference under `key` that a person (not an agent) wrote.
+    /// The deployment's dispatch table is read from these, never from an
+    /// agent's own row (WI-1323).
+    fn latest_human_preference(
+        &self,
+        key: &str,
+    ) -> Result<Option<ActorPreference>, crate::errors::VogtError>;
 
     fn session_by_id(
         &self,

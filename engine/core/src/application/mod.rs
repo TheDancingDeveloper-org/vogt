@@ -9,6 +9,7 @@ pub mod context;
 pub mod contracts;
 pub mod coverage;
 pub mod deployed;
+pub mod dispatch;
 #[cfg(test)]
 mod disposition;
 pub mod drift;

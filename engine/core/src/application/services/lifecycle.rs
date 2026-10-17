@@ -1516,6 +1516,9 @@ mod tests {
             model: None,
             effort: None,
             reason: "seeded".to_string(),
+            purpose: None,
+            started_by_session: None,
+            started_by_kind: None,
             started_at: now,
             stopped_at: None,
         })

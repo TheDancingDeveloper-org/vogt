@@ -12,9 +12,12 @@ use super::sessions::{
 };
 use crate::adapters::engine::EngineClient;
 use crate::application::context::{build_context, Built};
-use crate::core::{ActorKind, LinkState, Moment, Principal, Project, SequentialIds, StepClock};
+use crate::core::{
+    ActorKind, ActorPreference, LinkState, Moment, Principal, Project, SequentialIds, StepClock,
+};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn};
+use serde_json::json;
 
 fn moment() -> Moment {
     Moment::from_unix(1_700_000_000, 0)
@@ -53,6 +56,13 @@ fn engine(script: Arc<Script>) -> EngineClient {
 }
 
 fn opened(script: Option<Arc<Script>>) -> Built {
+    opened_as(
+        script,
+        Principal::new("local:test-user", ActorKind::Human, "Test").unwrap(),
+    )
+}
+
+fn opened_as(script: Option<Arc<Script>>, principal: Principal) -> Built {
     let dir = std::env::temp_dir().join(format!("vogt-ses-{}-{}", std::process::id(), unique()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -63,7 +73,7 @@ fn opened(script: Option<Arc<Script>>) -> Built {
     let client = script.map(engine);
     let built = build_context(
         config,
-        Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+        Some(principal),
         Some(StepClock::new(moment())),
         Some(SequentialIds::new(None).unwrap()),
         None,
@@ -108,6 +118,7 @@ fn start_params(project: Option<&str>, task: Option<&str>, reason: &str) -> Star
         permission_mode: "default".to_string(),
         autopilot: None,
         role: "worker".to_string(),
+        purpose: None,
     }
 }
 
@@ -315,5 +326,150 @@ fn a_dead_engine_hides_no_linked_sessions() {
     assert!(
         listed.engine.is_some(),
         "a dead engine must be reported, not rendered as a clean list"
+    );
+}
+
+fn with_purpose(mut params: StartSessionParams, purpose: &str) -> StartSessionParams {
+    params.purpose = Some(purpose.to_string());
+    params
+}
+
+#[test]
+fn a_purpose_fills_the_fields_the_start_left_unset() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-3","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let params = with_purpose(start_params(Some("beta"), None, "because"), "review");
+    let started = start_session(ctx, &params).unwrap();
+    assert_eq!(started.session.purpose.as_deref(), Some("review"));
+    assert_eq!(started.session.model.as_deref(), Some("opus"));
+    assert_eq!(started.session.template.as_deref(), Some("claude"));
+    assert_eq!(started.session.effort.as_deref(), Some("low"));
+    // A review profile is read-only, and the brief says so.
+    let asked = script.seen.lock().unwrap().join("\n");
+    assert!(asked.contains("## Read only"), "{asked}");
+}
+
+#[test]
+fn a_field_the_start_set_beats_the_profile() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-4","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = with_purpose(start_params(Some("beta"), None, "because"), "review");
+    params.model = Some("haiku".to_string());
+    let started = start_session(ctx, &params).unwrap();
+    assert_eq!(started.session.model.as_deref(), Some("haiku"));
+    assert_eq!(started.session.template.as_deref(), Some("claude"));
+}
+
+#[test]
+fn a_person_stored_profile_overrides_the_code_default() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-5","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    {
+        let human = ctx
+            .declared
+            .read()
+            .unwrap()
+            .actor_by_identity("local:test-user")
+            .unwrap()
+            .expect("the bootstrapped human");
+        let mut txn = ctx.declared.write().unwrap();
+        txn.upsert_actor_preference(&ActorPreference {
+            actor_id: human.id,
+            key: "dispatch.profiles".to_string(),
+            value: json!({"review": {"model": "sonnet"}}),
+            version: 1,
+            updated_at: moment(),
+        })
+        .unwrap();
+        txn.commit().unwrap();
+    }
+    let params = with_purpose(start_params(Some("beta"), None, "because"), "review");
+    let started = start_session(ctx, &params).unwrap();
+    assert_eq!(started.session.model.as_deref(), Some("sonnet"));
+    assert_eq!(started.session.effort.as_deref(), Some("low"));
+}
+
+#[test]
+fn an_unknown_purpose_is_refused_before_the_engine_is_asked() {
+    let script = script_with(Vec::new());
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let params = with_purpose(start_params(Some("beta"), None, "because"), "bogus");
+    let error = start_session(ctx, &params).unwrap_err();
+    assert!(matches!(error, VogtError::InvalidRequest(_)), "{error:?}");
+    assert!(script.seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_person_start_records_a_person_as_its_starter() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-6","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let started = start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    assert_eq!(started.session.purpose, None);
+    assert_eq!(started.session.started_by_kind.as_deref(), Some("person"));
+    assert_eq!(started.session.started_by_session, None);
+}
+
+#[test]
+fn a_worker_session_start_records_the_starting_session_and_its_role() {
+    // The engine answers the caller's own lookup first, then the start.
+    let script = script_with(vec![
+        (
+            200,
+            r#"{"id":"eng-8","name":"beta","cwd":"/work/tree"}"#.to_string(),
+        ),
+        (
+            200,
+            r#"{"id":"eng-parent","name":"parent","cwd":"/work/tree","activity":"idle","alive":true,"autopilot":false,"autopilot_nudges":0,"keep_awake":false,"role":"oversight"}"#
+                .to_string(),
+        ),
+    ]);
+    let built = opened_as(
+        Some(Arc::clone(&script)),
+        Principal::new("agent:engine:eng-parent", ActorKind::Agent, "Parent").unwrap(),
+    );
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let started = start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    assert_eq!(
+        started.session.started_by_session.as_deref(),
+        Some("eng-parent")
+    );
+    assert_eq!(
+        started.session.started_by_kind.as_deref(),
+        Some("oversight")
     );
 }
