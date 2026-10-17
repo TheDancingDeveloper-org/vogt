@@ -190,6 +190,10 @@
    }
   },
   {
+   "operation": "dump.after_project_and_label",
+   "dump": true
+  },
+  {
    "operation": "project.brief",
    "params": {
     "slug": "parity"
