@@ -818,6 +818,18 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 ),
             )),
     };
+    // Outermost last: the line covers routing, authentication and the error
+    // handlers, as Python's middleware does. The listener's scheme and bind
+    // address travel with every request, for redirects and a missing Host.
+    let scheme = if tls_cert.is_some() { "https" } else { "http" };
+    let router = router.layer(axum::Extension(adapters::http::app::ServerScope {
+        scheme,
+        address: addr.to_string(),
+    }));
+    let router = adapters::http::access_log::layer(
+        router,
+        adapters::http::access_log::AccessLogSettings::from_config(&config),
+    );
     // `--tls-cert` and `--tls-key` arrive together or not at all. One without the
     // other would either serve plain HTTP while the operator believes TLS is on,
     // or refuse a certificate Python accepts. A path that is not a file is named.
@@ -832,7 +844,6 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let scheme = if tls_cert.is_some() { "https" } else { "http" };
     if json {
         println!(
             "{{\"url\":\"{scheme}://{host}:{port}\",\"data_dir\":\"{}\"}}",
@@ -851,14 +862,17 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 });
                 axum_server::bind_rustls(addr, tls)
                     .handle(handle)
-                    .serve(router.into_make_service())
+                    .serve(router.into_make_service_with_connect_info::<SocketAddr>())
                     .await
             }
             None => {
                 let listener = tokio::net::TcpListener::bind(addr).await?;
-                axum::serve(listener, router)
-                    .with_graceful_shutdown(shutdown())
-                    .await
+                axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(shutdown())
+                .await
             }
         }
     });
