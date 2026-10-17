@@ -1600,6 +1600,7 @@ fn json_response(status: StatusCode, body: serde_json::Value) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::http::test_harness;
     use std::io::{Read, Write};
 
     struct Running {
@@ -2258,6 +2259,246 @@ mod tests {
         assert_eq!(
             json["error"]["message"],
             "the username or password is not right"
+        );
+    }
+
+    /// The scopes a token holds decide what it may call, and the gate answers
+    /// before the operation runs. Tokens are minted over `/api` by the admin.
+    #[test]
+    fn a_read_token_reads() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let reader = test_harness::mint_token(served.addr, &admin, "agent:reader", "read");
+        let (status, body) =
+            test_harness::send(served.addr, "GET", "/api/status", Some(&reader), None);
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[test]
+    fn a_read_token_cannot_write() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let reader = test_harness::mint_token(served.addr, &admin, "agent:reader", "read");
+        let (status, body) = test_harness::send(
+            served.addr,
+            "POST",
+            "/api/work",
+            Some(&reader),
+            Some(&serde_json::json!({"kind": "bug", "title": "Nope", "reason": "test"})),
+        );
+        assert_eq!(status, 403, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "forbidden");
+    }
+
+    #[test]
+    fn a_write_token_writes() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let writer = test_harness::mint_token(
+            served.addr,
+            &admin,
+            "agent:writer",
+            "work.write,project.write",
+        );
+        let (status, body) = test_harness::send(
+            served.addr,
+            "POST",
+            "/api/work",
+            Some(&writer),
+            Some(&serde_json::json!({"kind": "bug", "title": "Written", "reason": "test"})),
+        );
+        assert_eq!(status, 200, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            json["item"]["ref"]
+                .as_str()
+                .is_some_and(|reference| reference.starts_with("WI-")),
+            "{body}"
+        );
+    }
+
+    /// Provenance comes from the credential: the audit row names the token's
+    /// actor, whatever the request body says.
+    #[test]
+    fn the_write_is_attributed_to_the_token_holder() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let writer = test_harness::mint_token(
+            served.addr,
+            &admin,
+            "agent:writer",
+            "work.write,project.write",
+        );
+        let (status, body) = test_harness::send(
+            served.addr,
+            "POST",
+            "/api/work",
+            Some(&writer),
+            Some(&serde_json::json!({
+                "kind": "bug",
+                "title": "Attributed",
+                "reason": "test",
+            })),
+        );
+        assert_eq!(status, 200, "{body}");
+        let store = crate::storage::sqlite::declared::SqliteDeclaredStore::new(
+            crate::storage::sqlite::declared_path(&served.dir),
+            crate::application::context::SystemClock,
+            crate::core::SequentialIds::new(None).unwrap(),
+        );
+        let rows = store
+            .read()
+            .unwrap()
+            .list_audit(&crate::storage::interface::AuditQuery {
+                limit: 5,
+                offset: 0,
+                actor_id: None,
+                operation: Some("work.create".to_string()),
+                entity_id: None,
+                project_id: None,
+                since: None,
+                until: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one work.create row");
+        assert_eq!(rows[0].actor_identity_ref, "agent:writer");
+    }
+
+    #[test]
+    fn a_login_needs_no_credential_and_the_session_it_mints_works() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let (status, body) = test_harness::send(
+            served.addr,
+            "POST",
+            "/api/users",
+            Some(&admin),
+            Some(&serde_json::json!({
+                "username": "sessions",
+                "password": "correct horse battery",
+                "scopes": "read",
+                "reason": "http test",
+            })),
+        );
+        assert_eq!(status, 200, "{body}");
+        // No bearer on the login: it is how a caller gets one.
+        let (status, body) = test_harness::send(
+            served.addr,
+            "POST",
+            "/api/auth/login",
+            None,
+            Some(&serde_json::json!({"username": "sessions", "password": "correct horse battery"})),
+        );
+        assert_eq!(status, 200, "{body}");
+        let session = serde_json::from_str::<serde_json::Value>(&body).unwrap()["secret"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, body) =
+            test_harness::send(served.addr, "GET", "/api/auth/whoami", Some(&session), None);
+        assert_eq!(status, 200, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["identity_ref"], "human:sessions");
+        assert_eq!(json["scopes"], serde_json::json!(["read"]));
+    }
+
+    /// Five failures inside the minute lock the username, and the lock refuses
+    /// the right password with its own answer, so a client backs off.
+    #[test]
+    fn a_wrong_password_over_http_is_401_and_a_throttle_is_429() {
+        let _gate = crate::application::services::auth::throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::application::services::auth::throttle_reset();
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let (status, body) = test_harness::send(
+            served.addr,
+            "POST",
+            "/api/users",
+            Some(&admin),
+            Some(&serde_json::json!({
+                "username": "throttled",
+                "password": "correct horse battery",
+                "reason": "http test",
+            })),
+        );
+        assert_eq!(status, 200, "{body}");
+        for _ in 0..5 {
+            let (status, body) = test_harness::send(
+                served.addr,
+                "POST",
+                "/api/auth/login",
+                None,
+                Some(&serde_json::json!({"username": "throttled", "password": "nope"})),
+            );
+            assert_eq!(status, 401, "{body}");
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(json["error"]["code"], "unauthenticated");
+        }
+        let (status, body) = test_harness::send(
+            served.addr,
+            "POST",
+            "/api/auth/login",
+            None,
+            Some(
+                &serde_json::json!({"username": "throttled", "password": "correct horse battery"}),
+            ),
+        );
+        assert_eq!(status, 429, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "login_throttled");
+    }
+
+    #[test]
+    fn the_bootstrap_issues_a_working_token_over_http() {
+        let served = test_harness::serve(false);
+        let (status, body) = test_harness::send(
+            served.addr,
+            "POST",
+            "/api/install/bootstrap",
+            None,
+            Some(&serde_json::json!({"display_name": "Ada Lovelace"})),
+        );
+        assert_eq!(status, 200, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let secret = json["secret"].as_str().unwrap().to_string();
+        assert_eq!(
+            json["actor"]["identity_ref"], "human:ada-lovelace",
+            "{body}"
+        );
+        assert!(json["warning"].as_str().unwrap().contains("only time"));
+
+        let (status, body) =
+            test_harness::send(served.addr, "GET", "/api/status", Some(&secret), None);
+        assert_eq!(status, 200, "{body}");
+        let (status, body) =
+            test_harness::send(served.addr, "GET", "/api/install/status", None, None);
+        assert_eq!(status, 200, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["install_mode"], false);
+    }
+
+    #[test]
+    fn a_closed_bootstrap_refuses_with_a_named_reason() {
+        let served = test_harness::serve(false);
+        test_harness::admin_secret(served.addr);
+        let (status, body) = test_harness::send(
+            served.addr,
+            "POST",
+            "/api/install/bootstrap",
+            None,
+            Some(&serde_json::json!({"display_name": "Eve"})),
+        );
+        assert_eq!(status, 409, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "install_closed");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "{body}"
         );
     }
 }

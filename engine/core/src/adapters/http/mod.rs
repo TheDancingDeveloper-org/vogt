@@ -8,3 +8,6 @@ pub mod etag;
 pub mod health;
 pub mod mcp;
 pub mod openapi;
+
+#[cfg(test)]
+pub(crate) mod test_harness;

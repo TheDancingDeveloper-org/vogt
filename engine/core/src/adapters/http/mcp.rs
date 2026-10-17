@@ -561,6 +561,7 @@ fn json_response(status: StatusCode, body: Value) -> Response {
 mod tests {
     use super::*;
 
+    use crate::adapters::http::test_harness;
     use crate::application::context::SystemClock;
     use crate::core::SequentialIds;
     use crate::storage::interface::{DeclaredStore, ReadView};
@@ -671,5 +672,137 @@ mod tests {
         // A ping is not a tool call, so it writes no row. The one token_valid
         // row a no-auth session writes is for the tool it calls.
         assert!(decisions(&running.dir).is_empty());
+    }
+
+    /// The MCP route over HTTP, on the same listener and store as `/api`, with
+    /// tokens minted over `/api` the way an operator does it.
+    fn rpc(addr: std::net::SocketAddr, token: &str, method: &str, params: Value) -> Value {
+        let body =
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let (status, response) =
+            test_harness::send(addr, "POST", MCP_PATH, Some(token), Some(&body));
+        assert_eq!(status, 200, "{response}");
+        serde_json::from_str(&response).unwrap()
+    }
+
+    fn tool_names(addr: std::net::SocketAddr, token: &str) -> Vec<String> {
+        rpc(addr, token, "tools/list", serde_json::json!({}))["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn initialize_over_http_names_the_server() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let reader = test_harness::mint_token(served.addr, &admin, "agent:reader", "read");
+        let result = rpc(served.addr, &reader, "initialize", serde_json::json!({}));
+        assert_eq!(result["result"]["serverInfo"]["name"], "vogt", "{result}");
+        assert!(result["result"]["protocolVersion"].is_string(), "{result}");
+    }
+
+    /// The handshake negotiates down on HTTP as well as stdio. This is the
+    /// transport Claude Code uses through the bridge.
+    #[test]
+    fn an_unknown_protocol_version_negotiates_down_over_http() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let reader = test_harness::mint_token(served.addr, &admin, "agent:reader", "read");
+        let response = rpc(
+            served.addr,
+            &reader,
+            "initialize",
+            serde_json::json!({"protocolVersion": "2999-01-01"}),
+        );
+        assert!(response.get("error").is_none(), "{response}");
+        assert_eq!(
+            response["result"]["protocolVersion"],
+            crate::adapters::mcp::framing::SUPPORTED_PROTOCOL_VERSIONS[0]
+        );
+    }
+
+    #[test]
+    fn ungranted_tools_are_invisible_not_erroring() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let reader = test_harness::mint_token(served.addr, &admin, "agent:reader", "read");
+        let writer = test_harness::mint_token(served.addr, &admin, "agent:writer", "work.write");
+
+        let reader_tools = tool_names(served.addr, &reader);
+        let writer_tools = tool_names(served.addr, &writer);
+        assert!(
+            reader_tools.iter().any(|name| name == "status"),
+            "{reader_tools:?}"
+        );
+        assert!(!reader_tools.iter().any(|name| name == "work_create"));
+        assert!(writer_tools.iter().any(|name| name == "work_create"));
+        assert!(
+            !writer_tools.iter().any(|name| name == "token_issue"),
+            "a writer does not see admin tools"
+        );
+    }
+
+    #[test]
+    fn calling_an_ungranted_tool_over_http_is_refused_and_recorded() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let reader = test_harness::mint_token(served.addr, &admin, "agent:reader", "read");
+        let response = rpc(
+            served.addr,
+            &reader,
+            "tools/call",
+            serde_json::json!({
+                "name": "work_create",
+                "arguments": {"kind": "bug", "title": "x", "reason": "test"},
+            }),
+        );
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("forbidden"),
+            "{response}"
+        );
+        let store = SqliteDeclaredStore::new(
+            crate::storage::sqlite::declared_path(&served.dir),
+            SystemClock,
+            SequentialIds::new(None).unwrap(),
+        );
+        let denials = store
+            .read()
+            .unwrap()
+            .list_auth_decisions(Some("deny"), 10)
+            .unwrap();
+        assert!(
+            denials.iter().any(|d| d.transport == "mcp-http"),
+            "{denials:?}"
+        );
+    }
+
+    #[test]
+    fn a_granted_tool_call_works_over_http() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let writer = test_harness::mint_token(served.addr, &admin, "agent:writer", "work.write");
+        let response = rpc(
+            served.addr,
+            &writer,
+            "tools/call",
+            serde_json::json!({
+                "name": "work_create",
+                "arguments": {"kind": "bug", "title": "Filed over HTTP", "reason": "test"},
+            }),
+        );
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        assert!(
+            response["result"]["structuredContent"]["item"]["ref"]
+                .as_str()
+                .is_some_and(|reference| reference.starts_with("WI-")),
+            "{response}"
+        );
     }
 }

@@ -378,4 +378,26 @@ mod tests {
         unsafe { std::env::remove_var("VOGT_CONFIG_FILE") };
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A red probe says what is wrong. On an empty data directory the readiness
+    /// body names the declared schema as behind and points at the migrate step.
+    #[test]
+    fn a_probe_on_an_empty_store_says_why_it_is_not_ready() {
+        let _guard = ENV.lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("vogt-health-empty-{}", crate::core::fresh_id("t")));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let body = readiness(&dir).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["status"], "not_ready", "{json}");
+        let detail = json["detail"]
+            .as_str()
+            .expect("a not-ready probe has a detail");
+        assert!(detail.contains("declared schema is at 0"), "{detail}");
+        assert!(detail.contains("vogt migrate"), "{detail}");
+        assert!(json["instance_id"].is_null(), "{json}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
