@@ -420,7 +420,7 @@ fn an_onboarded_issue_is_one_backlog_row() {
 // disposition row), so the reason names the review instead.
 
 #[test]
-#[ignore = "parity: the board lists declared rows only, so an upstream-only issue is missing (WI-1745 review blocker 1; work item not filed yet)"]
+#[ignore = "parity: the board lists declared rows only, so an upstream-only issue is missing (WI-1778, from WI-1745 review blocker 1)"]
 fn board_lists_an_upstream_only_issue_once() {
     let (built, _) = forgejo_with(three_issues(), true);
     onboard(&built);
@@ -441,7 +441,7 @@ fn board_lists_an_upstream_only_issue_once() {
 }
 
 #[test]
-#[ignore = "parity: page one carries no next_cursor and the cursor is not honoured on page two (WI-1745 review blocker 1; work item not filed yet)"]
+#[ignore = "parity: page one carries no next_cursor and the cursor is not honoured on page two (WI-1778, from WI-1745 review blocker 1)"]
 fn the_board_pages_with_stable_cursors() {
     let (built, _) = forgejo_with(three_issues(), true);
     onboard(&built);
@@ -495,7 +495,7 @@ fn the_board_pages_with_stable_cursors() {
 }
 
 #[test]
-#[ignore = "parity: title and body edits on an adopted item are accepted locally, Python refuses them as upstream truth (WI-1745 review blocker 2; work item not filed yet)"]
+#[ignore = "parity: title and body edits on an adopted item are accepted locally, Python refuses them as upstream truth (WI-1779, from WI-1745 review blocker 2)"]
 fn title_and_body_edits_on_an_adopted_item_are_refused() {
     let (built, _) = forgejo_with(four_issues(), true);
     onboard(&built);
@@ -517,7 +517,7 @@ fn title_and_body_edits_on_an_adopted_item_are_refused() {
 }
 
 #[test]
-#[ignore = "parity: label removal on an adopted item is accepted, Python refuses it as append-only (WI-1745 review blocker 2; work item not filed yet)"]
+#[ignore = "parity: label removal on an adopted item is accepted, Python refuses it as append-only (WI-1779, from WI-1745 review blocker 2)"]
 fn a_label_removal_on_an_adopted_item_is_refused() {
     let (built, _) = forgejo_with(four_issues(), true);
     onboard(&built);
