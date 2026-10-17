@@ -226,6 +226,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "project.register" => Some(crate::application::projects::register_op),
         "project.create" => Some(crate::application::projects::create_op),
         "project.scaffold" => Some(crate::application::projects::scaffold_op),
+        "project.import" => Some(crate::application::projects::import_op),
         "project.get" => Some(crate::application::projects::get_op),
         "project.list" => Some(crate::application::projects::list_op),
         "project.update" => Some(crate::application::projects::update_op),
