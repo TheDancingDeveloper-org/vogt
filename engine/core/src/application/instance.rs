@@ -77,7 +77,7 @@ pub fn init(
         }
     }
     let instance_id = if !declared_existed {
-        let instance_id = bootstrap(data_dir, clock, ids)?;
+        let instance_id = bootstrap(data_dir, clock)?;
         bind_instance(data_dir, &instance_id, clock)?;
         instance_id
     } else {
@@ -105,6 +105,10 @@ fn adopt_configured(
     clock: &mut Option<crate::core::StepClock>,
     ids: &mut Option<SequentialIds>,
 ) -> Result<(String, String), migrator::MigrateError> {
+    // One context for both adoptions, built from the caller's own clock and id
+    // factory rather than a clone of them. A clone would persist its counter
+    // separately and collide with the caller's next id (a second `act_0001`).
+    // `None` resolves the hook environment once, which is what a plain init does.
     let mut overrides = serde_json::Map::new();
     overrides.insert(
         "data_dir".to_string(),
@@ -114,23 +118,44 @@ fn adopt_configured(
     let built = crate::application::context::build_context(
         config,
         None,
-        clock.clone(),
-        ids.clone(),
+        clock.take(),
+        ids.take(),
         None,
         None,
         None,
         None,
     )
     .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
-    let core = crate::with_ctx!(&built, |ctx| {
-        crate::application::services::bootstrap::adopt_bootstrap(ctx, true)
-    })
-    .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
-    let agent = crate::with_ctx!(&built, |ctx| {
-        crate::application::services::bootstrap::adopt_bootstrap(ctx, false)
-    })
-    .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
-    Ok((core, agent))
+    // `build_context` consumes the caller's clock and id factory. Hand them
+    // back so a caller that passed them in still has them afterwards.
+    let outcome = crate::with_ctx!(&built, |ctx| {
+        let core = crate::application::services::bootstrap::adopt_bootstrap(ctx, true)
+            .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
+        let agent = crate::application::services::bootstrap::adopt_bootstrap(ctx, false)
+            .map_err(|err| migrator::MigrateError::Message(err.message().to_string()))?;
+        Ok::<_, migrator::MigrateError>((core, agent))
+    })?;
+    // `build_context` consumes the caller's clock and id factory. Hand them
+    // back so a caller that passed them in still has them afterwards.
+    *clock = match &built {
+        crate::application::context::Built::StepSequential(ctx) => {
+            Some(ctx.clock.lock().expect("clock").clone())
+        }
+        crate::application::context::Built::StepRandom(ctx) => {
+            Some(ctx.clock.lock().expect("clock").clone())
+        }
+        _ => None,
+    };
+    *ids = match &built {
+        crate::application::context::Built::StepSequential(ctx) => {
+            Some(ctx.id_factory.lock().expect("ids").clone())
+        }
+        crate::application::context::Built::SystemSequential(ctx) => {
+            Some(ctx.id_factory.lock().expect("ids").clone())
+        }
+        _ => None,
+    };
+    Ok(outcome)
 }
 
 /// Pending migrations on a database that already exists. Zero means a
@@ -228,7 +253,6 @@ fn instance_id_of(data_dir: &Path) -> Result<String, migrator::MigrateError> {
 fn bootstrap(
     data_dir: &Path,
     clock: &mut Option<crate::core::StepClock>,
-    ids: &mut Option<SequentialIds>,
 ) -> Result<String, migrator::MigrateError> {
     use rusqlite::params;
 
@@ -244,16 +268,18 @@ fn bootstrap(
         return Ok(instance_id);
     }
     let user = crate::core::os_user();
-    let next = |ids: &mut Option<SequentialIds>, prefix: &str| -> String {
-        match ids {
-            Some(factory) => factory.next(prefix),
-            None => crate::core::fresh_id(prefix),
-        }
-    };
-    let instance_id = next(ids, "ins");
-    let actor_id = next(ids, "act");
-    let audit_id = next(ids, "aud");
-    let txn_id = next(ids, "txn");
+    // A sequence of this bootstrap's own, not the caller's. Several tests
+    // bootstrap at once, and a shared sequential factory would hand every one
+    // of them `act_0001` — the caller still holds its copy and mints the same
+    // number again. Python mints fresh ids here, so nothing asserts the shape;
+    // only uniqueness matters. The counter lives under the data dir, which is
+    // unique per instance, so two inits running together never share one.
+    let mut own = SequentialIds::new(Some(data_dir.join("bootstrap-ids.json")))
+        .expect("a fresh counter file cannot fail");
+    let instance_id = own.next("ins");
+    let actor_id = own.next("act");
+    let audit_id = own.next("aud");
+    let txn_id = own.next("txn");
     let at = stamp(clock);
     conn.execute("BEGIN IMMEDIATE", [])?;
     let written = (|| -> rusqlite::Result<()> {
@@ -441,7 +467,6 @@ fn stamp_if(clock: &mut Option<crate::core::StepClock>, due: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(test)]
     /// Puts an environment variable back the way it was, and keeps every other
     /// test out while it is changed: the variable is process-wide, so one test
     /// setting it changes what every other test's `init` adopts. The lock is the

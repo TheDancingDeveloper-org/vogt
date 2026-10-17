@@ -22,15 +22,14 @@ pub fn adopt_bootstrap<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     core: bool,
 ) -> Result<String, VogtError> {
-    // The file is read only when this process's environment names it. A
-    // config file on disk can point at a token this process was never given,
-    // and adopting that would make `init` depend on whoever shares the host.
-    let env_name = if core {
-        "VOGT_BOOTSTRAP_CORE_TOKEN_FILE"
+    // The file comes from the resolved config, which reads the environment
+    // and the config file the same way every other setting does. Python's
+    // `ctx.config.bootstrap_*_token_file`.
+    let configured = if core {
+        ctx.config.bootstrap_core_token_file.clone()
     } else {
-        "VOGT_BOOTSTRAP_AGENT_TOKEN_FILE"
+        ctx.config.bootstrap_agent_token_file.clone()
     };
-    let configured = std::env::var_os(env_name).map(std::path::PathBuf::from);
     let (scopes_raw, identity_ref, name) = if core {
         (
             ctx.config.bootstrap_core_token_scopes.clone(),
