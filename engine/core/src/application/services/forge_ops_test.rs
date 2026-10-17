@@ -13,11 +13,13 @@ use std::process::Command;
 
 use serde_json::json;
 
+use crate::adapters::forge::registry::provider_for_host;
+use crate::adapters::forge::ForgeProvider;
 use crate::adapters::git::{push_branch, CloneOutcome, CloneRequest, PushOutcome, PushRequest};
 use crate::application::context::{build_context, Built};
 use crate::application::forge_standin::StandInForge;
 use crate::application::services::{
-    forge_import, forge_link, forge_publish, forge_writeback, work,
+    forge_accounts, forge_import, forge_link, forge_publish, forge_repos, forge_writeback, work,
 };
 use crate::config::VogtConfig;
 use crate::core::{LinkState, Project, SequentialIds, StepClock};
@@ -616,5 +618,259 @@ fn forge_link_migrates_open_native_items_upstream_before_it_links() {
             .any(|request| request == "POST https://api.github.com/repos/acme/widget/issues"),
         "the native item was created upstream: {:?}",
         standin.requests()
+    );
+}
+
+/// A context on the stand-in with the GitHub file token, and optionally a
+/// Forgejo host's file token and a Fernet key so accounts can be linked.
+fn with_forge_config_on(standin: &StandInForge, forgejo: bool, account_key: bool) -> Built {
+    let dir = std::env::temp_dir().join(format!(
+        "vogt-forge-ops-{}-{}",
+        std::process::id(),
+        unique()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let github_token = dir.join("forge-token");
+    std::fs::write(&github_token, "secret-token\n").unwrap();
+    let mut config = VogtConfig {
+        data_dir: dir.clone(),
+        github_token_file: Some(github_token),
+        ..VogtConfig::default()
+    };
+    if forgejo {
+        let forgejo_token = dir.join("forgejo-token");
+        std::fs::write(&forgejo_token, "frg_file_token\n").unwrap();
+        config
+            .forge_token_files
+            .insert("forge.example.net".to_owned(), forgejo_token);
+    }
+    if account_key {
+        let key = dir.join("account.key");
+        std::fs::write(&key, "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=").unwrap();
+        config.forge_account_key_file = Some(key);
+    }
+    let mut clock = Some(StepClock::new(moment()));
+    let mut ids = Some(SequentialIds::new(None).unwrap());
+    crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+    let built = build_context(
+        config,
+        Some(principal()),
+        clock,
+        ids,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let Built::StepSequential(ctx) = built else {
+        panic!("expected a step clock");
+    };
+    let transport = standin.transport();
+    with_clone_and_push_seams(Built::StepSequential(ctx.with_forge_transport(
+        move |url, headers, body, method| transport(url, headers, body, method),
+    )))
+}
+
+/// The publish conflict: a name the account already holds answers 422, which
+/// is a typed refusal. Nothing is pushed and nothing local changes.
+#[test]
+fn forge_publish_answers_a_422_as_a_typed_refusal_and_pushes_nothing() {
+    let standin = StandInForge::one_of_each().with_existing(&["demo"]);
+    let built = with_forge_config_on(&standin, false, false);
+    let (root, _) = a_publishable_checkout("demo");
+    let _bare = a_bare_remote("demo");
+    insert_project(&built, "demo", None, &root.display().to_string(), false);
+
+    match forge_publish::publish_op(&built, json!({"project": "demo", "reason": "publish it"})) {
+        Err(VogtError::RemoteRepoExists(message)) => {
+            assert!(message.contains("never adopts"), "{message}");
+        }
+        other => panic!("expected RemoteRepoExists, got {other:?}"),
+    }
+    let pushes = SEAMS.with(|seams| seams.borrow().pushes.clone());
+    assert!(
+        pushes.is_empty(),
+        "nothing was pushed at an existing remote: {pushes:?}"
+    );
+    assert_eq!(project_link_state(&built, "demo"), "unlinked");
+}
+
+/// The non-fast-forward refusal, on the real `git push`: a diverged remote
+/// `main` is refused, the refusal is typed, and the remote's history stands.
+#[test]
+fn push_branch_refuses_a_non_fast_forward_and_keeps_the_remote_history() {
+    let bare = a_bare_remote("diverged");
+    let (theirs, _) = a_publishable_checkout("theirs");
+    std::fs::write(theirs.join("theirs.txt"), "theirs\n").unwrap();
+    git(&["add", "."], &theirs);
+    git(
+        &[
+            "-c",
+            "user.email=other@example.invalid",
+            "-c",
+            "user.name=Other",
+            "commit",
+            "-q",
+            "-m",
+            "theirs",
+        ],
+        &theirs,
+    );
+    push_branch(&PushRequest {
+        root: theirs.clone(),
+        remote: bare.display().to_string(),
+        branch: "main".to_owned(),
+        token: None,
+        helper_dir: None,
+    })
+    .unwrap();
+
+    let (ours, _) = a_publishable_checkout("ours");
+    std::fs::write(ours.join("ours.txt"), "ours\n").unwrap();
+    git(&["add", "."], &ours);
+    git(
+        &[
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Forge Test",
+            "commit",
+            "-q",
+            "-m",
+            "diverge",
+        ],
+        &ours,
+    );
+    let before = git(&["rev-parse", "refs/heads/main"], &bare);
+
+    let refused = push_branch(&PushRequest {
+        root: ours,
+        remote: bare.display().to_string(),
+        branch: "main".to_owned(),
+        token: None,
+        helper_dir: None,
+    });
+    match refused {
+        Err(VogtError::PublishNonFastForward(message)) => {
+            assert!(message.contains("never forces"), "{message}");
+        }
+        other => panic!("expected PublishNonFastForward, got {other:?}"),
+    }
+    assert_eq!(git(&["rev-parse", "refs/heads/main"], &bare), before);
+}
+
+/// Write-through after publish: an issue written through the published
+/// repository's provider lands upstream on the new repository and comes back
+/// with its upstream ref. This is the provider write the link migration uses;
+/// the `work.create` hook that calls it is not ported (WI-1068).
+#[test]
+fn a_published_repository_takes_writes_through_its_provider() {
+    let standin = StandInForge::one_of_each();
+    let built = with_forge_config_on(&standin, false, false);
+    let (root, _) = a_publishable_checkout("demo");
+    let _bare = a_bare_remote("demo");
+    insert_project(&built, "demo", None, &root.display().to_string(), false);
+    forge_publish::publish_op(&built, json!({"project": "demo", "reason": "publish it"})).unwrap();
+
+    let Built::StepSequential(ctx) = &built else {
+        panic!("expected a step clock");
+    };
+    let provider = provider_for_host("github.com", &ctx.config, ctx.forge_transport())
+        .unwrap()
+        .expect("github.com resolves with the file token");
+    let repo = provider
+        .parse(Some("https://github.com/acme/demo"))
+        .expect("the published address parses");
+    let sent = provider
+        .create_issue(&repo, "First", "written through", None)
+        .unwrap();
+
+    assert_eq!(
+        sent.subject_key.as_deref(),
+        Some("gh:acme/demo#8"),
+        "{sent:?}"
+    );
+    assert!(
+        standin
+            .requests()
+            .iter()
+            .any(|request| request == "POST https://api.github.com/repos/acme/demo/issues"),
+        "the issue was created upstream: {:?}",
+        standin.requests()
+    );
+}
+
+/// The Forgejo picker lists the host-qualified repositories a configured
+/// Forgejo host's file token can see.
+#[test]
+fn forgejo_picker_lists_host_qualified_repositories() {
+    let standin = StandInForge::one_of_each();
+    let built = with_forge_config_on(&standin, true, false);
+
+    let listed = forge_repos::repos_op(&built, json!({"host": "forge.example.net"})).unwrap();
+
+    let repos = listed["repos"].as_array().expect("repos is a list");
+    assert_eq!(repos.len(), 1, "{listed}");
+    assert_eq!(repos[0]["owner"], "acme");
+    assert_eq!(repos[0]["name"], "fuelwatchx");
+    assert_eq!(repos[0]["url"], "https://forge.example.net/acme/fuelwatchx");
+}
+
+/// Forgejo import clones the host-qualified URL under the host's file token,
+/// registers the project linked, and consolidates it.
+#[test]
+fn forgejo_import_clones_the_host_qualified_url_under_the_file_token() {
+    let standin = StandInForge::one_of_each();
+    let built = with_forge_config_on(&standin, true, false);
+
+    let imported = forge_import::import_op(
+        &built,
+        json!({"host": "forge.example.net", "owner": "acme", "name": "fuelwatchx", "reason": "import it"}),
+    )
+    .unwrap();
+
+    assert_eq!(
+        imported["project"]["repo_url"],
+        "https://forge.example.net/acme/fuelwatchx"
+    );
+    assert_eq!(imported["project"]["link_state"], "linked", "{imported}");
+    let clones = SEAMS.with(|seams| seams.borrow().clones.clone());
+    assert_eq!(
+        clones,
+        vec![(
+            "https://forge.example.net/acme/fuelwatchx.git".to_owned(),
+            Some("frg_file_token".to_owned())
+        )],
+    );
+}
+
+/// The clone authenticates with the actor's linked PAT, not the instance file
+/// token: the credential that could see the repository is the one that clones it.
+#[test]
+fn forge_import_clones_under_the_actors_credential() {
+    let standin = StandInForge::one_of_each();
+    let built = with_forge_config_on(&standin, false, true);
+    forge_accounts::account_link_op(
+        &built,
+        json!({"token": "ghp_actor_pat", "reason": "link it"}),
+    )
+    .unwrap();
+
+    forge_import::import_op(
+        &built,
+        json!({"owner": "octo-actor", "name": "rustnzb", "reason": "import it"}),
+    )
+    .unwrap();
+
+    let clones = SEAMS.with(|seams| seams.borrow().clones.clone());
+    assert_eq!(
+        clones,
+        vec![(
+            "https://github.com/octo-actor/rustnzb.git".to_owned(),
+            Some("ghp_actor_pat".to_owned())
+        )],
+        "the clone used the linked PAT, not secret-token"
     );
 }

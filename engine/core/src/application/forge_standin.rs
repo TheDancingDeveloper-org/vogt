@@ -4,9 +4,11 @@
 //! was asked to send. Nothing here opens a socket.
 //!
 //! A test asserts two things against it: the answer the service gave, and the
-//! requests it was sent. The reads answer from canned lists. The one write route
-//! is the repository create, which mints the repository in the answer and records
-//! the body it was sent. An unexpected path answers 404, which the providers read
+//! requests it was sent. The reads answer from canned lists. The writes are the
+//! repository create, which mints the repository and records the body it was sent
+//! (or answers 422 for a name the account already holds), the issue create, which
+//! numbers each issue from 8 up, and the `GET /user` a pasted token is checked
+//! against. An unexpected path answers 404, which the providers read
 //! as "not visible", so a missing route shows up as a missing count rather than a
 //! silent pass.
 
@@ -23,6 +25,8 @@ pub struct StandInForge {
     pub pulls: Value,
     pub labels: Value,
     pub releases: Value,
+    /// The repositories the account already holds: a create of one answers 422.
+    pub existing: Vec<String>,
     seen: Arc<Mutex<Vec<String>>>,
     creates: Arc<Mutex<Vec<Value>>>,
 }
@@ -53,9 +57,16 @@ impl StandInForge {
                 "draft": false,
                 "prerelease": false,
             }]),
+            existing: Vec::new(),
             seen: Arc::new(Mutex::new(Vec::new())),
             creates: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// As [`StandInForge::one_of_each`], with `names` already taken upstream.
+    pub fn with_existing(mut self, names: &[&str]) -> Self {
+        self.existing = names.iter().map(|name| (*name).to_owned()).collect();
+        self
     }
 
     /// Every request sent so far, as `METHOD url`.
@@ -75,13 +86,32 @@ impl StandInForge {
         let pulls = self.pulls.clone();
         let labels = self.labels.clone();
         let releases = self.releases.clone();
+        let repos = json!([{
+            "name": "fuelwatchx",
+            "owner": {"login": "acme"},
+            "default_branch": "main",
+            "private": false,
+            "html_url": "https://forge.example.net/acme/fuelwatchx",
+        }]);
+        let existing = self.existing.clone();
+        let numbers = Arc::new(Mutex::new(8_i64));
         let creates = Arc::clone(&self.creates);
         Arc::new(
             move |url: &str, _headers: &BTreeMap<String, String>, body: &[u8], method: &str| {
                 seen.lock().unwrap().push(format!("{method} {url}"));
+                if method == "GET" && url.ends_with("/user") {
+                    let answer = json!({"login": "octo-actor"});
+                    let headers =
+                        BTreeMap::from([("x-oauth-scopes".to_owned(), "repo".to_owned())]);
+                    return (200, answer.to_string().into_bytes(), headers);
+                }
                 if method == "POST" && url.ends_with("/user/repos") {
                     let payload: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
                     let name = payload["name"].as_str().unwrap_or_default().to_owned();
+                    if existing.contains(&name) {
+                        let answer = json!({"message": "name already exists on this account"});
+                        return (422, answer.to_string().into_bytes(), BTreeMap::new());
+                    }
                     let private = payload["private"].as_bool().unwrap_or(true);
                     let answer = json!({
                         "name": name,
@@ -93,22 +123,36 @@ impl StandInForge {
                     creates.lock().unwrap().push(payload);
                     return (201, answer.to_string().into_bytes(), BTreeMap::new());
                 }
-                if method == "POST" && url.ends_with("/repos/acme/widget/issues") {
+                if method == "POST" && url.contains("/repos/acme/") && url.ends_with("/issues") {
                     let payload: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+                    let repo = url
+                        .split("/repos/acme/")
+                        .nth(1)
+                        .unwrap_or_default()
+                        .trim_end_matches("/issues")
+                        .to_owned();
+                    let number = {
+                        let mut next = numbers.lock().unwrap();
+                        *next += 1;
+                        *next - 1
+                    };
                     let answer = json!({
-                        "number": 8,
+                        "number": number,
                         "title": payload["title"],
                         "state": "open",
-                        "html_url": "https://github.com/acme/widget/issues/8",
+                        "html_url": format!("https://github.com/acme/{repo}/issues/{number}"),
                     });
                     return (201, answer.to_string().into_bytes(), BTreeMap::new());
                 }
-                if method == "GET" && url.ends_with("/repos/acme/widget") {
-                    let answer = json!({"name": "widget", "default_branch": "main"});
+                if method == "GET" && is_repo_address(url) {
+                    let name = url.rsplit('/').next().unwrap_or_default();
+                    let answer = json!({"name": name, "default_branch": "main"});
                     return (200, answer.to_string().into_bytes(), BTreeMap::new());
                 }
                 let answer = if url.contains("/issues?") {
                     &issues
+                } else if url.contains("/user/repos") {
+                    &repos
                 } else if url.contains("/pulls?") {
                     &pulls
                 } else if url.contains("/labels?") {
@@ -122,4 +166,12 @@ impl StandInForge {
             },
         )
     }
+}
+
+/// `…/repos/<owner>/<name>` and nothing after it: the repository describe.
+fn is_repo_address(url: &str) -> bool {
+    let Some(tail) = url.split("/repos/").nth(1) else {
+        return false;
+    };
+    tail.split('/').count() == 2 && !tail.contains('?')
 }
