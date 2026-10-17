@@ -641,6 +641,20 @@ impl EngineClient {
             .map(|_| EngineSession::from_payload(&payload)))
     }
 
+    /// Commit on a session's behalf (C14): `POST /api/git/op` with `op:
+    /// commit`. The engine runs the checklist; a refusal arrives as
+    /// `InvalidRequest` (400) or `Conflict` (409, mid-turn).
+    pub fn git_commit(&self, session_id: &str, body: &Value) -> Result<Value, VogtError> {
+        let payload = self.call("/api/git/op", "POST", Some(body), false, None)?;
+        if !payload.is_object() {
+            return Err(VogtError::EngineUnavailable(format!(
+                "the {} returned no commit for session {session_id}",
+                self.label
+            )));
+        }
+        Ok(payload)
+    }
+
     /// Hand the engine a person-approved grant. `NotFound` when it does not know
     /// the session, `Conflict` when it cannot hold the grant, `GrantRefused` for
     /// a project not open to grants, `InvalidRequest` for a field it rejects.
