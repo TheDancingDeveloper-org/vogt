@@ -516,10 +516,14 @@ docker exec <core-container> \
   person_required`), and `session.start` reads the newest person's write.
   `dispatch.profiles` is `{"<purpose>": {field: value}}` and overrides only
   the fields it names (`template`, `model`, `effort`, `budget_turns`,
-  `budget_wall_clock_minutes`, `worktree`, `repo_map`, `autopilot`,
-  `read_only`). `dispatch.max_workers_per_overseer` (default 5),
-  `dispatch.escalate_after_failed_reviews` (2) and
-  `dispatch.review_by_oversight_only` (true) are each `{"value": …}`. Each
+  `budget_turns_by_model`, `budget_wall_clock_minutes`, `worktree`,
+  `repo_map`, `autopilot`, `read_only`). `budget_turns_by_model` sizes the
+  turn budget by the model the start runs (`implement` gives `haiku` 200).
+  `dispatch.max_workers_per_overseer` (default 5),
+  `dispatch.escalate_after_failed_reviews` (2),
+  `dispatch.review_by_oversight_only` (true) and
+  `dispatch.budget_restarts_per_item` (1; `0` turns automatic restarts off)
+  are each `{"value": …}`. Each
   key is validated against its own shape, and any other `dispatch.*` key is
   refused.
 - **`place.metrics`** — `inbox_active` is the badge: the count under the

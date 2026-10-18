@@ -202,9 +202,18 @@ The table is the deployment's, not yours. A person overrides fields with
 `preference_set` on `dispatch.profiles` (for example
 `{"implement": {"model": "grok-4.8"}}` changes only that one field). The same
 store holds `dispatch.max_workers_per_overseer` (`{"value": 5}`),
-`dispatch.escalate_after_failed_reviews` (`{"value": 2}`) and
-`dispatch.review_by_oversight_only` (`{"value": true}`). An agent cannot set
+`dispatch.escalate_after_failed_reviews` (`{"value": 2}`),
+`dispatch.review_by_oversight_only` (`{"value": true}`) and
+`dispatch.budget_restarts_per_item` (`{"value": 1}`). An agent cannot set
 any `dispatch.*` key.
+
+A session the engine stops at its budget always leaves a hand-off (WI-1833).
+If the agent wrote none after the soft warning, the scheduled sweep writes a
+minimal one from its git state (branch, head, uncommitted paths). Then, up to
+`dispatch.budget_restarts_per_item` times per item and only when nothing else
+has started on the item since, it starts a fresh worker with
+`from_handoff`, using the stopped session's purpose. Each restart leaves a
+`[vogt] budget restart:` note on the item.
 
 Every session records `purpose`, `started_by_session` (the engine id of the
 session that started it) and `started_by_kind` (`person`, or the starter's
