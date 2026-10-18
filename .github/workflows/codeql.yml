@@ -13,6 +13,9 @@ on:
   pull_request:
     branches:
       - main
+  # The merge queue analyses every language; a PR analyses only the languages
+  # its diff touches (the `changes` job below, WI-1886).
+  merge_group:
   schedule:
     - cron: "23 3 * * 1"
   workflow_dispatch:
@@ -21,6 +24,44 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: classify languages
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    outputs:
+      python: ${{ steps.classify.outputs.python }}
+      javascript-typescript: ${{ steps.classify.outputs.javascript-typescript }}
+      rust: ${{ steps.classify.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "$EVENT_NAME: analysing every language"
+            printf 'python=true\njavascript-typescript=true\nrust=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags origin "$BASE_REF"
+          files="$(git diff --name-only "$(git merge-base "origin/$BASE_REF" HEAD)..HEAD")"
+          matches() { printf '%s\n' "$files" | grep -Eq "$1"; }
+          # A change to the scanning setup itself re-analyses everything.
+          if matches '^\.github/(workflows/codeql\.yml|codeql/)'; then
+            printf 'python=true\njavascript-typescript=true\nrust=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          py=false; js=false; rs=false
+          matches '\.py$|^(pyproject\.toml|uv\.lock)$' && py=true
+          matches '\.(js|jsx|mjs|cjs|ts|tsx)$|(^|/)package\.json$|pnpm-lock\.yaml$' && js=true
+          matches '\.rs$|(^|/)Cargo\.(toml|lock)$' && rs=true
+          printf 'python=%s\njavascript-typescript=%s\nrust=%s\n' "$py" "$js" "$rs" >> "$GITHUB_OUTPUT"
+
   analyze:
     name: analyze (${{ matrix.language }})
     # `bigmem` is node-b-gha-public-bigmem (ops personal/github-runner, 32 G
@@ -31,6 +72,7 @@ jobs:
     # on this runner autodetect has room, and a pin only slows the analysis.
     # A label no online runner advertises queues forever, so this runner must
     # stay up; there is one bigmem slot, so the languages run one after another.
+    needs: changes
     runs-on: [self-hosted, bigmem]
     timeout-minutes: 45
     concurrency:
@@ -50,13 +92,21 @@ jobs:
           - javascript-typescript
           - rust
     steps:
+      # A required context must still report on a PR that does not touch the
+      # language, so the job runs and its steps skip; the merge queue and
+      # `main` always analyse every language.
+      - name: nothing in this language changed
+        if: needs.changes.outputs[matrix.language] != 'true'
+        run: echo "no ${{ matrix.language }} change on this pull request; the merge queue analyses it"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: needs.changes.outputs[matrix.language] == 'true'
 
       # The Actions runtime bundles Node for action execution, but the
       # JavaScript/TypeScript extractor starts `node` from PATH. The
       # self-hosted base runner deliberately has no language runtimes.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        if: matrix.language == 'javascript-typescript'
+        if: matrix.language == 'javascript-typescript' && needs.changes.outputs[matrix.language] == 'true'
         with:
           node-version: "22"
 
@@ -65,6 +115,7 @@ jobs:
       # from the authoritative build/test jobs and avoids rebuilding the PWA
       # or engine only to extract source a second time.
       - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d
+        if: needs.changes.outputs[matrix.language] == 'true'
         with:
           languages: ${{ matrix.language }}
           build-mode: none
@@ -73,5 +124,6 @@ jobs:
           config-file: ./.github/codeql/codeql-config.yml
 
       - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d
+        if: needs.changes.outputs[matrix.language] == 'true'
         with:
           category: /language:${{ matrix.language }}
