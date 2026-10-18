@@ -103,6 +103,13 @@ def classify(
     if not alive:
         return Verdict("exited", f"its process ended ({activity})")
     if approval_question or activity == "awaiting-approval":
+        if approval_kind == "question" and approval_question:
+            # WI-1871: an agent's question menu (AskUserQuestion) waits on an
+            # answer just as a permission dialog does.
+            return Verdict(
+                "approval",
+                f"asking a question (answer with session_answer): {approval_question}",
+            )
         gate = GATES.get(approval_kind or "")
         if gate and approval_question:
             return Verdict(

@@ -414,3 +414,34 @@ def test_a_done_declaration_after_the_report_makes_it_stale(
     assert result.counts["needs_you"] == 0
     assert result.rows[0].blocked_stale
     assert result.rows[0].attention != "blocked"
+
+
+def test_a_question_menu_is_needs_you_with_its_options_in_the_digest(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1871: the engine reads an AskUserQuestion menu as kind=question."""
+    _, asking_engine = _start(wired)
+    engine.rows[asking_engine].update(
+        activity="awaiting-approval",
+        approval={
+            "question": "Which approach should the sweep fix take?",
+            "command_excerpt": "☐ Approach\nWhich approach should the sweep fix take?",
+            "kind": "question",
+            "options": [
+                {"number": 1, "label": "Narrow fix", "selected": True},
+                {"number": 2, "label": "Full rewrite"},
+            ],
+            "detected_at": "2026-10-18T00:00:00Z",
+        },
+    )
+
+    result = sweep_sessions(wired, SweepSessionsParams(attention=["needs_you"]))
+
+    assert result.counts["needs_you"] == 1
+    (row,) = result.rows
+    assert row.attention == "approval"
+    assert row.attention_reason.startswith("asking a question")
+    assert row.digest is not None
+    assert row.digest.question == "Which approach should the sweep fix take?"
+    assert row.digest.question_kind == "question"
+    assert row.digest.options == ["Narrow fix", "Full rewrite"]

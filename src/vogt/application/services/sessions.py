@@ -579,6 +579,7 @@ def _digest_of(
             value = value.model_dump(mode="json")
         extra[name] = value
     blocked = None if summary.blocked is None else summary.blocked.blocker
+    approval = summary.approval
     return SessionDigest(
         id=summary.id,
         name=summary.name,
@@ -594,6 +595,11 @@ def _digest_of(
         done_at=summary.done_at,
         last_reply_excerpt=_clip(summary.last_reply_excerpt),
         template=summary.template,
+        question=None if approval is None else approval.question,
+        question_kind=None if approval is None else approval.kind,
+        options=None
+        if approval is None or not approval.options
+        else [option.label for option in approval.options],
         budget=budget,
         extra=extra or None,
     )
