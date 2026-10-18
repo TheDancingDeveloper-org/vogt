@@ -75,7 +75,8 @@ class Profile(BaseModel):
     @field_validator("budget_turns_by_model")
     @classmethod
     def _positive_turns(cls, value: dict[str, int]) -> dict[str, int]:
-        return _positive(value)
+        _positive(value)
+        return value
 
     def turns_for(self, model: str | None) -> int | None:
         """The turn budget for a start that runs `model`."""
