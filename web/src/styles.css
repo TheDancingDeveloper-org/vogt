@@ -11778,6 +11778,25 @@ a.vogt-projects-tag:hover {
   .sessions-place:not(.has-workspace) .sessions-tools a { flex: 0 0 auto; display: inline-flex; align-items: center; height: 34px; padding: 0 14px; border-color: transparent; border-radius: 999px; background: var(--bg-elev); font-size: 13px; }
   .sessions-place:not(.has-workspace) .sessions-tools a[aria-current="page"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
   .sessions-place:not(.has-workspace) .sessions-overview { padding: 0 16px 20px; }
+  /* WI-1830: the waiting cards sit above the overview, and the overview used
+     to be the only scroller inside an `overflow: hidden` place. Two cards
+     squeezed it to nothing and were clipped themselves, so the list stayed
+     stuck until every waiting session was answered. On a phone the place
+     itself scrolls: cards and list are one column, and the list grows to its
+     content instead of keeping a scroller of its own. */
+  .sessions-place:not(.has-workspace) {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .sessions-place:not(.has-workspace) > .sessions-waiting,
+  .sessions-place:not(.has-workspace) > .sessions-place-body,
+  .sessions-place:not(.has-workspace) .sessions-active-workspace,
+  .sessions-place:not(.has-workspace) .sessions-overview {
+    flex: 1 0 auto;
+    min-height: auto;
+    overflow: visible;
+  }
+  .sessions-place:not(.has-workspace) > .sessions-waiting { flex: 0 0 auto; }
   .sessions-overview-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 18px 0 8px; }
   .sessions-overview-heading {
     margin: 0;
@@ -11832,7 +11851,9 @@ a.vogt-projects-tag:hover {
   .session-waiting-identity { display: flex; flex-direction: column; gap: 2px; }
   .session-waiting-identity strong { color: var(--fg-bright); font-size: 16px; font-weight: 600; }
   .session-waiting-context { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .session-waiting-tail { max-height: 150px; padding: 10px 12px; border-radius: 10px; background: var(--term-bg); font-size: 12px; line-height: 1.55; }
+  /* A read-only snapshot of the last few lines, not a scroller: a swipe that
+     starts on it scrolls the page, never a box nested inside the card. */
+  .session-waiting-tail { max-height: none; overflow: hidden; padding: 10px 12px; border-radius: 10px; background: var(--term-bg); font-size: 12px; line-height: 1.55; touch-action: pan-y; }
   .session-waiting-acts { display: grid; grid-template-columns: 1fr 1fr; }
   .session-waiting-acts button { min-height: 46px; border-radius: 10px; font-size: 15px; font-weight: 600; }
   .session-waiting-acts button:first-child { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
