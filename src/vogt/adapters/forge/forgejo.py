@@ -419,6 +419,8 @@ class ForgejoProvider:
                 updated_at=item.get("updated_at"),
                 closed_at=item.get("closed_at"),
                 source_url=item.get("html_url"),
+                merged_at=item.get("merged_at"),
+                merged_by=_login(item.get("merged_by")),
             )
             for item in _as_list(payloads)
         ]

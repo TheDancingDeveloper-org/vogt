@@ -308,6 +308,8 @@ class ForgePullsCollector(_ForgeSyncCollector):
                 "implements": _implements(provider, ref, item),
                 "updated_at": item.updated_at,
                 "closed_at": item.closed_at,
+                "merged_at": item.merged_at,
+                "merged_by": item.merged_by,
                 "repo": ref.slug,
             },
         )

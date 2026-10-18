@@ -141,6 +141,10 @@ class ForgePull:
     updated_at: str | None = None
     closed_at: str | None = None
     source_url: str | None = None
+    #: When and by whom a merged PR merged (WI-1835). `None` when the forge's
+    #: payload does not carry them; GitHub's list page omits `merged_by`.
+    merged_at: str | None = None
+    merged_by: str | None = None
 
 
 @dataclass(frozen=True)
