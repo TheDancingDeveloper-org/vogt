@@ -13,11 +13,16 @@ back the next launch gets its credentials.
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import signal
+import socket
 import subprocess
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -44,8 +49,14 @@ class _Fake(BaseHTTPRequestHandler):
     """Infisical's bulk read and the engine's launch-report route, together."""
 
     reports: ClassVar[list[dict[str, Any]]] = []
+    # The API answers the login but a project read hangs: Infisical up, its
+    # Redis or Postgres down.
+    reads_hang: ClassVar[bool] = False
 
     def do_GET(self) -> None:
+        if _Fake.reads_hang:
+            time.sleep(8)
+            return
         body = json.dumps(
             {"secrets": [{"secretKey": "ALPHA", "secretValue": "alpha-value"}]}
         ).encode()
@@ -67,7 +78,8 @@ class _Fake(BaseHTTPRequestHandler):
 @pytest.fixture
 def server() -> Any:
     _Fake.reports = []
-    srv = HTTPServer(("127.0.0.1", 0), _Fake)
+    _Fake.reads_hang = False
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Fake)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -80,7 +92,12 @@ def _bin(tmp_path: Path, *, infisical_up: bool) -> Path:
     cli = bindir / "infisical"
     # Down: login hangs, as it did against an Infisical with no Redis.
     login = "printf tok-123" if infisical_up else "sleep 30"
-    cli.write_text(f"#!/bin/sh\nexec {login}\n", encoding="utf-8")
+    # Every CLI call is recorded; a per-secret read (`secrets get`) hangs too.
+    cli.write_text(
+        f'#!/bin/sh\necho "$1" >> {tmp_path}/cli-calls\n'
+        f'[ "$1" = login ] && exec {login}\nexec sleep 30\n',
+        encoding="utf-8",
+    )
     cli.chmod(0o755)
     boot = bindir / "vogt-mcp-bootstrap"
     boot.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -89,7 +106,12 @@ def _bin(tmp_path: Path, *, infisical_up: bool) -> Path:
 
 
 def _launch(
-    server: str, tmp_path: Path, *, infisical_up: bool, identity: bool = True
+    server: str,
+    tmp_path: Path,
+    *,
+    infisical_up: bool,
+    identity: bool = True,
+    manifest: str = "ALPHA proj-a ALPHA\nLATER proj-a LATER ondemand",
 ) -> subprocess.CompletedProcess[str]:
     bindir = _bin(tmp_path, infisical_up=infisical_up)
     env = {
@@ -98,7 +120,8 @@ def _launch(
         "TMPDIR": str(tmp_path),
         "VOGT_MCP_BOOTSTRAP": str(bindir / "vogt-mcp-bootstrap"),
         "ENGINE_AGENT_AUTH_TIMEOUT": "1",
-        "ENGINE_AGENT_AUTH_SECRETS": "ALPHA proj-a ALPHA\nLATER proj-a LATER ondemand",
+        "ENGINE_AGENT_AUTH_SECRETS": manifest,
+        "ENGINE_AGENT_AUTH_LAUNCH_BUDGET": "3",
         "VOGT_ENGINE_BROKER_URL": server,
         "VOGT_ENGINE_BROKER_TOKEN": "broker-tok",
     }
@@ -142,6 +165,29 @@ def test_infisical_down_the_session_still_launches_without_credentials(
     assert "timed out" in _Fake.reports[0]["error"]
 
 
+def test_hung_reads_are_not_retried_secret_by_secret(
+    server: str, tmp_path: Path
+) -> None:
+    _Fake.reads_hang = True
+    manifest = "\n".join(
+        [f"A{i} proj-a A{i}" for i in range(8)]
+        + [f"B{i} proj-b B{i}" for i in range(8)]
+    )
+    started = time.monotonic()
+    proc = _launch(server, tmp_path, infisical_up=True, manifest=manifest)
+    took = time.monotonic() - started
+
+    assert proc.returncode == 0, proc.stderr
+    # One budget for the whole launch, not 10 s per secret (WI-1812 review).
+    assert took < 8, f"16 hung reads must share one budget, took {took:.1f}s"
+    calls = (tmp_path / "cli-calls").read_text(encoding="utf-8").split()
+    assert calls == ["login"], "no per-secret CLI fallback after an unanswered read"
+    env = _env(proc.stdout)
+    assert env["AGENT_AUTH_GRANTED"] == ""
+    assert "did not answer" in env["AGENT_AUTH_UNAVAILABLE"]
+    assert [r["outcome"] for r in _Fake.reports] == ["degraded"]
+
+
 def test_no_identity_at_all_still_launches(server: str, tmp_path: Path) -> None:
     proc = _launch(server, tmp_path, infisical_up=False, identity=False)
     assert proc.returncode == 0, proc.stderr
@@ -164,9 +210,72 @@ def test_once_infisical_recovers_the_next_launch_gets_credentials(
     assert [r["outcome"] for r in _Fake.reports] == ["degraded", "ok"]
 
 
-def test_the_engine_start_path_never_waits_on_agent_auth() -> None:
+ENGINE_BIN = ROOT / "engine" / "target" / "debug" / "vogt-engine"
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@pytest.mark.skipif(
+    not ENGINE_BIN.exists(),
+    reason="needs the engine built (cargo build -p vogt-engine-server)",
+)
+def test_the_engine_is_ready_while_agent_auth_hangs(tmp_path: Path) -> None:
+    """Run the real entrypoint and the real engine with agent auth required
+    and the helper hanging, as against an Infisical with no Redis: the engine
+    must still bind and pass /readyz in its normal time."""
+    helper = tmp_path / "hung-helper"
+    helper.write_text("#!/bin/sh\nexec sleep 300\n", encoding="utf-8")
+    helper.chmod(0o755)
+    (tmp_path / "Working").mkdir()
+    port = _free_port()
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "VOGT_ENGINE_BIN": str(ENGINE_BIN),
+        "ENGINE_TOKEN": "t" * 40,
+        "ENGINE_BIND": f"127.0.0.1:{port}",
+        "ENGINE_AGENT_AUTH_HELPER": str(helper),
+        "ENGINE_AGENT_AUTH_REQUIRED": "1",
+        "ENGINE_AGENT_POLICY_HOOK": "0",
+        "ENGINE_AGENT_CONVERSATION_HOOK": "0",
+        "ENGINE_CARGO_CACHE_PERSIST": "0",
+    }
+    log = (tmp_path / "entrypoint.log").open("w")
+    proc = subprocess.Popen(
+        ["bash", str(ENTRYPOINT)],
+        env=env,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        started = time.monotonic()
+        ready = None
+        while time.monotonic() - started < 20 and proc.poll() is None:
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/readyz", timeout=1
+                ) as response:
+                    ready = response.status
+                    break
+            except (OSError, urllib.error.URLError):
+                time.sleep(0.2)
+        output = (tmp_path / "entrypoint.log").read_text(encoding="utf-8")
+        assert proc.poll() is None, f"the container exited:\n{output}"
+        assert ready == 200, f"/readyz not ready while agent auth hangs:\n{output}"
+        assert "the engine does not wait for it" in output
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        log.close()
+
+
+def test_the_entrypoint_has_no_exit_on_agent_auth() -> None:
     text = ENTRYPOINT.read_text(encoding="utf-8")
     end = text.index('if [[ "${START_SWAY')
     block = text[text.index('agent_auth_required="') : end]
     assert "exit 1" not in block, "agent auth must never stop the engine starting"
-    assert ") </dev/null &" in block, "the boot check runs in the background"
