@@ -2950,6 +2950,56 @@ def test_a_session_start_records_the_starters_engine_role(
     assert summary["started_by_session"] == ENGINE_SESSION
 
 
+def test_a_resumed_oversight_on_the_pod_token_keeps_its_starts(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1852: oversight resumed by hand runs on the pod token, so its
+    starts had no starter and its ownership filter lost them. The bridge's
+    claimed engine session counts once the engine vouches it is oversight."""
+    pod = dataclasses.replace(
+        _as(wired, "agent:pod:vogt-prod"), claimed_engine_session=ENGINE_SESSION
+    )
+    engine.roles[ENGINE_SESSION] = "oversight"
+    result = start_session(pod, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert result.session.started_by_session == ENGINE_SESSION
+    assert result.session.started_by_kind == "oversight"
+    owned = list_sessions(
+        wired, ListSessionsParams(mode="full", started_by_session=ENGINE_SESSION)
+    ).sessions
+    assert [row.id for row in owned] == [result.session.id]
+
+
+@pytest.mark.parametrize(
+    ("actor", "role"),
+    [
+        # A worker's claim is not oversight's.
+        ("agent:pod:vogt-prod", "worker"),
+        # Only the pod token may claim; any other agent has its own identity
+        # or none, and naming a session does not lend it one.
+        ("agent:someone-else", "oversight"),
+    ],
+)
+def test_a_claimed_engine_session_is_ignored_unless_vouched_for(
+    wired: AppContext, engine: StandInEngine, actor: str, role: str
+) -> None:
+    engine.roles[ENGINE_SESSION] = role
+    ctx = dataclasses.replace(_as(wired, actor), claimed_engine_session=ENGINE_SESSION)
+    result = start_session(ctx, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert result.session.started_by_session is None
+    assert result.session.started_by_kind is None
+
+
+def test_an_unknown_claimed_engine_session_is_ignored(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    ctx = dataclasses.replace(
+        _as(wired, "agent:pod:vogt-prod"),
+        claimed_engine_session="11111111-2222-4333-8444-555555555555",
+    )
+    result = start_session(ctx, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert result.session.started_by_session is None
+
+
 def test_a_vogt_started_session_is_named_by_its_engine_id(
     wired: AppContext, engine: StandInEngine
 ) -> None:
