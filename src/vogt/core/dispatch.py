@@ -80,8 +80,19 @@ class Profile(BaseModel):
 
     def turns_for(self, model: str | None) -> int | None:
         """The turn budget for a start that runs `model`."""
-        if model is not None and model in self.budget_turns_by_model:
+        if model is None:
+            return self.budget_turns
+        if model in self.budget_turns_by_model:
             return self.budget_turns_by_model[model]
+        # A family name matches the model ids that carry it: `haiku` sizes
+        # `claude-haiku-4-5-20251001` too. The longest matching key wins.
+        family = [
+            key
+            for key in self.budget_turns_by_model
+            if key in model.split("-") or model.startswith(f"{key}-")
+        ]
+        if family:
+            return self.budget_turns_by_model[max(family, key=len)]
         return self.budget_turns
 
 

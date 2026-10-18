@@ -43,6 +43,7 @@ class BudgetEngine(StandInEngine):
     def __init__(self) -> None:
         super().__init__()
         self.stopped: dict[str, str] = {}
+        self.budgets: dict[str, dict[str, int]] = {}
 
     def stop_at_budget(self, engine_id: str, cwd: str = ROOT) -> None:
         self.alive.pop(engine_id, None)
@@ -65,6 +66,7 @@ class BudgetEngine(StandInEngine):
                     "activity": "hibernated",
                     "cwd": cwd,
                     "alive": False,
+                    "budget": self.budgets.get(key),
                     "hibernation": {
                         "at": "2026-10-18T00:00:00Z",
                         "trigger": "budget",
@@ -212,3 +214,38 @@ def test_a_purpose_start_on_haiku_gets_the_larger_budget(instance: AppContext) -
         ),
     )
     assert engine.last_spec["budget"]["turns"] == 200
+
+
+def test_a_purpose_started_session_restarts_on_its_own_model_and_budget(
+    instance: AppContext,
+) -> None:
+    engine = BudgetEngine()
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    register_project(
+        ctx, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    item = native_work_item(ctx, title="Haiku loop", project="vogt")
+    start_session(
+        ctx,
+        StartSessionParams(
+            work_item=item.ref,
+            purpose="implement",
+            model="haiku",
+            effort="high",
+            task="loop on CI",
+            reason=WHY,
+        ),
+    )
+    engine.budgets["eng-1"] = {"turns": 200, "wall_clock_minutes": 90}
+    engine.stop_at_budget("eng-1")
+
+    settled = settle_budget_stops(ctx)
+
+    assert settled.restarted == [item.ref]
+    spec = engine.last_spec
+    assert spec["budget"] == {"turns": 200, "wall_clock_minutes": 90}
+    assert spec.get("model") == "haiku"
+    assert spec.get("effort") == "high"
