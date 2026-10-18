@@ -2887,3 +2887,66 @@ def test_session_list_fields_accept_a_comma_separated_string() -> None:
 def test_a_purpose_outside_the_six_is_refused() -> None:
     with pytest.raises(ValidationError):
         StartSessionParams(work_item="WI-1", purpose="anything", reason=WHY)  # type: ignore[arg-type]
+
+
+def _push_only_landing() -> AgentPolicy:
+    from vogt.core.entities import LandingPolicy
+
+    return AgentPolicy(
+        landing=LandingPolicy(
+            base_branch="main",
+            worker_lands_by="push_branch",
+            merge_by="oversight",
+            merge_mode="rebase",
+        )
+    )
+
+
+def test_a_task_asking_for_a_pr_on_a_push_only_project_is_overridden(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1832: the policy wins, the brief says so, the start result shows it."""
+    update_project(
+        wired,
+        UpdateProjectParams(slug="vogt", agent_policy=_push_only_landing(), reason=WHY),
+    )
+    item = native_work_item(wired, title="land me", project="vogt")
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item=item.ref,
+            reason=WHY,
+            task="Fix it, then open a PR against main.",
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    assert "## Policy overrides task" in brief
+    assert "Policy overrides task: push only." in brief
+    assert brief.index("## Policy overrides task") < brief.index("## Task")
+    policy = result.effective_policy
+    assert policy is not None
+    assert policy.lands_by == "push_branch"
+    assert policy.base_branch == "main"
+    assert len(policy.overrides) == 1
+    assert policy.overrides[0].startswith("Policy overrides task: push only.")
+
+
+def test_a_task_that_agrees_with_the_policy_adds_no_override(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    update_project(
+        wired,
+        UpdateProjectParams(slug="vogt", agent_policy=_push_only_landing(), reason=WHY),
+    )
+    item = native_work_item(wired, title="land me", project="vogt")
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item=item.ref,
+            reason=WHY,
+            task="Open NO PR, push the branch only. Never merge or deploy.",
+        ),
+    )
+    assert "Policy overrides task" not in engine.last_spec["prompt"]
+    assert result.effective_policy is not None
+    assert result.effective_policy.overrides == []

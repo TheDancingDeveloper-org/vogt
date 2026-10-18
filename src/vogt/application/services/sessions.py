@@ -55,6 +55,7 @@ from vogt.application.models import (
     BindSessionWorkResult,
     CommitForSessionParams,
     CommitForSessionResult,
+    EffectivePolicy,
     EngineSessionTokenParams,
     EngineSessionTokenResult,
     HibernateSessionParams,
@@ -123,6 +124,10 @@ from vogt.application.services._brief import (
     brief_for_work_item,
     review_brief_for_work_item,
 )
+from vogt.application.services._policy_conflicts import (
+    overrides_section,
+    task_policy_conflicts,
+)
 from vogt.application.services.preferences import dispatch_settings
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
@@ -134,6 +139,7 @@ from vogt.core.entities import (
     Actor,
     AgentPolicy,
     CodingSession,
+    LandingPolicy,
     Project,
     Token,
     WorkItem,
@@ -301,6 +307,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 cwd=subject.cwd,
                 autopilot=autopilot,
                 read_only=read_only,
+                landing=subject.policy.landing,
             ),
             companion=subject.brief.companion,
             model=params.model,
@@ -412,7 +419,8 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         )
         return WriteOutcome(
             result=SessionResult(
-                session=_summarize(txn, session, engine_session=started)
+                session=_summarize(txn, session, engine_session=started),
+                effective_policy=_effective_policy(subject.policy, params.task),
             ),
             entity_kind="session",
             entity_id=session.id,
@@ -3522,6 +3530,25 @@ def _engine(ctx: AppContext) -> EngineClient:
     return ctx.engine
 
 
+def _effective_policy(policy: AgentPolicy, task: str | None) -> EffectivePolicy | None:
+    """The landing rule a started worker runs under, and what it overrode.
+
+    Returned on `session.start` so the caller sees, before the worker runs,
+    that its task said one thing and the policy another (WI-1832).
+    """
+    landing = policy.landing
+    if landing is None:
+        return None
+    return EffectivePolicy(
+        base_branch=landing.base_branch,
+        lands_by=landing.worker_lands_by,
+        merge_by=landing.merge_by,
+        merge_mode=landing.merge_mode,
+        deploy_by=landing.deploy_by,
+        overrides=task_policy_conflicts(task or "", landing),
+    )
+
+
 def _brief_with_task(
     brief: ComposedBrief,
     params: StartSessionParams,
@@ -3529,6 +3556,7 @@ def _brief_with_task(
     cwd: str,
     autopilot: bool = False,
     read_only: bool = False,
+    landing: LandingPolicy | None = None,
 ) -> str:
     """Fold an explicit task, and its touch points, into the session's brief.
 
@@ -3554,6 +3582,12 @@ def _brief_with_task(
         # task would read as new work to go and do. It is recorded under the
         # review instead, as what the review was asked to look at.
         heading = "## Also asked" if params.review_of is not None else "## Task"
+        # Where the task contradicts the landing rule the policy wins, and
+        # the brief says so above the task rather than leaving the worker
+        # two instructions to choose between (WI-1832).
+        overrides = overrides_section(task_policy_conflicts(task, landing))
+        if overrides:
+            text = f"{text.rstrip()}\n\n{overrides}"
         text = f"{text.rstrip()}\n\n{heading}\n\n{task}\n"
     if touch:
         text = f"{text.rstrip()}\n\n{touch}"

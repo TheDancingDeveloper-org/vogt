@@ -4915,9 +4915,34 @@ class ListSessionsParams(Params):
         return None if value is None else value.strip()
 
 
+class EffectivePolicy(Result):
+    """The landing rule a started session runs under (WI-1832)."""
+
+    base_branch: str
+    lands_by: str
+    merge_by: str
+    merge_mode: str
+    deploy_by: str
+    overrides: list[str] = Field(
+        default=[],
+        description=(
+            "Where the task contradicted this policy, one line per axis (PR "
+            "vs push only, merge, base branch, deploy). The policy wins and "
+            "the brief says so; empty when the task agreed or set none."
+        ),
+    )
+
+
 class SessionResult(Result):
     session: SessionSummary
     digest: SessionDigest | None = None
+    effective_policy: EffectivePolicy | None = Field(
+        default=None,
+        description=(
+            "On `session.start` for a project with a landing rule: the rule "
+            "the worker runs under and any task lines it overrode."
+        ),
+    )
 
 
 class SessionListResult(Result):
