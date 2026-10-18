@@ -29,6 +29,14 @@
 //! other, and is nudged like one (WI-1090): it says it is in its goal loop in
 //! its title (`klaudia: goal-loop`) or, on older builds, in its status bar.
 //!
+//! Nor is a session whose model API refuses every turn (WI-1852): an agent
+//! whose provider answers a client error — `400 Invalid model name`, a
+//! rejected key — sits at its prompt exactly like one that finished a turn,
+//! and nudging it only repeats the refusal. When a nudged session's screen
+//! still ends on a 4xx error, it is reported blocked and its autopilot
+//! switched off, so it surfaces as failed rather than idle. A 408 or 429 is
+//! transient and is nudged as usual.
+//!
 //! Nor is a session whose budget watcher holds it: a warning or a hard stop is
 //! due and waits for the prompt, and a nudge would start the next turn first.
 //!
@@ -87,6 +95,39 @@ pub fn says_done(lines: &[String]) -> bool {
         .any(|l| l.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()) == DONE_MARKER)
 }
 
+/// A model API client error near the bottom of the screen: a line, among
+/// the last ten that are not blank, naming an error with a 4xx status, or
+/// litellm's own name for one. 408 (timeout) and 429 (rate limit) pass by
+/// and are not counted: waiting fixes them, a person does not need to.
+pub fn api_client_error(lines: &[String]) -> Option<String> {
+    static STATUS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)\b(?:api\s*error|error|status(?:\s*code)?|http)\b\D{0,24}\b(4\d\d)\b",
+        )
+        .expect("static regex")
+    });
+    static NAMED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)\b(?:BadRequestError|AuthenticationError|PermissionDeniedError|NotFoundError|Invalid model name)\b",
+        )
+        .expect("static regex")
+    });
+    lines
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .take(10)
+        .find(|l| {
+            let status = STATUS
+                .captures(l)
+                .and_then(|c| c.get(1))
+                .is_some_and(|m| !matches!(m.as_str(), "408" | "429"));
+            status || NAMED.is_match(l)
+        })
+        .map(|l| l.chars().take(200).collect())
+}
+
 /// What one tick decides for one session.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
@@ -94,6 +135,8 @@ pub enum Step {
     Nudge,
     Done,
     Capped,
+    /// Nudged, and its model API still refused the turn (WI-1852).
+    Refused,
 }
 
 /// What one session showed, as [`decide`] weighs it.
@@ -106,6 +149,8 @@ pub struct Seen {
     pub done: bool,
     /// The agent's own loop is driving it (Klaudia's goal loop).
     pub own_loop: bool,
+    /// The screen ends on a model API client error ([`api_client_error`]).
+    pub api_error: bool,
     pub nudges: u32,
 }
 
@@ -118,6 +163,7 @@ pub fn decide(policy: &Policy, seen: Seen) -> Step {
         ready,
         done,
         own_loop,
+        api_error,
         nudges,
     } = seen;
     if done {
@@ -135,10 +181,32 @@ pub fn decide(policy: &Policy, seen: Seen) -> Step {
     if !ready || quiet_for < policy.nudge_after {
         return Step::Leave;
     }
+    // The first error may be the brief's own turn going wrong once; after a
+    // nudge it is the same refusal again, and another nudge would be a third.
+    if api_error && nudges >= 1 {
+        return Step::Refused;
+    }
     if nudges >= policy.max_nudges {
         return Step::Capped;
     }
     Step::Nudge
+}
+
+/// Why a session whose model API keeps refusing needs a person.
+fn refused_report(line: &str) -> vogt_engine_contract::BlockedReport {
+    vogt_engine_contract::BlockedReport {
+        reason: format!(
+            "the agent's model API refused the turn again after an autopilot nudge: {line}"
+        ),
+        items: vec![
+            "check the session's template and model (a Claude alias on a non-Claude \
+             template is refused), then restart it or stop it"
+                .to_string(),
+        ],
+        since: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
+    }
 }
 
 /// Why a session that has used its nudges needs a person.
@@ -189,6 +257,7 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
         };
         let own_loop =
             agent == "klaudia" && screen::klaudia_goal_loop(view.title.as_deref(), &view.lines);
+        let api_error = api_client_error(&view.lines);
         let step = decide(
             policy,
             Seen {
@@ -198,6 +267,7 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
                 ready: view.ready,
                 done: says_done(&view.lines),
                 own_loop,
+                api_error: api_error.is_some(),
                 nudges: session.autopilot_nudges(),
             },
         );
@@ -241,6 +311,23 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
                     nudges,
                     event = "autopilot.capped",
                     "autopilot nudge cap reached; autopilot off, needs a person"
+                );
+            }
+            Step::Refused => {
+                let line = api_error.unwrap_or_default();
+                let _ = registry.set_autopilot(session.id, false);
+                if let Err(e) = session.set_blocked(Some(refused_report(&line)), bus) {
+                    tracing::warn!(
+                        session = %session.id,
+                        error = %e,
+                        "could not report an autopilot session blocked on a refused model call"
+                    );
+                }
+                tracing::warn!(
+                    session = %session.id,
+                    agent = %agent,
+                    event = "autopilot.refused",
+                    "model API refused the turn again after a nudge; autopilot off, reported blocked"
                 );
             }
             Step::Nudge => {
@@ -338,6 +425,7 @@ mod tests {
                     ready,
                     done,
                     own_loop: false,
+                    api_error: false,
                     nudges,
                 },
             )
@@ -413,6 +501,7 @@ mod tests {
                     ready: is_ready(activity, true, lines, Some("klaudia"), title),
                     done: says_done(lines),
                     own_loop: klaudia_goal_loop(title, lines),
+                    api_error: false,
                     nudges: 0,
                 },
             )
@@ -474,5 +563,39 @@ mod tests {
         let mut done = frames::idle();
         done.insert(3, "AUTOPILOT: DONE".to_string());
         assert_eq!(step(ActivityState::Idle, &done, None), Step::Done);
+    }
+
+    /// WI-1852: a provider refusing every turn is reported, not nudged forever.
+    #[test]
+    fn a_repeated_model_api_client_error_is_refused_not_nudged() {
+        let klaudia = lines(&[
+            "▣ Build · opus",
+            "litellm.BadRequestError: Invalid model name passed in model=opus",
+            "",
+            "┃ > ",
+        ]);
+        assert!(api_client_error(&klaudia).is_some());
+        let claude = lines(&["⏺ API Error: 400 {\"type\":\"error\"}", "│ > "]);
+        assert!(api_client_error(&claude).unwrap().contains("400"));
+        assert!(api_client_error(&lines(&["API Error: 429 rate limited"])).is_none());
+        assert!(api_client_error(&lines(&["Error: 408 request timeout"])).is_none());
+        assert!(api_client_error(&lines(&["Fixed the 404 page in 3 files"])).is_none());
+        assert!(api_client_error(&lines(&["Wrote 412 lines", "│ > "])).is_none());
+
+        let policy = Policy::default();
+        let seen = |api_error, nudges| Seen {
+            activity: ActivityState::Idle,
+            blocked: false,
+            quiet_for: policy.nudge_after + Duration::from_secs(1),
+            ready: true,
+            done: false,
+            own_loop: false,
+            api_error,
+            nudges,
+        };
+        // The first refusal earns one nudge; the second is reported.
+        assert_eq!(decide(&policy, seen(true, 0)), Step::Nudge);
+        assert_eq!(decide(&policy, seen(true, 1)), Step::Refused);
+        assert_eq!(decide(&policy, seen(false, 1)), Step::Nudge);
     }
 }
