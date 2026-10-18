@@ -2950,3 +2950,141 @@ def test_a_task_that_agrees_with_the_policy_adds_no_override(
     assert "Policy overrides task" not in engine.last_spec["prompt"]
     assert result.effective_policy is not None
     assert result.effective_policy.overrides == []
+
+
+def _rust_core_landing(**landing: Any) -> AgentPolicy:
+    from vogt.core.entities import LandingPolicy
+
+    return AgentPolicy(
+        base_branch="main",
+        landing=LandingPolicy(
+            base_branch="main",
+            worker_lands_by="push_branch",
+            merge_by="oversight",
+            merge_mode="rebase",
+            **landing,
+        ),
+    )
+
+
+def test_an_initiative_base_replaces_the_project_base(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1841: the Rust port's items cut from and land onto `rust-core`."""
+    from vogt.application.models import CreateInitiativeParams
+    from vogt.application.services import create_initiative
+
+    create_initiative(wired, CreateInitiativeParams(title="Rust port", reason=WHY))
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=_rust_core_landing(
+                initiative_bases={"rust-port": "rust-core"}
+            ),
+            reason=WHY,
+        ),
+    )
+    item = native_work_item(
+        wired, title="port it", project="vogt", initiative="rust-port"
+    )
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item=item.ref,
+            reason=WHY,
+            worktree=True,
+            task="Cut a branch from rust-core and land it onto rust-core.",
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    assert "Policy overrides task" not in brief
+    assert "**Base** `rust-core`" in brief
+    assert engine.last_spec["worktree"]["base_ref"] == "rust-core"
+    policy = result.effective_policy
+    assert policy is not None
+    assert policy.base_branch == "rust-core"
+    assert policy.overrides == []
+
+
+def test_a_task_naming_a_known_long_lived_branch_is_taken_at_its_word(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=_rust_core_landing(long_lived_branches=["rust-core"]),
+            reason=WHY,
+        ),
+    )
+    item = native_work_item(wired, title="port it", project="vogt")
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item=item.ref, reason=WHY, task="Branch off rust-core and fix it."
+        ),
+    )
+    assert result.effective_policy is not None
+    assert result.effective_policy.base_branch == "rust-core"
+    assert result.effective_policy.overrides == []
+    assert "**Base** `rust-core`" in engine.last_spec["prompt"]
+
+
+def test_an_unknown_base_in_a_task_is_still_overridden(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=_rust_core_landing(long_lived_branches=["rust-core"]),
+            reason=WHY,
+        ),
+    )
+    item = native_work_item(wired, title="port it", project="vogt")
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item=item.ref, reason=WHY, task="Branch off develop and fix it."
+        ),
+    )
+    assert result.effective_policy is not None
+    assert result.effective_policy.base_branch == "main"
+    assert any("base `main`" in line for line in result.effective_policy.overrides)
+
+
+@pytest.mark.parametrize(
+    ("role", "purpose", "overridden"),
+    [
+        ("oversight", "mechanical", False),
+        ("oversight", "implement", True),
+        ("worker", "mechanical", True),
+    ],
+)
+def test_oversight_landing_work_is_not_told_not_to_merge(
+    wired: AppContext,
+    engine: StandInEngine,
+    role: str,
+    purpose: Literal["mechanical", "implement"],
+    overridden: bool,
+) -> None:
+    """WI-1841: where oversight merges, its own landing task keeps its merge."""
+    update_project(
+        wired,
+        UpdateProjectParams(slug="vogt", agent_policy=_push_only_landing(), reason=WHY),
+    )
+    item = native_work_item(wired, title="land me", project="vogt")
+    engine.roles[ENGINE_SESSION] = role
+    result = start_session(
+        _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+        StartSessionParams(
+            work_item=item.ref,
+            purpose=purpose,
+            reason=WHY,
+            task="Rebase the branch, then merge it into main.",
+        ),
+    )
+    assert result.effective_policy is not None
+    merged = any("do not merge" in line for line in result.effective_policy.overrides)
+    assert merged is overridden

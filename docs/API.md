@@ -709,11 +709,19 @@ fits in context.
   `landing` (`base_branch`, `branch_pattern` with `{n}` for the work item
   number, `worker_lands_by` of `push_branch` or `open_pr`, `merge_by` of
   `oversight` or `operator`, `merge_mode` of `fast_forward` or `rebase`,
-  `linear_history`, `deploy_by`), `review` (`template`, `model`, `effort`,
+  `linear_history`, `deploy_by`, `initiative_bases`, `long_lived_branches`),
+  `review` (`template`, `model`, `effort`,
   `never_models`, `budget_turns`) and `verification` (`required_for_done`,
   `lanes`). `branch_pattern` must compile as a regex once `{n}` is a number,
   and `merge_mode` of `merge` is refused; both refusals name the field.
   `project.get` returns the blocks as stored. Nothing enforces them yet.
+  `initiative_bases` maps an initiative id or slug to the base its items cut
+  from and land onto (the Rust port on `rust-core`), and a session start's
+  task that names a branch from `long_lived_branches` (or an initiative base)
+  as its base is taken at its word. The brief, the worktree's `base_ref` and
+  `session.start`'s `effective_policy` all carry the resolved base. An
+  oversight session's own `mechanical` start, on a project where oversight
+  merges, is not told "do not merge".
 
 ## Deploy diagnostics
 

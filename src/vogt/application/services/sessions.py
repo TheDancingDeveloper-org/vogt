@@ -126,6 +126,7 @@ from vogt.application.services._brief import (
 )
 from vogt.application.services._policy_conflicts import (
     overrides_section,
+    task_named_base,
     task_policy_conflicts,
 )
 from vogt.application.services.claims import check_claim, record_claim_check
@@ -282,6 +283,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     subject = _subject(ctx, params, session_id)
     if params.cwd:
         subject.cwd = _existing_worktree_cwd(params.cwd, subject.cwd)
+    caller_merges = _caller_merges(subject.policy, params, started_by_kind)
     actor_ref = f"agent:session:{session_id}"
     session_scopes = _session_scopes(ctx)
     credential = issue(session_scopes)
@@ -309,6 +311,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 autopilot=autopilot,
                 read_only=read_only,
                 landing=subject.policy.landing,
+                caller_merges=caller_merges,
             ),
             companion=subject.brief.companion,
             model=params.model,
@@ -421,7 +424,9 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         return WriteOutcome(
             result=SessionResult(
                 session=_summarize(txn, session, engine_session=started),
-                effective_policy=_effective_policy(subject.policy, params.task),
+                effective_policy=_effective_policy(
+                    subject.policy, params.task, caller_merges=caller_merges
+                ),
             ),
             entity_kind="session",
             entity_id=session.id,
@@ -3609,6 +3614,7 @@ def _resolve_subject(
         if project is None:  # pragma: no cover - foreign key guarantees this
             msg = f"work item {item.ref} references a project that is gone"
             raise NotFound(msg)
+        project = _with_item_base(view, project, item, params.task)
         return _Subject(
             project_id=project.id,
             project_slug=project.slug,
@@ -3625,6 +3631,7 @@ def _resolve_subject(
         )
 
     project = _resolve.project(view, params.project or "")
+    project = _with_item_base(view, project, None, params.task)
     return _Subject(
         project_id=project.id,
         project_slug=project.slug,
@@ -3633,6 +3640,42 @@ def _resolve_subject(
         brief=brief_for_project(view, project.slug, session_id, project=project),
         policy=project.agent_policy,
     )
+
+
+def _with_item_base(
+    view: ReadView, project: Project, item: WorkItem | None, task: str | None
+) -> Project:
+    """The project as this start sees it: its policy on the item's base.
+
+    A project's landing rule names one base, but a long-lived integration
+    line — the Rust port on `rust-core` — has its own (WI-1841). The
+    initiative's base applies to its items, and a task that names a known
+    long-lived branch as its base is taken at its word. The brief, the
+    worktree and the conflict check all read the result, so they agree.
+    """
+    policy = project.agent_policy
+    landing = policy.landing
+    if landing is None:
+        return project
+    base = landing.base_branch
+    if item is not None and item.initiative_id is not None:
+        keys = [item.initiative_id]
+        initiative = view.initiative_by_id(item.initiative_id)
+        if initiative is not None:
+            keys.append(initiative.slug)
+        base = next(
+            (
+                landing.initiative_bases[key]
+                for key in keys
+                if key in landing.initiative_bases
+            ),
+            base,
+        )
+    base = task_named_base(task or "", landing) or base
+    resolved = policy.with_base(base)
+    if resolved is policy:
+        return project
+    return project.model_copy(update={"agent_policy": resolved})
 
 
 def _record_declared_branch(
@@ -3677,7 +3720,29 @@ def _engine(ctx: AppContext) -> EngineClient:
     return ctx.engine
 
 
-def _effective_policy(policy: AgentPolicy, task: str | None) -> EffectivePolicy | None:
+def _caller_merges(
+    policy: AgentPolicy,
+    params: StartSessionParams,
+    started_by_kind: str | None,
+) -> bool:
+    """Whether this start is oversight's own landing work (WI-1841).
+
+    On a project where oversight merges, an oversight session that starts a
+    mechanical session to land a branch is doing what the policy says; its
+    "merge" is not overridden to "do not merge".
+    """
+    landing = policy.landing
+    return (
+        landing is not None
+        and landing.merge_by == "oversight"
+        and started_by_kind == "oversight"
+        and params.purpose == "mechanical"
+    )
+
+
+def _effective_policy(
+    policy: AgentPolicy, task: str | None, *, caller_merges: bool = False
+) -> EffectivePolicy | None:
     """The landing rule a started worker runs under, and what it overrode.
 
     Returned on `session.start` so the caller sees, before the worker runs,
@@ -3692,7 +3757,9 @@ def _effective_policy(policy: AgentPolicy, task: str | None) -> EffectivePolicy 
         merge_by=landing.merge_by,
         merge_mode=landing.merge_mode,
         deploy_by=landing.deploy_by,
-        overrides=task_policy_conflicts(task or "", landing),
+        overrides=task_policy_conflicts(
+            task or "", landing, caller_merges=caller_merges
+        ),
     )
 
 
@@ -3704,6 +3771,7 @@ def _brief_with_task(
     autopilot: bool = False,
     read_only: bool = False,
     landing: LandingPolicy | None = None,
+    caller_merges: bool = False,
 ) -> str:
     """Fold an explicit task, and its touch points, into the session's brief.
 
@@ -3732,7 +3800,9 @@ def _brief_with_task(
         # Where the task contradicts the landing rule the policy wins, and
         # the brief says so above the task rather than leaving the worker
         # two instructions to choose between (WI-1832).
-        overrides = overrides_section(task_policy_conflicts(task, landing))
+        overrides = overrides_section(
+            task_policy_conflicts(task, landing, caller_merges=caller_merges)
+        )
         if overrides:
             text = f"{text.rstrip()}\n\n{overrides}"
         text = f"{text.rstrip()}\n\n{heading}\n\n{task}\n"

@@ -104,6 +104,23 @@ class LandingPolicy(Entity):
     merge_mode: Literal["fast_forward", "rebase"]
     linear_history: bool = True
     deploy_by: str = "operator"
+    #: An initiative whose items cut from and land onto another long-lived
+    #: branch, keyed by initiative id or slug (WI-1841): the Rust port lands
+    #: on `rust-core`, not on `base_branch`.
+    initiative_bases: dict[str, str] = {}
+    #: Other long-lived branches a task may name as its base. A task that
+    #: names one is taken at its word rather than overridden (WI-1841).
+    long_lived_branches: list[str] = []
+
+    def known_bases(self) -> frozenset[str]:
+        """Every branch a worker on this project may cut from and land onto."""
+        return frozenset(
+            {
+                self.base_branch,
+                *self.initiative_bases.values(),
+                *self.long_lived_branches,
+            }
+        )
 
     @field_validator("branch_pattern")
     @classmethod
@@ -182,6 +199,21 @@ class AgentPolicy(Entity):
     landing: LandingPolicy | None = None
     review: ReviewPolicy | None = None
     verification: VerificationPolicy | None = None
+
+    def with_base(self, base: str) -> AgentPolicy:
+        """This policy for work that cuts from and lands onto `base` (WI-1841).
+
+        The landing rule's base and the worktree's base move together, so the
+        brief, the worktree and the conflict check all name the same branch.
+        """
+        if self.landing is None or self.landing.base_branch == base:
+            return self
+        return self.model_copy(
+            update={
+                "base_branch": base,
+                "landing": self.landing.model_copy(update={"base_branch": base}),
+            }
+        )
 
     @field_validator("session_wall_clock_minutes")
     @classmethod
