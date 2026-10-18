@@ -716,11 +716,13 @@ load_manifest_secrets() {
             AGENT_AUTH_ONDEMAND_VARS+="${AGENT_AUTH_ONDEMAND_VARS:+ }$var"
             continue
         fi
+        # The alias name matched a manifest entry: recorded before any of the
+        # degraded skips below, so the post-load check never misreports a
+        # degraded launch as a GH_TOKEN_FROM typo and kills it.
+        [[ "$var" != "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" ]] || GH_TOKEN_ALIASED=1
         if [[ -z "$access_token" ]]; then
             # The secrets manager is unreachable and the launch is already
-            # marked degraded: nothing is read or exported. The alias name
-            # still matched, so the check below does not misreport it.
-            [[ "$var" != "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" ]] || GH_TOKEN_ALIASED=1
+            # marked degraded: nothing is read or exported.
             continue
         fi
         resolve_secret value "$access_token" "$project" "$name" "$var"
