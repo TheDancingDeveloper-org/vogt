@@ -803,6 +803,7 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             # Vogt's link to a session the engine no longer runs: not a row
             # of a table of what is running.
             continue
+        stale = _block_is_stale(summary)
         verdict = oversight.classify(
             activity=summary.activity,
             alive=summary.alive,
@@ -810,7 +811,9 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             approval_question=None
             if summary.approval is None
             else summary.approval.question,
-            blocker=None if summary.blocked is None else summary.blocked.blocker,
+            blocker=None
+            if summary.blocked is None or stale
+            else summary.blocked.blocker,
             approval_kind=None if summary.approval is None else summary.approval.kind,
             last_output_at=summary.last_output_at,
             now=now,
@@ -824,6 +827,7 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                 session=summary,
                 screen_tail=list(entry.screen_tail) if params.screen_lines else [],
                 ready=entry.ready,
+                **_block_age(summary, now, stale=stale),
             )
         )
     rows.sort(
@@ -866,10 +870,43 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                     ),
                     screen_tail=row.screen_tail,
                     ready=row.ready,
+                    blocked_since=row.blocked_since,
+                    blocked_age_s=row.blocked_age_s,
+                    blocked_stale=row.blocked_stale,
                 )
             )
         rows = kept[: params.limit]
     return SessionSweepResult(rows=rows, counts=counts, swept_at=now, engine=None)
+
+
+def _block_is_stale(summary: SessionSummary) -> bool:
+    """Whether the session's blocked report predates its current turn.
+
+    A report is made mid-turn, just before the agent stops. A turn that
+    began after it means the session went back to work — it was typed into,
+    woken, or nudged on — so the report no longer says what it waits on
+    (WI-1834). A done declaration in a later turn begins that turn too.
+    """
+    blocked = summary.blocked
+    if blocked is None or blocked.since is None or summary.turn_started_at is None:
+        return False
+    return summary.turn_started_at > blocked.since
+
+
+def _block_age(
+    summary: SessionSummary | None, now: datetime, *, stale: bool
+) -> dict[str, Any]:
+    """The sweep row's blocked_since / blocked_age_s / blocked_stale."""
+    since = None
+    if summary is not None and summary.blocked is not None:
+        since = summary.blocked.since
+    if since is None:
+        return {"blocked_stale": stale}
+    return {
+        "blocked_since": since,
+        "blocked_age_s": max(0, int((now - since).total_seconds())),
+        "blocked_stale": stale,
+    }
 
 
 def _starter_engine_id(view: ReadView, named: str | None) -> str | None:
@@ -1654,6 +1691,10 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         },
         event_kind=SESSION_INPUT_EVENT,
     )
+    if submitted:
+        # A new instruction answers whatever the session reported it was
+        # blocked on, or supersedes it (WI-1834). A draft is not sent yet.
+        _clear_block_on(ctx, engine, target, cause="input", reason=reason)
     digest = _input_digest(ctx, target)
     return SessionInputResult(
         id=params.id,
@@ -2082,7 +2123,13 @@ def wake_session(ctx: AppContext, params: WakeSessionParams) -> SessionResult:
     if params.force and not _may_force_wake(ctx, engine):
         raise RoleRefused("only a person or an oversight session may force a wake")
     target = _target(ctx, params.id)
-    return _wake(ctx, engine, target, reason, force=params.force)
+    result = _wake(ctx, engine, target, reason, force=params.force)
+    # Woken on purpose: whoever woke it is acting on it, so the report it
+    # slept with no longer stands (WI-1834). A session that is still blocked
+    # reports again.
+    if _clear_block_on(ctx, engine, target, cause="wake", reason=reason):
+        result = _wake(ctx, engine, target, reason, force=params.force)
+    return result
 
 
 def _named_session(ctx: AppContext, engine_session_id: str) -> str:
@@ -3042,6 +3089,53 @@ def _set_blocked(
         engine_session_id=engine_id,
         blocked=_blocked(updated.blocked),
     )
+
+
+def _clear_block_on(
+    ctx: AppContext, engine: EngineClient, target: _Target, *, cause: str, reason: str
+) -> bool:
+    """Clear `target`'s blocked report because someone acted on the session
+    (WI-1834): it was given new input, or woken. The report it replaces stays
+    in the audit, as an unblock naming the cause and what it said.
+
+    A session typing into or waking itself clears nothing, and a report that
+    cannot be read or cleared is left for the sweep's staleness rule: this
+    never fails the input or wake it rides on. True when one was cleared.
+    """
+    if ctx.principal.identity_ref in {
+        f"agent:session:{target.engine_session_id}",
+        *(() if target.session is None else (f"agent:session:{target.session.id}",)),
+    }:
+        return False
+    engine_id = target.engine_session_id
+    try:
+        current = engine.get_session(engine_id)
+        if current is None or current.blocked is None:
+            return False
+        was = current.blocked
+        if engine.set_blocked(engine_id, blocked=False, reason=None, items=[]) is None:
+            return False
+    except (EngineUnavailable, Conflict, NotFound):
+        return False
+    audited_action(
+        ctx,
+        operation=SESSION_REPORT_UNBLOCKED,
+        reason=f"cleared by {cause}: {reason}",
+        entity_kind="session",
+        entity_id=target.session.id if target.session is not None else engine_id,
+        outcome={
+            "engine_session_id": engine_id,
+            "linked": target.session is not None,
+            "blocker": None,
+            "items": [],
+            "cleared_by": cause,
+            "was_blocker": was.reason,
+            "was_items": list(was.items),
+            "was_since": was.since,
+        },
+        event_kind=SESSION_UNBLOCKED_EVENT,
+    )
+    return True
 
 
 def _input_digest(ctx: AppContext, target: _Target) -> SessionDigest | None:
