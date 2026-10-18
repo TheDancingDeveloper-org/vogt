@@ -368,4 +368,4 @@ fi
 
 # `exec` so the server becomes the container's foreground process from here;
 # SIGTERM from `docker stop` reaches it cleanly. Pass through any args.
-exec /usr/local/bin/vogt-engine "$@"
+exec "${VOGT_ENGINE_BIN:-/usr/local/bin/vogt-engine}" "$@"

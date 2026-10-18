@@ -134,6 +134,9 @@ pub struct Session {
     first_output_seen: AtomicBool,
     /// The launch wrapper's report was accepted; a second is refused.
     launch_reported: AtomicBool,
+    /// Set when the launch wrapper reported `degraded`: the session started
+    /// without its brokered credentials (WI-1812). Lives and dies with it.
+    agent_auth_degraded: parking_lot::Mutex<Option<crate::launch::DegradedLaunch>>,
     /// The economics tailer's place in this session's transcript, and the
     /// snapshot it last produced (WI-1245).
     economics: parking_lot::Mutex<Option<crate::economics::Tail>>,
@@ -188,6 +191,15 @@ impl Session {
     /// Claim the session's one launch report. True the first time only.
     pub fn mark_launch_reported(&self) -> bool {
         !self.launch_reported.swap(true, Ordering::AcqRel)
+    }
+
+    /// Why this session started without its brokered credentials, if it did.
+    pub fn agent_auth_degraded(&self) -> Option<crate::launch::DegradedLaunch> {
+        self.agent_auth_degraded.lock().clone()
+    }
+
+    pub fn set_agent_auth_degraded(&self, degraded: crate::launch::DegradedLaunch) {
+        *self.agent_auth_degraded.lock() = Some(degraded);
     }
 
     pub fn activity(&self) -> ActivityState {
@@ -1274,6 +1286,7 @@ pub fn spawn(
         },
         first_output_seen: AtomicBool::new(false),
         launch_reported: AtomicBool::new(false),
+        agent_auth_degraded: parking_lot::Mutex::new(None),
         economics: parking_lot::Mutex::new(None),
         economics_snapshot: parking_lot::Mutex::new(None),
         // Set by the registry from the spec, like autopilot: the spawn path

@@ -35,12 +35,18 @@
 #                                    NAME URL TOKEN_VAR   (a bearer GET)
 #   ENGINE_AGENT_AUTH_TIMEOUT      seconds one secrets-manager call may take
 #                                  (login, a project read; default 10)
+#   ENGINE_AGENT_AUTH_LAUNCH_BUDGET  seconds ALL secrets-manager calls of one
+#                                  launch may take together (default 20); a
+#                                  call is cut to what is left, and none is
+#                                  made once it is spent
 #
 # A session launch (`run`, `shell`) never depends on the secrets manager being
 # up (WI-1812). If it cannot be reached — no identity, login failed or timed
 # out, a required secret unreadable — the launch goes on WITHOUT those
 # credentials: each call is bounded by ENGINE_AGENT_AUTH_TIMEOUT and tried
-# once, the session prints an "agent auth unavailable" warning, exports the
+# once, the whole launch shares one budget (ENGINE_AGENT_AUTH_LAUNCH_BUDGET), a
+# project read that times out or cannot connect is not retried secret by
+# secret, the session prints an "agent auth unavailable" warning, exports the
 # reason as `AGENT_AUTH_UNAVAILABLE` beside an accurate `AGENT_AUTH_GRANTED`,
 # and reports the launch to the engine as `degraded`, which the engine's
 # status shows. Nothing is cached, so the next launch after the secrets
@@ -130,6 +136,12 @@ GH_TOKEN_ALIASED=0
 # Seconds one secrets-manager call may take before the launch gives up on it.
 AUTH_TIMEOUT="${ENGINE_AGENT_AUTH_TIMEOUT:-10}"
 [[ "$AUTH_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || AUTH_TIMEOUT=10
+# Seconds every secrets-manager call of one launch may take together, and the
+# deadline (epoch seconds) `begin_launch` derives from it. Empty outside a
+# launch: `check`, `get` and `set` are bounded per call only.
+LAUNCH_BUDGET="${ENGINE_AGENT_AUTH_LAUNCH_BUDGET:-20}"
+[[ "$LAUNCH_BUDGET" =~ ^[1-9][0-9]*$ ]] || LAUNCH_BUDGET=20
+LAUNCH_DEADLINE=""
 # Set by `run`/`shell`: a secrets-manager failure degrades the launch instead
 # of failing it (WI-1812). Each reason it degraded, joined with "; ".
 DEGRADE_ON_UNAVAILABLE=0
@@ -221,10 +233,28 @@ unavailable() {
     AGENT_AUTH_UNAVAILABLE_REASON+="${AGENT_AUTH_UNAVAILABLE_REASON:+; }$*"
 }
 
-# Run a secrets-manager command bounded by AUTH_TIMEOUT, when `timeout` exists.
+# Seconds the next secrets-manager call may take: AUTH_TIMEOUT, cut to what is
+# left of the launch budget. 0 once the budget is spent.
+call_timeout() {
+    local left
+    if [[ -z "$LAUNCH_DEADLINE" ]]; then
+        printf '%s' "$AUTH_TIMEOUT"
+        return
+    fi
+    left=$(( LAUNCH_DEADLINE - EPOCHSECONDS ))
+    (( left > 0 )) || left=0
+    (( left < AUTH_TIMEOUT )) || left="$AUTH_TIMEOUT"
+    printf '%s' "$left"
+}
+
+# Run a secrets-manager command bounded by `call_timeout`, when `timeout`
+# exists. Fails at once (124, as `timeout` would) once the budget is spent.
 bounded() {
+    local secs
+    secs="$(call_timeout)"
+    (( secs > 0 )) || return 124
     if command -v timeout >/dev/null 2>&1; then
-        timeout --kill-after=2 "$AUTH_TIMEOUT" "$@"
+        timeout --kill-after=2 "$secs" "$@"
     else
         "$@"
     fi
@@ -363,25 +393,39 @@ get_secret() {
 # already downloads the whole project to return one value; this is the same
 # request (`GET /api/v4/secrets`, references expanded, imports included), made
 # once. The token goes in a header read from a file descriptor, never argv.
+#
+# Returns 2 when the secrets manager did not answer at all (cannot connect,
+# timed out, connection dropped, launch budget spent): the caller must not
+# then retry it secret by secret. 1 is any other failure, where the per-secret
+# CLI is still worth a try.
 get_project_secrets() {
-    local access_token="$1" project_id="$2" base
+    local access_token="$1" project_id="$2" base secs raw rc=0
     command -v curl >/dev/null 2>&1 || return 1
     command -v jq >/dev/null 2>&1 || return 1
+    secs="$(call_timeout)"
+    (( secs > 0 )) || return 2
     base="${INFISICAL_API_URL%/}"
     base="${base%/api}"
-    curl -sS --fail --connect-timeout 5 --max-time "$AUTH_TIMEOUT" \
+    raw="$(curl -sS --fail --connect-timeout "$secs" --max-time "$secs" \
         -H @<(printf 'Authorization: Bearer %s\n' "$access_token") \
         --get "$base/api/v4/secrets" \
         --data-urlencode "projectId=$project_id" \
         --data-urlencode "environment=$INFISICAL_ENV" \
         --data-urlencode "secretPath=/" \
         --data "expandSecretReferences=true&includeImports=true&recursive=false" \
-        2>/dev/null \
-    | jq -ce '
+        2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) ;;
+        # couldn't resolve, couldn't connect, timed out, TLS connect, empty
+        # reply, receive error: nobody answered.
+        6|7|28|35|52|56) return 2 ;;
+        *) return 1 ;;
+    esac
+    jq -ce '
         # Imported secrets first, so the project'"'"'s own keys win, as in the CLI.
         [((.imports // [])[] | .secrets // [])[], (.secrets // [])[]]
         | map(select(.secretValueHidden != true))
-        | reduce .[] as $s ({}; .[$s.secretKey] = $s.secretValue)'
+        | reduce .[] as $s ({}; .[$s.secretKey] = $s.secretValue)' <<<"$raw"
 }
 
 # Fetch a project once per launch, in this shell (not a subshell, so the
@@ -390,13 +434,20 @@ get_project_secrets() {
 # read leaves each lookup empty, and the manifest's own required/optional
 # rule decides what that means.
 prefetch_project() {
-    local access_token="$1" project="$2" started json
+    local access_token="$1" project="$2" started json rc=0
     [[ -n "${PROJECT_MODE[$project]:-}" ]] && return 0
     started="$(now_us)"
-    if json="$(get_project_secrets "$access_token" "$project")"; then
+    json="$(get_project_secrets "$access_token" "$project")" || rc=$?
+    if [[ "$rc" == 0 ]]; then
         PROJECT_SECRETS[$project]="$json"
         PROJECT_MODE[$project]=bulk
         PROJECT_OUTCOME[$project]=ok
+    elif [[ "$rc" == 2 ]]; then
+        # Nobody answered: one CLI read per secret would wait out the same
+        # timeout again for every entry (WI-1812). Read nothing more here.
+        PROJECT_MODE[$project]=bulk
+        PROJECT_OUTCOME[$project]=unreachable
+        unavailable "Infisical did not answer reading project $project (timeout or no connection)"
     else
         PROJECT_MODE[$project]=cli
         PROJECT_OUTCOME[$project]=bulk-failed
@@ -410,7 +461,9 @@ prefetch_project() {
 resolve_secret() {
     local _into="$1" _token="$2" _project="$3" _name="$4" _var="$5" _value _started _found=0
     prefetch_project "$_token" "$_project"
-    if [[ "${PROJECT_MODE[$_project]}" == "bulk" ]]; then
+    if [[ "${PROJECT_OUTCOME[$_project]}" == "unreachable" ]]; then
+        _value=""
+    elif [[ "${PROJECT_MODE[$_project]}" == "bulk" ]]; then
         _value="$(jq -r --arg n "$_name" 'if has($n) then .[$n] else empty end' \
             <<<"${PROJECT_SECRETS[$_project]}")"
     else
@@ -671,6 +724,8 @@ load_manifest_secrets() {
             continue
         fi
         resolve_secret value "$access_token" "$project" "$name" "$var"
+        # An unreachable project is already recorded once, not per secret.
+        [[ "${PROJECT_OUTCOME[$project]}" != "unreachable" ]] || continue
         if [[ -z "$value" ]] && ! flags_contain "${flag:-}" optional; then
             unavailable "Infisical secret $name is missing or empty"
             continue
@@ -909,6 +964,7 @@ begin_launch() {
     LAUNCH_T0="$(now_us)"
     LAUNCH_REPORTING=1
     DEGRADE_ON_UNAVAILABLE=1
+    LAUNCH_DEADLINE=$(( EPOCHSECONDS + LAUNCH_BUDGET ))
 }
 
 # The handover: report the launch, and say so in the session when it holds

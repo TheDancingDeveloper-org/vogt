@@ -1736,7 +1736,8 @@ const Settings: Component<Props> = (props) => {
                     <Show when={status().auth_broker.degraded}>
                       {(degraded) => (
                         <div style={{ ...opsMetaStyle, color: "var(--danger, #c0392b)" }}>
-                          Agent auth unavailable: {degraded().reason}
+                          Agent auth unavailable in {status().auth_broker.degraded_session_count ?? 1} live
+                          session(s): {degraded().reason}
                         </div>
                       )}
                     </Show>

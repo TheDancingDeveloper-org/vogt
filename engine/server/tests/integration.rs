@@ -15948,3 +15948,132 @@ fn a_quiet_working_codex_session_does_not_starve_the_runtime() {
         .recv_timeout(Duration::from_secs(20))
         .expect("the engine runtime stalled: the activity watcher is spinning");
 }
+
+/// WI-1812: a session launched through the real `agent-auth.sh` while the
+/// secrets manager is unreachable still starts, says so in its terminal, and
+/// shows in `/api/status`; once the secrets manager answers again, the next
+/// session gets its credentials from the same engine, with no restart.
+#[tokio::test]
+async fn a_launch_with_the_secrets_manager_down_degrades_and_recovers_without_restart() {
+    for tool in ["jq", "curl", "timeout"] {
+        if std::process::Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: the launch uses {tool}");
+            return;
+        }
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../deploy/agent-auth.sh");
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let write_exec = |name: &str, body: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_exec("vogt-mcp-bootstrap", "#!/bin/sh\nexit 0\n");
+    // Down: the login hangs, as it did against an Infisical with no Redis.
+    write_exec("infisical", "#!/bin/sh\nexec sleep 30\n");
+
+    // A stand-in secrets-manager API that answers the one bulk read.
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", api.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/api/v4/secrets",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "secrets": [
+                    { "secretKey": "ALPHA", "secretValue": "alpha-value" }
+                ]}))
+            }),
+        );
+        axum::serve(api, app).await.unwrap()
+    });
+
+    let cfg = broker_config(&tmp, "ALPHA proj-a ALPHA\n");
+    let (base, _state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let start = |name: &'static str| {
+        let client = client.clone();
+        let base = base.clone();
+        let script = script.display().to_string();
+        let (path, api_url, bin) = (path.clone(), api_url.clone(), bin.clone());
+        async move {
+            client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({
+                    "name": name,
+                    "command": ["/bin/bash", script, "run", "--", "/bin/bash", "-c",
+                        "echo \"granted=[$AGENT_AUTH_GRANTED] alpha=[${ALPHA:-}]\"; sleep 30"],
+                    "env": [
+                        ["VOGT_ENGINE_BROKER_URL", base],
+                        ["PATH", path],
+                        ["VOGT_MCP_BOOTSTRAP", bin.join("vogt-mcp-bootstrap").display().to_string()],
+                        ["ENGINE_AGENT_AUTH_TIMEOUT", "1"],
+                        ["ENGINE_AGENT_AUTH_SECRETS", "ALPHA proj-a ALPHA"],
+                        ["INFISICAL_API_URL", format!("{api_url}/api")],
+                        ["INFISICAL_CLIENT_ID", "id"],
+                        ["INFISICAL_CLIENT_SECRET", "secret"],
+                    ],
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    let down = start("auth-down").await;
+    live_output_containing(
+        &client,
+        &base,
+        &down,
+        &["agent auth unavailable", "granted=[] alpha=[]"],
+    )
+    .await;
+    let mut status = Value::Null;
+    for _ in 0..50 {
+        status = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        if status["auth_broker"]["degraded_session_count"] == json!(1) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(status["auth_broker"]["degraded_session_count"], json!(1));
+    assert_eq!(status["auth_broker"]["degraded"]["session_id"], json!(down));
+    assert!(status["auth_broker"]["degraded"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("timed out"));
+
+    // The secrets manager is back: the next launch gets its credentials.
+    write_exec("infisical", "#!/bin/sh\nprintf tok-123\n");
+    let up = start("auth-up").await;
+    live_output_containing(
+        &client,
+        &base,
+        &up,
+        &["granted=[ALPHA] alpha=[alpha-value]"],
+    )
+    .await;
+}
