@@ -2984,6 +2984,88 @@ test("Phone Sessions overview reaches idle and busy sessions, not only the waiti
   await expect(page).toHaveURL(/#\/t\/sess-idle$/);
 });
 
+// WI-1830: with sessions waiting for input the phone overview locked — the
+// cards sat in a non-scrolling band above the only scroller and squeezed it to
+// nothing, so nothing moved until every waiting session had been answered.
+test("Phone Sessions overview scrolls past three waiting cards from a swipe on a preview", async ({ page, context }) => {
+  test.skip(test.info().project.name !== "phone", "The waiting cards are the narrow body's");
+  const waiting = [1, 2, 3].map((n) => ({
+    id: `sess-wait-${n}`, name: `waiting-${n}`, cwd: `/workspace/w${n}`,
+    activity: "waiting-for-input", exit_code: null, scrollback_bytes: 1024,
+    created_at: "2026-08-18T08:00:00Z", activity_changed_at: `2026-08-18T08:00:3${n}Z`,
+  }));
+  const idle = Array.from({ length: 12 }, (_, n) => ({
+    id: `sess-idle-${n}`, name: `idle-${n}`, cwd: "/workspace/vogt",
+    activity: "idle", exit_code: null, scrollback_bytes: 1024,
+    created_at: "2026-08-18T08:00:00Z", activity_changed_at: "2026-08-18T08:00:00Z",
+  }));
+  // A Claude Code permission prompt as a TUI draws it: cursor moves for
+  // spacing and rows, box rules around it, blank padding below.
+  const prompt = [
+    "\x1b[2J\x1b[1;1H\u256d" + "\u2500".repeat(30) + "\u256e",
+    "\x1b[2;1H\u2502\x1b[1CBash\x1b[1Ccommand",
+    "\x1b[3;1H\u2502\x1b[3Cgit\x1b[1Cpush\x1b[1Corigin",
+    "\x1b[4;1H\u2502\x1b[1CDo\x1b[1Cyou\x1b[1Cwant\x1b[1Cto\x1b[1Cproceed?",
+    "\x1b[5;1H\u2502\x1b[1C\u276f\x1b[1C1.\x1b[1CYes",
+    "\x1b[6;1H\u2502\x1b[3C2.\x1b[1CNo",
+    "\x1b[7;1H\u2570" + "\u2500".repeat(30) + "\u256f",
+    "\x1b[8;1H   \x1b[9;1H \u00b7 \u00b7 \u00b7",
+  ].join("");
+  // The fixture base64s a byte string; hand it the prompt's UTF-8 bytes.
+  const promptBytes = String.fromCharCode(...new TextEncoder().encode(prompt));
+  await installFixtures(page, {}, [...waiting, ...idle], undefined, { scrollback: promptBytes });
+  await page.goto("/#/sessions");
+
+  const tails = page.getByTestId("waiting-tail");
+  await expect(tails).toHaveCount(3);
+  // The preview shows the prompt's words, not an empty dotted box.
+  await expect(tails.first()).toContainText("Do you want to proceed?");
+  await expect(tails.first()).toContainText("1. Yes");
+  // And it is short: six lines at most, so cards never fill the screen.
+  expect((await tails.first().textContent())!.split("\n").length).toBeLessThanOrEqual(6);
+
+  const last = page.locator('.session-list a[href="#/t/sess-idle-11"]');
+  await expect(last).toHaveCount(1);
+  await expect(last).not.toBeInViewport();
+
+  const client = await context.newCDPSession(page);
+  for (let swipe = 0; swipe < 20 && !(await last.isVisible() && await last.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const nav = document.querySelector(".phone-bottom-nav")?.getBoundingClientRect();
+    return rect.bottom <= (nav ? nav.top : window.innerHeight) && rect.top >= 0;
+  })); swipe++) {
+    // Start inside a preview while one is on screen; once they have all
+    // scrolled away, mid-list (never on the bottom navigation).
+    const box = await tails.evaluateAll((nodes) => {
+      for (const node of nodes) {
+        const rect = node.getBoundingClientRect();
+        if (rect.top >= 0 && rect.bottom <= window.innerHeight) return { x: rect.x + rect.width / 2, y: rect.bottom - 4 };
+      }
+      return null;
+    });
+    const x = box?.x ?? 200;
+    const y = box ? Math.max(box.y, 320) : 420;
+    await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+    for (let dy = 10; dy <= 300; dy += 10) {
+      await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y - dy }] });
+    }
+    await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  }
+
+  // No dead band: the scroller runs down to the bottom navigation (bar the
+  // few pixels of safe-area padding `main` keeps), and the last row ends
+  // above the navigation rather than under it.
+  const layout = await page.evaluate(() => {
+    const place = document.querySelector(".sessions-place")!.getBoundingClientRect();
+    const nav = document.querySelector(".phone-bottom-nav")?.getBoundingClientRect();
+    const row = document.querySelector('.session-list a[href="#/t/sess-idle-11"]')!.getBoundingClientRect();
+    const navTop = nav ? nav.top : window.innerHeight;
+    return { band: navTop - place.bottom, rowBottom: row.bottom, navTop };
+  });
+  expect(layout.band, JSON.stringify(layout)).toBeLessThan(16);
+  expect(layout.rowBottom, JSON.stringify(layout)).toBeLessThanOrEqual(layout.navTop);
+});
+
 test("Desktop Sessions overview lists the running sessions as links", async ({ page }) => {
   test.skip(test.info().project.name === "phone", "The overview panel is the desktop body");
   await installFixtures(page, {}, THREE_SESSIONS);

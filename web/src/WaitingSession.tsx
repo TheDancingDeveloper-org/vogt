@@ -29,6 +29,10 @@ import { pickerWaiting, sessionActivityAge } from "./sessionRowModel";
  *  the next person to touch this line cannot see. */
 const INTERRUPT = "\u0003";
 
+/** Lines of the tail a phone card shows: the prompt and what sets it up,
+ *  short enough that cards never fill the screen they are listed on. */
+const CARD_TAIL_LINES = 6;
+
 interface Props {
   session: SessionSummary;
   /** Open the session's own terminal, for anything these two acts cannot do. */
@@ -52,7 +56,7 @@ export const WaitingSessionCard: Component<Props> = (props) => {
     async (id) => {
       try {
         const detail = await api.getSession(id, undefined, TAIL_FETCH_BYTES);
-        return { ok: true as const, text: tailOf(detail.scrollback_base64) };
+        return { ok: true as const, text: tailOf(detail.scrollback_base64, CARD_TAIL_LINES) };
       } catch (error) {
         return {
           ok: false as const,
