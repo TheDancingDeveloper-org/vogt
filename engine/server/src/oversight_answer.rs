@@ -139,7 +139,14 @@ fn part_allowed(
         ["git", rest @ ..] => {
             // Global options (`-C`, `-c`) come before the subcommand, so the
             // match below already refuses them.
-            if has(&["--git-dir", "--work-tree", "--exec-path"]) {
+            if has(&[
+                "--output",
+                "--ext-diff",
+                "--textconv",
+                "--git-dir",
+                "--work-tree",
+                "--exec-path",
+            ]) {
                 return Err("git is pointed elsewhere or reconfigured".into());
             }
             match rest {
@@ -365,6 +372,8 @@ mod tests {
             "rm -rf target",
             "cat ~/.ssh/id_ed25519",
             "git diff /etc/passwd",
+            "git log --output=src/lib.rs",
+            "git diff --ext-diff",
         ] {
             assert!(!ok(command), "{command} must need a person");
         }
