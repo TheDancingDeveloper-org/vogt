@@ -14,6 +14,11 @@ Two rules, both about the self-hosted pool staying usable:
    which is what the `dependency review` context did on 2026-09-10. The
    required list is read from `SECURITY.md`, the place it is documented for
    the operator who configures the ruleset.
+3. **Every required status check has a merge-queue producer.** With a merge
+   queue on `main`, a required context that nothing posts on `merge_group`
+   leaves every queued entry waiting until the queue times it out, so a
+   workflow that produces a required check must also trigger on
+   `merge_group` (WI-1886).
 
 Standard library only, so the gate needs no environment beyond `python3`:
 the workflows are parsed line by line, which is enough for the keys this reads
@@ -296,6 +301,28 @@ def producer_problems(
     return problems
 
 
+def queue_problems(
+    workflows: Iterable[Workflow], required: Iterable[str], source: str
+) -> list[Problem]:
+    queued: set[str] = set()
+    for workflow in workflows:
+        if "merge_group" not in workflow.events:
+            continue
+        for job in workflow.jobs:
+            if job.uses is None:
+                queued |= check_contexts(job)
+    return [
+        Problem(
+            source,
+            1,
+            f"required check '{context}' is produced by no job on merge_group; "
+            "every merge-queue entry would wait on it until the queue times out",
+        )
+        for context in required
+        if context not in queued
+    ]
+
+
 def required_checks(security_md: str) -> list[str]:
     """The bullet list that follows the 'required checks:' sentence."""
     lines = security_md.splitlines()
@@ -334,6 +361,7 @@ def run(root: Path) -> list[Problem]:
             )
         )
     problems += producer_problems(workflows, required, "SECURITY.md")
+    problems += queue_problems(workflows, required, "SECURITY.md")
     return problems
 
 
