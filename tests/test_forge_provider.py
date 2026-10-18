@@ -206,6 +206,67 @@ def test_pulls_and_releases_and_checks_normalise() -> None:
     assert checks[0].revision == "abc123" and checks[0].conclusion == "success"
 
 
+def test_a_merged_pull_gets_its_merger_from_the_single_pr_read_once() -> None:
+    """WI-1835: GitHub's list page has `merged_at` but no `merged_by`, so a
+    merged PR is read once on its own for it, and the answer is cached."""
+    from vogt.adapters.forge import github as forge_github
+
+    forge_github._MERGED_BY.clear()
+    seen: list[str] = []
+
+    def transport(
+        url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
+    ) -> tuple[int, bytes]:
+        del headers, body, method
+        seen.append(url)
+        if "/pulls/193" in url:
+            return 200, json.dumps(
+                {
+                    "number": 193,
+                    "state": "closed",
+                    "merged": True,
+                    "merged_at": "2026-10-17T09:00:00Z",
+                    "merged_by": {"login": "sprooty", "type": "User"},
+                }
+            ).encode("utf-8")
+        if "/pulls" in url:
+            return 200, json.dumps(
+                [
+                    {
+                        "number": 193,
+                        "title": "header button",
+                        "state": "closed",
+                        "merged_at": "2026-10-17T09:00:00Z",
+                        "head": {"ref": "wi-1707-x", "sha": "abc"},
+                        "user": {"login": "worker", "type": "Bot"},
+                    },
+                    {"number": 194, "title": "open", "state": "open"},
+                    {
+                        "number": 195,
+                        "title": "abandoned",
+                        "state": "closed",
+                        "merged_at": None,
+                    },
+                ]
+            ).encode("utf-8")
+        return 200, b"[]"
+
+    provider = GitHubProvider(GitHubClient(token="x", transport=transport))
+    ref = provider.parse(GITHUB)
+    assert ref is not None
+
+    pulls = {p.number: p for p in provider.pulls_updated_since(ref, since=None)}
+    again = {p.number: p for p in provider.pulls_updated_since(ref, since=None)}
+
+    assert pulls[193].merged_by == "sprooty"
+    assert pulls[193].merged_at == "2026-10-17T09:00:00Z"
+    assert again[193].merged_by == "sprooty"
+    assert pulls[194].merged_by is None and pulls[195].merged_by is None
+    single = [url for url in seen if "/pulls/" in url]
+    assert len(single) == 1, "one single-PR read, for the merged PR, cached after"
+    forge_github._MERGED_BY.clear()
+
+
 def test_a_read_against_an_empty_repository_is_empty_not_an_error() -> None:
     provider = _provider()  # every route returns []
     ref = provider.parse(GITHUB)
