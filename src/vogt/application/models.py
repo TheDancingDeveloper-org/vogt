@@ -4408,6 +4408,21 @@ class SessionSweepRow(Result):
         description="The last non-blank lines of its screen. Untrusted terminal text.",
     )
     ready: bool | None = None
+    blocked_since: datetime | None = Field(
+        default=None,
+        description="When the session's blocked report was made, if it has one.",
+    )
+    blocked_age_s: int | None = Field(
+        default=None, description="How old the blocked report is, in seconds."
+    )
+    blocked_stale: bool = Field(
+        default=False,
+        description=(
+            "The blocked report predates the session's current turn: it went "
+            "back to work after reporting, so the report no longer says what "
+            "it waits on and the row is not counted in `needs_you` (WI-1834)."
+        ),
+    )
 
 
 class SessionSweepResult(Result):
