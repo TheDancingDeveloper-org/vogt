@@ -23,7 +23,7 @@ can read it and inserts the reference for you.
 | Chat turn | `engine/server/src/chat_codex.rs` `turn_start` sends `input: [{type:"text"}]` to the Codex app-server | Gains `{type:"localImage", path}` items. |
 | Session input `POST /api/sessions/{id}/input {text, submit}` | `engine/server/src/api.rs` | No change. The path goes in as text. |
 | Worktree cleanup | `engine/server/src/worktree_clean.rs` (WI-1304/WI-1750) | Extended to remove the attachments dir when the session stops. |
-| Android wrapper | `mobile/android` (Capacitor 8). `ServerActivity` has a LAUNCHER filter only. | Gets an `ACTION_SEND` / `SEND_MULTIPLE` intent filter. |
+| Android wrapper | `mobile/android` (Capacitor 8). `ServerActivity` is the exported launcher root and the "Connect to Vogt" entry, deliberately **not** `singleTask` (WI-924). It starts `MainActivity` (not exported), which holds the signed-in WebView. | Gets a new exported `ShareActivity` that receives `SEND` / `SEND_MULTIPLE` and hands off to `MainActivity`. `ServerActivity` and its launch mode are unchanged. |
 
 ## Recommendation
 
@@ -158,20 +158,85 @@ The same three entry points on every composer:
 
 ### 5. Android share sheet
 
-- **Manifest:** add an `<intent-filter>` with `SEND` and `SEND_MULTIPLE` for
-  `image/*`, `text/plain` and `*/*` to `ServerActivity`, the launcher, which
-  is `singleTask`. The filter must keep the WI-924 task behaviour.
-- **Native side:** a small Capacitor plugin copies each shared `content://`
-  stream into app cache. It then raises a `shareReceived` event with
-  `{files:[{name, mime, size, cachePath}], text?}`.
-- **PWA side:** a **"Send to…" picker** lists running sessions and chats,
-  most recent first, from the rail model. The picker also offers the
-  assistant and a "New chat" option. Picking a target opens that target's
-  composer with the files already attached as chips (upload via
-  `POST /api/attachments`) and any shared text in the draft. Nothing sends
-  without the user pressing send.
-- If the app is not signed in, the share is held until login completes and is
-  then shown in the picker.
+The share filter does **not** go on `ServerActivity`. That activity is the
+launcher root, and it is standard mode on purpose: WI-924 removed
+`singleTask` because a `singleTask` root destroyed `MainActivity` and its
+signed-in WebView on every launcher intent. A standard-mode activity that
+receives `SEND` would also be started inside the *sharing app's* task, where
+it can't reach the existing WebView. Making it `singleTask` to fix that would
+bring the WI-924 bug back.
+
+**Receiving activity: a new `ShareActivity`.**
+
+```xml
+<activity android:name=".ShareActivity"
+    android:exported="true"
+    android:theme="@style/AppTheme.Translucent.NoDisplay"
+    android:taskAffinity=""
+    android:excludeFromRecents="true"
+    android:noHistory="true">
+  <intent-filter>
+    <action android:name="android.intent.action.SEND" />
+    <action android:name="android.intent.action.SEND_MULTIPLE" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="image/*" />
+    <data android:mimeType="text/plain" />
+    <data android:mimeType="*/*" />
+  </intent-filter>
+</activity>
+```
+
+- **No UI and no WebView.** `ShareActivity` is a trampoline. Its empty
+  `taskAffinity`, `noHistory` and `excludeFromRecents` keep it from joining
+  either task or leaving a recents entry. It runs briefly inside the sharer's
+  task and then finishes.
+- **It copies the files first.** In `onCreate`, it copies each
+  `EXTRA_STREAM` `content://` URI into
+  `cacheDir/share/<uuid>/<name>`. This has to happen here because the read
+  grant is tied to this intent and is lost once the activity finishes. It also
+  caps the size (the same 25 MiB per file) and records
+  `{id, files:[{name, mime, size, cachePath}], text?}` in a small
+  `PendingShare` store. That store lives in memory and is mirrored to an
+  app-private file, so it survives process death.
+- **Handoff into the existing task, which leaves WI-924 intact.**
+  `ShareActivity` calls
+  `startActivity(new Intent(this, MainActivity.class).addFlags(NEW_TASK | CLEAR_TOP | SINGLE_TOP).putExtra("vogt.share_id", id))`
+  and then `finish()`. These flags are on this one intent only.
+  - `MainActivity` keeps the app's default affinity, so `NEW_TASK` brings the
+    existing Vogt task forward instead of creating a new one.
+  - `CLEAR_TOP|SINGLE_TOP` delivers the intent to the live `MainActivity`
+    through `onNewIntent`, so the WebView is reused, not recreated.
+  - Neither activity's `launchMode` changes, and a launcher intent behaves
+    exactly as it does today.
+- **Cold start or not signed in.** If no Vogt task exists, the same intent
+  creates `MainActivity`. Its existing check (`MainActivity.java:49`) sends an
+  unconfigured app to `ServerActivity` and finishes. The pending share stays
+  in `PendingShare`. When `ServerActivity` later starts `MainActivity`
+  (lines 33/63), the PWA asks for it once it is ready.
+- **Native → PWA.** The `VogtShare` Capacitor plugin in `MainActivity` exposes
+  two calls:
+  - `takePending()`, which the PWA calls on boot and on resume.
+  - A `shareReceived` event, fired from `onNewIntent`.
+  The PWA reads each file through a plugin call that streams it from the
+  cache path, uploads it with `POST /api/attachments`, and then tells the
+  plugin to delete the cache dir. Cache entries older than 24 h are dropped on
+  app start.
+
+**PWA side: a "Send to…" picker.**
+- It lists running sessions and chats, most recent first, from the rail
+  model. It also offers the assistant and a "New chat" option.
+- Picking a target opens that target's composer with the files already
+  attached as chips and any shared text in the draft.
+- Nothing sends without the user pressing send.
+- A share that arrives before sign-in is held in `PendingShare` and shown in
+  the picker after login.
+
+**Tests (item 7).** A Robolectric/instrumented test covers the WI-924
+guarantee: with `MainActivity` on top, a `SEND` resumes the same
+`MainActivity` instance through `onNewIntent`, and a later launcher intent
+still does not tear it down. The tests also cover a cold-start share that
+reaches the picker after "Connect to Vogt". The whole flow is checked on the
+remote emulator by sharing from Photos and from a screenshot.
 
 ## Implementation items to split out
 
@@ -194,10 +259,12 @@ The same three entry points on every composer:
 6. **Agent-CLI reference format** in `agent_cli.rs`: bare path (Claude, Codex)
    vs `@path` (opencode). Includes verifying opencode/Klaudia image handling
    and the assistant vision parts gated by model capability. Effort S.
-7. **Android share target.** Covers the manifest intent filter, the Capacitor
-   plugin that copies content URIs, and the PWA "Send to…" picker. It is
-   verified on the remote emulator (sharing from the gallery and from a
-   screenshot). Effort M.
+7. **Android share target.** Covers the exported trampoline `ShareActivity`
+   (copy under the URI grant, `PendingShare` store) and the handoff to
+   `MainActivity` (`NEW_TASK|CLEAR_TOP|SINGLE_TOP` → `onNewIntent`), with no
+   launch-mode change to `ServerActivity`/`MainActivity` (WI-924 kept). It
+   also covers the `VogtShare` plugin, the PWA "Send to…" picker, and a WI-924
+   regression test, verified on the remote emulator. Effort M.
 8. *(Optional)* **MCP `session_attach`** wraps upload plus input for agents
    driving other sessions. Effort S.
 
