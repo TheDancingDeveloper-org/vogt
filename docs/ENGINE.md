@@ -2076,7 +2076,7 @@ fields are logged quoted: `event="launch.report"`).
 | `launch.first_output` | info, or warn at 10 s or more | the session's first byte of output | `session_id`, `name`, `launcher`, `first_output_ms` |
 | `launch.stage` | info | each stage the launch wrapper reports | `session_id`, `stage` (`login`, `secrets`, `bootstrap`), `ms`, `outcome`, and for `secrets` the `project` and `mode` |
 | `launch.secrets` | info (audit) | each secret project the launch read | `session_id`, `project`, `mode`, `ms`, `count`, `missing`, `secrets` (`VAR=SECRET_NAME` pairs, never a value) |
-| `launch.report` | info, or warn when failed or 10 s or more | the wrapper hands over, or fails | `session_id`, `name`, `command`, `outcome`, `total_ms`, `error` |
+| `launch.report` | info, or warn when degraded, failed or 10 s or more | the wrapper hands over, or fails | `session_id`, `name`, `command`, `outcome` (`ok`, `degraded`, `failed`), `total_ms`, `error` |
 
 `launcher` is `agent-auth` when the launch wrapper runs first, and `direct`
 otherwise. The wrapper (`vogt-agent-auth run`/`shell`) times its own stages
@@ -4268,6 +4268,38 @@ shares the engine's uid can already reach the identity off the host, so in
 such a deployment the manifest is cost without a boundary. **Default is
 off**: the brokered model stays the norm, and a deployment opts in per stack.
 Enabling it is an operator decision, not the engine's default.
+
+**The engine does not depend on the secrets manager (WI-1812).** Agent auth is
+never on the engine's start path. The engine binds its port and passes
+`/readyz` whether or not the secrets manager (or anything behind it) is
+reachable; what the engine itself needs — `ENGINE_TOKEN`, the stack secret,
+the database location, the assistant keys — comes from the stack environment
+or a mounted file, never from a live secrets-manager call. Credentials are
+resolved per session, when the launch wrapper runs:
+
+- Each secrets-manager call in a launch (the login, each project read) is
+  bounded by `ENGINE_AGENT_AUTH_TIMEOUT` (seconds, default 10) and tried
+  once. There is no retry loop.
+- If the secrets manager cannot be reached — no identity, the login failed or
+  timed out, a required secret could not be read — the session **still
+  starts**, without the credentials it could not get. It prints an
+  "agent auth unavailable" warning in the terminal, exports the reason as
+  `AGENT_AUTH_UNAVAILABLE` (unset on a full launch), and `AGENT_AUTH_GRANTED`
+  names only what it actually holds. The identity is still dropped.
+- The launch reports `outcome=degraded` (a `launch.report` warn line and the
+  launch metric). `GET /api/status` shows the latest degraded launch under
+  `auth_broker.degraded` (`session_id`, `at`, `reason`), and Settings shows it
+  on the auth-broker card, until a full launch clears it.
+- Nothing is cached between launches, so once the secrets manager recovers
+  the next session gets its credentials with no engine restart. A degraded
+  session gets them by being restarted.
+- Only a malformed manifest still fails a launch. `check`, `get` and `set`
+  keep failing loudly: they are explicit requests.
+- `ENGINE_AGENT_AUTH_REQUIRED=1` no longer stops the container. The
+  entrypoint runs a bounded check in the background
+  (`ENGINE_AGENT_AUTH_BOOT_CHECK_TIMEOUT`, default 60 s) and logs
+  `agent service auth check passed` or `... FAILED`; the engine starts either
+  way.
 
 **Getting a secret after launch: the on-demand broker.** The one
 sanctioned late path is a *manifest-constrained fetch*, and it keeps the
