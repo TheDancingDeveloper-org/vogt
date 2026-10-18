@@ -128,6 +128,7 @@ from vogt.application.services._policy_conflicts import (
     overrides_section,
     task_policy_conflicts,
 )
+from vogt.application.services.claims import check_claim
 from vogt.application.services.preferences import dispatch_settings
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
@@ -820,14 +821,28 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             stall_after=stall_after,
             done_at=summary.done_at,
         )
+        reason = verdict.reason
+        claim_check = None
+        if verdict.attention == "done" and summary.work_item is not None:
+            # WI-1835: a DONE claim is checked against git and the forge, and a
+            # mismatch is said in the row's reason so the digest carries it.
+            claim_check = check_claim(
+                ctx,
+                summary,
+                claim="autopilot-done",
+                text="\n".join([summary.last_reply_excerpt or "", *entry.screen_tail]),
+            )
+            if claim_check.mismatches:
+                reason = f"{reason}; claim check: " + "; ".join(claim_check.mismatches)
         rows.append(
             SessionSweepRow(
                 attention=verdict.attention,
-                attention_reason=verdict.reason,
+                attention_reason=reason,
                 session=summary,
                 screen_tail=list(entry.screen_tail) if params.screen_lines else [],
                 ready=entry.ready,
                 **_block_age(summary, now, stale=stale),
+                claim_check=claim_check,
             )
         )
     rows.sort(
@@ -873,6 +888,7 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                     blocked_since=row.blocked_since,
                     blocked_age_s=row.blocked_age_s,
                     blocked_stale=row.blocked_stale,
+                    claim_check=row.claim_check,
                 )
             )
         rows = kept[: params.limit]

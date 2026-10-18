@@ -96,7 +96,7 @@ SessionViewMode = Literal["digest", "full"]
 #: Session states a digest listing keeps unless the caller names others.
 #: Hibernated, stopped and exited stay in `counts` but not in the rows.
 DIGEST_LIVE_STATES: frozenset[str] = frozenset(
-    {"running", "idle", "waiting", "blocked", "approval", "stalled", "unknown"}
+    {"running", "idle", "waiting", "blocked", "approval", "stalled", "done", "unknown"}
 )
 
 _DIGEST_ROW_BUDGET = 300
@@ -1565,6 +1565,46 @@ class WorkItemGitStory(Result):
     )
 
 
+class ClaimPull(Result):
+    """A pull request a completion claim was checked against (WI-1835)."""
+
+    number: int
+    state: str
+    merged_at: datetime | None = None
+    merged_by: str | None = Field(
+        default=None, description="Who merged it, when the forge observation says."
+    )
+    checks: str | None = None
+    head_ref: str | None = None
+
+
+class ClaimCheck(Result):
+    """A session's completion claim checked against git and the forge (WI-1835).
+
+    Recorded when a session says `AUTOPILOT: DONE` or moves its item to
+    review or done. `mismatches` lists, in words, where the claim and the
+    facts disagree; `unchecked` lists the facts that could not be read, so
+    an empty `mismatches` is never mistaken for verified.
+    """
+
+    claim: Literal["autopilot-done", "review", "done"]
+    session: str | None = Field(default=None, description="The session's Vogt id.")
+    work_item: str | None = None
+    session_started_at: datetime | None = None
+    branch: str | None = None
+    head: str | None = Field(default=None, description="The worktree's HEAD commit.")
+    pushed: bool | None = Field(
+        default=None, description="Whether HEAD is on the branch's upstream."
+    )
+    new_commits: int | None = Field(
+        default=None,
+        description="Commits on HEAD committed since the session started.",
+    )
+    pulls: list[ClaimPull] = []
+    mismatches: list[str] = []
+    unchecked: list[str] = []
+
+
 class WorkResult(Result):
     item: WorkItem
     comments: list[Comment] = []
@@ -1590,6 +1630,10 @@ class WorkResult(Result):
     #: a refusal — a session may still be finishing (a PR, a comment) — and
     #: nothing is unbound. Empty everywhere else.
     live_sessions: list[SessionSummary] = []
+    #: On a `work.transition` to review or done made by a session: the
+    #: session's claim checked against git and the forge (WI-1835). A
+    #: mismatch is also recorded as a comment on the item; nothing is refused.
+    claim_check: ClaimCheck | None = None
 
 
 class GetWorkParams(Params):
@@ -4421,6 +4465,13 @@ class SessionSweepRow(Result):
             "The blocked report predates the session's current turn: it went "
             "back to work after reporting, so the report no longer says what "
             "it waits on and the row is not counted in `needs_you` (WI-1834)."
+        ),
+    )
+    claim_check: ClaimCheck | None = Field(
+        default=None,
+        description=(
+            "On a `done` row bound to a work item: its AUTOPILOT: DONE claim "
+            "checked against git and the forge (WI-1835)."
         ),
     )
 
