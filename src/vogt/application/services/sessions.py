@@ -4096,6 +4096,17 @@ def _resolve_purpose(
         "repo_map": profile.repo_map,
         "autopilot": profile.autopilot,
     }
+    if (
+        "model" in given
+        and "template" not in given
+        and params.model is not None
+        and _CLAUDE_MODEL.match(params.model)
+        and _resolved_template_tag(profile.template) != "claude"
+    ):
+        # A Claude model on the profile's other agent never runs: klaudia
+        # answers `opus` with 400 "Invalid model name" on every turn
+        # (WI-1852). The caller named the model, so the agent follows it.
+        supplied["template"] = "claude"
     filled = {field: value for field, value in supplied.items() if field not in given}
     overrides = tuple(field for field in _PROFILE_FIELDS if field in given)
     return params.model_copy(update=filled), overrides, profile.read_only
@@ -4107,6 +4118,10 @@ def _resolve_purpose(
 #: `opus`, `sonnet`, `haiku` and `fable` are the aliases Claude Code resolves
 #: itself; a full id is `claude-…`.
 _CLAUDE_MODEL = re.compile(r"^(claude-.+|opus|sonnet|haiku|fable)$")
+#: The bare aliases among those: names only Claude Code resolves.
+_CLAUDE_ALIAS = re.compile(r"^(opus|sonnet|haiku|fable)$")
+#: Agent templates that are not Claude Code.
+_NON_CLAUDE_AGENTS = ("codex", "opencode", "klaudia")
 
 
 def _resolved_template_tag(template: str | None) -> str | None:
@@ -4178,6 +4193,19 @@ def _refuse_forbidden_model(ctx: AppContext, params: StartSessionParams) -> None
             f"template 'claude' runs Claude Code, which does not take model "
             f"{params.model!r}; name a claude model (claude-*, opus, sonnet, "
             "haiku, fable) or a different template"
+        )
+        raise PolicyRefused(msg)
+    if (
+        template in _NON_CLAUDE_AGENTS
+        and params.model is not None
+        and _CLAUDE_ALIAS.match(params.model)
+    ):
+        # The mirror image (WI-1852): `opus` is a name only Claude Code
+        # resolves, and the other agents refuse it on every turn.
+        msg = (
+            f"template {params.template!r} runs {template}, which does not "
+            f"resolve the Claude Code alias {params.model!r}; use template "
+            "'claude', or name a model that agent takes"
         )
         raise PolicyRefused(msg)
     if params.model is None:

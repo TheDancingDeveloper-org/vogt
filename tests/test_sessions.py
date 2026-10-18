@@ -2722,6 +2722,66 @@ def test_klaudia_may_run_a_model_claude_refuses(
     assert engine.last_spec["model"] == "grok-4.7"
 
 
+def test_a_claude_model_on_the_implement_profile_runs_claude_code(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1852: `purpose=implement, model=opus` kept the profile's klaudia
+    template, and klaudia answered 400 "Invalid model name" on every turn.
+    The caller named a Claude model, so the agent follows it."""
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1",
+            purpose="implement",
+            model="opus",
+            task="fix it",
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["template"] == "claude"
+    assert engine.last_spec["model"] == "opus"
+    assert result.session.template == "claude"
+    # The caller's template still wins when it names one Claude Code is.
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1",
+            purpose="implement",
+            model="claude-opus-5-5",
+            task="fix it",
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["template"] == "claude"
+
+
+def test_a_claude_alias_on_another_agent_template_is_refused(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1852: a bare alias only Claude Code resolves is refused up front
+    on klaudia, codex or opencode, rather than failing every turn."""
+    for template in ("klaudia", "codex", "opencode"):
+        with pytest.raises(PolicyRefused, match="does not resolve"):
+            start_session(
+                wired,
+                StartSessionParams(
+                    project="vogt", template=template, model="opus", reason=WHY
+                ),
+            )
+    with pytest.raises(PolicyRefused, match="does not resolve"):
+        start_session(
+            wired,
+            StartSessionParams(
+                work_item="WI-1",
+                purpose="implement",
+                template="klaudia",
+                model="sonnet",
+                reason=WHY,
+            ),
+        )
+    assert engine.sent == []
+
+
 def test_a_model_the_project_does_not_forbid_still_starts(
     wired: AppContext, engine: StandInEngine
 ) -> None:
