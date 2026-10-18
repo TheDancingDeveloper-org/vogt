@@ -68,11 +68,36 @@ def _asserted(pattern: re.Pattern[str], task: str) -> list[re.Match[str]]:
     return hits
 
 
-def task_policy_conflicts(task: str, landing: LandingPolicy | None) -> list[str]:
+def task_named_base(task: str, landing: LandingPolicy | None) -> str | None:
+    """The known long-lived branch `task` names as its base, if exactly one.
+
+    A task that says "branch from `rust-core`" on a project that lists
+    `rust-core` among its long-lived branches means it (WI-1841): it is the
+    base, not a contradiction. An unknown branch, or two known ones, is not
+    taken — the first is the conflict check's to report, the second is
+    ambiguous.
+    """
+    if landing is None or not task.strip():
+        return None
+    known = landing.known_bases()
+    named = {
+        match.group("branch")
+        for match in _asserted(_BASE, task)
+        if match.group("branch") in known
+    }
+    return next(iter(named)) if len(named) == 1 else None
+
+
+def task_policy_conflicts(
+    task: str, landing: LandingPolicy | None, *, caller_merges: bool = False
+) -> list[str]:
     """The override lines for each axis where `task` contradicts `landing`.
 
     Empty when there is no task, no landing rule, or no conflict. Each line
     names the axis, what the task asked, and what the policy requires.
+    `caller_merges` is an oversight session handing out its own landing work
+    on a project where oversight merges: a merge there is the policy, not
+    against it (WI-1841).
     """
     if landing is None or not task.strip():
         return []
@@ -88,7 +113,7 @@ def task_policy_conflicts(task: str, landing: LandingPolicy | None) -> list[str]
             "Policy overrides task: open a PR. The task says push only; this "
             f"project lands by opening a pull request against `{base}`."
         )
-    if _asserted(_MERGE, task):
+    if not caller_merges and _asserted(_MERGE, task):
         lines.append(
             "Policy overrides task: do not merge. The task asks for a merge; "
             f"on this project {landing.merge_by} merges ({landing.merge_mode})."

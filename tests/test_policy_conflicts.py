@@ -72,3 +72,27 @@ def test_a_worker_deployer_allows_deploy_and_no_landing_means_nothing() -> None:
 def test_the_section_is_empty_without_lines() -> None:
     assert overrides_section([]) == ""
     assert overrides_section(["x"]).startswith("## Policy overrides task")
+
+
+def test_a_known_long_lived_base_is_named_not_contradicted() -> None:
+    """WI-1841."""
+    from vogt.application.services._policy_conflicts import task_named_base
+
+    landing = LandingPolicy.model_validate(
+        {
+            "base_branch": "main",
+            "worker_lands_by": "push_branch",
+            "merge_by": "oversight",
+            "merge_mode": "rebase",
+            "initiative_bases": {"rust-port": "rust-core"},
+        }
+    )
+    assert task_named_base("Branch off `rust-core`.", landing) == "rust-core"
+    assert task_named_base("Branch off develop.", landing) is None
+    assert task_named_base("Rebase onto main; branch off rust-core.", landing) is None
+    assert task_named_base("Never branch off rust-core.", landing) is None
+
+
+def test_a_caller_that_merges_is_not_told_not_to_merge() -> None:
+    lines = task_policy_conflicts("Then merge it.", _landing(), caller_merges=True)
+    assert not any("do not merge" in line for line in lines)
