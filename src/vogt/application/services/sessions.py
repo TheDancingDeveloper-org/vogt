@@ -4263,7 +4263,7 @@ def _started_by(
         return None, "person"
     caller = _caller_engine_session_id(ctx)
     if caller is None:
-        return None, None
+        return _claimed_oversight(ctx, engine)
     try:
         live = engine.get_session(caller)
     except EngineUnavailable:
@@ -4271,6 +4271,35 @@ def _started_by(
     if live is None or live.role not in ("oversight", "worker"):
         return caller, None
     return caller, "oversight" if live.role == "oversight" else "worker"
+
+
+#: The shared pod token's actor (`agent:pod:<stack>`).
+_POD_ACTOR_PREFIX = "agent:pod:"
+
+
+def _claimed_oversight(
+    ctx: AppContext, engine: EngineClient
+) -> tuple[str | None, Literal["person", "oversight", "worker"] | None]:
+    """A pod-token caller's starter, from the session its bridge says it runs in.
+
+    An oversight session resumed by hand (`claude --resume` in a shell) runs
+    with the pod's token, not its own, so it has no session identity and its
+    starts were recorded with no starter — and its ownership filter lost them
+    (WI-1852). The MCP bridge names the engine session it runs in; that claim
+    counts only from the pod token, which already outranks any session, and
+    only when the engine says that session is live and oversight. It sets
+    attribution and nothing else.
+    """
+    claimed = ctx.claimed_engine_session
+    if claimed is None or not ctx.principal.identity_ref.startswith(_POD_ACTOR_PREFIX):
+        return None, None
+    try:
+        live = engine.get_session(claimed)
+    except EngineUnavailable:
+        return None, None
+    if live is None or not live.alive or live.role != "oversight":
+        return None, None
+    return claimed, "oversight"
 
 
 def _autopilot(params: StartSessionParams) -> bool:
