@@ -112,6 +112,7 @@ def _launch(
     infisical_up: bool,
     identity: bool = True,
     manifest: str = "ALPHA proj-a ALPHA\nLATER proj-a LATER ondemand",
+    extra: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     bindir = _bin(tmp_path, infisical_up=infisical_up)
     env = {
@@ -131,6 +132,7 @@ def _launch(
             "INFISICAL_CLIENT_ID": "id",
             "INFISICAL_CLIENT_SECRET": "secret",
         }
+    env |= extra or {}
     return subprocess.run(
         ["bash", str(SCRIPT), "run", "--", "env"],
         env=env,
@@ -185,6 +187,29 @@ def test_hung_reads_are_not_retried_secret_by_secret(
     env = _env(proc.stdout)
     assert env["AGENT_AUTH_GRANTED"] == ""
     assert "did not answer" in env["AGENT_AUTH_UNAVAILABLE"]
+    assert [r["outcome"] for r in _Fake.reports] == ["degraded"]
+
+
+@pytest.mark.parametrize("reads", ["hang", "refused", "empty"])
+def test_a_gh_token_alias_does_not_kill_a_degraded_launch(
+    server: str, tmp_path: Path, reads: str
+) -> None:
+    """With ENGINE_AGENT_AUTH_GH_TOKEN_FROM set, a degraded read must not be
+    mistaken for an alias naming no manifest entry (WI-1812 re-review)."""
+    _Fake.reads_hang = reads == "hang"
+    extra = {"ENGINE_AGENT_AUTH_GH_TOKEN_FROM": "GHT"}
+    manifest = "GHT proj-a GHT"
+    if reads == "refused":
+        extra["INFISICAL_API_URL"] = "http://127.0.0.1:9/api"
+    if reads == "empty":
+        manifest = "GHT proj-a NOT_THERE"
+    proc = _launch(server, tmp_path, infisical_up=True, manifest=manifest, extra=extra)
+    assert proc.returncode == 0, proc.stderr
+    assert "not a variable" not in proc.stderr
+    env = _env(proc.stdout)
+    assert "GH_TOKEN" not in env
+    assert env["AGENT_AUTH_GRANTED"] == ""
+    assert env["AGENT_AUTH_UNAVAILABLE"]
     assert [r["outcome"] for r in _Fake.reports] == ["degraded"]
 
 
