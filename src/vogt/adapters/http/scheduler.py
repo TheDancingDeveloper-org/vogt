@@ -124,9 +124,15 @@ class CollectorSchedule:
 
     def _sweep(self) -> None:
         from vogt.application.services import sweep
+        from vogt.application.services.budget_handoff import settle_budget_stops
 
         ctx = self._context_factory()
-        sweep(ctx, SweepParams(reason=SCHEDULED_REASON))
+        try:
+            sweep(ctx, SweepParams(reason=SCHEDULED_REASON))
+        finally:
+            # A budget-stopped session is handed off (and restarted within
+            # the cap) whether or not the collectors succeeded (WI-1833).
+            settle_budget_stops(ctx)
 
 
 @contextlib.asynccontextmanager
