@@ -90,6 +90,7 @@ for half in "${halves[@]}"; do
             continue
         fi
         run "pnpm typecheck" pnpm --dir web typecheck
+        run "pwa route map" node web/scripts/check-route-map.mjs
         run "pnpm test" pnpm --dir web test
         ;;
     *)
