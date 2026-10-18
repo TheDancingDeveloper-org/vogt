@@ -3169,6 +3169,7 @@ mod tests {
             scratch_prune_bytes: 2 << 30,
             min_free_percent: 0,
             shared_cargo_target_dir: None,
+            shared_cargo_target_max_bytes: 40 << 30,
             metrics_bind: None,
             chat: Default::default(),
             economics_tick: std::time::Duration::ZERO,

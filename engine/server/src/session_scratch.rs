@@ -65,9 +65,111 @@ pub fn dirs(roots: &[PathBuf], id: Uuid) -> Vec<PathBuf> {
 pub fn remove(roots: &[PathBuf], id: Uuid) -> Vec<Removed> {
     let mut out = Vec::new();
     for dir in dirs(roots, id) {
+        let repos = worktree_repos(&dir);
         let bytes = dir_bytes(&dir);
         if std::fs::remove_dir_all(&dir).is_ok() {
             out.push(Removed { path: dir, bytes });
+        }
+        for repo in repos {
+            git_worktree_prune(&repo);
+        }
+    }
+    out
+}
+
+/// The main repositories of the linked worktrees under `dir`, at most four
+/// levels down, so a deleted scratch worktree's record can be pruned.
+fn worktree_repos(dir: &Path) -> Vec<PathBuf> {
+    let mut repos = Vec::new();
+    let mut stack = vec![(dir.to_path_buf(), 0u8)];
+    while let Some((d, depth)) = stack.pop() {
+        let git = d.join(".git");
+        if std::fs::symlink_metadata(&git).is_ok_and(|m| m.is_file()) {
+            if let Some(main) = std::fs::read_to_string(&git).ok().and_then(|t| {
+                let gitdir = t.lines().find_map(|l| l.trim().strip_prefix("gitdir:"))?;
+                Some(
+                    d.join(gitdir.trim())
+                        .parent()?
+                        .parent()?
+                        .parent()?
+                        .to_path_buf(),
+                )
+            }) {
+                if !repos.contains(&main) {
+                    repos.push(main);
+                }
+            }
+            continue;
+        }
+        if depth >= 4 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            if std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_dir()) {
+                stack.push((e.path(), depth + 1));
+            }
+        }
+    }
+    repos
+}
+
+fn git_worktree_prune(repo: &Path) {
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["worktree", "prune"])
+        .output();
+}
+
+/// Claude Code's directory name for a session started in `cwd`: every
+/// character other than an ASCII letter or digit becomes `-`.
+pub fn cwd_slug(cwd: &Path) -> String {
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Point scratch Cargo builds of a session in `cwd` at one shared target per
+/// repository (WI-1810): write `<root>/<slug>/.cargo/config.toml` with
+/// `build.target-dir = <shared>/<repo>`. Cargo reads it for any build under
+/// the session's scratch directory and for nothing else, so the session's
+/// own worktree keeps its own target and concurrent workers never wait on
+/// one lock; scratch builds of one repo share it (and its lock).
+/// A repository's own `.cargo/config.toml` or a `CARGO_TARGET_DIR` wins.
+pub fn write_scratch_cargo_config(root: &Path, cwd: &Path, shared: &Path) -> Option<PathBuf> {
+    let repo = repo_name(cwd)?;
+    let dir = root.join(cwd_slug(cwd)).join(".cargo");
+    std::fs::create_dir_all(&dir).ok()?;
+    let target = shared.join(repo);
+    let path = dir.join("config.toml");
+    let body = format!(
+        "# Written by the Vogt engine (WI-1810): scratch builds share one target.\n\
+         [build]\ntarget-dir = {:?}\n",
+        target.to_string_lossy()
+    );
+    std::fs::write(&path, body).ok()?;
+    Some(path)
+}
+
+/// Remove each repository target under `shared` larger than `limit` bytes;
+/// the next scratch build starts it again.
+pub fn cap_shared_targets(shared: &Path, limit: u64) -> Vec<Removed> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(shared) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        let bytes = dir_bytes(&path);
+        if bytes > limit && std::fs::remove_dir_all(&path).is_ok() {
+            out.push(Removed { path, bytes });
         }
     }
     out
@@ -80,12 +182,23 @@ pub fn remove(roots: &[PathBuf], id: Uuid) -> Vec<Removed> {
 pub fn prune(roots: &[PathBuf], id: Uuid, limit: u64) -> Vec<Removed> {
     let mut out = Vec::new();
     for dir in dirs(roots, id) {
+        let repos = worktree_repos(&dir);
         out.extend(remove_cargo_targets(&dir));
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        // Claude Code keeps everything under `<id>/scratchpad/`, so its
+        // children are the entries weighed, not `scratchpad/` as a whole.
+        let mut candidates = Vec::new();
+        for parent in [dir.clone(), dir.join("scratchpad")] {
+            let Ok(entries) = std::fs::read_dir(&parent) else {
+                continue;
+            };
+            candidates.extend(
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.file_name().is_none_or(|n| n != "scratchpad")),
+            );
+        }
+        for path in candidates {
             let Ok(meta) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
@@ -105,6 +218,9 @@ pub fn prune(roots: &[PathBuf], id: Uuid, limit: u64) -> Vec<Removed> {
             if gone.is_ok() {
                 out.push(Removed { path, bytes });
             }
+        }
+        for repo in repos {
+            git_worktree_prune(&repo);
         }
     }
     out
@@ -302,6 +418,8 @@ mod tests {
         let plain = pad.join("notes").join("target");
         std::fs::create_dir_all(&plain).unwrap();
         std::fs::write(plain.join("n"), "n").unwrap();
+        // A large entry inside scratchpad/ goes on its own; the rest stays.
+        std::fs::write(pad.join("download.bin"), vec![0u8; 2048]).unwrap();
         // A large top-level entry goes, a small one stays.
         std::fs::write(dir.join("big.bin"), vec![0u8; 2048]).unwrap();
         std::fs::write(dir.join("small.txt"), "s").unwrap();
@@ -313,7 +431,9 @@ mod tests {
         assert!(!dir.join("big.bin").exists());
         assert!(dir.join("small.txt").exists());
         assert!(wt.join("Cargo.toml").exists());
-        assert_eq!(removed.len(), 3);
+        assert!(!pad.join("download.bin").exists());
+        assert!(pad.exists(), "scratchpad/ itself is kept");
+        assert_eq!(removed.len(), 4);
     }
 
     #[cfg(target_os = "linux")]
@@ -348,6 +468,72 @@ mod tests {
         .unwrap();
         assert_eq!(repo_name(&wt).as_deref(), Some("vogt"));
         assert_eq!(repo_name(Path::new("/")), None);
+    }
+
+    #[test]
+    fn scratch_cargo_config_and_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("vogt");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let root = tmp.path().join("claude-1");
+        let shared = tmp.path().join("shared");
+        let path = write_scratch_cargo_config(&root, &repo, &shared).unwrap();
+        assert_eq!(path, root.join(cwd_slug(&repo)).join(".cargo/config.toml"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(
+            parsed["build"]["target-dir"].as_str().unwrap(),
+            shared.join("vogt").to_str().unwrap()
+        );
+        assert!(write_scratch_cargo_config(&root, Path::new("/"), &shared).is_none());
+        assert_eq!(cwd_slug(Path::new("/a/b_c.d")), "-a-b-c-d");
+
+        std::fs::create_dir_all(shared.join("vogt")).unwrap();
+        std::fs::write(shared.join("vogt").join("x"), vec![0u8; 100]).unwrap();
+        std::fs::create_dir_all(shared.join("small")).unwrap();
+        assert_eq!(cap_shared_targets(&shared, 50).len(), 1);
+        assert!(!shared.join("vogt").exists());
+        assert!(shared.join("small").exists());
+    }
+
+    #[test]
+    fn remove_prunes_the_worktree_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        std::fs::create_dir(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@e",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "i",
+            ],
+        );
+        let id = Uuid::new_v4();
+        let roots = vec![tmp.path().join("claude")];
+        let dir = session_dir(&roots[0], id);
+        let wt = dir.join("scratchpad").join("wt");
+        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        assert!(main.join(".git/worktrees/wt").exists());
+        remove(&roots, id);
+        assert!(!dir.exists());
+        assert!(!main.join(".git/worktrees/wt").exists());
     }
 
     #[test]

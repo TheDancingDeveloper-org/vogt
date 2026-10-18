@@ -134,7 +134,6 @@ enum Origin {
     AgentTask,
 }
 
-/// What `SessionRegistry::create_inner` is doing.
 /// What [`SessionRegistry::clean_scratch`] does to a session's scratchpad.
 #[derive(Debug, Clone, Copy)]
 enum Scratch {
@@ -142,6 +141,7 @@ enum Scratch {
     Prune,
 }
 
+/// What `SessionRegistry::create_inner` is doing.
 enum Creating {
     Fresh(Origin),
     /// Starting a hibernated session again under its own id.
@@ -557,23 +557,17 @@ impl SessionRegistry {
             cut.0 = Some((checkout, created, worktree.branch.trim().to_string()));
         }
 
-        // One Cargo target per repository, shared by its worktrees, when the
-        // deployment names a root for them (WI-1810). Not recorded: a wake
-        // adds it again. A caller's or template's own value wins.
-        if let Some(root) = self.cfg.shared_cargo_target_dir.as_deref() {
-            let env = spec.env.get_or_insert_with(Vec::new);
-            if !env.iter().any(|(k, _)| k == "CARGO_TARGET_DIR") {
-                let cwd = spec
-                    .cwd
-                    .as_deref()
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| self.cfg.default_cwd.clone());
-                if let Some(repo) = crate::session_scratch::repo_name(&cwd) {
-                    env.push((
-                        "CARGO_TARGET_DIR".into(),
-                        root.join(repo).to_string_lossy().into_owned(),
-                    ));
-                }
+        // Scratch builds share one Cargo target per repository (WI-1810):
+        // a config file under the session's scratch directory, so the
+        // session's own worktree keeps its own target.
+        if let Some(shared) = self.cfg.shared_cargo_target_dir.as_deref() {
+            let cwd = spec
+                .cwd
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| self.cfg.default_cwd.clone());
+            if let Some(root) = crate::session_scratch::roots().into_iter().next() {
+                crate::session_scratch::write_scratch_cargo_config(&root, &cwd, shared);
             }
         }
 
@@ -2065,7 +2059,14 @@ impl SessionRegistry {
             return;
         }
         let limit = self.cfg.scratch_prune_bytes;
+        let shared = self.cfg.shared_cargo_target_dir.clone();
+        let shared_limit = self.cfg.shared_cargo_target_max_bytes;
         let job = move || {
+            if let (Scratch::Remove, Some(shared)) = (how, shared.as_deref()) {
+                for r in crate::session_scratch::cap_shared_targets(shared, shared_limit) {
+                    tracing::info!(path = %r.path.display(), bytes = r.bytes, "removed an oversized shared scratch Cargo target");
+                }
+            }
             let roots = crate::session_scratch::roots();
             let removed = match how {
                 Scratch::Remove => crate::session_scratch::remove(&roots, id),
