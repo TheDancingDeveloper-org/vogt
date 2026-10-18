@@ -24,6 +24,7 @@ import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { render } from "@solidjs/testing-library";
 import { vi } from "vitest";
 import { startEventStream, stopEventStream } from "../store";
+import { cancelPendingWakeForTests } from "../wakeCoordinator";
 
 /** The front door's mount, as `vogtApi.ts` names it. */
 const VOGT_PREFIX = "/api/vogt";
@@ -691,7 +692,12 @@ export async function liveStream(vogt: FakeVogt): Promise<void> {
   await settle();
 }
 
-export const stopLiveStream = stopEventStream;
+export function stopLiveStream(): void {
+  stopEventStream();
+  // A reconnect notes a debounced wake; one still pending when the test ends
+  // would refetch the next test's surfaces under it.
+  cancelPendingWakeForTests();
+}
 
 // -- mounting a surface at a URL --------------------------------------------
 
