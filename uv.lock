@@ -1004,7 +1004,7 @@ wheels = [
 
 [[package]]
 name = "vogt"
-version = "0.7.18"
+version = "0.7.19"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
