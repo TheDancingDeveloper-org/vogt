@@ -1961,4 +1961,71 @@ mod tests {
         )
         .unwrap();
     }
+
+    /// WI-1053's hard gate. The fixture is a declared store the Python core
+    /// wrote (`tests/parity/make_python_auth_db.py`), with the secrets it
+    /// minted beside it. After the swap the Rust core opens that same file, so
+    /// the Python-issued token must authenticate with its actor and scopes, and
+    /// the Python-hashed password must sign in. A wrong secret must not.
+    #[test]
+    fn a_python_written_store_still_authenticates() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        throttle_reset();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python-auth");
+        let secrets: Value =
+            serde_json::from_str(&std::fs::read_to_string(fixture.join("secrets.json")).unwrap())
+                .unwrap();
+        let dir = std::env::temp_dir().join(format!("vogt-python-auth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(
+            fixture.join("declared.sqlite3"),
+            dir.join("declared.sqlite3"),
+        )
+        .unwrap();
+        let built = crate::application::context::build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.clone(),
+                ..crate::config::VogtConfig::default()
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let now = crate::core::utc_now();
+
+        let api = &secrets["api_token"];
+        let grant = presented(&built, api["secret"].as_str().unwrap(), now)
+            .unwrap_or_else(|_| panic!("the Python-issued token must authenticate"));
+        assert_eq!(grant.identity_ref.as_deref(), api["actor"].as_str());
+        let want: Vec<String> = serde_json::from_value(api["scopes"].clone()).unwrap();
+        assert_eq!(grant.scopes, want);
+        assert!(
+            presented(&built, "vogt_not-the-python-token", now).is_err(),
+            "a secret the store never saw must be refused"
+        );
+
+        let user = &secrets["user"];
+        let session = login_op(
+            &built,
+            serde_json::json!({"username": user["username"], "password": user["password"]}),
+        )
+        .expect("the Python-hashed password must sign in");
+        assert_eq!(token_of(&session).scopes, vec!["admin"]);
+        let wrong = login_op(
+            &built,
+            serde_json::json!({"username": user["username"], "password": "not the password"}),
+        )
+        .unwrap_err();
+        assert_eq!(wrong.message(), "the username or password is not right");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
