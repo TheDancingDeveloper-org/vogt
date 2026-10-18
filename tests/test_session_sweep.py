@@ -395,3 +395,22 @@ def test_a_report_older_than_the_current_turn_is_stale(
     assert rows[worker_engine].attention != "blocked"
     assert rows[worker_engine].blocked_stale
     assert rows[worker_engine].blocked_since is not None
+
+
+def test_a_done_declaration_after_the_report_makes_it_stale(
+    wired: AppContext, engine: Engine
+) -> None:
+    """AUTOPILOT: DONE after the report, even in the same turn, ages it out."""
+    _worker, worker_engine = _start(wired)
+    engine.rows[worker_engine].update(
+        activity="idle",
+        turn_started_at="2026-10-18T08:00:00Z",
+        done_at="2026-10-18T09:30:00Z",
+        blocked={"reason": "waiting on go-ahead", "since": "2026-10-18T09:00:00Z"},
+    )
+
+    result = sweep_sessions(wired, SweepSessionsParams(mode="full", screen_lines=0))
+
+    assert result.counts["needs_you"] == 0
+    assert result.rows[0].blocked_stale
+    assert result.rows[0].attention != "blocked"

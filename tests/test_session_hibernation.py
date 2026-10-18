@@ -26,6 +26,7 @@ from vogt.application.models import (
     ListEventsParams,
     ListSessionsParams,
     RegisterProjectParams,
+    ReportBlockedParams,
     SessionInputParams,
     SessionScreenParams,
     SessionWaitParams,
@@ -40,6 +41,7 @@ from vogt.application.services import (
     list_events,
     list_sessions,
     register_project,
+    report_blocked,
     session_input,
     session_screen,
     session_wait,
@@ -98,6 +100,7 @@ class Engine:
         self.refuse_wake: str | None = None
         #: The successor recorded by the last hibernate that named one.
         self.superseded_by: dict[str, str] = {}
+        self.blocked: dict[str, dict[str, Any]] = {}
 
     def summary(self, engine_id: str) -> dict[str, Any]:
         asleep = engine_id in self.hibernated
@@ -108,6 +111,7 @@ class Engine:
             "alive": not asleep,
             "cwd": ROOT,
             "created_at": "2026-10-05T00:00:00Z",
+            "blocked": self.blocked.get(engine_id),
             "conversation": {
                 "agent": self.agent.get(engine_id, "claude"),
                 "id": engine_id,
@@ -182,6 +186,16 @@ class Engine:
             self._idle_reads_left = self.idle_reads_after_wake
             self._swallow_left = self.swallow_enters
             self.composer = "empty"
+            return 200, json.dumps(self.summary(engine_id)).encode()
+        if method == "POST" and verb == "blocked":
+            if payload.get("blocked"):
+                self.blocked[engine_id] = {
+                    "reason": payload["reason"],
+                    "items": payload.get("items", []),
+                    "since": "2026-10-18T09:00:00Z",
+                }
+            else:
+                self.blocked.pop(engine_id, None)
             return 200, json.dumps(self.summary(engine_id)).encode()
         if method == "POST" and verb == "keep-awake":
             if payload.get("keep_awake"):
@@ -375,6 +389,28 @@ def test_waking_a_live_session_changes_nothing(
     result = wake_session(wired, WakeSessionParams(id=ses_id, reason=WHY))
     assert "POST wake" not in engine.calls(engine_id)
     assert result.session.alive is True
+
+
+def test_waking_clears_the_blocked_report_it_slept_with(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1834: whoever wakes a session is acting on it; the report goes, and
+    the audit keeps it."""
+    ses_id, engine_id = _started(wired)
+    report_blocked(
+        wired, ReportBlockedParams(id=ses_id, blocker="waiting on go-ahead", reason=WHY)
+    )
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+
+    result = wake_session(wired, WakeSessionParams(id=ses_id, reason=WHY))
+
+    assert engine_id not in engine.blocked
+    assert result.session.alive is True
+    assert result.session.blocked is None
+    cleared = list_audit(
+        wired, ListAuditParams(entity_id=ses_id, operation="session.report_unblocked")
+    ).records
+    assert [row.reason for row in cleared] == [f"cleared by wake: {WHY}"]
 
 
 def test_typing_into_a_hibernated_session_wakes_it_first(

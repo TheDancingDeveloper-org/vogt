@@ -885,12 +885,17 @@ def _block_is_stale(summary: SessionSummary) -> bool:
     A report is made mid-turn, just before the agent stops. A turn that
     began after it means the session went back to work — it was typed into,
     woken, or nudged on — so the report no longer says what it waits on
-    (WI-1834). A done declaration in a later turn begins that turn too.
+    (WI-1834). So does a done declaration (`AUTOPILOT: DONE`) made after
+    the report, even in the same turn: the agent says nothing is left for it.
+    The report stays on the row, flagged stale, so it is not lost.
     """
     blocked = summary.blocked
-    if blocked is None or blocked.since is None or summary.turn_started_at is None:
+    if blocked is None or blocked.since is None:
         return False
-    return summary.turn_started_at > blocked.since
+    return any(
+        at is not None and at > blocked.since
+        for at in (summary.turn_started_at, summary.done_at)
+    )
 
 
 def _block_age(
@@ -1691,11 +1696,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         },
         event_kind=SESSION_INPUT_EVENT,
     )
-    if submitted:
-        # A new instruction answers whatever the session reported it was
-        # blocked on, or supersedes it (WI-1834). A draft is not sent yet.
-        _clear_block_on(ctx, engine, target, cause="input", reason=reason)
-    digest = _input_digest(ctx, target)
+    digest = _input_digest(ctx, target, submitted=submitted, reason=reason)
     return SessionInputResult(
         id=params.id,
         engine_session_id=engine_id,
@@ -3092,31 +3093,41 @@ def _set_blocked(
 
 
 def _clear_block_on(
-    ctx: AppContext, engine: EngineClient, target: _Target, *, cause: str, reason: str
-) -> bool:
+    ctx: AppContext,
+    engine: EngineClient,
+    target: _Target,
+    *,
+    cause: str,
+    reason: str,
+    current: EngineSession | None = None,
+) -> EngineSession | None:
     """Clear `target`'s blocked report because someone acted on the session
     (WI-1834): it was given new input, or woken. The report it replaces stays
     in the audit, as an unblock naming the cause and what it said.
 
     A session typing into or waking itself clears nothing, and a report that
     cannot be read or cleared is left for the sweep's staleness rule: this
-    never fails the input or wake it rides on. True when one was cleared.
+    never fails the input or wake it rides on. `current` is a read of the
+    session the caller already holds, to spare a second one. The session as
+    cleared when one was, else None.
     """
     if ctx.principal.identity_ref in {
         f"agent:session:{target.engine_session_id}",
         *(() if target.session is None else (f"agent:session:{target.session.id}",)),
     }:
-        return False
+        return None
     engine_id = target.engine_session_id
     try:
-        current = engine.get_session(engine_id)
+        if current is None:
+            current = engine.get_session(engine_id)
         if current is None or current.blocked is None:
-            return False
+            return None
         was = current.blocked
-        if engine.set_blocked(engine_id, blocked=False, reason=None, items=[]) is None:
-            return False
+        cleared = engine.set_blocked(engine_id, blocked=False, reason=None, items=[])
+        if cleared is None:
+            return None
     except (EngineUnavailable, Conflict, NotFound):
-        return False
+        return None
     audited_action(
         ctx,
         operation=SESSION_REPORT_UNBLOCKED,
@@ -3135,15 +3146,30 @@ def _clear_block_on(
         },
         event_kind=SESSION_UNBLOCKED_EVENT,
     )
-    return True
+    return cleared
 
 
-def _input_digest(ctx: AppContext, target: _Target) -> SessionDigest | None:
-    """The digest of the session just typed into, when it can be read."""
+def _input_digest(
+    ctx: AppContext, target: _Target, *, submitted: bool, reason: str
+) -> SessionDigest | None:
+    """The digest of the session just typed into, when it can be read.
+
+    A submitted input also clears the session's blocked report (WI-1834),
+    from the same read: a new instruction answers what it was blocked on, or
+    supersedes it. A draft is not sent yet.
+    """
+    engine = _engine(ctx)
     try:
-        live = _engine(ctx).get_session(target.engine_session_id)
+        live = engine.get_session(target.engine_session_id)
     except (EngineUnavailable, NotFound):
         return None
+    if submitted and live is not None:
+        live = (
+            _clear_block_on(
+                ctx, engine, target, cause="input", reason=reason, current=live
+            )
+            or live
+        )
     if target.session is None:
         if live is None:
             return None
