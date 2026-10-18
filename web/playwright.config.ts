@@ -50,6 +50,13 @@ export default defineConfig({
             name: "live",
             use: { ...devices["Desktop Chrome"], baseURL: liveBaseURL },
           },
+          // The same live run at phone size; selected explicitly with
+          // `--project=live-phone`, so the e2e workflow's `--project=live`
+          // is unchanged.
+          {
+            name: "live-phone",
+            use: { ...devices["iPhone 13"], baseURL: liveBaseURL },
+          },
         ]
       : []),
   ],
