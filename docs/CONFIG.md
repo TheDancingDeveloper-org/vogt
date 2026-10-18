@@ -169,7 +169,7 @@ The ID or the client ID of a GitHub App for the forge adapter to authenticate as
 
 ### `github_app_installation_id`
 
-Pin every GitHub request to one installation of `github_app_id`. Unset, the installation is discovered per repository owner (`GET /repos/{owner}/{repo}/installation`, then `/orgs/{owner}/installation` or `/users/{owner}/installation`) and remembered, so one App installed on several accounts or organisations covers them all. Publishing a new repository needs an owner to create it under: this installation's account, or the single one discovered.
+Pin every GitHub request to one installation of `github_app_id`. Unset, the installation is discovered per repository owner (`GET /repos/{owner}/{repo}/installation`, then `/orgs/{owner}/installation` or `/users/{owner}/installation`) and remembered, so one App installed on several accounts or organisations covers them all; an owner without the App is read with `github_token_file`. Publishing a new repository needs an owner to create it under: this installation's account or, unset, the App's only installation. An App with several installations must set this to publish.
 
 ### `github_app_private_key_file`
 

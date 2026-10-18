@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ from vogt.adapters.forge.github import GitHubProvider
 from vogt.adapters.forge.models import RepoRef
 from vogt.adapters.forge.registry import github_provider
 from vogt.adapters.github.app_auth import (
+    NOT_INSTALLED_TTL_SECONDS,
     GitHubAppAuth,
     clear_app_auth_cache,
     github_client_for,
@@ -34,6 +36,7 @@ from vogt.adapters.github.client import (
     ETAGS,
     RATE_BUDGET,
     GitHubClient,
+    GitHubRateLimited,
     GitHubUnavailable,
 )
 from vogt.adapters.github.collectors import github_collectors
@@ -96,6 +99,10 @@ class _GitHub:
         self.expires_at = NOW + 3600
         self.revoked: set[str] = set()
         self.calls: list[tuple[str, str, str]] = []  # method, path, bearer
+        #: Forced status and extra headers for JWT-signed (`/app`, lookup) calls.
+        self.app_status: int | None = None
+        self.app_headers: dict[str, str] = {}
+        self.installations = list(INSTALLS)
 
     def _by_id(self, installation: int) -> tuple[str, str] | None:
         for owner, (number, kind) in INSTALLS.items():
@@ -111,6 +118,29 @@ class _GitHub:
         bearer = headers.get("Authorization", "").removeprefix("Bearer ")
         self.calls.append((method, path, bearer))
         parts = path.strip("/").split("/")
+        if parts[0] == "app" or parts[-1] == "installation":
+            status, payload = self._app(parts)
+            if self.app_status is not None:
+                status = self.app_status
+            return status, payload, self.app_headers
+        if bearer in self.revoked:
+            return _json(401, {"message": "Bad credentials"})
+        if method == "POST":
+            return _json(201, {"name": "fresh", "owner": {"login": "example-org"}})
+        return _json(200, {"ok": True})
+
+    def _app(self, parts: list[str]) -> tuple[int, bytes]:
+        if parts == ["app", "installations"]:
+            return _json(
+                200,
+                [
+                    {
+                        "id": INSTALLS[o][0],
+                        "account": {"login": o, "type": INSTALLS[o][1]},
+                    }
+                    for o in self.installations
+                ],
+            )
         if parts[0] == "app":
             installation = int(parts[2])
             found = self._by_id(installation)
@@ -123,23 +153,37 @@ class _GitHub:
             return _json(200, {"account": {"login": found[0], "type": found[1]}})
         if parts[-1] == "installation":
             owner = parts[1]
-            if owner not in INSTALLS or (parts[0] == "orgs") != (
-                INSTALLS[owner][1] == "Organization"
+            # A repository lookup finds any installation; the org and user
+            # lookups only find their own kind of account.
+            if owner not in INSTALLS or (
+                parts[0] != "repos"
+                and (parts[0] == "orgs") != (INSTALLS[owner][1] == "Organization")
             ):
                 return _json(404, {"message": "Not Found"})
             number, kind = INSTALLS[owner]
             return _json(200, {"id": number, "account": {"login": owner, "type": kind}})
-        if bearer in self.revoked:
-            return _json(401, {"message": "Bad credentials"})
-        if method == "POST":
-            return _json(201, {"name": "fresh", "owner": {"login": "example-org"}})
-        return _json(200, {"ok": True})
+        return _json(404, {"message": "Not Found"})
+
+    def app_calls(self) -> list[str]:
+        return [
+            p
+            for _m, p, _b in self.calls
+            if p.startswith("/app/") or p.endswith("/installation")
+        ]
 
     def bearers(self, path: str) -> list[str]:
         return [bearer for _m, p, bearer in self.calls if p == path]
 
     def posts(self) -> list[str]:
         return [p for m, p, _b in self.calls if m == "POST" and "/app/" not in p]
+
+
+def _low() -> dict[str, str]:
+    return {
+        "X-RateLimit-Remaining": "3",
+        "X-RateLimit-Reset": str(int(NOW) + 10_000_000),
+        "X-RateLimit-Resource": "core",
+    }
 
 
 def _auth(
@@ -259,11 +303,128 @@ def test_installations_are_discovered_per_owner(key: rsa.RSAPrivateKey) -> None:
     assert fake.minted == [111, 222]
 
 
-def test_an_owner_without_the_app_is_unavailable(key: rsa.RSAPrivateKey) -> None:
+def test_an_owner_without_the_app_falls_back_to_the_pat(
+    key: rsa.RSAPrivateKey,
+) -> None:
+    """F1: not an error; the owner is read with the personal token."""
+    fake = _GitHub()
+    auth = _auth(key, fake)
+    auth.fallback_token = "pat-fixture"
+    client = GitHubClient(token_provider=auth, transport=fake)
+    assert client.get("/repos/stranger/r") == {"ok": True}
+    assert fake.bearers("/repos/stranger/r") == ["pat-fixture"]
+    assert fake.minted == []
+
+
+def test_not_installed_is_cached_per_owner_with_a_ttl(
+    key: rsa.RSAPrivateKey,
+) -> None:
+    """F1: no further App calls for that owner until the TTL runs out."""
+    fake = _GitHub()
+    clock = [NOW]
+    auth = _auth(key, fake, clock)
+    auth.fallback_token = "pat-fixture"
+    client = GitHubClient(token_provider=auth, transport=fake)
+    client.get("/repos/stranger/a")
+    app_calls = len(fake.app_calls())
+    assert app_calls == 3  # repo, org and user installation lookups
+    client.get("/repos/stranger/b")
+    clock[0] = NOW + NOT_INSTALLED_TTL_SECONDS - 1
+    client.get("/repos/stranger/c")
+    assert len(fake.app_calls()) == app_calls
+    clock[0] = NOW + NOT_INSTALLED_TTL_SECONDS
+    client.get("/repos/stranger/d")
+    assert len(fake.app_calls()) > app_calls
+
+
+def test_an_owner_without_the_app_and_no_pat_is_read_anonymously(
+    key: rsa.RSAPrivateKey,
+) -> None:
     fake = _GitHub()
     client = GitHubClient(token_provider=_auth(key, fake), transport=fake)
-    with pytest.raises(GitHubUnavailable, match="not installed on 'stranger'"):
+    assert client.get("/repos/stranger/r") == {"ok": True}
+    assert fake.bearers("/repos/stranger/r") == [""]
+
+
+def test_the_fallback_owner_shares_the_pat_budget(key: rsa.RSAPrivateKey) -> None:
+    fake = _GitHub()
+    auth = _auth(key, fake)
+    auth.fallback_token = "pat-fixture"
+    pat = GitHubClient(token="pat-fixture")
+    assert auth.cache_key("/repos/stranger/r") == pat._budget_key()
+
+
+def test_a_fallback_pat_401_is_not_retried(key: rsa.RSAPrivateKey) -> None:
+    fake = _GitHub()
+    fake.revoked.add("pat-fixture")
+    auth = _auth(key, fake)
+    auth.fallback_token = "pat-fixture"
+    client = GitHubClient(token_provider=auth, transport=fake)
+    with pytest.raises(GitHubUnavailable, match="401"):
         client.get("/repos/stranger/r")
+    assert fake.bearers("/repos/stranger/r") == ["pat-fixture"]
+
+
+def test_a_failed_lookup_is_not_cached_as_not_installed(
+    key: rsa.RSAPrivateKey,
+) -> None:
+    fake = _GitHub()
+    fake.app_status = 500
+    auth = _auth(key, fake)
+    with pytest.raises(GitHubUnavailable):
+        auth.token("/repos/example-org/a")
+    fake.app_status = None
+    assert auth.token("/repos/example-org/a") == "ghs_111_1"
+
+
+# -- F2: the rate budget comes first ----------------------------------------
+
+
+def test_a_low_installation_budget_mints_nothing(key: rsa.RSAPrivateKey) -> None:
+    fake = _GitHub()
+    auth = _auth(key, fake, installation_id=111)
+    # The budget reads response headers, which the client lower-cases.
+    low = {k.lower(): v for k, v in _low().items()}
+    RATE_BUDGET.observe(auth.cache_key(), low)
+    client = GitHubClient(token_provider=auth, transport=fake)
+    with pytest.raises(GitHubRateLimited):
+        client.get("/repos/example-org/a")
+    with pytest.raises(GitHubRateLimited):
+        client.send("/repos/example-org/a/issues", {"title": "t"})
+    assert fake.calls == []
+
+
+def test_a_low_app_budget_stops_lookups_and_mints(key: rsa.RSAPrivateKey) -> None:
+    fake = _GitHub()
+    auth = _auth(key, fake)
+    assert auth.token("/repos/example-org/a") == "ghs_111_1"
+    # A JWT-signed response reports the App's budget is nearly spent.
+    fake.app_headers = _low()
+    fake.installations = ["example-org"]
+    auth._app_get("/app/installations")
+    calls = len(fake.calls)
+    with pytest.raises(GitHubRateLimited):
+        auth.token("/repos/example-user/a")  # would need a lookup
+    auth.invalidate("/repos/example-org/a")
+    with pytest.raises(GitHubRateLimited):
+        auth.token("/repos/example-org/a")  # would need a mint
+    assert len(fake.calls) == calls
+
+
+def test_a_rate_limited_lookup_is_not_cached_as_not_installed(
+    key: rsa.RSAPrivateKey,
+) -> None:
+    fake = _GitHub()
+    fake.app_status = 403
+    fake.app_headers = {**_low(), "X-RateLimit-Remaining": "0"}
+    auth = _auth(key, fake)
+    auth.fallback_token = "pat-fixture"
+    with pytest.raises(GitHubRateLimited):
+        auth.token("/repos/example-org/a")
+    RATE_BUDGET.clear()
+    fake.app_status = None
+    fake.app_headers = {}
+    assert auth.token("/repos/example-org/a") == "ghs_111_1"
 
 
 def test_a_configured_installation_skips_discovery(key: rsa.RSAPrivateKey) -> None:
@@ -415,3 +576,57 @@ def test_create_repo_with_a_pat_is_unchanged() -> None:
         name="fresh", private=True
     )
     assert fake.posts() == ["/user/repos"]
+
+
+# -- F3: publishing without a configured installation ------------------------
+
+
+def test_publish_discovers_the_only_installation(key: rsa.RSAPrivateKey) -> None:
+    fake = _GitHub()
+    fake.installations = ["example-org"]
+    auth = _auth(key, fake)
+    _writer(GitHubClient(token_provider=auth, transport=fake)).create_repo(
+        name="fresh", private=True
+    )
+    assert "/app/installations" in fake.app_calls()
+    assert fake.posts() == ["/orgs/example-org/repos"]
+
+
+def test_publish_refuses_to_guess_between_installations(
+    key: rsa.RSAPrivateKey,
+) -> None:
+    fake = _GitHub()
+    auth = _auth(key, fake)
+    with pytest.raises(GitHubUnavailable, match="github_app_installation_id"):
+        _writer(GitHubClient(token_provider=auth, transport=fake)).create_repo(
+            name="fresh", private=True
+        )
+    assert fake.posts() == []
+
+
+# -- F4: a broken key is loud -------------------------------------------------
+
+
+def test_a_missing_key_file_warns_once_and_uses_the_pat(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    token_file = _pat_file(tmp_path)
+    config = _config(tmp_path / "absent.pem", token_file)
+    with caplog.at_level(logging.WARNING, logger="vogt.github.app"):
+        for _ in range(3):
+            client = github_client_for(config, token_file)
+            assert client is not None
+            assert client.token == "pat-fixture"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "falling back to github_token_file" in warnings[0].getMessage()
+
+
+def test_an_invalid_key_file_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    bad = tmp_path / "bad.pem"
+    bad.write_text("not a key")
+    with caplog.at_level(logging.WARNING, logger="vogt.github.app"):
+        github_client_for(_config(bad, None), None)
+    assert any("bad.pem" in r.getMessage() for r in caplog.records)

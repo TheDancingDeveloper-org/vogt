@@ -18,7 +18,8 @@ writes attributed to a bot.
 
 When the App settings are set, they take precedence over `github_token_file`
 for every GitHub read and write except notifications. If the key file is
-missing or unreadable, Vogt falls back to the token file.
+missing or unreadable, Vogt logs a warning once and falls back to the token
+file.
 
 ## 1. Create the App
 
@@ -61,13 +62,25 @@ the installation for each repository owner on first use, with
 `/users/{owner}/installation`, and remembers it. A forge config that spans
 several organisations therefore needs no per-owner settings.
 
+If the App is not installed on an owner, Vogt remembers that for an hour. In
+that hour it reads the owner's repositories with `github_token_file`, or
+unauthenticated if no token file is set, and makes no App calls for that
+owner. An installation added later is picked up when the hour is up.
+
 To pin every request to one installation, set `github_app_installation_id`.
 The installation ID is the number at the end of the installation's settings
-URL (`.../settings/installations/<id>`). Publishing a new repository with
-`forge.publish` needs an owner to create it under. That owner is the pinned
-installation's account. With no pin, it is the only installation discovered
-so far; if Vogt has discovered more than one, it refuses to guess. On an
-organisation installation, the repository is created with
+URL (`.../settings/installations/<id>`).
+
+**Publishing** (`forge.publish`) creates a repository before any repository
+names an owner, so Vogt has to pick the installation:
+
+- If `github_app_installation_id` is set, Vogt uses that installation.
+- If it isn't set and the App has exactly one installation, Vogt finds it
+  through `GET /app/installations` and uses it.
+- If the App has several installations, set `github_app_installation_id`,
+  or publishing refuses rather than guess.
+
+On an organisation installation, Vogt creates the repository with
 `POST /orgs/{owner}/repos`.
 
 ## 3. Configure Vogt
@@ -107,6 +120,9 @@ installation token. It keeps each installation's token until five minutes
 before it expires, which is about an hour. On a `401`, it mints a new token
 and retries the request once. The rate budget and the ETag cache are kept per
 installation, so one owner running low on budget doesn't pause the others.
+Requests signed with the JWT, which look up installations and mint tokens,
+have their own budget. Vogt checks it before sending one, so a low budget
+stops those calls too.
 
 ## Switching back
 
