@@ -17,6 +17,7 @@ pays for it.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from vogt.adapters.forge._payloads import comparison, decoded_content, quote_path
@@ -43,6 +44,11 @@ from vogt.adapters.github.client import (
     repo_of,
 )
 from vogt.errors import RemoteRepoExists
+
+#: Who merged each merged PR, keyed by API root, repository and number
+#: (WI-1835). Bounded, oldest entry first out.
+_MERGED_BY: dict[tuple[str, str, int], str | None] = {}
+_MERGED_BY_CAP = 4096
 
 if TYPE_CHECKING:
     from vogt.adapters.forge.writeback import WriteBackResult
@@ -214,7 +220,32 @@ class GitHubProvider:
         pulls = [_to_pull(ref, item) for item in _as_list(payloads)]
         if since:
             pulls = [p for p in pulls if p.updated_at is None or p.updated_at >= since]
-        yield from reversed(pulls)
+        yield from (self._with_merger(ref, pull) for pull in reversed(pulls))
+
+    def _with_merger(self, ref: RepoRef, pull: ForgePull) -> ForgePull:
+        """Fill `merged_by` on a merged PR from the single-PR read (WI-1835).
+
+        The list page omits `merged_by`; `GET /pulls/{n}` carries it. Who merged
+        a PR never changes once it has merged, so the answer is cached per PR
+        for the life of the process and each merged PR costs one read, once.
+        A read that fails leaves `merged_by` empty rather than failing the sync.
+        """
+        if not pull.merged or pull.merged_by is not None:
+            return pull
+        key = (self._client.api_root, ref.slug, pull.number)
+        if key not in _MERGED_BY:
+            try:
+                payload = self._client.get(
+                    f"/repos/{ref.owner}/{ref.repo}/pulls/{pull.number}"
+                )
+            except GitHubUnavailable:
+                return pull
+            merger = payload.get("merged_by") if isinstance(payload, dict) else None
+            login = merger.get("login") if isinstance(merger, dict) else None
+            if len(_MERGED_BY) >= _MERGED_BY_CAP:
+                _MERGED_BY.pop(next(iter(_MERGED_BY)))
+            _MERGED_BY[key] = login if isinstance(login, str) else None
+        return replace(pull, merged_by=_MERGED_BY[key])
 
     def releases(self, ref: RepoRef) -> Iterable[ForgeRelease]:
         payloads = self._client.get(
