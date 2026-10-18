@@ -40,6 +40,7 @@ from vogt.adapters.github.client import (
     DEFAULT_PER_PAGE,
     NO_CONTENT,
     GitHubClient,
+    GitHubRateLimited,
     GitHubUnavailable,
     repo_of,
 )
@@ -429,6 +430,10 @@ class GitHubProvider:
                 if github_dir
                 else {}
             )
+        except GitHubRateLimited:
+            # A paused read is "not read", not "no config": raise so the
+            # posture collector records nothing and retries next sweep.
+            raise
         except GitHubUnavailable:
             return None
         present = set(root) | {f".github/{name}" for name in nested}
@@ -442,6 +447,8 @@ class GitHubProvider:
         None ("could not tell", never flattened to off)."""
         try:
             found = self._client.get(f"/repos/{ref.owner}/{ref.repo}/{endpoint}")
+        except GitHubRateLimited:
+            raise
         except GitHubUnavailable:
             return None
         return found is not None
