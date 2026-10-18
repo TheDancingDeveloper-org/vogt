@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -286,10 +287,12 @@ class QueuedEngine:
 
     ID = "00000000-0000-4000-8000-000000000001"
 
-    def __init__(self, takes_after: int) -> None:
+    def __init__(self, takes_after: int, timeouts: int = 0) -> None:
         self.takes_after = takes_after
+        self.timeouts = timeouts
         self.enters = 0
         self.waits = 0
+        self.wait_timeouts: list[int] = []
 
     def _screen(self) -> tuple[str, list[str]]:
         if self.enters == 0:
@@ -312,6 +315,10 @@ class QueuedEngine:
             return 200, b'{"ok":true}'
         if path.endswith("/wait"):
             self.waits += 1
+            query = urllib.parse.parse_qs(url.split("?", 1)[1])
+            self.wait_timeouts.append(int(query["timeout_s"][0]))
+            if self.waits <= self.timeouts:
+                return 200, json.dumps({"outcome": "timeout"}).encode()
             return 200, json.dumps({"outcome": "ready", "matched": True}).encode()
         if path.endswith("/screen"):
             screen = {"id": self.ID, "lines": lines, "activity": activity}
@@ -419,3 +426,56 @@ def test_a_stuck_multi_line_body_gets_a_follow_up_enter(instance: AppContext) ->
         CLAUDE["held_idle"]["lines"] = saved
     assert result.delivery == "queued"
     assert engine.enters == 2
+
+
+def test_a_long_turn_is_waited_out_in_waits_the_engine_accepts(
+    instance: AppContext,
+) -> None:
+    """Review of #1112: the engine refuses a wait over 600 s, so a turn
+    longer than one wait is followed in chunks, each within the cap."""
+    from vogt.application.services import sessions
+
+    engine = QueuedEngine(takes_after=1, timeouts=3)
+    ctx, ses_id = _wired_queued(instance, engine)
+    session_input(
+        ctx, SessionInputParams(id=ses_id, text=CLAUDE["held_idle"]["text"], reason=WHY)
+    )
+    assert engine.waits == 4, "three timed-out waits, then ready"
+    assert max(engine.wait_timeouts) <= 600
+    assert sessions._ENGINE_WAIT_MAX_S <= 600
+    assert engine.enters == 2, "the follow-up Enter still came"
+
+
+def test_a_turn_longer_than_the_follow_up_gets_no_enter(instance: AppContext) -> None:
+    from vogt.application.services import sessions
+
+    engine = QueuedEngine(takes_after=1, timeouts=1000)
+    ctx, ses_id = _wired_queued(instance, engine)
+    session_input(
+        ctx, SessionInputParams(id=ses_id, text=CLAUDE["held_idle"]["text"], reason=WHY)
+    )
+    assert engine.waits * sessions._ENGINE_WAIT_MAX_S >= sessions._QUEUED_FOLLOW_S
+    assert all(t <= 600 for t in engine.wait_timeouts)
+    assert engine.enters == 1
+
+
+def test_the_follow_up_thread_logs_what_it_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from vogt.application.services import sessions
+
+    class Broken:
+        def wait_session(self, *_args: object, **_kwargs: object) -> None:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+    sessions._submit_queued_logged(Broken(), "e", "x", "text", person=False)  # type: ignore[arg-type]
+    assert "following queued input to x failed" in caplog.text
+
+
+def test_a_greyed_suggestion_is_not_input_pending() -> None:
+    """Review of #1112: Claude's suggestion after the prompt marker."""
+    box = _box(f'{PROMPT} Try "fix lint errors"')
+    assert claude_composer(box) == ""
+    assert input_pending(box) is None
+    assert input_pending(_box(f"{PROMPT} fix lint errors")) == "fix lint errors"
