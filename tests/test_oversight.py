@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from vogt.core.oversight import ORDER, classify
+from vogt.core.oversight import NEEDS_YOU, ORDER, classify
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 
@@ -106,3 +106,16 @@ def test_a_session_that_did_work_or_was_never_metered_is_not_awaiting_task(
 def test_a_done_session_is_not_awaiting_task() -> None:
     attention, _ = verdict(activity="waiting-for-input", turns=2, done_at=NOW)
     assert attention == "done"
+
+
+def test_a_question_menu_needs_you_not_idle() -> None:
+    """WI-1871: an agent at an AskUserQuestion menu is not resting."""
+    attention, reason = verdict(
+        activity="idle",
+        approval_question="Which approach should the sweep fix take?",
+        approval_kind="question",
+    )
+    assert attention == "approval"
+    assert attention in NEEDS_YOU
+    assert reason.startswith("asking a question (answer with session_answer)")
+    assert "Which approach" in reason

@@ -977,7 +977,8 @@ class SessionApproval(Result):
         default="permission",
         description=(
             "permission (a tool call) / folder-trust / external-imports "
-            "(a CLAUDE.md importing files from outside) / read-outside-cwd."
+            "(a CLAUDE.md importing files from outside) / read-outside-cwd / "
+            "question (the agent asks a question with a menu of answers)."
         ),
     )
     options: list[SessionApprovalOption] = Field(
@@ -1106,6 +1107,24 @@ class SessionDigest(Result):
     )
     template: str | None = None
     brief_file: str | None = None
+    question: str | None = Field(
+        default=None,
+        description=(
+            "The question or dialog the session is showing, when it waits on "
+            "one (WI-1871). Untrusted terminal text."
+        ),
+    )
+    question_kind: str | None = Field(
+        default=None,
+        description="`question` (an agent's question menu) or a dialog kind.",
+    )
+    options: list[str] | None = Field(
+        default=None,
+        description=(
+            "The menu's choices in order, numbered from 1; answer with "
+            "`session_answer` by number or label. Untrusted terminal text."
+        ),
+    )
     budget: str | None = Field(
         default=None,
         description=(
@@ -4441,7 +4460,8 @@ class SessionSweepRow(Result):
 
     attention: str = Field(
         description=(
-            "approval / blocked / waiting (at its prompt, wants the next "
+            "approval (a permission dialog, startup gate or question menu) / "
+            "blocked / waiting (at its prompt, wants the next "
             "instruction) / stalled (running, silent too long) / running / "
             "idle / hibernated / exited / unknown. The table is ordered by it."
         )
