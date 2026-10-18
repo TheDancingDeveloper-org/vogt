@@ -516,6 +516,18 @@ cap (`autopilot` and `autopilot_nudges` on `session_list`). A driver need not
 re-prompt an autopilot session — wait for it to be blocked or done. The flag
 is recorded on the start's audit row.
 
+**Done claims are checked.** A `done` row on `session_sweep` for a session
+bound to a work item carries `claim_check`: the worktree's branch and HEAD,
+whether HEAD is pushed, how many commits it gained since the session started,
+and the observed pull requests the reply names or that come from that branch
+(state, merge time, CI). `mismatches` names each disagreement in words, for
+example a claimed PR that merged before the session started, or no new
+commits. The row's `attention_reason` repeats them, so the digest shows them.
+When a session moves its own item to `review` or `done`, `work_transition`
+returns the same check and records any mismatch as a note on the item. The
+check never refuses anything. Facts it could not read are listed under
+`unchecked`, so an empty `mismatches` does not mean the claim was verified.
+
 **Klaudia owns its own loop.** `session_start(template="klaudia")` runs
 Klaudia in its TUI like the other agents (model, resume, permission posture
 and the brief work the same way). Klaudia iterates by itself toward a goal
