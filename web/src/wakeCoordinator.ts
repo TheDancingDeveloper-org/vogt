@@ -134,6 +134,18 @@ export function reconcile<T>(
   return promise;
 }
 
+/**
+ * Drop a wake that is still inside its debounce window. Tests only: the
+ * coordinator is module state, so a wake a test noted just before it ended
+ * would otherwise fire inside the next test, against surfaces that test
+ * mounted (the live.test backlog flake, WI-1886).
+ */
+export function cancelPendingWakeForTests(): void {
+  if (timer !== null) clearTimeout(timer);
+  timer = null;
+  pendingReason = null;
+}
+
 /** Last fifty wakes, useful when diagnosing a resume stall from the console. */
 export const wakeLog: ReadonlyArray<WakeTelemetry> = telemetry;
 
