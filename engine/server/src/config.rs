@@ -484,6 +484,19 @@ pub struct Config {
     /// git worktree removes regenerable build output there. Never a repo's
     /// main checkout.
     pub worktree_clean_on_stop: bool,
+    /// `ENGINE_SCRATCH_PRUNE_GB` (2): with cleanup on, a hibernation drops
+    /// Cargo `target` dirs from the session's Claude scratchpad and any
+    /// top-level entry there larger than this; a stop removes the scratchpad
+    /// (`session_scratch`, WI-1810).
+    pub scratch_prune_bytes: u64,
+    /// `ENGINE_MIN_FREE_PERCENT` (10): a new session is refused while the
+    /// workspace or temp volume has less free than this. 0 turns it off.
+    pub min_free_percent: u8,
+    /// `ENGINE_SHARED_CARGO_TARGET_DIR`: when set, each session gets
+    /// `CARGO_TARGET_DIR=<this>/<repo>`, one target per repository shared by
+    /// all its worktrees, instead of a fresh `target` per checkout. Unset
+    /// leaves Cargo's default. A caller's own `CARGO_TARGET_DIR` wins.
+    pub shared_cargo_target_dir: Option<std::path::PathBuf>,
     /// `ENGINE_DISK_WARN_PERCENT` (85): the workspace volume's used percent
     /// above which sweep and status carry a needs-attention disk row.
     pub disk_warn_percent: u8,
@@ -1013,6 +1026,17 @@ pub fn load(
         },
         worktree_clean_on_hibernate: worktree_clean.hibernate,
         worktree_clean_on_stop: worktree_clean.stop,
+        scratch_prune_bytes: parse_scratch_prune_gb(
+            engine_env("ENGINE_SCRATCH_PRUNE_GB").ok().as_deref(),
+        )?,
+        min_free_percent: parse_min_free_percent(
+            engine_env("ENGINE_MIN_FREE_PERCENT").ok().as_deref(),
+        )?,
+        shared_cargo_target_dir: engine_env("ENGINE_SHARED_CARGO_TARGET_DIR")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from),
         disk_warn_percent: parse_disk_warn_percent(
             engine_env("ENGINE_DISK_WARN_PERCENT").ok().as_deref(),
         )?,
@@ -1235,6 +1259,35 @@ fn parse_worktree_clean(raw: Option<&str>) -> Result<WorktreeClean> {
         _ => Ok(WorktreeClean {
             stop: true,
             hibernate: false,
+        }),
+    }
+}
+
+/// `ENGINE_SCRATCH_PRUNE_GB`: a positive whole number of GiB, 2 when unset.
+fn parse_scratch_prune_gb(raw: Option<&str>) -> Result<u64> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(2 << 30),
+        Some(v) => v
+            .parse::<u64>()
+            .ok()
+            .filter(|&gb| gb > 0)
+            .and_then(|gb| gb.checked_mul(1 << 30))
+            .ok_or_else(|| {
+                ApiError::Config(format!(
+                    "ENGINE_SCRATCH_PRUNE_GB must be a positive whole number of GiB, got {v:?}"
+                ))
+            }),
+    }
+}
+
+/// `ENGINE_MIN_FREE_PERCENT`: a whole percent from 0 (off) to 99, 10 when unset.
+fn parse_min_free_percent(raw: Option<&str>) -> Result<u8> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(10),
+        Some(v) => v.parse::<u8>().ok().filter(|&p| p < 100).ok_or_else(|| {
+            ApiError::Config(format!(
+                "ENGINE_MIN_FREE_PERCENT must be a whole percent from 0 to 99, got {v:?}"
+            ))
         }),
     }
 }
@@ -2011,6 +2064,19 @@ mod prefix_tests {
         assert_eq!(parse_worktree_clean(Some("0")).unwrap(), off);
         assert_eq!(parse_worktree_clean(Some("false")).unwrap(), off);
         assert!(parse_worktree_clean(Some("maybe")).is_err());
+    }
+
+    #[test]
+    fn scratch_and_free_space_settings() {
+        assert_eq!(parse_scratch_prune_gb(None).unwrap(), 2 << 30);
+        assert_eq!(parse_scratch_prune_gb(Some(" 5 ")).unwrap(), 5 << 30);
+        assert!(parse_scratch_prune_gb(Some("0")).is_err());
+        assert!(parse_scratch_prune_gb(Some("x")).is_err());
+        assert_eq!(parse_min_free_percent(None).unwrap(), 10);
+        assert_eq!(parse_min_free_percent(Some("0")).unwrap(), 0);
+        assert_eq!(parse_min_free_percent(Some("25")).unwrap(), 25);
+        assert!(parse_min_free_percent(Some("100")).is_err());
+        assert!(parse_min_free_percent(Some("-1")).is_err());
     }
 
     #[test]
