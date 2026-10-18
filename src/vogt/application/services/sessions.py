@@ -128,7 +128,7 @@ from vogt.application.services._policy_conflicts import (
     overrides_section,
     task_policy_conflicts,
 )
-from vogt.application.services.claims import check_claim
+from vogt.application.services.claims import check_claim, record_claim_check
 from vogt.application.services.preferences import dispatch_settings
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
@@ -832,6 +832,13 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                 claim="autopilot-done",
                 text="\n".join([summary.last_reply_excerpt or "", *entry.screen_tail]),
             )
+            # Once per DONE: the key is the session and the moment it said so.
+            if summary.done_at is not None:
+                record_claim_check(
+                    ctx,
+                    claim_check,
+                    once_key=f"{summary.id}@{summary.done_at.isoformat()}",
+                )
             if claim_check.mismatches:
                 reason = f"{reason}; claim check: " + "; ".join(claim_check.mismatches)
         rows.append(

@@ -64,6 +64,26 @@ def _git(root: Path, *args: str) -> str | None:
     return completed.stdout.strip()
 
 
+def _session_commits(
+    root: Path, head: str, branch: str | None, started: datetime
+) -> int | None:
+    """Commits on `head` made since `started` that only this branch has.
+
+    A commit any other remote branch already carries is someone else's work,
+    brought in by a rebase or pull onto a `main` that moved after the start,
+    and does not count. Only this branch's own remote ref is exempt, so this
+    session's pushed commits still count. A commit date is all git keeps, so
+    a commit this session rebased also counts: its committer date is new.
+    """
+    args = ["rev-list", "--count", f"--since={started.isoformat()}", head, "--not"]
+    if branch and branch != "HEAD":
+        # Matched against the name under refs/remotes/, e.g. `origin/<branch>`.
+        args.append(f"--exclude=*/{branch}")
+    args.append("--remotes")
+    count = _git(root, *args)
+    return int(count) if count and count.isdigit() else None
+
+
 def _parse(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -157,10 +177,7 @@ def check_claim(
             remotes = _git(root, "branch", "-r", "--contains", head)
             pushed = None if remotes is None else bool(remotes)
             if started is not None:
-                count = _git(
-                    root, "rev-list", "--count", f"--since={started.isoformat()}", head
-                )
-                new_commits = int(count) if count and count.isdigit() else None
+                new_commits = _session_commits(root, head, branch, started)
     named = claims.mentioned_pulls(text)
     pulls = _pulls(
         ctx,
@@ -221,22 +238,42 @@ def comment_body(check: ClaimCheck) -> str:
     return "\n".join(lines)
 
 
-def record_claim_check(ctx: AppContext, check: ClaimCheck) -> bool:
+def record_claim_check(
+    ctx: AppContext, check: ClaimCheck, *, once_key: str | None = None
+) -> bool:
     """Put a flagged check on its item as a note. Returns whether it did.
 
     Nothing is recorded when the claim matched. A comment that cannot be
-    written does not undo or fail the transition that prompted it.
+    written does not undo or fail the operation that prompted it.
+
+    `once_key` makes the note idempotent, for a caller that sees the same
+    claim again and again (every sweep sees a done session until it moves
+    on). The key is written into the note, and a note already carrying it
+    among the item's recent comments is not written twice. Such a note is
+    only written on a native item, whose comments are local: on an upstream
+    item it would be a forge comment, posted from a read.
     """
     from vogt.application.services.work import comment_work
 
     if not check.mismatches or check.work_item is None:
         return False
+    body = comment_body(check)
+    if once_key is not None:
+        marker = f"Check key: {once_key}"
+        with ctx.declared.read() as view:
+            item = view.work_item_by_ref(check.work_item)
+            if item is None:
+                return False
+            recent = view.comments_for(item.id, limit=50, order="newest")
+        if any(marker in comment.body for comment in recent):
+            return False
+        body = f"{body}\n{marker}"
     try:
         comment_work(
             ctx,
             CommentParams(
                 ref=check.work_item,
-                body=comment_body(check),
+                body=body,
                 reason=f"claim check ({check.claim}) found mismatches (WI-1835)",
             ),
         )

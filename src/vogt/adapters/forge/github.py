@@ -610,6 +610,8 @@ def _to_pull(ref: RepoRef, item: dict[str, Any]) -> ForgePull:
         updated_at=item.get("updated_at"),
         closed_at=item.get("closed_at"),
         source_url=item.get("html_url"),
+        merged_at=item.get("merged_at"),
+        merged_by=(item.get("merged_by") or {}).get("login"),
     )
 
 

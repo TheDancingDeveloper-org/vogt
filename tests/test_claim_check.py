@@ -226,7 +226,7 @@ def _wired(instance: AppContext, repo: Path) -> tuple[AppContext, Engine, str, s
 def test_the_wi_1707_claim_is_flagged_on_the_done_row(
     instance: AppContext, repo: Path
 ) -> None:
-    ctx, engine, _ref, _session = _wired(instance, repo)
+    ctx, engine, ref, _session = _wired(instance, repo)
     for row in engine.rows.values():
         row.update(
             activity="waiting-for-input",
@@ -243,6 +243,71 @@ def test_the_wi_1707_claim_is_flagged_on_the_done_row(
     assert check.new_commits == 0
     assert any("before this session started" in line for line in check.mismatches)
     assert "claim check:" in row.attention_reason
+    # The DONE claim is also noted on the item, once however often it is swept.
+    sweep_sessions(ctx, SweepSessionsParams(mode="digest"))
+    notes = [
+        comment
+        for comment in get_work(ctx, GetWorkParams(ref=ref)).comments
+        if "Claim check (autopilot-done)" in comment.body
+    ]
+    assert len(notes) == 1
+
+
+def test_others_commits_brought_in_by_a_rebase_are_not_the_sessions(
+    tmp_path: Path, repo: Path
+) -> None:
+    """A worker that pulled a moved main after it started and did nothing
+    still made no commits of its own."""
+    from vogt.application.services.claims import _session_commits
+
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "init", "-q", "--bare", str(origin))
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-q", "origin", "wi-1707-x:main")
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", "-b", "main", str(origin), str(other))
+    (other / "g").write_text("y")
+    _git(other, "add", "g")
+    subprocess.run(
+        ["git", "-C", str(other), "commit", "-q", "-m", "someone else"],
+        check=True,
+        capture_output=True,
+        env={
+            "GIT_AUTHOR_NAME": "o",
+            "GIT_AUTHOR_EMAIL": "o@example.com",
+            "GIT_COMMITTER_NAME": "o",
+            "GIT_COMMITTER_EMAIL": "o@example.com",
+            "GIT_COMMITTER_DATE": "2026-10-18T10:00:00Z",
+            "HOME": str(other),
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+    _git(other, "push", "-q", "origin", "main")
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "merge", "-q", "--ff-only", "origin/main")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    assert _session_commits(repo, head, "wi-1707-x", STARTED) == 0
+
+    (repo / "h").write_text("z")
+    _git(repo, "add", "h")
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "-m", "mine"],
+        check=True,
+        capture_output=True,
+        env={
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.com",
+            "GIT_COMMITTER_DATE": "2026-10-18T11:00:00Z",
+            "HOME": str(repo),
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+    _git(repo, "push", "-q", "origin", "wi-1707-x")
+    head = _git(repo, "rev-parse", "HEAD")
+    assert _session_commits(repo, head, "wi-1707-x", STARTED) == 1
 
 
 def test_a_sessions_move_to_review_is_checked_and_noted_on_the_item(
