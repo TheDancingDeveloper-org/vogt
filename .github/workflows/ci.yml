@@ -258,7 +258,12 @@ jobs:
     name: fmt, clippy, test (engine) and the PWA it embeds
     needs: changes
     if: needs.changes.outputs.engine == 'true'
-    runs-on: [self-hosted]
+    # `tailnet` is carried by the Node B runners (node-b-gha-public-*) and
+    # not by the GCP rust-heavy pool, whose image has no ripgrep and whose
+    # `runner` user has no passwordless sudo — so the install step below
+    # fails there and the `/api/search` tests go red (WI-1887). Widen this
+    # back to the whole pool once that image is rebaked.
+    runs-on: [self-hosted, tailnet]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -524,10 +529,11 @@ jobs:
           command -v rg >/dev/null || missing="$missing ripgrep"
           if [ -n "$missing" ]; then
             echo "installing:$missing"
-            # The runner executes as root and has no sudoers entry, so
-            # `sudo apt-get` fails with "root is not in the sudoers file" —
-            # which is what the first run on this branch did. Elevate only
-            # when there is something to elevate from.
+            # Runners differ: some execute as root with no sudoers entry
+            # (where `sudo apt-get` fails with "root is not in the sudoers
+            # file"), others as an unprivileged user that may or may not
+            # have passwordless sudo. Use apt-get directly as root, sudo
+            # otherwise, and fail clearly when neither is available.
             if [ "$(id -u)" = "0" ]; then
               apt-get update
               apt-get install -y --no-install-recommends $missing
