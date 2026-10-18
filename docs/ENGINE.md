@@ -1966,8 +1966,10 @@ nothing) and acts at two levels:
 - **soft**, once, at `ENGINE_BUDGET_SOFT_PCT` (default 80) of a turn, context
   or whole-session clock limit: a `budget` change, and — only while the session is at its prompt — one
   typed line: `[vogt] budget: {what} ({n} of {limit}). Commit your work in
-  progress on your branch, write a hand-off comment (work_comment
-  kind=handoff), then stop.` Mid-turn, the line waits for the next tick that
+  progress on your branch and push it, write a hand-off comment (work_comment
+  kind=handoff: branch, head_sha, done, remaining, gates_run, blockers), then
+  stop.` A session that stops without one gets a minimal hand-off from the
+  core, built from its git state (WI-1833). Mid-turn, the line waits for the next tick that
   finds it ready. The prompt is read the way autopilot reads it: the session
   must not be blocked, its agent must be one the engine re-drives, and the
   prompt must have been quiet for the nudge settle time. A turn or context
