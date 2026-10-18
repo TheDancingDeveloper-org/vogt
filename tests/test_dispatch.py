@@ -107,6 +107,8 @@ def test_each_key_is_validated_by_its_own_shape() -> None:
 def test_the_turn_budget_is_sized_by_the_model_it_runs() -> None:
     implement = dispatch.resolve({}).profiles["implement"]
     assert implement.turns_for("haiku") == 200
+    assert implement.turns_for("claude-haiku-4-5-20251001") == 200
+    assert implement.turns_for("sonnet-haikuish") == 120
     assert implement.turns_for("grok-4.7") == 120
     assert implement.turns_for(None) == 120
 

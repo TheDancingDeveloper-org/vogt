@@ -136,9 +136,25 @@ def git_state_handoff(
     )
 
 
+#: The limits a restart carries over from the stopped session's engine row.
+_BUDGET_KEYS = (
+    "turns",
+    "context_tokens",
+    "wall_clock_minutes",
+    "session_wall_clock_minutes",
+)
+
+
 def _restart_params(
-    link: CodingSession, ref: str, n: int, cap: int
+    link: CodingSession,
+    ref: str,
+    n: int,
+    cap: int,
+    budget: dict[str, object] | None = None,
 ) -> StartSessionParams | None:
+    """The start that continues `link`'s item: its own purpose, template,
+    model, effort and budget, so a restart runs on what the stopped session
+    ran rather than on the profile's defaults."""
     if link.purpose is None and link.template is None:
         return None
     task = (
@@ -153,12 +169,19 @@ def _restart_params(
     }
     if link.purpose is not None:
         fields["purpose"] = link.purpose
-    else:
+    if link.template is not None:
         fields["template"] = link.template
-        if link.model is not None:
-            fields["model"] = link.model
-        if link.effort is not None:
-            fields["effort"] = link.effort
+    if link.model is not None:
+        fields["model"] = link.model
+    if link.effort is not None:
+        fields["effort"] = link.effort
+    limits = {
+        key: value
+        for key in _BUDGET_KEYS
+        if isinstance(value := (budget or {}).get(key), int) and value > 0
+    }
+    if limits:
+        fields["budget"] = limits
     return StartSessionParams.model_validate(fields)
 
 
@@ -236,7 +259,7 @@ def settle_budget_stops(ctx: AppContext) -> BudgetSettlement:
         )
         if used >= cap:
             continue
-        params = _restart_params(link, item.ref, used + 1, cap)
+        params = _restart_params(link, item.ref, used + 1, cap, row.budget)
         if params is None:
             continue
         try:
