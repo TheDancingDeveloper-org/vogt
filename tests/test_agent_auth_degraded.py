@@ -279,3 +279,37 @@ def test_the_entrypoint_has_no_exit_on_agent_auth() -> None:
     end = text.index('if [[ "${START_SWAY')
     block = text[text.index('agent_auth_required="') : end]
     assert "exit 1" not in block, "agent auth must never stop the engine starting"
+
+
+def test_a_hung_post_start_hook_does_not_hold_back_the_service(
+    tmp_path: Path,
+) -> None:
+    """The estate's post-start hook runs `vogt-agent-auth run -- deploy.sh`.
+    vogt-lifecycle starts the service before post-start, so even a hook that
+    hangs on the secrets manager cannot keep the engine from serving."""
+    hooks = tmp_path / "hooks" / "post-start.d"
+    hooks.mkdir(parents=True)
+    hook = hooks / "10-hangs.sh"
+    hook.write_text("#!/bin/sh\nexec sleep 300\n", encoding="utf-8")
+    hook.chmod(0o755)
+    marker = tmp_path / "service-started"
+    proc = subprocess.Popen(
+        ["sh", str(ROOT / "vogt-lifecycle.sh"), "sh", "-c", f": > {marker}; sleep 300"],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "VOGT_HOOK_DIR": str(tmp_path / "hooks"),
+            "VOGT_HOOKS_REQUIRED": "true",
+            "VOGT_LIFECYCLE_STATE_DIR": str(tmp_path / "state"),
+        },
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert marker.exists(), "the service waited on a post-start hook"
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()

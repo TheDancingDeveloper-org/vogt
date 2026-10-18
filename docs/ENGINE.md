@@ -4279,7 +4279,10 @@ resolved per session, when the launch wrapper runs:
 
 - Each secrets-manager call in a launch (the login, each project read) is
   bounded by `ENGINE_AGENT_AUTH_TIMEOUT` (seconds, default 10) and tried
-  once. There is no retry loop.
+  once, and all of a launch's calls share `ENGINE_AGENT_AUTH_LAUNCH_BUDGET`
+  (seconds, default 20). A project read that times out or cannot connect is
+  not retried one secret at a time; the per-secret CLI fallback is only for a
+  read the API answered with an error. There is no retry loop.
 - If the secrets manager cannot be reached — no identity, the login failed or
   timed out, a required secret could not be read — the session **still
   starts**, without the credentials it could not get. It prints an
@@ -4287,9 +4290,11 @@ resolved per session, when the launch wrapper runs:
   `AGENT_AUTH_UNAVAILABLE` (unset on a full launch), and `AGENT_AUTH_GRANTED`
   names only what it actually holds. The identity is still dropped.
 - The launch reports `outcome=degraded` (a `launch.report` warn line and the
-  launch metric). `GET /api/status` shows the latest degraded launch under
-  `auth_broker.degraded` (`session_id`, `at`, `reason`), and Settings shows it
-  on the auth-broker card, until a full launch clears it.
+  launch metric). The engine keeps that on the session: `GET /api/status`
+  counts the live degraded sessions in `auth_broker.degraded_session_count`
+  and names the latest under `auth_broker.degraded` (`session_id`, `at`,
+  `reason`). Settings shows it on the auth-broker card. A degraded session
+  stops counting when it exits.
 - Nothing is cached between launches, so once the secrets manager recovers
   the next session gets its credentials with no engine restart. A degraded
   session gets them by being restarted.
@@ -4300,6 +4305,9 @@ resolved per session, when the launch wrapper runs:
   (`ENGINE_AGENT_AUTH_BOOT_CHECK_TIMEOUT`, default 60 s) and logs
   `agent service auth check passed` or `... FAILED`; the engine starts either
   way.
+- Deployment hooks: `vogt-lifecycle` starts the engine before it runs
+  `post-start.d`, so a hook that calls `vogt-agent-auth run` cannot hold the
+  engine back, and that call is itself bounded and degrades as above.
 
 **Getting a secret after launch: the on-demand broker.** The one
 sanctioned late path is a *manifest-constrained fetch*, and it keeps the
