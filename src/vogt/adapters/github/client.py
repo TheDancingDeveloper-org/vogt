@@ -119,7 +119,7 @@ class TokenProvider(Protocol):
 
     def cache_key(self, path: str | None = None) -> str: ...
 
-    def token(self, path: str | None = None) -> str: ...
+    def token(self, path: str | None = None) -> str | None: ...
 
     def invalidate(self, path: str | None = None) -> None: ...
 
@@ -291,8 +291,12 @@ class GitHubClient:
         answer = self._fetch(url, headers, body=body, method=method)
         if answer[0] == 401 and provider is not None:
             provider.invalidate(path)
-            headers["Authorization"] = f"Bearer {provider.token(path)}"
-            answer = self._fetch(url, headers, body=body, method=method)
+            fresh = provider.token(path)
+            # A fallback personal token is not refreshable; retrying it with
+            # the same value would only spend another request.
+            if fresh and fresh != bearer:
+                headers["Authorization"] = f"Bearer {fresh}"
+                answer = self._fetch(url, headers, body=body, method=method)
         return answer
 
     @classmethod
@@ -402,6 +406,11 @@ class GitHubClient:
         }
 
         body = json.dumps(payload).encode("utf-8")
+        # Before any installation lookup or token mint the write would cause.
+        reset_at = RATE_BUDGET.blocked_until(self._budget_key(path))
+        if reset_at is not None:
+            msg = f"GitHub rate budget below {RATE_BUDGET.floor}; not sending {path}"
+            raise GitHubRateLimited(msg, reset_at=reset_at)
         status, response, response_headers = self._authed_fetch(
             path, url, headers, body=body, method=method
         )

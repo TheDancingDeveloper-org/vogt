@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -33,10 +34,13 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from vogt.adapters.github.client import (
     API_ROOT,
+    RATE_BUDGET,
     USER_AGENT,
     GitHubClient,
+    GitHubRateLimited,
     GitHubUnavailable,
     Transport,
+    _token_key,
 )
 
 if TYPE_CHECKING:
@@ -52,6 +56,12 @@ JWT_BACKDATE_SECONDS = 60
 REFRESH_MARGIN_SECONDS = 300
 #: GitHub documents installation tokens as valid for one hour.
 DEFAULT_TOKEN_LIFETIME_SECONDS = 3600
+#: How long "the App is not installed on this owner" is remembered. Requests
+#: for that owner use the personal token meanwhile, and make no App calls; an
+#: installation added later is picked up when the entry expires.
+NOT_INSTALLED_TTL_SECONDS = 3600
+
+logger = logging.getLogger("vogt.github.app")
 
 
 def _b64url(raw: bytes) -> str:
@@ -129,6 +139,16 @@ class GitHubAppAuth:
         self._owners: dict[str, int] = {}
         #: installation id → its account (`login`, `type`)
         self._accounts: dict[int, dict[str, Any]] = {}
+        #: owner login (lower-cased) → when "not installed" stops being trusted
+        self._not_installed: dict[str, float] = {}
+        #: The personal token used for owners the App is not installed on;
+        #: `None` sends those requests unauthenticated.
+        self.fallback_token: str | None = None
+
+    @property
+    def _app_budget_key(self) -> str:
+        """Requests signed with the JWT share the App's own rate limit."""
+        return f"github-app:{self.app_id}:jwt"
 
     @classmethod
     def from_key_file(
@@ -161,11 +181,20 @@ class GitHubAppAuth:
     # -- the TokenProvider surface ------------------------------------------
 
     def cache_key(self, path: str | None = None) -> str:
-        """Stable across token refreshes: the rate limit is per installation."""
-        return f"github-app:{self.app_id}:{self._installation_for(path)}"
+        """Stable across token refreshes: the rate limit is per installation.
 
-    def token(self, path: str | None = None) -> str:
+        An owner without the App shares the personal token's bucket, the
+        same key a token-file client uses.
+        """
         installation = self._installation_for(path)
+        if installation is None:
+            return _token_key(self.fallback_token)
+        return f"github-app:{self.app_id}:{installation}"
+
+    def token(self, path: str | None = None) -> str | None:
+        installation = self._installation_for(path)
+        if installation is None:
+            return self.fallback_token
         with self._lock:
             cached = self._tokens.get(installation)
             if (
@@ -179,12 +208,24 @@ class GitHubAppAuth:
 
     def invalidate(self, path: str | None = None) -> None:
         installation = self._installation_for(path)
+        if installation is None:
+            return
         with self._lock:
             self._tokens.pop(installation, None)
 
     def account(self, path: str | None = None) -> dict[str, Any] | None:
-        """The account (`login`, `type`) of the installation `path` routes to."""
-        installation = self._installation_for(path)
+        """The account (`login`, `type`) of the installation `path` routes to.
+
+        `None` when that owner has no installation. With no path and nothing
+        configured or discovered, the App's installations are listed: exactly
+        one is used, more refuse (set `github_app_installation_id`).
+        """
+        if path is None and self.installation_id is None:
+            installation = self._sole_installation()
+        else:
+            installation = self._installation_for(path)
+        if installation is None:
+            return None
         with self._lock:
             known = self._accounts.get(installation)
         if known is None:
@@ -200,13 +241,18 @@ class GitHubAppAuth:
     def jwt(self) -> str:
         return sign_jwt(self._key, self.app_id, self._clock())
 
-    def _installation_for(self, path: str | None) -> int:
+    def _installation_for(self, path: str | None) -> int | None:
+        """The installation for `path`'s owner; `None` when it has none."""
         if self.installation_id is not None:
             return self.installation_id
         owner, repo = _owner_repo(path)
         with self._lock:
             if owner is not None and owner.lower() in self._owners:
                 return self._owners[owner.lower()]
+            if owner is not None:
+                until = self._not_installed.get(owner.lower())
+                if until is not None and self._clock() < until:
+                    return None
             known = set(self._owners.values())
         if owner is None:
             # Nothing in the path names an owner (`/user`, a bare publish);
@@ -221,10 +267,52 @@ class GitHubAppAuth:
             raise GitHubUnavailable(msg)
         installation = self._discover(owner, repo)
         with self._lock:
-            self._owners[owner.lower()] = installation
+            if installation is None:
+                self._not_installed[owner.lower()] = (
+                    self._clock() + NOT_INSTALLED_TTL_SECONDS
+                )
+            else:
+                self._not_installed.pop(owner.lower(), None)
+                self._owners[owner.lower()] = installation
+        if installation is None:
+            logger.info(
+                "GitHub App %s is not installed on %r; using the personal "
+                "token for it for the next %ss",
+                self.app_id,
+                owner,
+                NOT_INSTALLED_TTL_SECONDS,
+            )
         return installation
 
-    def _discover(self, owner: str, repo: str | None) -> int:
+    def _sole_installation(self) -> int | None:
+        """The one installation this App has, for an owner-less publish."""
+        with self._lock:
+            known = set(self._owners.values())
+        if len(known) == 1:
+            return next(iter(known))
+        if not known:
+            listed = self._app_get("/app/installations")
+            if isinstance(listed, list):
+                ids = [
+                    item
+                    for item in listed
+                    if isinstance(item, dict) and isinstance(item.get("id"), int)
+                ]
+                if len(ids) == 1:
+                    number = int(ids[0]["id"])
+                    account = ids[0].get("account")
+                    with self._lock:
+                        if isinstance(account, dict):
+                            self._accounts[number] = account
+                    return number
+        msg = (
+            "the GitHub App has more than one installation (or none), so "
+            "there is no default owner to create a repository under; set "
+            "github_app_installation_id"
+        )
+        raise GitHubUnavailable(msg)
+
+    def _discover(self, owner: str, repo: str | None) -> int | None:
         candidates = [f"/orgs/{owner}/installation", f"/users/{owner}/installation"]
         if repo is not None:
             candidates.insert(0, f"/repos/{owner}/{repo}/installation")
@@ -236,17 +324,21 @@ class GitHubAppAuth:
                     with self._lock:
                         self._accounts[payload["id"]] = account
                 return int(payload["id"])
-        msg = f"the GitHub App is not installed on {owner!r}"
-        raise GitHubUnavailable(msg)
+        return None
 
     def _app_request(
         self, path: str, *, method: str = "GET", body: bytes | None = None
     ) -> tuple[int, Any]:
         """A request authenticated as the App itself (the JWT).
 
-        Bypasses the client's ETag cache and rate budget: the JWT changes on
-        every call, and App endpoints have their own limit.
+        Bypasses the client's ETag cache: the JWT changes on every call. The
+        App's own rate budget is checked first and observed after, so a low
+        budget stops installation lookups and token mints before they are sent.
         """
+        reset_at = RATE_BUDGET.blocked_until(self._app_budget_key)
+        if reset_at is not None:
+            msg = f"GitHub App rate budget is below the floor; skipping {path}"
+            raise GitHubRateLimited(msg, reset_at=reset_at)
         client = GitHubClient(api_root=self._api_root, transport=self._transport)
         headers = {
             "Accept": "application/vnd.github+json",
@@ -254,9 +346,19 @@ class GitHubAppAuth:
             "User-Agent": USER_AGENT,
             "Authorization": f"Bearer {self.jwt()}",
         }
-        status, raw, _headers = client._fetch(
+        status, raw, response_headers = client._fetch(
             f"{self._api_root}{path}", headers, body=body, method=method
         )
+        RATE_BUDGET.observe(self._app_budget_key, response_headers)
+        if (
+            status in (403, 429)
+            and response_headers.get("x-ratelimit-remaining") == "0"
+        ):
+            reset = response_headers.get("x-ratelimit-reset")
+            msg = f"GitHub App rate limit exhausted on {path}"
+            raise GitHubRateLimited(
+                msg, reset_at=float(reset) if reset and reset.isdigit() else None
+            )
         payload = json.loads(raw.decode("utf-8")) if raw.strip() else None
         return status, payload
 
@@ -290,6 +392,8 @@ class GitHubAppAuth:
 #: would mint its own installation token.
 _AUTHS: dict[tuple[str, int | None, str, int], GitHubAppAuth] = {}
 _AUTHS_LOCK = threading.Lock()
+#: Key files already warned about, so a broken key logs once, not per sweep.
+_WARNED: set[str] = set()
 
 
 def app_auth_from_config(
@@ -316,6 +420,18 @@ def app_auth_from_config(
         )
         if auth is not None:
             _AUTHS[key] = auth
+            _WARNED.discard(key[2])
+        elif key[2] not in _WARNED:
+            # Once per key file, not per provider build: the registry builds
+            # one per project per sweep.
+            _WARNED.add(key[2])
+            logger.warning(
+                "GitHub App %s is configured but its private key file %s is "
+                "missing or not an RSA PEM key; falling back to "
+                "github_token_file",
+                config.github_app_id,
+                key[2],
+            )
         return auth
 
 
@@ -323,6 +439,7 @@ def clear_app_auth_cache() -> None:
     """Forget every cached App token (tests; a rotated key)."""
     with _AUTHS_LOCK:
         _AUTHS.clear()
+        _WARNED.clear()
 
 
 def github_client_for(
@@ -332,10 +449,13 @@ def github_client_for(
     transport: Transport | None = None,
 ) -> GitHubClient | None:
     """The App client when the App is configured, else the token-file client."""
+    pat = GitHubClient.from_token_file(token_file, transport=transport)
     auth = app_auth_from_config(config, transport=transport)
     if auth is not None:
+        # Owners the App is not installed on are read with the personal token.
+        auth.fallback_token = None if pat is None else pat.token
         return GitHubClient(token_provider=auth, transport=transport)
-    return GitHubClient.from_token_file(token_file, transport=transport)
+    return pat
 
 
 __all__ = [

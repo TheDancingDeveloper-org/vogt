@@ -467,9 +467,12 @@ class VogtConfig(BaseSettings):
             "repository owner (`GET /repos/{owner}/{repo}/installation`, "
             "then `/orgs/{owner}/installation` or "
             "`/users/{owner}/installation`) and remembered, so one App "
-            "installed on several accounts or organisations covers them all. "
+            "installed on several accounts or organisations covers them all; "
+            "an owner without the App is read with `github_token_file`. "
             "Publishing a new repository needs an owner to create it under: "
-            "this installation's account, or the single one discovered."
+            "this installation's account or, unset, the App's only "
+            "installation. An App with several installations must set this "
+            "to publish."
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
