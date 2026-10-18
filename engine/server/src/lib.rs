@@ -54,6 +54,7 @@ pub mod resources;
 pub mod screen;
 pub mod scrollback;
 pub mod secret_broker;
+pub mod session_scratch;
 pub mod sessions;
 pub mod transcripts;
 pub mod vogt_core;

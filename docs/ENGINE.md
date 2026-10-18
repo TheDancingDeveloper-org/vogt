@@ -2072,6 +2072,34 @@ what is free, the percent used, and `needs_attention` once that passes
 `ENGINE_DISK_WARN_PERCENT` (`85`). A deployment with no engine reports no row,
 which is a different fact from a volume that is fine.
 
+
+#### Session scratch, background processes and free space
+
+Claude Code keeps each session's scratchpad at
+`<tmp>/claude-<uid>/<cwd slug>/<session id>/`, outside the worktree, and
+nothing used to delete it: on 2026-10-18 scratch worktrees with their own Cargo
+`target` (10–16 GB each) and load-test downloads held 292 GB and filled the
+host (WI-1810). Unless `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` is false:
+
+- stopping or removing a session deletes its scratch directories;
+- hibernating one keeps them but removes every Cargo `target` there (beside a
+  `Cargo.toml`, or holding `CACHEDIR.TAG`) and any top-level entry larger
+  than `ENGINE_SCRATCH_PRUNE_GB` (2).
+
+On hibernate, stop and remove the engine also `SIGKILL`s every process of its
+user still carrying the session's `VOGT_ENGINE_SESSION_ID` — a `setsid` or
+`nohup` job that left the process tree.
+
+A new session is refused with `507 Insufficient Storage` while the workspace
+or temp volume has less than `ENGINE_MIN_FREE_PERCENT` (10) free; `0` turns
+the guard off. A wake is let through.
+
+`ENGINE_SHARED_CARGO_TARGET_DIR`, when set, gives each session
+`CARGO_TARGET_DIR=<dir>/<repo>`: one target per repository, shared by its
+worktrees and scratch checkouts, instead of a fresh one per checkout. A
+caller's or template's own `CARGO_TARGET_DIR` wins. Unset leaves Cargo's
+default.
+
 #### Launch timing, logs and metrics
 
 A session's launch explains itself in the engine log and on `/metrics`
