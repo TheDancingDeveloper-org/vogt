@@ -1833,6 +1833,10 @@ def _submit_until_taken(
 _QUEUED_FOLLOW_S = 3600
 _QUEUED_MAX_ENTERS = 2
 
+#: The longest single wait the engine accepts (its `/wait` caps at 600 s
+#: and refuses more); a longer follow-up waits in chunks of this.
+_ENGINE_WAIT_MAX_S = 600
+
 _log = logging.getLogger(__name__)
 
 
@@ -1842,12 +1846,41 @@ def _follow_queued(
     """Follow a queued input in the background (WI-1870). A module value so
     tests can run it inline."""
     threading.Thread(
-        target=_submit_queued,
+        target=_submit_queued_logged,
         args=(engine, engine_id, named, text),
         kwargs={"person": person},
         name=f"vogt-queued-input-{engine_id}",
         daemon=True,
     ).start()
+
+
+def _submit_queued_logged(
+    engine: EngineClient, engine_id: str, named: str, text: str, *, person: bool
+) -> None:
+    """The follow-up thread's body: nothing it raises may die silently."""
+    try:
+        _submit_queued(engine, engine_id, named, text, person=person)
+    except Exception:
+        _log.exception("following queued input to %s failed", named)
+
+
+def _wait_turn_end(engine: EngineClient, engine_id: str) -> bool:
+    """Wait up to `_QUEUED_FOLLOW_S` for the session to be ready, in waits
+    of at most `_ENGINE_WAIT_MAX_S` each. False when it never was, or the
+    engine no longer holds it."""
+    chunks = -(-_QUEUED_FOLLOW_S // _ENGINE_WAIT_MAX_S)
+    for _ in range(chunks):
+        waited = engine.wait_session(
+            engine_id, until="ready", timeout_s=_ENGINE_WAIT_MAX_S
+        )
+        if waited is None:
+            return False
+        if waited.outcome == "ready":
+            return True
+        if waited.outcome != "timeout":
+            # Exited, hibernated, refused: nothing left to submit to.
+            return False
+    return False
 
 
 def _submit_queued(
@@ -1863,10 +1896,7 @@ def _submit_queued(
     shows such a session as "input pending" from its screen.
     """
     try:
-        waited = engine.wait_session(
-            engine_id, until="ready", timeout_s=_QUEUED_FOLLOW_S
-        )
-        if waited is None or waited.outcome != "ready":
+        if not _wait_turn_end(engine, engine_id):
             return "queued"
         for _ in range(_QUEUED_MAX_ENTERS):
             screen = engine.session_screen(engine_id)

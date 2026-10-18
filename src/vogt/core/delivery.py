@@ -76,6 +76,10 @@ def codex_composer(lines: tuple[str, ...]) -> str | None:
 #: Claude Code's placeholder for a paste it folds: `[Pasted text #1 +4 lines]`.
 PASTED = re.compile(r"\[Pasted text #\d+")
 
+#: Claude Code's greyed suggestion in an empty box (`❯ Try "fix lint
+#: errors"`). The screen carries no colour, so it is told by its shape.
+SUGGESTION = re.compile(r'^Try "[^"]*"$')
+
 #: Claude Code's input box is drawn between two full-width rules of `─`.
 _CLAUDE_RULE = re.compile(r"^\s*\u2500{20,}\s*$")
 
@@ -102,7 +106,7 @@ def claude_composer(lines: tuple[str, ...]) -> str | None:
     for glyph in _CLAUDE_PROMPTS:
         first = first.removeprefix(glyph)
     shown = " ".join([first.strip(), *inside[1:]]).strip()
-    if QUEUED_HINT.search(shown):
+    if QUEUED_HINT.search(shown) or SUGGESTION.match(shown):
         return ""
     return shown
 

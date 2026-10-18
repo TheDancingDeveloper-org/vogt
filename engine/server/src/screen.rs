@@ -172,7 +172,6 @@ pub struct Rendered {
     pub title: Option<String>,
 }
 
-/// Replay `bytes` into a fresh `rows` x `cols` terminal and read it back.
 /// The bytes `/input` writes for `text`, then Enter when `submit`.
 ///
 /// Multi-line text typed raw into Claude Code lands as soft line breaks in
@@ -202,6 +201,7 @@ pub fn input_bytes(text: &str, bracketed_paste: bool, submit: bool) -> Vec<u8> {
     out
 }
 
+/// Replay `bytes` into a fresh `rows` x `cols` terminal and read it back.
 pub fn render(bytes: &[u8], rows: u16, cols: u16) -> Rendered {
     render_with_scrollback(bytes, rows, cols, 0).0
 }
