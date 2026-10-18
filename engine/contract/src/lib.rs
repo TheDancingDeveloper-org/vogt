@@ -809,6 +809,13 @@ pub struct AnswerRequest {
     /// other caller is a person or not by its own actor's kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person: Option<bool>,
+    /// The engine id of the oversight session vogt-core is relaying, when
+    /// the answer comes from one (WI-1831). Read only from vogt-core's own
+    /// credential. The engine checks the role itself and lets that session
+    /// choose "Yes" only on an allow-listed command in the target's own
+    /// worktree (`oversight_answer`); everything else stays a person's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overseer: Option<String>,
 }
 
 /// What `POST /api/sessions/{id}/answer` did.

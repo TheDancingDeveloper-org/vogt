@@ -2728,7 +2728,10 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
 
     A permission prompt (not a startup gate) is a person's to answer: the
     engine refuses it for anyone else with `PersonRequired` (WI-983), and
-    this decides which the caller is (`_answers_as_person`).
+    this decides which the caller is (`_answers_as_person`). The one
+    exception is an oversight session choosing "Yes" on an allow-listed
+    command in the worker's own worktree, which the engine decides and
+    audits (WI-1831).
     """
     reason = writes.validate_reason(params.reason)
     if (params.option is None) == (params.label is None or not params.label.strip()):
@@ -2737,18 +2740,19 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
-    # A person, or an oversight session: autonomous fleets have no person at
-    # the prompt, and the overseer is the driver that answers for them. The
-    # audit line records which one answered.
+    # A person answers anything. An oversight session is relayed by its
+    # engine id, not as a person: the engine lets it choose "Yes" only on an
+    # allow-listed command in the worker's own worktree and refuses the rest
+    # with `PersonRequired` (WI-1831). The audit line records which answered.
     by_person = _answers_as_person(ctx)
     by_oversight = not by_person and _is_oversight_caller(ctx, engine)
-    person = by_person or by_oversight
     answered = engine.answer_session(
         engine_id,
         option=params.option,
         label=None if params.label is None else params.label.strip(),
         expect_question=params.expect_question,
-        person=person,
+        person=by_person,
+        overseer=_caller_engine_session_id(ctx) if by_oversight else None,
     )
     if answered is None:
         msg = (
