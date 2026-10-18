@@ -540,7 +540,13 @@ the Inbox as "asking for approval".
 an agent's `session_answer` to one is refused with `403 person_required`,
 and so is any `session_input` while it shows — on a modal dialog every
 keystroke, `esc` included, is an answer. Nothing is typed (WI-983). If you
-are an overseer and a worker is waiting on one, do not try to get round it:
+are an oversight session, you may answer `Yes` with `session_answer` (never
+`session_input`) when the prompt is a one-line, allow-listed worker-loop
+command (read-only git/gh, fetch, checkout of a ref, rebase or
+`--force-with-lease` push of the worker's own branch, build and test) in the
+worker's own worktree. The engine decides and audits that (WI-1831), and
+refuses anything else with `person_required`. Otherwise, as an overseer, if a
+worker is waiting on one, do not try to get round it:
 it is already in the Inbox as "asking for approval"; if you cannot go on
 until it is answered, report that with `session_report_blocked`, naming the
 session and the command. A person answers it from the Inbox or with

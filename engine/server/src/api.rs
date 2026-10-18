@@ -605,6 +605,71 @@ pub async fn list_session_grants(
     ))
 }
 
+/// Let an oversight session answer `dialog` on `session`, or refuse it as
+/// `person_gate` would (WI-1831, `oversight_answer`). The overseer must be a
+/// live session the engine has marked oversight, other than the target, and
+/// the answer a plain "Yes" to an allow-listed command run in the target's
+/// own worktree. Audited either way.
+async fn oversight_may_answer(
+    state: &AppState,
+    session: &Arc<crate::pty::Session>,
+    dialog: &crate::approval::Detected,
+    overseer: &str,
+    label: &str,
+) -> Result<()> {
+    let who = format!("oversight session {overseer}");
+    let refuse = |why: String| {
+        tracing::warn!(
+            target: "vogt::audit",
+            event = "session.permission_answer",
+            outcome = "refused",
+            via = "oversight",
+            session_id = %session.id,
+            overseer = %overseer,
+            why = %why,
+            "refused an oversight answer to a permission prompt"
+        );
+        crate::person_gate::refusal(&format!("{who} ({why})"), dialog)
+    };
+    let caller = Uuid::parse_str(overseer)
+        .ok()
+        .and_then(|id| state.sessions.get(id).ok());
+    let Some(caller) = caller else {
+        return Err(refuse("no such session".into()));
+    };
+    if caller.id == session.id {
+        return Err(refuse("a session does not answer its own prompt".into()));
+    }
+    if caller.role() != vogt_engine_contract::SessionRole::Oversight {
+        return Err(refuse("it is not an oversight session".into()));
+    }
+    let cwd = std::path::PathBuf::from(&session.cwd);
+    let (dialog_owned, label_owned) = (dialog.clone(), label.to_string());
+    let decided = tokio::task::spawn_blocking(move || {
+        let branch = crate::oversight_answer::current_branch(&cwd);
+        crate::oversight_answer::may_answer(&dialog_owned, &label_owned, &cwd, branch.as_deref())
+    })
+    .await
+    .map_err(|e| crate::error::ApiError::Internal(format!("check the command: {e}")))?;
+    match decided {
+        Ok(command) => {
+            tracing::info!(
+                target: "vogt::audit",
+                event = "session.permission_answer",
+                outcome = "answered",
+                via = "oversight",
+                session_id = %session.id,
+                overseer = %overseer,
+                command = %command,
+                label = %label,
+                "an oversight session answered an allow-listed permission prompt"
+            );
+            Ok(())
+        }
+        Err(why) => Err(refuse(why)),
+    }
+}
+
 /// Choose one option of the dialog on screen (WI-917): a permission
 /// dialog or a startup gate. The engine reads the menu as it is now, moves
 /// the highlight to the option with arrow keys, presses Enter, and looks
@@ -630,7 +695,13 @@ pub async fn answer_session(
         .ok_or_else(|| ApiError::Conflict("no dialog is showing on this session".into()))?;
     let identity = identity.as_deref();
     let person = crate::person_gate::is_person(identity, req.person);
-    if crate::person_gate::needs_person(dialog.kind) && !person {
+    // An overseer named by vogt-core, and only by vogt-core: checked against
+    // the chosen option below, once the menu is read (WI-1831).
+    let overseer = match (identity, req.overseer.as_deref()) {
+        (Some(i), Some(overseer)) if i.stack_secret && !person => Some(overseer),
+        _ => None,
+    };
+    if crate::person_gate::needs_person(dialog.kind) && !person && overseer.is_none() {
         let who = identity.map_or("unidentified", |i| i.name.as_str());
         return Err(crate::person_gate::refuse(
             &session,
@@ -682,6 +753,9 @@ pub async fn answer_session(
             menu.join(" | ")
         ))
     })?;
+    if let Some(overseer) = overseer.filter(|_| crate::person_gate::needs_person(dialog.kind)) {
+        oversight_may_answer(&state, &session, &dialog, overseer, &chosen.label).await?;
+    }
     let keys = crate::approval::keys_to_choose(&dialog.options, chosen.number, dialog.horizontal)
         .ok_or_else(|| ApiError::Conflict("the option is not on the menu".into()))?;
     // Arrows one write each, then Enter: a TUI reading a burst can merge an

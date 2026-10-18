@@ -1220,12 +1220,17 @@ class EngineClient:
         label: str | None,
         expect_question: str | None,
         person: bool = False,
+        overseer: str | None = None,
     ) -> dict[str, Any] | None:
         """Choose an option of the dialog on screen; the engine's
         `AnswerResult`, or `None` on a 404. A dialog that is gone, changed,
         or lacks the option is a `Conflict` naming why; a permission prompt
-        answered without `person` is `PersonRequired` (WI-983)."""
+        answered without `person` is `PersonRequired` (WI-983), unless
+        `overseer` names the oversight session answering and the engine
+        finds the command allow-listed (WI-1831)."""
         body: dict[str, Any] = {"person": person}
+        if overseer is not None:
+            body["overseer"] = overseer
         if option is not None:
             body["option"] = option
         if label is not None:

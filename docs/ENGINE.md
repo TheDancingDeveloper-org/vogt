@@ -786,7 +786,16 @@ than these routes.
   a label matches several options. Requires `sessions` (WI-917). A
   permission prompt (`kind` `permission` or `read-outside-cwd`) is answered
   only by a person: anyone else gets `403 person required` and nothing is
-  typed (WI-983, below).
+  typed (WI-983, below). One exception (WI-1831, `oversight_answer`):
+  vogt-core may name an `overseer` (the engine id of the oversight session it
+  relays). The engine checks that session's role itself, and then lets it
+  choose the plain `Yes` only on a one-line Bash command in an allow-listed
+  class (read-only git and `gh`, `git fetch`, a checkout of a ref, rebase
+  and push — `--force-with-lease` at most — of the checked-out, unprotected
+  branch, cargo/pnpm/uv build and test). No `cd`, `-C`, substitution,
+  redirection, pipes, absolute or `..` paths are allowed, and the target's
+  working directory must be a linked git worktree. Answers and refusals are
+  both audited (`vogt::audit`, `via=oversight`).
 - `GET /api/sessions/changes[?since=N&ids=&limit=]` and
   `GET /api/sessions/wait-any[?ids=&until=&cursor=&timeout_s=]` — the overseer
   delta (WI-1246, WI-1672). `cursor` is a sequence number, or `now` to skip
