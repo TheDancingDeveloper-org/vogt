@@ -102,3 +102,31 @@ def test_each_key_is_validated_by_its_own_shape() -> None:
         "dispatch.profiles", {"implement": {"model": "grok-4.8"}}
     ) == {"implement": {"model": "grok-4.8"}}
     assert dispatch.validate("dispatch.profiles", {}) == {}
+
+
+def test_the_turn_budget_is_sized_by_the_model_it_runs() -> None:
+    implement = dispatch.resolve({}).profiles["implement"]
+    assert implement.turns_for("haiku") == 200
+    assert implement.turns_for("grok-4.7") == 120
+    assert implement.turns_for(None) == 120
+
+
+def test_a_model_turn_override_merges_and_is_validated() -> None:
+    table = dispatch.resolve(
+        {dispatch.PROFILES_KEY: {"review": {"budget_turns_by_model": {"haiku": 30}}}}
+    )
+    assert table.profiles["review"].turns_for("haiku") == 30
+    assert table.profiles["review"].turns_for("opus") == 40
+    with pytest.raises(dispatch.DispatchError):
+        dispatch.validate(
+            dispatch.PROFILES_KEY, {"review": {"budget_turns_by_model": {"haiku": 0}}}
+        )
+
+
+def test_the_budget_restart_cap_defaults_to_one_and_can_be_off() -> None:
+    assert dispatch.resolve({}).budget_restarts_per_item == 1
+    off = dispatch.resolve({dispatch.BUDGET_RESTARTS_KEY: {"value": 0}})
+    assert off.budget_restarts_per_item == 0
+    assert dispatch.validate(dispatch.BUDGET_RESTARTS_KEY, {"value": 0}) == {
+        "value": 0
+    }

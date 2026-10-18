@@ -3961,15 +3961,17 @@ def _resolve_purpose(
     with ctx.declared.read() as view:
         profile = dispatch_settings(view).profiles[params.purpose]
     given = params.model_fields_set
+    # Sized by the model the start will run, the caller's or the profile's.
+    turns = profile.turns_for(params.model if "model" in given else profile.model)
     supplied: dict[str, object] = {
         "template": profile.template,
         "model": profile.model,
         "effort": profile.effort,
         "budget": SessionBudgetParams(
-            turns=profile.budget_turns,
+            turns=turns,
             wall_clock_minutes=profile.budget_wall_clock_minutes,
         )
-        if profile.budget_turns or profile.budget_wall_clock_minutes
+        if turns or profile.budget_wall_clock_minutes
         else None,
         "worktree": profile.worktree,
         "repo_map": profile.repo_map,

@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 Purpose = Literal[
     "implement",
@@ -43,6 +43,7 @@ PROFILES_KEY = "dispatch.profiles"
 MAX_WORKERS_KEY = "dispatch.max_workers_per_overseer"
 ESCALATE_KEY = "dispatch.escalate_after_failed_reviews"
 REVIEW_BY_OVERSIGHT_KEY = "dispatch.review_by_oversight_only"
+BUDGET_RESTARTS_KEY = "dispatch.budget_restarts_per_item"
 KEY_PREFIX = "dispatch."
 
 
@@ -59,6 +60,10 @@ class Profile(BaseModel):
     model: str
     effort: str | None = None
     budget_turns: int | None = Field(default=None, gt=0)
+    #: Turns by the model the start resolves to, over `budget_turns` (WI-1833):
+    #: a small model spends more turns on the same task (rebase and CI loops
+    #: on haiku ran out at 120). Keyed by the model as named on the start.
+    budget_turns_by_model: dict[str, int] = Field(default_factory=dict)
     budget_wall_clock_minutes: int | None = Field(default=None, gt=0)
     worktree: bool = False
     repo_map: bool = False
@@ -66,6 +71,24 @@ class Profile(BaseModel):
     #: A hint carried into the brief: the session should read and report,
     #: not change the tree. Advisory; enforcement is the engine policy's.
     read_only: bool = False
+
+    @field_validator("budget_turns_by_model")
+    @classmethod
+    def _positive_turns(cls, value: dict[str, int]) -> dict[str, int]:
+        return _positive(value)
+
+    def turns_for(self, model: str | None) -> int | None:
+        """The turn budget for a start that runs `model`."""
+        if model is not None and model in self.budget_turns_by_model:
+            return self.budget_turns_by_model[model]
+        return self.budget_turns
+
+
+def _positive(value: dict[str, int] | None) -> dict[str, int] | None:
+    if value is not None and any(turns <= 0 for turns in value.values()):
+        msg = "every turn budget must be greater than 0"
+        raise ValueError(msg)
+    return value
 
 
 class ProfileOverride(BaseModel):
@@ -77,11 +100,17 @@ class ProfileOverride(BaseModel):
     model: str | None = Field(default=None, min_length=1)
     effort: str | None = Field(default=None, min_length=1)
     budget_turns: int | None = Field(default=None, gt=0)
+    budget_turns_by_model: dict[str, int] | None = None
     budget_wall_clock_minutes: int | None = Field(default=None, gt=0)
     worktree: bool | None = None
     repo_map: bool | None = None
     autopilot: bool | None = None
     read_only: bool | None = None
+
+    @field_validator("budget_turns_by_model")
+    @classmethod
+    def _positive_turns(cls, value: dict[str, int] | None) -> dict[str, int] | None:
+        return _positive(value)
 
 
 #: The code defaults (design C10). A deployment overrides fields, never has
@@ -91,6 +120,7 @@ DEFAULT_PROFILES: dict[Purpose, Profile] = {
         template="klaudia",
         model="grok-4.7",
         budget_turns=120,
+        budget_turns_by_model={"haiku": 200},
         budget_wall_clock_minutes=90,
         worktree=True,
         repo_map=True,
@@ -117,11 +147,20 @@ DEFAULT_PROFILES: dict[Purpose, Profile] = {
 DEFAULT_MAX_WORKERS_PER_OVERSEER = 5
 DEFAULT_ESCALATE_AFTER_FAILED_REVIEWS = 2
 DEFAULT_REVIEW_BY_OVERSIGHT_ONLY = True
+#: How many times the core restarts an item's worker from its hand-off after
+#: a budget stop (WI-1833). `0` turns the restart off; the hand-off is still
+#: written.
+DEFAULT_BUDGET_RESTARTS_PER_ITEM = 1
 
 
 class _IntSetting(BaseModel):
     model_config = ConfigDict(extra="forbid")
     value: int = Field(gt=0)
+
+
+class _CountSetting(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: int = Field(ge=0)
 
 
 class _BoolSetting(BaseModel):
@@ -135,6 +174,7 @@ _SCALAR_SHAPES: dict[str, type[BaseModel]] = {
     MAX_WORKERS_KEY: _IntSetting,
     ESCALATE_KEY: _IntSetting,
     REVIEW_BY_OVERSIGHT_KEY: _BoolSetting,
+    BUDGET_RESTARTS_KEY: _CountSetting,
 }
 KEYS: tuple[str, ...] = (PROFILES_KEY, *_SCALAR_SHAPES)
 
@@ -148,6 +188,7 @@ class DispatchSettings(BaseModel):
     max_workers_per_overseer: int = DEFAULT_MAX_WORKERS_PER_OVERSEER
     escalate_after_failed_reviews: int = DEFAULT_ESCALATE_AFTER_FAILED_REVIEWS
     review_by_oversight_only: bool = DEFAULT_REVIEW_BY_OVERSIGHT_ONLY
+    budget_restarts_per_item: int = DEFAULT_BUDGET_RESTARTS_PER_ITEM
 
 
 def _problems(error: ValidationError) -> str:
@@ -216,6 +257,7 @@ def resolve(stored: Mapping[str, Mapping[str, object]]) -> DispatchSettings:
         (MAX_WORKERS_KEY, "max_workers_per_overseer"),
         (ESCALATE_KEY, "escalate_after_failed_reviews"),
         (REVIEW_BY_OVERSIGHT_KEY, "review_by_oversight_only"),
+        (BUDGET_RESTARTS_KEY, "budget_restarts_per_item"),
     ):
         raw = stored.get(key)
         if not raw:
