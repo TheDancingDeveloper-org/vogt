@@ -146,6 +146,8 @@ jobs:
           # voice-policy test reads the capability matrix), so the document is
           # an engine input too.
           matches '^docs/ENGINE\.md$' && engine=true
+          # The PWA contract check reads the Rust registry golden.
+          matches '^tests/parity/golden/registry\.json$' && engine=true
           matches '^voice/' && voice=true
           # The shell wraps a remote URL, not the PWA bundle — `webDir` is
           # `mobile/web/`, a one-file offline fallback — so a `web/` change
@@ -400,6 +402,13 @@ jobs:
         if: always() && !cancelled()
         working-directory: web
         run: pnpm typecheck
+
+      # The PWA contract with no Python in it (WI-1077): the route table
+      # against the Rust registry golden, a reason on every write, and every
+      # engine path served by the router and listed in docs/ENGINE.md.
+      - name: PWA contract against the Rust registry
+        if: always() && !cancelled()
+        run: node web/scripts/check-route-map.mjs
 
       # The PWA's own tests (`docs/ENGINE.md` §3.4): the five Vogt surfaces
       # mounted in jsdom against a fake front door, asserting the interaction
