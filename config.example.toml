@@ -180,6 +180,14 @@
 # default policy: behaviour
 # sweep_interval_seconds = 900
 
+# How often the forge posture collector re-reads a repository's update-automation settings (version-update config, vulnerability alerts, automated security fixes). Posture changes rarely and cost several API calls per repository, so the default is daily; sweeps in between skip it. Zero reads it on every sweep.
+# default policy: behaviour
+# forge_posture_interval_seconds = 86400
+
+# When GitHub reports fewer core API requests than this left in the hour, forge reads stop until the limit resets instead of spending the rest. The limit is per GitHub user and shared with every other tool on that account. Zero never pauses early.
+# default policy: behaviour
+# github_rate_limit_floor = 500
+
 # How recently a subject must have been observed for a linked declared entity to count as `verified` rather than `stale`. Trust is computed from this, never hand-set.
 # default policy: behaviour
 # verify_horizon_hours = 24

@@ -175,7 +175,8 @@ class ForgejoClient:
         method: str = "GET",
     ) -> tuple[int, bytes]:
         if self.transport is not None:
-            return self.transport(url, headers, body or b"", method)
+            answer = self.transport(url, headers, body or b"", method)
+            return answer[0], answer[1]
         request = urllib.request.Request(url, headers=headers, data=body, method=method)
         try:
             with urllib.request.urlopen(  # https only; api_root is not caller-set
