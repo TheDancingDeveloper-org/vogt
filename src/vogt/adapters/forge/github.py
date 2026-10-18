@@ -414,14 +414,26 @@ class GitHubProvider:
     )
 
     def _version_update_config(self, ref: RepoRef) -> str | None:
+        """Which update-automation config exists, read from the git tree.
+
+        One `git/trees/HEAD` read lists the root, and only when the root
+        holds `.github` is that one subtree read too — at most two calls,
+        both ETag-cached, where this used to be eight `/contents/` probes
+        per repository per sweep (WI-1838)."""
+        base = f"/repos/{ref.owner}/{ref.repo}/git/trees"
+        try:
+            root = _tree_entries(self._client.get(f"{base}/HEAD"))
+            github_dir = root.get(".github")
+            nested = (
+                _tree_entries(self._client.get(f"{base}/{github_dir}"))
+                if github_dir
+                else {}
+            )
+        except GitHubUnavailable:
+            return None
+        present = set(root) | {f".github/{name}" for name in nested}
         for path in self._VERSION_UPDATE_CONFIGS:
-            try:
-                found = self._client.get(
-                    f"/repos/{ref.owner}/{ref.repo}/contents/{path}"
-                )
-            except GitHubUnavailable:
-                return None
-            if found is not None:
+            if path in present:
                 return path
         return None
 
@@ -689,3 +701,14 @@ def _runs(ref: RepoRef, payloads: object) -> Iterable[ForgeCheck]:
 
 
 __all__ = ["GITHUB_CAPABILITIES", "HOST", "GitHubProvider"]
+
+
+def _tree_entries(payload: object) -> dict[str, str]:
+    """`path → sha` for one level of a git tree payload; empty when absent."""
+    if not isinstance(payload, dict):
+        return {}
+    entries: dict[str, str] = {}
+    for item in payload.get("tree") or []:
+        if isinstance(item, dict) and item.get("path"):
+            entries[str(item["path"])] = str(item.get("sha") or "")
+    return entries

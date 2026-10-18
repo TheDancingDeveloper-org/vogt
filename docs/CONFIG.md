@@ -55,6 +55,8 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `install_bootstrap_enabled` | `VOGT_INSTALL_BOOTSTRAP_ENABLED` | boolean | `True` | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
+| `forge_posture_interval_seconds` | `VOGT_FORGE_POSTURE_INTERVAL_SECONDS` | integer | `86400` | behaviour |
+| `github_rate_limit_floor` | `VOGT_GITHUB_RATE_LIMIT_FLOOR` | integer | `500` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
 | `image_digest` | `VOGT_IMAGE_DIGEST` | string, optional | *(no default — must be set)* | behaviour |
 | `diagnostics_peer_url` | `VOGT_DIAGNOSTICS_PEER_URL` | string, optional | *(no default — must be set)* | exposure |
@@ -237,6 +239,14 @@ How hard SQLite works to survive a power cut. `normal` is the standard pairing f
 ### `sweep_interval_seconds`
 
 How often `serve` runs collectors in the background. Zero disables the schedule, leaving sweeps on-demand only. A default rather than a required value because an instance that never looks is the failure this product exists to prevent: stale evidence and no evidence are indistinguishable from the outside, so the safe default is to keep looking.
+
+### `forge_posture_interval_seconds`
+
+How often the forge posture collector re-reads a repository's update-automation settings (version-update config, vulnerability alerts, automated security fixes). Posture changes rarely and cost several API calls per repository, so the default is daily; sweeps in between skip it. Zero reads it on every sweep.
+
+### `github_rate_limit_floor`
+
+When GitHub reports fewer core API requests than this left in the hour, forge reads stop until the limit resets instead of spending the rest. The limit is per GitHub user and shared with every other tool on that account. Zero never pauses early.
 
 ### `verify_horizon_hours`
 

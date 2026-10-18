@@ -734,6 +734,29 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    forge_posture_interval_seconds: int = Field(
+        default=86400,
+        ge=0,
+        description=(
+            "How often the forge posture collector re-reads a repository's "
+            "update-automation settings (version-update config, vulnerability "
+            "alerts, automated security fixes). Posture changes rarely and "
+            "cost several API calls per repository, so the default is daily; "
+            "sweeps in between skip it. Zero reads it on every sweep."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_rate_limit_floor: int = Field(
+        default=500,
+        ge=0,
+        description=(
+            "When GitHub reports fewer core API requests than this left in "
+            "the hour, forge reads stop until the limit resets instead of "
+            "spending the rest. The limit is per GitHub user and shared with "
+            "every other tool on that account. Zero never pauses early."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     verify_horizon_hours: int = Field(
         default=24,
         ge=1,
