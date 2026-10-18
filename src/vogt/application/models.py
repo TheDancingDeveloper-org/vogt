@@ -4126,7 +4126,9 @@ class StartSessionParams(Params):
             "on X and check its containers' opens an agent already checking "
             "them. A plain shell only gets the brief's path in "
             "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with "
-            "`template` when it is something to carry out."
+            "`template` when it is something to carry out. Omitted on an "
+            "agent start, the task is taken from `reason` (a leading "
+            "`Task:` dropped); a `review` purpose gets a default review task."
         ),
     )
     files: list[str] = Field(
