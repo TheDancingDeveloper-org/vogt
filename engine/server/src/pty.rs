@@ -822,6 +822,15 @@ impl Session {
         self.scrollback.lock().total_written()
     }
 
+    /// Whether the program in the PTY has bracketed paste on. False when
+    /// the session keeps no grid.
+    pub fn bracketed_paste(&self) -> bool {
+        self.terminal
+            .lock()
+            .as_ref()
+            .is_some_and(crate::screen::Terminal::bracketed_paste)
+    }
+
     pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
         *self.last_input.lock() = Some(Instant::now());
         let mut w = self.writer.lock();

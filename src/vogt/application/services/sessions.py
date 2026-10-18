@@ -26,9 +26,11 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -753,6 +755,10 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
     )
 
 
+#: Screen lines the sweep always reads, to find an input box (WI-1870).
+_SWEEP_INPUT_LINES = 8
+
+
 def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweepResult:
     """Every live and hibernated session at once, for a driver overseeing
     them: the `session.list` row (activity, turn timing, last reply excerpt,
@@ -775,7 +781,11 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             engine="no session engine is configured (VOGT_ENGINE_URL is unset)",
         )
     try:
-        entries = ctx.engine.sweep_sessions(screen_lines=params.screen_lines)
+        # Enough of every screen to see an input box holding unsent text
+        # (WI-1870), whatever the caller asked to be shown.
+        entries = ctx.engine.sweep_sessions(
+            screen_lines=max(params.screen_lines, _SWEEP_INPUT_LINES)
+        )
         if entries is None:
             # An engine that predates the sweep route: the same table, from
             # the list, without screens.
@@ -827,6 +837,10 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             done_at=summary.done_at,
             turns=_turns_of(live.get(summary.engine_session_id)),
         )
+        if verdict.attention in {"waiting", "done", "idle"} and (
+            delivery.input_pending(tuple(entry.screen_tail)) is not None
+        ):
+            verdict = oversight.Verdict("waiting", oversight.INPUT_PENDING)
         reason = verdict.reason
         claim_check = None
         if verdict.attention == "done" and summary.work_item is not None:
@@ -852,7 +866,9 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                 attention=verdict.attention,
                 attention_reason=reason,
                 session=summary,
-                screen_tail=list(entry.screen_tail) if params.screen_lines else [],
+                screen_tail=list(entry.screen_tail)[-params.screen_lines :]
+                if params.screen_lines
+                else [],
                 ready=entry.ready,
                 **_block_age(summary, now, stale=stale),
                 claim_check=claim_check,
@@ -1706,7 +1722,12 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     if woken_verdict is not None:
         verdict = woken_verdict
     elif confirming:
-        verdict = _confirm_delivery(engine, engine_id, before)
+        verdict = _confirm_delivery(engine, engine_id, before, text or None)
+        if verdict.delivery == "queued" and text and submit:
+            # Behind a running turn. The CLI should take it when the turn
+            # ends, but a Claude Code turn can end with the text left in
+            # the box, unsent (WI-1870): watch for that and press Enter.
+            _follow_queued(engine, engine_id, params.id, text, person=person)
     else:
         verdict = delivery.judge(submitted=submitted, before=None, after=[])
 
@@ -1784,7 +1805,7 @@ def _submit_until_taken(
     """
     verdict = _confirm_delivery(engine, engine_id, before, text)
     for _ in range(_CODEX_MAX_ENTERS - 1):
-        if verdict.delivery != "unconfirmed":
+        if verdict.delivery not in {"unconfirmed", "stuck"}:
             break
         try:
             engine.wait_session(engine_id, until="ready", timeout_s=_CODEX_SETTLE_S)
@@ -1799,6 +1820,64 @@ def _submit_until_taken(
         _send_all(engine, engine_id, named, [("", True)], person=person)
         verdict = _confirm_delivery(engine, engine_id, before, text)
     return verdict
+
+
+#: How long a queued input is followed for its turn to end, and how many
+#: Enters it gets once the agent is at rest with the text still in its box.
+_QUEUED_FOLLOW_S = 3600
+_QUEUED_MAX_ENTERS = 2
+
+_log = logging.getLogger(__name__)
+
+
+def _follow_queued(
+    engine: EngineClient, engine_id: str, named: str, text: str, *, person: bool
+) -> None:
+    """Follow a queued input in the background (WI-1870). A module value so
+    tests can run it inline."""
+    threading.Thread(
+        target=_submit_queued,
+        args=(engine, engine_id, named, text),
+        kwargs={"person": person},
+        name=f"vogt-queued-input-{engine_id}",
+        daemon=True,
+    ).start()
+
+
+def _submit_queued(
+    engine: EngineClient, engine_id: str, named: str, text: str, *, person: bool
+) -> delivery.Delivery:
+    """Once the running turn ends, make sure the queued text was taken
+    (WI-1870).
+
+    Waits for the agent to be ready, then reads its screen: a box that no
+    longer holds the text means the CLI took it. A box still holding it,
+    with no dialog or approval showing, gets an Enter, at most
+    `_QUEUED_MAX_ENTERS` times. Still held after that is `stuck`; the sweep
+    shows such a session as "input pending" from its screen.
+    """
+    try:
+        waited = engine.wait_session(
+            engine_id, until="ready", timeout_s=_QUEUED_FOLLOW_S
+        )
+        if waited is None or waited.outcome != "ready":
+            return "queued"
+        for _ in range(_QUEUED_MAX_ENTERS):
+            screen = engine.session_screen(engine_id)
+            if screen is None:
+                return "unconfirmed"
+            seen = delivery.Observation(activity=screen.activity, lines=screen.lines)
+            if not delivery.safe_to_resubmit(seen, text):
+                return "delivered"
+            _send_all(engine, engine_id, named, [("", True)], person=person)
+            verdict = _confirm_delivery(engine, engine_id, "waiting-for-input", text)
+            if verdict.delivery == "delivered":
+                _log.info("queued input to %s submitted by a follow-up Enter", named)
+                return "delivered"
+    except (EngineUnavailable, NotFound):
+        return "unconfirmed"
+    _log.warning("queued input to %s is stuck in its input box", named)
+    return "stuck"
 
 
 def _is_codex(session: object) -> bool:
@@ -1816,7 +1895,7 @@ def _confirm_delivery(
     """Read the session a few times after a submit and judge, stopping at
     the first decisive read. An engine that cannot be read leaves the
     judgement to what was seen before. `pending` is the submitted text
-    when a Codex composer should be checked for it."""
+    when the input box should be checked for it."""
     observed: list[delivery.Observation] = []
     verdict = delivery.judge(
         submitted=True, before=before, after=observed, pending=pending
@@ -1837,7 +1916,9 @@ def _confirm_delivery(
         verdict = delivery.judge(
             submitted=True, before=before, after=observed, pending=pending
         )
-        if verdict.delivery != "unconfirmed":
+        # A held box can be the CLI not yet having read the Enter: `stuck`
+        # stands only if it is still held at the last read.
+        if verdict.delivery not in {"unconfirmed", "stuck"}:
             break
     return verdict
 

@@ -68,6 +68,14 @@ AWAITING_TASK = (
 )
 
 
+#: The reason a session at rest with unsent text in its input box is shown
+#: with (WI-1870).
+INPUT_PENDING = (
+    "input pending: at rest with text typed into its input box but not "
+    "submitted; read session_screen, then press enter with session_input"
+)
+
+
 @dataclass(frozen=True)
 class Verdict:
     attention: Attention

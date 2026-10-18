@@ -1131,10 +1131,7 @@ pub async fn session_input(
         .await
         .map_err(|e| crate::error::ApiError::Internal(format!("read the screen: {e}")))??;
     }
-    let mut bytes = req.text.into_bytes();
-    if req.submit {
-        bytes.push(b'\r');
-    }
+    let bytes = crate::screen::input_bytes(&req.text, session.bracketed_paste(), req.submit);
     session
         .write_input(&bytes)
         .map_err(|e| crate::error::ApiError::Pty(format!("write input: {e}")))?;

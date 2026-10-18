@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Delivery = Literal["typed", "delivered", "queued", "unconfirmed"]
+Delivery = Literal["typed", "delivered", "queued", "stuck", "unconfirmed"]
 
 #: Claude Code's hint under its input box while messages wait behind a turn
 #: ("Press up to edit queued messages"), and Codex's queued-message line.
@@ -73,16 +73,64 @@ def codex_composer(lines: tuple[str, ...]) -> str | None:
     return " ".join(reversed(block)).strip()
 
 
-def composer_holds(lines: tuple[str, ...], text: str) -> bool:
-    """Whether Codex's composer still shows `text`, unsubmitted (WI-1669).
+#: Claude Code's placeholder for a paste it folds: `[Pasted text #1 +4 lines]`.
+PASTED = re.compile(r"\[Pasted text #\d+")
 
-    A resumed Codex can swallow the Enter while it reads as working; the
-    text left in the composer is the only sign.
+#: Claude Code's input box is drawn between two full-width rules of `─`.
+_CLAUDE_RULE = re.compile(r"^\s*\u2500{20,}\s*$")
+
+#: Claude Code's prompt glyphs: `❯` now, `>` in the older boxed input.
+_CLAUDE_PROMPTS = ("\u276f", ">")
+
+
+def claude_composer(lines: tuple[str, ...]) -> str | None:
+    """The text in Claude Code's input box, or None when none is drawn.
+
+    The box is the last pair of `─` rules on the screen with a prompt line
+    (`❯ text`, then any wrapped continuation lines) between them, as
+    captured live on 2026-10-18 (WI-1870). An empty string is a box showing
+    nothing, or only the "Press up to edit queued messages" hint.
+    """
+    rules = [i for i, line in enumerate(lines) if _CLAUDE_RULE.match(line)]
+    if len(rules) < 2:
+        return None
+    top, bottom = rules[-2], rules[-1]
+    inside = [line.strip() for line in lines[top + 1 : bottom]]
+    if not inside or not inside[0].startswith(_CLAUDE_PROMPTS):
+        return None
+    first = inside[0]
+    for glyph in _CLAUDE_PROMPTS:
+        first = first.removeprefix(glyph)
+    shown = " ".join([first.strip(), *inside[1:]]).strip()
+    if QUEUED_HINT.search(shown):
+        return ""
+    return shown
+
+
+def composer_text(lines: tuple[str, ...]) -> str | None:
+    """What an agent's input box holds — Codex's composer or Claude Code's
+    input box — or None when neither is drawn."""
+    shown = codex_composer(lines)
+    if shown is None:
+        shown = claude_composer(lines)
+    return shown
+
+
+def composer_holds(lines: tuple[str, ...], text: str) -> bool:
+    """Whether the input box still shows `text`, unsubmitted (WI-1669,
+    WI-1870).
+
+    A resumed Codex can swallow the Enter while it reads as working, and a
+    Claude Code turn can end with a queued message left in its box; the
+    text left in the input is the only sign.
     """
     wanted = " ".join(text.split())
-    shown = codex_composer(lines)
+    shown = composer_text(lines)
     if not wanted or not shown:
         return False
+    if "\n" in text.strip() and PASTED.search(shown):
+        # Claude Code folds a long paste into a placeholder in its box.
+        return True
     n = min(len(wanted), _COMPOSER_MATCH)
     return " ".join(shown.split())[:n] == wanted[:n]
 
@@ -123,9 +171,10 @@ def judge(
     """What became of the input, from the activity before it and the reads
     after it, in order.
 
-    `pending` is the submitted text, given for Codex only: while the latest
-    read still shows it in the composer the Enter has not landed, whatever
-    the activity says (WI-1669).
+    `pending` is the submitted text: while the latest read shows the
+    agent off its turn with the text still in its input box, the Enter has
+    not landed (WI-1669) — `stuck`, not `queued`, even when a turn was
+    running as it was sent (WI-1870).
     """
     if not submitted:
         return Verdict(
@@ -139,6 +188,17 @@ def judge(
                 "the agent shows a queued-message hint: it will take the "
                 "input when its current turn ends",
             )
+    if (
+        pending
+        and after
+        and after[-1].activity != "running"
+        and composer_holds(after[-1].lines, pending)
+    ):
+        return Verdict(
+            "stuck",
+            "the text is still in the input box and no turn is running: the "
+            "submit did not land; read session_screen",
+        )
     if before == "running":
         return Verdict(
             "queued",
@@ -164,3 +224,10 @@ def judge(
         "sent, but no turn started and no queued hint showed while Vogt "
         "watched; read session_screen",
     )
+
+
+def input_pending(lines: tuple[str, ...]) -> str | None:
+    """The text an agent at rest still holds unsent in its input box, or
+    None (WI-1870). Only meaningful for a session not running a turn."""
+    shown = composer_text(lines)
+    return shown or None
