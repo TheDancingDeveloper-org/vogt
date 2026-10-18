@@ -1489,6 +1489,8 @@ export interface OperationalStatus {
   auth_broker: {
     auto_agent_auth: boolean;
     helper: string;
+    /** Latest session launched without its credentials (secrets manager unreachable). */
+    degraded?: { session_id: string; at: string; reason: string };
   };
   storage: {
     state_dir: string;

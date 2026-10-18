@@ -1306,6 +1306,11 @@ pub struct AgentTaskStorageStatus {
 pub struct AuthBrokerStatus {
     pub auto_agent_auth: bool,
     pub helper: String,
+    /// The latest session launched without its brokered credentials because
+    /// the secrets manager was unreachable, until a full launch clears it
+    /// (WI-1812).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<crate::launch::DegradedLaunch>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1370,6 +1375,7 @@ pub async fn operational_status(
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| state.config.agent_auth_helper.display().to_string()),
+            degraded: crate::launch::last_degraded(),
         },
         storage: ServerStorageStatus {
             state_dir: state.config.state_dir.display().to_string(),

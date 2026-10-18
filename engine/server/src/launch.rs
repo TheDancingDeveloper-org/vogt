@@ -24,7 +24,7 @@
 //! token, which only the session's own launch holds. It is accepted once per
 //! session, so a session cannot inflate the metrics by repeating it.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::{
@@ -34,7 +34,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::app::AppState;
@@ -149,6 +149,43 @@ pub fn record_first_output(session: &Session, after: Duration) {
             first_output_ms = ms,
             "session first output"
         );
+    }
+}
+
+/// The latest launch the wrapper reported as `degraded` (WI-1812): the
+/// session started, but without the brokered credentials, because the secrets
+/// manager could not be reached. Shown in `/api/status` so the gap is visible
+/// beyond the session's own warning. Cleared by the next full (`ok`) launch,
+/// which is the sign the secrets manager is back.
+#[derive(Clone, Debug, Serialize)]
+pub struct DegradedLaunch {
+    pub session_id: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: time::OffsetDateTime,
+    pub reason: String,
+}
+
+static LAST_DEGRADED: Mutex<Option<DegradedLaunch>> = Mutex::new(None);
+
+/// The latest degraded launch, if no full launch has happened since.
+pub fn last_degraded() -> Option<DegradedLaunch> {
+    LAST_DEGRADED.lock().map(|g| g.clone()).unwrap_or(None)
+}
+
+fn note_outcome(session_id: &str, outcome: &str, reason: &str) {
+    let Ok(mut last) = LAST_DEGRADED.lock() else {
+        return;
+    };
+    match outcome {
+        "degraded" => {
+            *last = Some(DegradedLaunch {
+                session_id: session_id.to_string(),
+                at: time::OffsetDateTime::now_utc(),
+                reason: reason.to_string(),
+            })
+        }
+        "ok" => *last = None,
+        _ => {}
     }
 }
 
@@ -274,7 +311,7 @@ pub async fn report(State(state): State<Arc<AppState>>, request: Request<Body>) 
 
 /// Log, audit and measure one accepted report.
 pub fn record_report(session: &Session, report: &LaunchReport, request_id: &str) {
-    let outcome = one_of(&report.outcome, &["ok", "failed"]);
+    let outcome = one_of(&report.outcome, &["ok", "degraded", "failed"]);
     let command = one_of(&report.command, &["run", "shell"]);
     let total = Duration::from_millis(report.total_ms);
     metrics()
@@ -353,6 +390,7 @@ pub fn record_report(session: &Session, report: &LaunchReport, request_id: &str)
                 .collect::<String>()
         })
         .unwrap_or_default();
+    note_outcome(&session.id.to_string(), outcome, &error);
     if outcome != "ok" || total >= SLOW_LAUNCH {
         tracing::warn!(
             target: "vogt::launch",
@@ -394,5 +432,16 @@ mod tests {
         assert_eq!(token("", 64), None);
         assert_eq!(one_of("bulk", &["bulk", "cli"]), "bulk");
         assert_eq!(one_of("anything else", &["bulk", "cli"]), "other");
+    }
+
+    #[test]
+    fn degraded_launch_is_remembered_until_a_full_one() {
+        note_outcome("s1", "degraded", "login timed out");
+        let last = last_degraded().expect("a degraded launch is remembered");
+        assert_eq!(last.reason, "login timed out");
+        note_outcome("s1", "failed", "");
+        assert!(last_degraded().is_some(), "a failed launch says nothing of the vault");
+        note_outcome("s1", "ok", "");
+        assert!(last_degraded().is_none(), "a full launch clears it");
     }
 }
