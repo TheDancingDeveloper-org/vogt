@@ -492,11 +492,15 @@ pub struct Config {
     /// `ENGINE_MIN_FREE_PERCENT` (10): a new session is refused while the
     /// workspace or temp volume has less free than this. 0 turns it off.
     pub min_free_percent: u8,
-    /// `ENGINE_SHARED_CARGO_TARGET_DIR`: when set, each session gets
-    /// `CARGO_TARGET_DIR=<this>/<repo>`, one target per repository shared by
-    /// all its worktrees, instead of a fresh `target` per checkout. Unset
-    /// leaves Cargo's default. A caller's own `CARGO_TARGET_DIR` wins.
+    /// `ENGINE_SHARED_CARGO_TARGET_DIR` (`<tmp>/claude-<uid>/cargo-target`;
+    /// `off` disables): Cargo builds inside a session's Claude scratch
+    /// directory use `<this>/<repo>`, one target per repository, instead of
+    /// a fresh one per scratch worktree. The session's own worktree is not
+    /// affected (`session_scratch::write_scratch_cargo_config`).
     pub shared_cargo_target_dir: Option<std::path::PathBuf>,
+    /// `ENGINE_SHARED_CARGO_TARGET_MAX_GB` (40): a repository's shared
+    /// scratch target over this is removed when a session stops.
+    pub shared_cargo_target_max_bytes: u64,
     /// `ENGINE_DISK_WARN_PERCENT` (85): the workspace volume's used percent
     /// above which sweep and status carry a needs-attention disk row.
     pub disk_warn_percent: u8,
@@ -1026,17 +1030,24 @@ pub fn load(
         },
         worktree_clean_on_hibernate: worktree_clean.hibernate,
         worktree_clean_on_stop: worktree_clean.stop,
-        scratch_prune_bytes: parse_scratch_prune_gb(
+        scratch_prune_bytes: parse_gib(
+            "ENGINE_SCRATCH_PRUNE_GB",
             engine_env("ENGINE_SCRATCH_PRUNE_GB").ok().as_deref(),
+            2,
         )?,
         min_free_percent: parse_min_free_percent(
             engine_env("ENGINE_MIN_FREE_PERCENT").ok().as_deref(),
         )?,
-        shared_cargo_target_dir: engine_env("ENGINE_SHARED_CARGO_TARGET_DIR")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from),
+        shared_cargo_target_dir: parse_shared_cargo_target_dir(
+            engine_env("ENGINE_SHARED_CARGO_TARGET_DIR").ok().as_deref(),
+        ),
+        shared_cargo_target_max_bytes: parse_gib(
+            "ENGINE_SHARED_CARGO_TARGET_MAX_GB",
+            engine_env("ENGINE_SHARED_CARGO_TARGET_MAX_GB")
+                .ok()
+                .as_deref(),
+            40,
+        )?,
         disk_warn_percent: parse_disk_warn_percent(
             engine_env("ENGINE_DISK_WARN_PERCENT").ok().as_deref(),
         )?,
@@ -1263,10 +1274,10 @@ fn parse_worktree_clean(raw: Option<&str>) -> Result<WorktreeClean> {
     }
 }
 
-/// `ENGINE_SCRATCH_PRUNE_GB`: a positive whole number of GiB, 2 when unset.
-fn parse_scratch_prune_gb(raw: Option<&str>) -> Result<u64> {
+/// A positive whole number of GiB in `name`, `default` GiB when unset; bytes.
+fn parse_gib(name: &str, raw: Option<&str>, default: u64) -> Result<u64> {
     match raw.map(str::trim).filter(|v| !v.is_empty()) {
-        None => Ok(2 << 30),
+        None => Ok(default << 30),
         Some(v) => v
             .parse::<u64>()
             .ok()
@@ -1274,9 +1285,29 @@ fn parse_scratch_prune_gb(raw: Option<&str>) -> Result<u64> {
             .and_then(|gb| gb.checked_mul(1 << 30))
             .ok_or_else(|| {
                 ApiError::Config(format!(
-                    "ENGINE_SCRATCH_PRUNE_GB must be a positive whole number of GiB, got {v:?}"
+                    "{name} must be a positive whole number of GiB, got {v:?}"
                 ))
             }),
+    }
+}
+
+/// `ENGINE_SHARED_CARGO_TARGET_DIR`: a directory, `off`/`0`/`false` for none,
+/// `cargo-target` under the first scratch root when unset.
+fn parse_shared_cargo_target_dir(raw: Option<&str>) -> Option<std::path::PathBuf> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v)
+            if matches!(
+                v.to_ascii_lowercase().as_str(),
+                "off" | "0" | "false" | "no"
+            ) =>
+        {
+            None
+        }
+        Some(v) => Some(std::path::PathBuf::from(v)),
+        None => crate::session_scratch::roots()
+            .into_iter()
+            .next()
+            .map(|r| r.join("cargo-target")),
     }
 }
 
@@ -2068,10 +2099,18 @@ mod prefix_tests {
 
     #[test]
     fn scratch_and_free_space_settings() {
-        assert_eq!(parse_scratch_prune_gb(None).unwrap(), 2 << 30);
-        assert_eq!(parse_scratch_prune_gb(Some(" 5 ")).unwrap(), 5 << 30);
-        assert!(parse_scratch_prune_gb(Some("0")).is_err());
-        assert!(parse_scratch_prune_gb(Some("x")).is_err());
+        assert_eq!(parse_gib("X", None, 2).unwrap(), 2 << 30);
+        assert_eq!(parse_gib("X", Some(" 5 "), 2).unwrap(), 5 << 30);
+        assert!(parse_gib("X", Some("0"), 2).is_err());
+        assert!(parse_gib("X", Some("x"), 2).is_err());
+        assert!(parse_shared_cargo_target_dir(None)
+            .unwrap()
+            .ends_with("cargo-target"));
+        assert_eq!(parse_shared_cargo_target_dir(Some("off")), None);
+        assert_eq!(
+            parse_shared_cargo_target_dir(Some("/srv/t")),
+            Some(std::path::PathBuf::from("/srv/t"))
+        );
         assert_eq!(parse_min_free_percent(None).unwrap(), 10);
         assert_eq!(parse_min_free_percent(Some("0")).unwrap(), 0);
         assert_eq!(parse_min_free_percent(Some("25")).unwrap(), 25);

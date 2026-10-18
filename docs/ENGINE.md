@@ -2094,11 +2094,20 @@ A new session is refused with `507 Insufficient Storage` while the workspace
 or temp volume has less than `ENGINE_MIN_FREE_PERCENT` (10) free; `0` turns
 the guard off. A wake is let through.
 
-`ENGINE_SHARED_CARGO_TARGET_DIR`, when set, gives each session
-`CARGO_TARGET_DIR=<dir>/<repo>`: one target per repository, shared by its
-worktrees and scratch checkouts, instead of a fresh one per checkout. A
-caller's or template's own `CARGO_TARGET_DIR` wins. Unset leaves Cargo's
-default.
+Cargo builds inside a session's scratch directory share one target per
+repository: at start the engine writes
+`<tmp>/claude-<uid>/<cwd slug>/.cargo/config.toml` with `build.target-dir =
+<ENGINE_SHARED_CARGO_TARGET_DIR>/<repo>` (default
+`<tmp>/claude-<uid>/cargo-target`; `off` disables). Cargo reads that file only
+for builds under the scratch directory, so a session's own worktree keeps its
+own target and workers never queue on one lock; concurrent scratch builds of
+one repository do share its lock, which is the price of not building a fresh
+10–16 GB target each time. A repository's own `.cargo/config.toml` or a
+`CARGO_TARGET_DIR` wins. A repository's shared target over
+`ENGINE_SHARED_CARGO_TARGET_MAX_GB` (40) is removed when a session stops.
+Deleting a scratch directory also runs `git worktree prune` in the main
+repository of each scratch worktree it held. Hibernation pruning weighs the
+entries inside `scratchpad/` one by one, never `scratchpad/` as a whole.
 
 #### Launch timing, logs and metrics
 
