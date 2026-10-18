@@ -122,8 +122,8 @@ class ForgeProvider(Protocol):
     def describe(self, ref: RepoRef) -> dict[str, object] | None:
         """Repository metadata, or ``None`` when it is not visible."""
 
-    def clone_token(self) -> str | None:
-        """The token a git clone should use, if one is configured."""
+    def clone_token(self, ref: RepoRef | None = None) -> str | None:
+        """The token a git clone of `ref` should use, if one is configured."""
 
     def identity(self) -> tuple[str, str] | None:
         """The token owner and reported scopes, or ``None`` when invalid."""

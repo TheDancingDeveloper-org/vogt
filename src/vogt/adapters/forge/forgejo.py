@@ -333,8 +333,9 @@ class ForgejoProvider:
             return None
         return payload if isinstance(payload, dict) else {}
 
-    def clone_token(self) -> str | None:
+    def clone_token(self, ref: RepoRef | None = None) -> str | None:
         """The token a clone should authenticate with, if any."""
+        del ref  # one token per Forgejo host
         return self._client.token
 
     def identity(self) -> tuple[str, str] | None:

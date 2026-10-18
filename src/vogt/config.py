@@ -443,6 +443,50 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    github_app_id: str | None = Field(
+        default=None,
+        description=(
+            "The ID or the client ID of a GitHub App for the forge adapter "
+            "to authenticate as; GitHub accepts either as the JWT issuer. "
+            "With `github_app_private_key_file` also set, GitHub reads and "
+            "writes use short-lived installation tokens, which have their own "
+            "rate limit, instead of `github_token_file`. The notifications "
+            "collector stays on `github_token_file`, because notifications "
+            "belong to a user and an App cannot read them. Not a secret, so "
+            "plain config is fine. Setup, including the permissions the App "
+            "needs, is in docs/GITHUB_APP.md."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_app_installation_id: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Pin every GitHub request to one installation of "
+            "`github_app_id`. Unset, the installation is discovered per "
+            "repository owner (`GET /repos/{owner}/{repo}/installation`, "
+            "then `/orgs/{owner}/installation` or "
+            "`/users/{owner}/installation`) and remembered, so one App "
+            "installed on several accounts or organisations covers them all. "
+            "Publishing a new repository needs an owner to create it under: "
+            "this installation's account, or the single one discovered."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_app_private_key_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to the GitHub App's PEM private key, which signs the "
+            "short-lived JWT exchanged for installation tokens. A file for "
+            "the same reason as `github_token_file`: the key never appears "
+            "in the environment or a process listing. When this and "
+            "`github_app_id` are set, the App takes precedence over "
+            "`github_token_file` for every GitHub read and write except "
+            "notifications. Unset, or unreadable, the personal token is used "
+            "as before."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     forge_account_key_file: Path | None = Field(
         default=None,
         description=(

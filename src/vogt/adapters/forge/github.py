@@ -168,9 +168,14 @@ class GitHubProvider:
             return None
         return payload if isinstance(payload, dict) else {}
 
-    def clone_token(self) -> str | None:
-        """The token a clone should authenticate with, if any."""
-        return self._client.token
+    def clone_token(self, ref: RepoRef | None = None) -> str | None:
+        """The token a clone of `ref` should authenticate with, if any.
+
+        `ref` routes a GitHub App to the installation on that repository's
+        owner; a personal token ignores it.
+        """
+        path = None if ref is None else f"/repos/{ref.owner}/{ref.repo}"
+        return self._client.bearer(path)
 
     def identity(self) -> tuple[str, str] | None:
         identity = self._client.identity()

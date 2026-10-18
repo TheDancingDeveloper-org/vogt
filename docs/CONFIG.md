@@ -35,6 +35,9 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `branch_binding_template` | `VOGT_BRANCH_BINDING_TEMPLATE` | string | `wi-{number}` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
+| `github_app_id` | `VOGT_GITHUB_APP_ID` | string, optional | *(no default — must be set)* | behaviour |
+| `github_app_installation_id` | `VOGT_GITHUB_APP_INSTALLATION_ID` | integer, optional | *(no default — must be set)* | behaviour |
+| `github_app_private_key_file` | `VOGT_GITHUB_APP_PRIVATE_KEY_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_account_key_file` | `VOGT_FORGE_ACCOUNT_KEY_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_token_files` | `VOGT_FORGE_TOKEN_FILES` | map of string to path | *(empty)* | behaviour |
 | `agent_activity_roots` | `VOGT_AGENT_ACTIVITY_ROOTS` | map of string to path | *(empty)* | behaviour |
@@ -159,6 +162,18 @@ How long observation *history* is kept. The newest observation per subject is ke
 ### `github_token_file`
 
 Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing.
+
+### `github_app_id`
+
+The ID or the client ID of a GitHub App for the forge adapter to authenticate as; GitHub accepts either as the JWT issuer. With `github_app_private_key_file` also set, GitHub reads and writes use short-lived installation tokens, which have their own rate limit, instead of `github_token_file`. The notifications collector stays on `github_token_file`, because notifications belong to a user and an App cannot read them. Not a secret, so plain config is fine. Setup, including the permissions the App needs, is in docs/GITHUB_APP.md.
+
+### `github_app_installation_id`
+
+Pin every GitHub request to one installation of `github_app_id`. Unset, the installation is discovered per repository owner (`GET /repos/{owner}/{repo}/installation`, then `/orgs/{owner}/installation` or `/users/{owner}/installation`) and remembered, so one App installed on several accounts or organisations covers them all. Publishing a new repository needs an owner to create it under: this installation's account, or the single one discovered.
+
+### `github_app_private_key_file`
+
+Path to the GitHub App's PEM private key, which signs the short-lived JWT exchanged for installation tokens. A file for the same reason as `github_token_file`: the key never appears in the environment or a process listing. When this and `github_app_id` are set, the App takes precedence over `github_token_file` for every GitHub read and write except notifications. Unset, or unreadable, the personal token is used as before.
 
 ### `forge_account_key_file`
 
