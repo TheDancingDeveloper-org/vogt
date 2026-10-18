@@ -251,3 +251,37 @@ def test_posture_is_read_once_per_interval(
     assert read is reads_again
     # A skipped sweep still records its receipt, with nothing read.
     assert len(second) == (2 if reads_again else 1)
+
+
+def test_a_rate_limited_posture_read_records_nothing_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review blocker: a paused read must not be stored as "no config" and
+    then pinned for a day by the schedule."""
+    limited = [True]
+
+    def answer(url: str, headers: dict[str, str]) -> Any:
+        if limited[0]:
+            return 403, b"{}", _headers(0)
+        return _posture_answer(url, headers)
+
+    transport = _Recorder(answer)
+
+    def provider_for(*_args: object, **_kwargs: object) -> GitHubProvider:
+        return GitHubProvider(GitHubClient(token="t", transport=transport))
+
+    monkeypatch.setattr("vogt.adapters.forge.collectors.provider_for", provider_for)
+    now = [datetime(2026, 10, 18, 12, tzinfo=UTC)]
+    ctx = CollectorContext(config=VogtConfig(), clock=lambda: now[0])
+    collector = ForgePostureCollector()
+
+    with pytest.raises(GitHubRateLimited):
+        list(collector.collect(ctx, _project()))
+
+    limited[0] = False
+    RATE_BUDGET.clear()
+    now[0] += timedelta(minutes=15)
+    found = list(collector.collect(ctx, _project()))
+    posture = [f for f in found if f.kind == "forge.posture"]
+    assert len(posture) == 1, "the next sweep reads posture, not in a day"
+    assert posture[0].payload["version_updates_config"] == ".github/dependabot.yml"
