@@ -127,6 +127,4 @@ def test_the_budget_restart_cap_defaults_to_one_and_can_be_off() -> None:
     assert dispatch.resolve({}).budget_restarts_per_item == 1
     off = dispatch.resolve({dispatch.BUDGET_RESTARTS_KEY: {"value": 0}})
     assert off.budget_restarts_per_item == 0
-    assert dispatch.validate(dispatch.BUDGET_RESTARTS_KEY, {"value": 0}) == {
-        "value": 0
-    }
+    assert dispatch.validate(dispatch.BUDGET_RESTARTS_KEY, {"value": 0}) == {"value": 0}
