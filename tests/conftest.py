@@ -348,6 +348,9 @@ def _instant_input_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
     from vogt.application.services import sessions
 
     monkeypatch.setattr(sessions, "_pause", lambda _seconds: None)
+    # The follow-up on a queued input runs in a thread in production; inline
+    # here so a test sees what it did (WI-1870).
+    monkeypatch.setattr(sessions, "_follow_queued", sessions._submit_queued)
 
 
 @pytest.fixture(autouse=True)

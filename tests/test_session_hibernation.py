@@ -557,8 +557,8 @@ def test_the_enters_are_bounded(
     """A composer that never clears gets three Enters in all, not more."""
     result = _send_to_resumed_codex(wired, engine, monkeypatch, swallow=10)
     assert len(_submits(engine)) == 3
-    assert result.delivery == "unconfirmed"
-    assert "composer" in result.delivery_evidence
+    assert result.delivery == "stuck"
+    assert "input box" in result.delivery_evidence
 
 
 def test_no_enter_is_pressed_again_on_a_dialog(

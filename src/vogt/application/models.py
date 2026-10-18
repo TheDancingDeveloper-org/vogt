@@ -5494,8 +5494,12 @@ class SessionInputResult(Result):
         default="unconfirmed",
         description=(
             "typed (no Enter: the text sits in the input) / delivered (a turn "
-            "started) / queued (behind a running turn) / unconfirmed (sent; "
-            "nothing observable yet). A refused input is an error, not a value."
+            "started) / queued (behind a running turn; once it ends Vogt "
+            "checks the input box and presses Enter if the text is still "
+            "there) / stuck (at rest with the text still in the input box: "
+            "the submit did not land; the sweep shows it as input pending) / "
+            "unconfirmed (sent; nothing observable yet). A refused input is "
+            "an error, not a value."
         ),
     )
     delivery_evidence: str = Field(

@@ -166,7 +166,8 @@ def test_one_call_returns_every_session_most_urgent_first(
     assert third is not None and third.linked is False
     assert result.counts["total"] == 4
     assert result.counts["needs_you"] == 2
-    assert engine.sweep_queries == ["screen_lines=5"]
+    # The sweep reads at least 8 lines to find an input box (WI-1870).
+    assert engine.sweep_queries == ["screen_lines=8"]
     assert busy_engine in {
         session.engine_session_id for session in sessions if session is not None
     }
