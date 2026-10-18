@@ -820,6 +820,7 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             now=now,
             stall_after=stall_after,
             done_at=summary.done_at,
+            turns=_turns_of(live.get(summary.engine_session_id)),
         )
         reason = verdict.reason
         claim_check = None
@@ -1386,6 +1387,13 @@ def economics(
 
 
 _EXCERPT_LIMIT = 120
+
+
+def _turns_of(engine_session: EngineSession | None) -> int | None:
+    """The engine's metered turn count, or None when it has not metered one."""
+    if engine_session is None or not engine_session.economics:
+        return None
+    return _int_or_none(engine_session.economics.get("turns"))
 
 
 def _int_or_none(value: object) -> int | None:
@@ -3724,6 +3732,13 @@ def _brief_with_task(
         text = f"{text.rstrip()}\n\n{READ_ONLY}"
     task = (params.task or "").strip()
     touch = _touch_points(params, cwd=cwd)
+    if params.review_of is not None:
+        # The agent's launch prompt looks for a Task section and otherwise
+        # waits, so a reviewer gets one even when the caller named no task
+        # (WI-1854). The caller's own task stays under "Also asked".
+        text = f"{text.rstrip()}\n\n## Task\n\n{_REVIEW_TASK}\n"
+    elif not task:
+        task = _default_task(params)
     if task:
         # A reviewer already has its task — check the diff — and a caller's
         # task would read as new work to go and do. It is recorded under the
@@ -3739,6 +3754,40 @@ def _brief_with_task(
     if touch:
         text = f"{text.rstrip()}\n\n{touch}"
     return text
+
+
+#: The Task section a review start gets (WI-1854): what the review brief
+#: above it already asks, said under the heading the launch prompt looks for.
+_REVIEW_TASK = (
+    "Review the branch this item's latest hand-off names, as the Review "
+    "section above says, and post the verdict as one `work_comment`: "
+    "`no blockers (head <sha>)` or `blockers (head <sha>):` with the list."
+)
+
+#: How a reason says it is the task (WI-1854): `Task: do the thing`.
+_TASK_PREFIX = re.compile(r"^\s*task\s*:\s*", re.IGNORECASE)
+
+
+def _default_task(params: StartSessionParams) -> str:
+    """The task a start implies when it names none (WI-1854).
+
+    An agent is launched to "carry out the Task section, or summarise and
+    wait", so a start that leaves `task` out opens an agent that idles.
+    Callers often put the task in `reason` instead; an agent start takes
+    it from there. A purpose of `review` gets the review task. A plain
+    shell gets nothing: it has no agent to read a task.
+    """
+    if params.purpose == "review":
+        target = params.work_item or "the bound work item"
+        return (
+            f"Review the pull request or branch bound to {target} and "
+            "report blockers: post one `work_comment` whose first line is "
+            "`no blockers (head <sha>)` or `blockers (head <sha>):` followed "
+            "by a numbered list. Make no edits, commits or pushes."
+        )
+    if params.template is None:
+        return ""
+    return _TASK_PREFIX.sub("", params.reason or "", count=1).strip()
 
 
 def _touch_points(params: StartSessionParams, *, cwd: str) -> str:

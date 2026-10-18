@@ -58,6 +58,16 @@ GATES: dict[str, str] = {
 }
 
 
+#: Turns a first turn takes: read the brief, then say what it is (WI-1854).
+FIRST_TURN_TURNS = 3
+
+#: The reason a session idle since its first turn is shown with.
+AWAITING_TASK = (
+    "awaiting task: idle at its prompt since its first turn, no work done; "
+    "give it the task with session_input"
+)
+
+
 @dataclass(frozen=True)
 class Verdict:
     attention: Attention
@@ -76,8 +86,14 @@ def classify(
     now: datetime,
     stall_after: timedelta,
     done_at: datetime | None = None,
+    turns: int | None = None,
 ) -> Verdict:
-    """Where one session belongs in the oversight table, and why."""
+    """Where one session belongs in the oversight table, and why.
+
+    `turns` is the engine's metered turn count, None when it has none. A
+    session resting after no more than `FIRST_TURN_TURNS` of them did its
+    first turn and nothing else: it was never given work (WI-1854).
+    """
     if activity == "hibernated":
         return Verdict("hibernated", "hibernated to free memory; wake it to continue")
     if activity is None or alive is None:
@@ -103,10 +119,18 @@ def classify(
     if activity == "waiting-for-input" or (activity == "idle" and ready):
         if done_at is not None:
             return Verdict("done", "said it is done (AUTOPILOT: DONE), at its prompt")
+        if _awaiting_task(turns):
+            return Verdict("waiting", AWAITING_TASK)
         return Verdict("waiting", "at its prompt, waiting for the next instruction")
     if activity == "running":
         if last_output_at is not None and now - last_output_at >= stall_after:
             minutes = int((now - last_output_at).total_seconds() // 60)
             return Verdict("stalled", f"running, but nothing printed for {minutes} min")
         return Verdict("running", "working")
+    if activity == "idle" and done_at is None and _awaiting_task(turns):
+        return Verdict("waiting", AWAITING_TASK)
     return Verdict("idle", "resting, not at a recognised prompt")
+
+
+def _awaiting_task(turns: int | None) -> bool:
+    return turns is not None and 0 < turns <= FIRST_TURN_TURNS

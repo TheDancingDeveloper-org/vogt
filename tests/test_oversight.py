@@ -83,3 +83,26 @@ def test_a_startup_gate_is_named_as_one() -> None:
     )
     assert attention == "approval"
     assert reason.startswith("stopped at a startup gate (folder trust)")
+
+
+@pytest.mark.parametrize("activity", ["waiting-for-input", "idle"])
+def test_a_session_idle_since_its_first_turn_is_awaiting_task(activity: str) -> None:
+    """WI-1854: a worker that only read its brief is waiting on a task."""
+    attention, reason = verdict(activity=activity, ready=True, turns=2)
+    assert attention == "waiting"
+    assert reason.startswith("awaiting task")
+
+
+@pytest.mark.parametrize("turns", [None, 0, 40])
+def test_a_session_that_did_work_or_was_never_metered_is_not_awaiting_task(
+    turns: int | None,
+) -> None:
+    _, reason = verdict(activity="waiting-for-input", turns=turns)
+    assert not reason.startswith("awaiting task")
+    attention, _ = verdict(activity="idle", turns=turns)
+    assert attention == "idle"
+
+
+def test_a_done_session_is_not_awaiting_task() -> None:
+    attention, _ = verdict(activity="waiting-for-input", turns=2, done_at=NOW)
+    assert attention == "done"

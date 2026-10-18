@@ -351,6 +351,50 @@ def test_a_task_is_folded_into_the_session_brief(
     assert brief.index("# vogt") < brief.index("## Task")
 
 
+def test_an_agent_start_takes_its_task_from_the_reason(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1854: an agent launched with no Task section summarises and idles."""
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1",
+            template="claude",
+            reason="Task: fix the flaky sweep test and push",
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    task = brief.index("## Task")
+    assert "fix the flaky sweep test and push" in brief[task:]
+    assert "Task: fix" not in brief
+
+
+def test_an_explicit_task_wins_over_the_reason(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", template="claude", task="do this", reason="Task: not that"
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    assert "do this" in brief
+    assert "not that" not in brief
+
+
+def test_a_review_purpose_gets_a_default_review_task(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="review", reason=WHY)
+    )
+    brief = engine.last_spec["prompt"]
+    task = brief[brief.index("## Task") :]
+    assert "Review the pull request or branch bound to WI-1" in task
+    assert "report blockers" in task
+
+
 def test_no_task_leaves_the_brief_untouched(
     wired: AppContext, engine: StandInEngine
 ) -> None:
