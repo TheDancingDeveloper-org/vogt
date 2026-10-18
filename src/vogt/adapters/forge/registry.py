@@ -37,6 +37,7 @@ from vogt.adapters.forge.github import HOST as GITHUB_HOST
 from vogt.adapters.forge.github import GitHubProvider
 from vogt.adapters.forge.models import RepoRef
 from vogt.adapters.forge.provider import ForgeProvider
+from vogt.adapters.github.app_auth import github_client_for
 from vogt.adapters.github.client import GitHubClient, Transport
 from vogt.config import VogtConfig
 
@@ -48,23 +49,27 @@ class _Spec:
 
     hosts: Callable[[VogtConfig | None], tuple[str, ...]]
     match: Callable[[str | None, VogtConfig | None], RepoRef | None]
-    build: Callable[[str, Path | None, Transport | None], ForgeProvider | None]
+    build: Callable[[str, VogtConfig, Transport | None], ForgeProvider | None]
     identity: Callable[[str, Transport | None], ForgeProvider]
     build_token: Callable[[str, str, Transport | None], ForgeProvider]
 
 
 def _build_github(
-    host: str, token_file: Path | None, transport: Transport | None
+    host: str, config: VogtConfig, transport: Transport | None
 ) -> ForgeProvider | None:
-    del host  # one host; the client knows its own API root
-    client = GitHubClient.from_token_file(token_file, transport=transport)
+    # A configured GitHub App wins over the token file (WI-1838).
+    client = github_client_for(
+        config, token_file_for(config, host), transport=transport
+    )
     return None if client is None else GitHubProvider(client)
 
 
 def _build_forgejo(
-    host: str, token_file: Path | None, transport: Transport | None
+    host: str, config: VogtConfig, transport: Transport | None
 ) -> ForgeProvider | None:
-    client = ForgejoClient.from_token_file(host, token_file, transport=transport)
+    client = ForgejoClient.from_token_file(
+        host, token_file_for(config, host), transport=transport
+    )
     return None if client is None else ForgejoProvider(client)
 
 
@@ -179,8 +184,7 @@ def provider_for(
     if matched is None:
         return None
     spec, ref = matched
-    token_file = token_file_for(config, ref.host)
-    return spec.build(ref.host, token_file, transport)
+    return spec.build(ref.host, config, transport)
 
 
 def provider_for_host(
@@ -200,7 +204,7 @@ def provider_for_host(
     for spec in _SPECS:
         if host not in spec.hosts(config):
             continue
-        return spec.build(host, token_file_for(config, host), transport)
+        return spec.build(host, config, transport)
     return None
 
 
@@ -284,7 +288,7 @@ def has_configured_forge(config: VogtConfig) -> bool:
     # may have substituted.
     for spec in _SPECS:
         for host in spec.hosts(config):
-            if spec.build(host, token_file_for(config, host), None) is not None:
+            if spec.build(host, config, None) is not None:
                 return True
     return False
 
@@ -307,8 +311,7 @@ def github_provider(
     name rather than resolving one per URL, and this keeps that honest —
     it still goes through the same token resolution as everything else (D8).
     """
-    token_file = token_file_for(config, GITHUB_HOST)
-    return _build_github(GITHUB_HOST, token_file, transport)  # type: ignore[return-value]
+    return _build_github(GITHUB_HOST, config, transport)  # type: ignore[return-value]
 
 
 __all__ = [

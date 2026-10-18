@@ -146,7 +146,10 @@ class ForgeWriter:
     ) -> dict[str, Any]:
         """Create a repository under the authenticated account.
 
-        `POST /user/repos` and nothing else: no auto-init (the local history
+        `POST /user/repos` for a user token, or `POST /orgs/{owner}/repos`
+        when the credential is a GitHub App installation on an organisation —
+        an installation token has no user, so `/user/repos` would refuse it.
+        Nothing else: no auto-init (the local history
         is about to be pushed and a generated first commit would make the
         very first push non-fast-forward), no template, no transfer. Errors
         propagate as `GitHubUnavailable` with the status in the message; the
@@ -160,8 +163,15 @@ class ForgeWriter:
         }
         if description:
             payload["description"] = description
-        response = self._client.send("/user/repos", payload)
+        response = self._client.send(self._create_repo_path(), payload)
         return response if isinstance(response, dict) else {}
+
+    def _create_repo_path(self) -> str:
+        account = self._client.default_owner()
+        login = (account or {}).get("login")
+        if login and (account or {}).get("type") == "Organization":
+            return f"/orgs/{login}/repos"
+        return "/user/repos"
 
     # -- transport ---------------------------------------------------------
 

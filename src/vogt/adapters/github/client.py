@@ -106,6 +106,24 @@ class Transport(Protocol):
     # and a fake that returns two elements simply opts out of both.
 
 
+class TokenProvider(Protocol):
+    """Where a client gets its bearer token when it is not a fixed string.
+
+    A GitHub App installation token lives an hour (`app_auth.GitHubAppAuth`),
+    so the client asks for it per request. Each method takes the request path,
+    because one App may have a different installation per owner. `cache_key`
+    names the rate-limit and ETag bucket, stable across refreshes;
+    `invalidate` drops a token the server has just refused, so the next
+    `token()` mints a fresh one.
+    """
+
+    def cache_key(self, path: str | None = None) -> str: ...
+
+    def token(self, path: str | None = None) -> str: ...
+
+    def invalidate(self, path: str | None = None) -> None: ...
+
+
 class GitHubUnavailable(VogtError):
     """GitHub could not be reached or refused the request.
 
@@ -238,6 +256,44 @@ class GitHubClient:
     api_root: str = API_ROOT
     transport: Transport | None = None
     timeout: int = DEFAULT_TIMEOUT_SECONDS
+    #: When set, wins over `token`: asked for a bearer token on every request.
+    token_provider: TokenProvider | None = None
+
+    def bearer(self, path: str | None = None) -> str | None:
+        """The token a request to `path` (or a clone) would use now."""
+        if self.token_provider is not None:
+            return self.token_provider.token(path)
+        return self.token
+
+    def _budget_key(self, path: str | None = None) -> str:
+        if self.token_provider is not None:
+            return self.token_provider.cache_key(path)
+        return _token_key(self.token)
+
+    def _authed_fetch(
+        self,
+        path: str,
+        url: str,
+        headers: dict[str, str],
+        *,
+        body: bytes | None = None,
+        method: str = "GET",
+    ) -> tuple[int, bytes, dict[str, str]]:
+        """`_fetch` with the bearer token attached, refreshing once on a 401.
+
+        A fixed token that gets a 401 is simply wrong; a provided one may
+        have been revoked or expired early, so it is minted again once.
+        """
+        provider = self.token_provider
+        bearer = self.bearer(path)
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        answer = self._fetch(url, headers, body=body, method=method)
+        if answer[0] == 401 and provider is not None:
+            provider.invalidate(path)
+            headers["Authorization"] = f"Bearer {provider.token(path)}"
+            answer = self._fetch(url, headers, body=body, method=method)
+        return answer
 
     @classmethod
     def from_token_file(
@@ -258,6 +314,17 @@ class GitHubClient:
             return None
         return cls(token=token, transport=transport)
 
+    def default_owner(self) -> dict[str, Any] | None:
+        """The account an App installation acts for, or `None` for a PAT.
+
+        A user token creates repositories under its user; an installation
+        token has no user, so `create_repo` targets the installation's
+        account instead — the configured installation, or the only one
+        discovered so far.
+        """
+        account = getattr(self.token_provider, "account", None)
+        return account() if callable(account) else None
+
     def get(self, path: str, **params: str | int) -> Any:
         """GET one resource, returning parsed JSON, or `None` for a 404."""
         query = urllib.parse.urlencode({k: str(v) for k, v in params.items()})
@@ -267,10 +334,7 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": USER_AGENT,
         }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-
-        token_key = _token_key(self.token)
+        token_key = self._budget_key(path)
         reset_at = RATE_BUDGET.blocked_until(token_key)
         if reset_at is not None:
             when = time.strftime("%H:%M:%SZ", time.gmtime(reset_at))
@@ -284,7 +348,7 @@ class GitHubClient:
         if cached is not None:
             headers["If-None-Match"] = cached[0]
 
-        status, body, response_headers = self._fetch(url, headers)
+        status, body, response_headers = self._authed_fetch(path, url, headers)
         RATE_BUDGET.observe(token_key, response_headers)
         if status == 304 and cached is not None:
             # Unchanged since the last read, and free: replay what we kept.
@@ -336,14 +400,12 @@ class GitHubClient:
             "User-Agent": USER_AGENT,
             "Content-Type": "application/json",
         }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
 
         body = json.dumps(payload).encode("utf-8")
-        status, response, response_headers = self._fetch(
-            url, headers, body=body, method=method
+        status, response, response_headers = self._authed_fetch(
+            path, url, headers, body=body, method=method
         )
-        RATE_BUDGET.observe(_token_key(self.token), response_headers)
+        RATE_BUDGET.observe(self._budget_key(path), response_headers)
         if status == 404:
             return None
         if status >= 400:
@@ -366,9 +428,7 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": USER_AGENT,
         }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        status, body, response_headers = self._fetch(url, headers)
+        status, body, response_headers = self._authed_fetch("/user", url, headers)
         if status in (401, 403, 404):
             return None
         if status >= 400:
