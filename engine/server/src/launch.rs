@@ -440,7 +440,10 @@ mod tests {
         let last = last_degraded().expect("a degraded launch is remembered");
         assert_eq!(last.reason, "login timed out");
         note_outcome("s1", "failed", "");
-        assert!(last_degraded().is_some(), "a failed launch says nothing of the vault");
+        assert!(
+            last_degraded().is_some(),
+            "a failed launch says nothing of the vault"
+        );
         note_outcome("s1", "ok", "");
         assert!(last_degraded().is_none(), "a full launch clears it");
     }
