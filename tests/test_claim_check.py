@@ -227,8 +227,8 @@ def test_the_wi_1707_claim_is_flagged_on_the_done_row(
     instance: AppContext, repo: Path
 ) -> None:
     ctx, engine, ref, _session = _wired(instance, repo)
-    for row in engine.rows.values():
-        row.update(
+    for engine_row in engine.rows.values():
+        engine_row.update(
             activity="waiting-for-input",
             done_at=STARTED.isoformat(),
             last_reply_excerpt="PR #193 was opened and merged.\nAUTOPILOT: DONE",
