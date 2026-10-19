@@ -1685,6 +1685,18 @@ where
 /// One workflow edge of an upstream item. Ports `_transition_upstream`:
 /// entering a terminal state closes the issue and leaving one reopens it,
 /// fail-loud; a move between open states is overlay-only and sends nothing.
+/// The forge write a hop from `from` to `to` makes: entering a terminal state
+/// closes the issue, leaving one reopens it, anything else writes nothing.
+fn upstream_verb(from: &str, to: &str) -> Option<&'static str> {
+    if TERMINAL_STATES.contains(&to) {
+        Some("close")
+    } else if TERMINAL_STATES.contains(&from) {
+        Some("reopen")
+    } else {
+        None
+    }
+}
+
 fn transition_upstream<C, I>(
     ctx: &AppContext<C, I>,
     item: WorkItem,
@@ -1698,13 +1710,14 @@ where
 {
     let workflow = ctx.declared.read()?.workflow_for(&item.kind.to_string())?;
     workflow.check(&item.state, to_state)?;
-    let action = if TERMINAL_STATES.contains(&to_state) {
-        Some(("close", crate::core::WriteBackAction::Close))
-    } else if TERMINAL_STATES.contains(&item.state.as_str()) {
-        Some(("reopen", crate::core::WriteBackAction::Reopen))
-    } else {
-        None
-    };
+    let action = upstream_verb(&item.state, to_state).map(|verb| {
+        let kind = if verb == "close" {
+            crate::core::WriteBackAction::Close
+        } else {
+            crate::core::WriteBackAction::Reopen
+        };
+        (verb, kind)
+    });
     let mut sent = None;
     let mut identity = String::new();
     if let Some((verb, _)) = action {
@@ -1813,6 +1826,14 @@ where
         } else {
             vec![resolved.state.clone(), to_state.clone()]
         };
+        // Check every hop's write-back policy before moving anything, as
+        // Python does, so a refused close or reopen cannot stop a walk
+        // half-way with the forge already changed.
+        for window in path.windows(2) {
+            if let Some(verb) = upstream_verb(&window[0], &window[1]) {
+                require_permitted(ctx, &project, verb, false)?;
+            }
+        }
         let hops = path.len().saturating_sub(1);
         let mut current = resolved;
         for (number, window) in path.windows(2).enumerate() {

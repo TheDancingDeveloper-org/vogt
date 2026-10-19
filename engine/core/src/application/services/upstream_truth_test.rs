@@ -875,3 +875,35 @@ fn a_failed_comment_and_close_raise_and_change_nothing() {
         "{ledger}"
     );
 }
+
+/// A walk checks every hop's write-back policy before moving anything: under
+/// `comment_only` the closing hop is refused, so the open-state hops before it
+/// do not land either.
+#[test]
+fn a_walk_refused_mid_way_moves_nothing() {
+    let (built, forgejo) = armed();
+    onboard(&built);
+    writeback_op(
+        &built,
+        json!({"project": SLUG, "policy": "comment_only", "reason": WHY}),
+    )
+    .unwrap();
+    forgejo.requests.lock().unwrap().clear();
+    let walked = transition_op(
+        &built,
+        json!({"ref": subject(9), "to_state": "done", "walk": true, "reason": WHY}),
+    );
+    match walked {
+        Err(VogtError::UpstreamWriteRefused(message)) => {
+            assert!(message.contains("'close'"), "{message}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    assert!(forgejo.mutations().is_empty(), "{:?}", forgejo.mutations());
+    assert!(
+        overlay(&built, &subject(9)).is_none_or(|o| o.workflow_state.is_none()),
+        "no hop landed"
+    );
+    let got = get_op(&built, json!({"ref": subject(9)})).unwrap();
+    assert_eq!(got["item"]["state"], json!("open"), "{got}");
+}
