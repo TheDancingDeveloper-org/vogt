@@ -12,6 +12,8 @@ pub mod coverage;
 pub mod deployed;
 pub mod dispatch;
 #[cfg(test)]
+mod dispatch_test;
+#[cfg(test)]
 mod disposition;
 pub mod drift;
 #[cfg(test)]
