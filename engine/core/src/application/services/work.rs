@@ -1550,6 +1550,7 @@ where
         return comment_upstream(ctx, &resolved, &project, &body, &reason);
     }
     drop(view);
+    let writer = native_writer(ctx, &reference)?;
     let mut writing = crate::application::context::write_of(ctx);
     let clock = std::sync::Arc::clone(writing.clock());
     let ids = std::sync::Arc::clone(writing.ids());
@@ -1579,7 +1580,7 @@ where
                 .flatten();
             let links = txn.work_links_for_subjects_by_item(&item.id)?;
             let subject = links.keys().next().cloned();
-            let record = skipped_writeback(
+            let record = attempt_writeback(
                 txn,
                 &ids_for_record,
                 &clock_for_record,
@@ -1589,6 +1590,11 @@ where
                 Some(&item.id),
                 subject.as_deref(),
                 &reason_for_record,
+                writer.as_ref(),
+                Some(&format!(
+                    "{body}\n\n— posted from Vogt as {}",
+                    item.reference
+                )),
             )?;
             let outcome = record.outcome.to_string();
             let comment_id = comment.id.clone();
@@ -1882,6 +1888,11 @@ where
         let leaving = crate::core::TERMINAL_STATES.contains(&from.as_str())
             && !crate::core::TERMINAL_STATES.contains(&to.as_str());
         let hop_for_record = hop_reason.clone();
+        let writer = if entering || leaving {
+            native_writer(ctx, &reference)?
+        } else {
+            None
+        };
         current = audited_write(
             &mut writing,
             WORK_TRANSITION,
@@ -1934,7 +1945,7 @@ where
                 };
                 if let Some(action) = action {
                     let subject = linked_subject(txn, &updated.id)?;
-                    skipped_writeback(
+                    attempt_writeback(
                         txn,
                         &ids,
                         &clock,
@@ -1944,6 +1955,8 @@ where
                         Some(&updated.id),
                         subject.as_deref(),
                         &hop_for_record,
+                        writer.as_ref(),
+                        None,
                     )?;
                 }
                 let mut summary = serde_json::Map::new();
@@ -2300,7 +2313,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn skipped_writeback(
+/// One write-back attempt from a native item, recorded either way. Ports
+/// `writeback.attempt`: policy, link and forge gates answer `skipped` with
+/// the reason; otherwise the provider is called and its outcome recorded.
+#[allow(clippy::too_many_arguments)]
+fn attempt_writeback(
     txn: &mut dyn WriteTxn,
     ids: &std::sync::Arc<std::sync::Mutex<impl IdFactory>>,
     clock: &std::sync::Arc<std::sync::Mutex<impl Clock>>,
@@ -2310,6 +2327,8 @@ fn skipped_writeback(
     work_item_id: Option<&str>,
     subject_key: Option<&str>,
     reason: &str,
+    writer: Option<&(ForgeClient, String)>,
+    body: Option<&str>,
 ) -> Result<WriteBackRecord, VogtError> {
     let policy = project
         .map(|project| project.write_back.to_string())
@@ -2326,6 +2345,59 @@ fn skipped_writeback(
         }
     } else if subject_key.is_none() && action != crate::core::WriteBackAction::Create {
         "this item is not linked to a forge object".to_string()
+    } else if let Some((provider, identity)) = writer {
+        let repo = provider.parse(project.and_then(|project| project.repo_url.as_deref()));
+        let number = provider.number_of(subject_key);
+        let sent = match (repo, number, action) {
+            (None, _, _) => None,
+            (Some(repo), Some(number), crate::core::WriteBackAction::Comment) => body
+                .filter(|text| !text.is_empty())
+                .map(|text| provider.comment(&repo, number, text))
+                .transpose()?,
+            (Some(repo), Some(number), crate::core::WriteBackAction::Close) => {
+                Some(provider.set_state(&repo, number, "closed")?)
+            }
+            (Some(repo), Some(number), crate::core::WriteBackAction::Reopen) => {
+                Some(provider.set_state(&repo, number, "open")?)
+            }
+            _ => None,
+        };
+        let has_repo = provider
+            .parse(project.and_then(|project| project.repo_url.as_deref()))
+            .is_some();
+        match sent {
+            Some(sent) => {
+                let record = WriteBackRecord {
+                    id: super::next_id(ids, "wbk"),
+                    at: super::now_of(clock),
+                    project_id: project.map(|project| project.id.clone()),
+                    work_item_id: work_item_id.map(str::to_string),
+                    actor_id: actor_id.to_string(),
+                    action,
+                    subject_key: sent
+                        .subject_key
+                        .clone()
+                        .filter(|key| !key.is_empty())
+                        .or_else(|| subject_key.map(str::to_string)),
+                    policy,
+                    outcome: sent
+                        .outcome
+                        .as_str()
+                        .parse()
+                        .unwrap_or(crate::core::WriteBackOutcome::Failed),
+                    reason: reason.to_string(),
+                    detail: Some(match sent.detail.as_deref() {
+                        Some(detail) => format!("as {identity}; {detail}"),
+                        None => format!("as {identity}"),
+                    }),
+                    source_url: sent.source_url.clone(),
+                };
+                txn.insert_writeback(&record)?;
+                return Ok(record);
+            }
+            None if !has_repo => "this project has no forge repository to write to".to_string(),
+            None => format!("nothing to send for {action}"),
+        }
     } else {
         "no forge is configured to write to for this project".to_string()
     };
@@ -2345,6 +2417,39 @@ fn skipped_writeback(
     };
     txn.insert_writeback(&record)?;
     Ok(record)
+}
+
+/// The writer a native item's write-back would use, resolved before the
+/// declared transaction opens. `None` when the project's policy is `none`
+/// or no forge credential resolves, which `attempt_writeback` records.
+fn native_writer<C, I>(
+    ctx: &AppContext<C, I>,
+    reference: &str,
+) -> Result<Option<(ForgeClient, String)>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let view = ctx.declared.read()?;
+    let Some(item) = view.work_item_by_ref(reference)? else {
+        return Ok(None);
+    };
+    let Some(project) = item
+        .project_id
+        .as_deref()
+        .map(|id| view.project_by_id(id))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    if project.write_back.to_string() == "none" {
+        return Ok(None);
+    }
+    let actor = view.actor_by_identity(&ctx.principal.identity_ref)?;
+    drop(view);
+    let (provider, identity) = writer_provider(ctx, actor.as_ref(), project.repo_url.as_deref())?;
+    Ok(provider.map(|provider| (provider, identity)))
 }
 
 fn linked_subject(txn: &impl ReadView, item_id: &str) -> Result<Option<String>, VogtError> {

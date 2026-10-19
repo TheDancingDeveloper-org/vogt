@@ -2,8 +2,8 @@
 //! today.
 //!
 //! Ports the cases of `tests/test_upstream_truth.py`. `work.create` and
-//! `work.update` write through to the forge (WI-1068); the comment and close
-//! write-through is still unported (WI-1780).
+//! `work.update` write through to the forge (WI-1068), and so do comment,
+//! close and reopen (WI-1780).
 
 use serde_json::json;
 

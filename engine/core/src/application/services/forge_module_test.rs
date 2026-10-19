@@ -538,6 +538,76 @@ fn every_write_back_is_recorded_with_its_reason() {
         .expect("the comment is in the ledger");
     assert_eq!(posted["reason"], "because a human asked");
     assert_eq!(posted["policy"], "comment_only");
+    assert!(!posted["source_url"].is_null(), "{posted}");
+}
+
+#[test]
+fn a_comment_posts_upstream_under_comment_only() {
+    let (built, forgejo) = forgejo_with(four_issues(), true);
+    onboard(&built);
+    let reference = adopt(&built, FORGEJO_SUBJECT_12);
+    writeback_op(
+        &built,
+        json!({"project": SLUG, "policy": "comment_only", "reason": WHY}),
+    )
+    .unwrap();
+    forgejo.requests.lock().unwrap().clear();
+    forgejo.bodies.lock().unwrap().clear();
+
+    let result = comment_op(
+        &built,
+        json!({"ref": reference, "body": "Looking at this now", "reason": WHY}),
+    )
+    .unwrap();
+    assert_eq!(result["write_back"], "succeeded", "{result}");
+    let mutations = forgejo.mutations();
+    assert_eq!(mutations.len(), 1, "{mutations:?}");
+    assert!(mutations[0].starts_with("POST "), "{mutations:?}");
+    let posted = forgejo.bodies.lock().unwrap()[0]["body"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(posted.contains("Looking at this now"), "{posted}");
+    assert!(
+        posted.contains(reference.as_str()),
+        "the upstream comment says where it came from: {posted}"
+    );
+}
+
+#[test]
+fn finishing_an_item_closes_the_linked_issue_under_full() {
+    let (built, forgejo) = forgejo_with(four_issues(), true);
+    onboard(&built);
+    let reference = adopt(&built, FORGEJO_SUBJECT_12);
+    writeback_op(
+        &built,
+        json!({"project": SLUG, "policy": "full", "reason": WHY}),
+    )
+    .unwrap();
+    forgejo.requests.lock().unwrap().clear();
+    forgejo.bodies.lock().unwrap().clear();
+    for state in ["in_progress", "review", "done"] {
+        transition_op(
+            &built,
+            json!({"ref": reference, "to_state": state, "reason": WHY}),
+        )
+        .unwrap();
+    }
+    let mutations = forgejo.mutations();
+    assert_eq!(mutations.len(), 1, "{mutations:?}");
+    assert!(mutations[0].starts_with("PATCH "), "{mutations:?}");
+    assert_eq!(
+        forgejo.bodies.lock().unwrap().last().cloned(),
+        Some(json!({"state": "closed"}))
+    );
+    let ledger = writeback_list_op(&built, json!({"outcome": "succeeded"})).unwrap();
+    let actions: Vec<&str> = ledger["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["action"].as_str())
+        .collect();
+    assert_eq!(actions, ["close"], "{ledger}");
 }
 
 // -- forge drift ------------------------------------------------------------
