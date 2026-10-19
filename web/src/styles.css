@@ -2092,6 +2092,11 @@ textarea {
   padding: 6px 10px;
   cursor: pointer;
   border-left: 2px solid transparent;
+  /* A busy roster is a long list: rows off screen skip layout and paint
+     until they scroll near the viewport (WI-1903). `auto` remembers each
+     row's last real height, so the scrollbar does not jump. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 34px;
 }
 .session-row:hover {
   background: rgba(255, 255, 255, 0.04);

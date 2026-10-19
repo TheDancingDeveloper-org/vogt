@@ -15,19 +15,30 @@ describe("readAllStarters", () => {
       { sessions: [link("w3", "ovs")], truncated: false },
     ];
     const fetchPage = vi.fn(async (offset: number) => pages[offset === 0 ? 0 : offset === 1 ? 1 : 2]!);
-    const starters = await readAllStarters(fetchPage);
+    const starters = await readAllStarters(fetchPage, 1);
     expect(Object.fromEntries(starters)).toEqual({ w1: "ovs", w2: "ovs", w3: "ovs" });
     expect(fetchPage.mock.calls.map((call) => call[0])).toEqual([0, 1, 2]);
   });
 
   it("stops at the page cap and at an empty page", async () => {
     const always = vi.fn(async () => ({ sessions: [link("w", "ovs")], truncated: true }));
-    await readAllStarters(always);
+    await readAllStarters(always, 1);
     expect(always).toHaveBeenCalledTimes(STARTERS_MAX_PAGES);
 
     const empty = vi.fn(async () => ({ sessions: [], truncated: true }));
-    await readAllStarters(empty);
+    await readAllStarters(empty, 1);
     expect(empty).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops at a short page even when the core still says truncated (WI-1903)", async () => {
+    // Prod asked offset 0, then 500, then 506: the six-row page still came
+    // back truncated, so one more full read went out for nothing.
+    const fetchPage = vi.fn(async (offset: number) => ({
+      sessions: offset === 0 ? [link("a", "ovs"), link("b", "ovs")] : [link("c", "ovs")],
+      truncated: true,
+    }));
+    await readAllStarters(fetchPage, 2);
+    expect(fetchPage.mock.calls.map((call) => call[0])).toEqual([0, 2]);
   });
 
   it("asks for Vogt's full page size, not the default of 50", () => {

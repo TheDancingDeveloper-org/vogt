@@ -44,13 +44,17 @@ interface StartersPage {
  *  testable without a core. */
 export async function readAllStarters(
   fetchPage: (offset: number) => Promise<StartersPage>,
+  pageSize: number = STARTERS_PAGE_SIZE,
 ): Promise<Map<string, string>> {
   const starters = new Map<string, string>();
   let offset = 0;
   for (let page = 0; page < STARTERS_MAX_PAGES; page += 1) {
     const answer = await fetchPage(offset);
     for (const [child, starter] of startersById(answer.sessions)) starters.set(child, starter);
-    if (!answer.truncated || answer.sessions.length === 0) break;
+    // A short page is the last one, whatever `truncated` says: the core
+    // reports it from the total, so the page after offset 500 of 506 used to
+    // be asked for as well — a fourth full read every refresh (WI-1903).
+    if (!answer.truncated || answer.sessions.length < pageSize) break;
     offset += answer.sessions.length;
   }
   return starters;
