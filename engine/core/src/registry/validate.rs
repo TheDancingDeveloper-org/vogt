@@ -28,8 +28,10 @@ pub fn prepare(operation: &str, params: Value) -> Result<Value, VogtError> {
         ));
     };
     let given_value = Value::Object(given.clone());
-    apply_object(operation, &[], schema, given, schema)
-        .map(Value::Object)
+    let given = apply_aliases(operation, given)
+        .map_err(|complaint| invalid(operation, &[model_error(&complaint, &given_value)]))?;
+    let resolved = apply_object(operation, &[], schema, given, schema)
+        .and_then(|resolved| after_fields(operation, resolved))
         .map_err(|problems| {
             let problems: Vec<FieldError> = problems
                 .into_iter()
@@ -42,7 +44,140 @@ pub fn prepare(operation: &str, params: Value) -> Result<Value, VogtError> {
                 })
                 .collect();
             invalid(operation, &problems)
-        })
+        })?;
+    after_model(operation, &resolved)
+        .map_err(|complaint| invalid(operation, &[model_error(&complaint, &given_value)]))?;
+    Ok(Value::Object(resolved))
+}
+
+/// A complaint from a whole-model validator: pydantic reports it with an empty
+/// location and the whole input as the value.
+fn model_error(complaint: &str, input: &Value) -> FieldError {
+    finish(&pydantic(&[], &format!("Value error, {complaint}")), input)
+}
+
+/// The tolerated aliases, the `apply_aliases` `mode="before"` model validators
+/// on `ProjectBriefParams`, `GetWorkParams`, `ListWorkParams` and
+/// `TransitionWorkParams`. An alias is taken only when the canonical field is
+/// absent; naming both is refused.
+fn apply_aliases(
+    operation: &str,
+    mut given: Map<String, Value>,
+) -> Result<Map<String, Value>, String> {
+    let aliases: &[(&str, &str)] = match operation {
+        "project.brief" => &[("project", "slug"), ("id", "slug")],
+        "work.get" => &[("id", "ref")],
+        "work.list" => &[
+            ("status", "states"),
+            ("state", "states"),
+            ("text", "query"),
+            ("search", "query"),
+            ("q", "query"),
+        ],
+        "work.transition" => &[("id", "ref"), ("to", "to_state"), ("state", "to_state")],
+        _ => &[],
+    };
+    for (alias, field) in aliases {
+        let Some(value) = given.remove(*alias) else {
+            continue;
+        };
+        if given.contains_key(*field) {
+            return Err(format!(
+                "{operation}: '{alias}' is an alias of '{field}'; pass one of them, not both"
+            ));
+        }
+        given.insert((*field).to_string(), value);
+    }
+    if operation == "work.list" {
+        if let Some(Value::String(text)) = given.get("states") {
+            let parts = text
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(|part| Value::String(part.to_string()))
+                .collect();
+            given.insert("states".to_string(), Value::Array(parts));
+        }
+    }
+    Ok(given)
+}
+
+/// Pydantic `field_validator`s in the default (after) mode: they see a value
+/// that already passed its type check.
+fn after_fields(
+    operation: &str,
+    mut resolved: Map<String, Value>,
+) -> Result<Map<String, Value>, Vec<FieldError>> {
+    let complain = |name: &str, complaint: &str, input: &Value| {
+        vec![finish(
+            &pydantic(
+                &[Loc::Field(name.to_string())],
+                &format!("Value error, {complaint}"),
+            ),
+            input,
+        )]
+    };
+    match operation {
+        // `GetManyWorkParams._refs_are_refs`.
+        "work.get_many" => {
+            if let Some(refs @ Value::Array(items)) = resolved.get("refs") {
+                if items.iter().any(|item| {
+                    item.as_str()
+                        .is_some_and(|text| text.is_empty() || text.chars().count() > 200)
+                }) {
+                    return Err(complain("refs", "each ref is 1-200 characters", refs));
+                }
+            }
+        }
+        // `ListSessionsParams._starter_is_an_id`.
+        "session.list" => {
+            if let Some(Value::String(text)) = resolved.get("started_by_session") {
+                if text.trim().is_empty() || text.chars().count() > 200 {
+                    let input = Value::String(text.clone());
+                    return Err(complain(
+                        "started_by_session",
+                        "started_by_session is 1-200 characters",
+                        &input,
+                    ));
+                }
+                let trimmed = Value::String(text.trim().to_string());
+                resolved.insert("started_by_session".to_string(), trimmed);
+            }
+        }
+        // `SessionWaitAnyParams._cursor_not_negative`.
+        "session.wait_any" => {
+            if let Some(cursor @ Value::Number(number)) = resolved.get("cursor") {
+                if number.as_i64().is_some_and(|n| n < 0)
+                    || number.as_f64().is_some_and(|n| n < 0.0)
+                {
+                    return Err(complain("cursor", "cursor is at least 0", cursor));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(resolved)
+}
+
+/// Pydantic `model_validator(mode="after")`s, run once every field passed.
+fn after_model(operation: &str, resolved: &Map<String, Value>) -> Result<(), String> {
+    // `CommentParams._handoff_matches_kind`.
+    if operation == "work.comment" {
+        let kind = resolved
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("note");
+        let handoff = resolved
+            .get("handoff")
+            .is_some_and(|value| !value.is_null());
+        if kind == "handoff" && !handoff {
+            return Err("a hand-off comment requires handoff fields".to_string());
+        }
+        if kind == "note" && handoff {
+            return Err("handoff fields belong on a comment of kind handoff".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn apply_object(
@@ -636,6 +771,22 @@ fn check_bounds(
             )]);
         }
     }
+    if let Some(min) = bound(schema, "exclusiveMinimum") {
+        if number <= min {
+            return Err(vec![pydantic(
+                location,
+                &format!("Input should be greater than {min}"),
+            )]);
+        }
+    }
+    if let Some(max) = bound(schema, "exclusiveMaximum") {
+        if number >= max {
+            return Err(vec![pydantic(
+                location,
+                &format!("Input should be less than {max}"),
+            )]);
+        }
+    }
     if let Some(max) = bound(schema, "maximum") {
         if number > max {
             return Err(vec![pydantic(
@@ -671,21 +822,6 @@ fn check_array(
             &value,
         ));
     };
-    if let Some(min) = bound(schema, "minItems") {
-        if (items.len() as i64) < min {
-            return Err(stamp(
-                &[pydantic(
-                    location,
-                    &format!(
-                        "List should have at least {min} item{} after validation, not {}",
-                        if min == 1 { "" } else { "s" },
-                        items.len()
-                    ),
-                )],
-                &Value::Array(items),
-            ));
-        }
-    }
     if let Some(max) = bound(schema, "maxItems") {
         if (items.len() as i64) > max {
             return Err(stamp(
@@ -697,8 +833,10 @@ fn check_array(
             ));
         }
     }
+    // Pydantic checks `min_length` only "after validation": an item's own
+    // error is reported first, and the length only once every item passed.
     let Some(item_schema) = schema.get("items") else {
-        return Ok(Value::Array(items));
+        return min_items(location, schema, items);
     };
     let mut checked = Vec::with_capacity(items.len());
     let mut problems = Vec::new();
@@ -715,10 +853,33 @@ fn check_array(
         }
     }
     if problems.is_empty() {
-        Ok(Value::Array(checked))
+        min_items(location, schema, checked)
     } else {
         Err(problems)
     }
+}
+
+fn min_items(
+    location: &[Loc],
+    schema: &Value,
+    items: Vec<Value>,
+) -> Result<Value, Vec<FieldError>> {
+    if let Some(min) = bound(schema, "minItems") {
+        if (items.len() as i64) < min {
+            return Err(stamp(
+                &[pydantic(
+                    location,
+                    &format!(
+                        "List should have at least {min} item{} after validation, not {}",
+                        if min == 1 { "" } else { "s" },
+                        items.len()
+                    ),
+                )],
+                &Value::Array(items),
+            ));
+        }
+    }
+    Ok(Value::Array(items))
 }
 
 fn bound(schema: &Value, name: &str) -> Option<i64> {
@@ -778,8 +939,12 @@ fn error_code(complaint: &str, input: &Value) -> &'static str {
         _ if complaint.starts_with("String should have at most") => "string_too_long",
         _ if complaint.starts_with("String should match pattern") => "string_pattern_mismatch",
         _ if complaint.starts_with("Input should be '") => "literal_error",
-        _ if complaint.starts_with("Input should be greater than") => "greater_than_equal",
-        _ if complaint.starts_with("Input should be less than") => "less_than_equal",
+        _ if complaint.starts_with("Input should be greater than or equal to") => {
+            "greater_than_equal"
+        }
+        _ if complaint.starts_with("Input should be greater than") => "greater_than",
+        _ if complaint.starts_with("Input should be less than or equal to") => "less_than_equal",
+        _ if complaint.starts_with("Input should be less than") => "less_than",
         _ if complaint.starts_with("List should have at least") => "too_short",
         _ if complaint.starts_with("List should have at most") => "too_long",
         _ if complaint.starts_with("Value error,") => "value_error",
@@ -852,8 +1017,14 @@ fn finish(problem: &FieldError, input: &Value) -> FieldError {
         problem.loc.clone()
     };
     let code = error_code(complaint, input);
+    // A whole-model complaint has no field line.
+    let field = if field.is_empty() {
+        String::new()
+    } else {
+        format!("{field}\n")
+    };
     let text = format!(
-        "{field}\n  {complaint} [type={code}, input_value={}, input_type={}]\n    \
+        "{field}  {complaint} [type={code}, input_value={}, input_type={}]\n    \
          For further information visit https://errors.pydantic.dev/2.13/v/{code}",
         render_input(input),
         json_type(input)
@@ -991,6 +1162,178 @@ fn loc_json(step: &crate::errors::Loc) -> serde_json::Value {
 
 mod tests {
     use super::*;
+
+    /// The text after the `invalid arguments` header and model line.
+    fn refusal(operation: &str, params: Value) -> String {
+        let error = prepare(operation, params).unwrap_err();
+        let message = error.message().to_string();
+        message.splitn(3, '\n').nth(2).unwrap().to_string()
+    }
+
+    fn pydantic_text(field: Option<&str>, complaint: &str, input: &str, kind: &str) -> String {
+        let code = if complaint.starts_with("Value error,") {
+            "value_error"
+        } else {
+            "greater_than"
+        };
+        let field = field.map(|f| format!("{f}\n")).unwrap_or_default();
+        format!(
+            "{field}  {complaint} [type={code}, input_value={input}, input_type={kind}]\n    \
+             For further information visit https://errors.pydantic.dev/2.13/v/{code}"
+        )
+    }
+
+    #[test]
+    fn a_handoff_comment_without_fields_is_refused() {
+        let text = refusal(
+            "work.comment",
+            serde_json::json!({"ref": "x", "body": "x", "reason": "x", "kind": "handoff"}),
+        );
+        assert_eq!(
+            text,
+            pydantic_text(
+                None,
+                "Value error, a hand-off comment requires handoff fields",
+                "{'ref': 'x', 'body': 'x',... 'x', 'kind': 'handoff'}",
+                "dict"
+            )
+        );
+    }
+
+    #[test]
+    fn a_note_with_handoff_fields_is_refused() {
+        let text = refusal(
+            "work.comment",
+            serde_json::json!({"ref": "x", "body": "x", "reason": "x", "handoff": {}}),
+        );
+        assert_eq!(
+            text,
+            pydantic_text(
+                None,
+                "Value error, handoff fields belong on a comment of kind handoff",
+                "{'ref': 'x', 'body': 'x',...on': 'x', 'handoff': {}}",
+                "dict"
+            )
+        );
+        let accepted = prepare(
+            "work.comment",
+            serde_json::json!({"ref": "x", "body": "x", "reason": "x", "kind": "handoff", "handoff": {}}),
+        );
+        assert!(accepted.is_ok(), "{accepted:?}");
+    }
+
+    #[test]
+    fn a_digest_context_window_must_be_positive() {
+        let text = refusal(
+            "session.digest",
+            serde_json::json!({"id": "x", "context_window": 0}),
+        );
+        assert_eq!(
+            text,
+            pydantic_text(
+                Some("context_window"),
+                "Input should be greater than 0",
+                "0",
+                "int"
+            )
+        );
+        assert!(prepare(
+            "session.digest",
+            serde_json::json!({"id": "x", "context_window": 1})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn decision_options_report_the_item_before_the_length() {
+        let text = refusal(
+            "decision.ask",
+            serde_json::json!({"question": "x", "options": [5], "reason": "x"}),
+        );
+        assert!(
+            text.starts_with(
+                "options.0\n  Input should be a valid dictionary or instance of DecisionOptionModel [type=model_type"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn get_many_refs_are_1_to_200_characters() {
+        let text = refusal("work.get_many", serde_json::json!({"refs": ["WI-1", ""]}));
+        assert_eq!(
+            text,
+            pydantic_text(
+                Some("refs"),
+                "Value error, each ref is 1-200 characters",
+                "['WI-1', '']",
+                "list"
+            )
+        );
+    }
+
+    #[test]
+    fn started_by_session_is_an_id_and_is_trimmed() {
+        let text = refusal(
+            "session.list",
+            serde_json::json!({"started_by_session": "  "}),
+        );
+        assert_eq!(
+            text,
+            pydantic_text(
+                Some("started_by_session"),
+                "Value error, started_by_session is 1-200 characters",
+                "'  '",
+                "str"
+            )
+        );
+        let ok = prepare(
+            "session.list",
+            serde_json::json!({"started_by_session": " ses_1 "}),
+        )
+        .unwrap();
+        assert_eq!(ok["started_by_session"], "ses_1");
+    }
+
+    #[test]
+    fn a_wait_any_cursor_is_not_negative() {
+        let text = refusal("session.wait_any", serde_json::json!({"cursor": -1}));
+        assert_eq!(
+            text,
+            pydantic_text(
+                Some("cursor"),
+                "Value error, cursor is at least 0",
+                "-1",
+                "int"
+            )
+        );
+    }
+
+    #[test]
+    fn an_alias_and_its_field_together_are_refused() {
+        let text = refusal("work.get", serde_json::json!({"id": "WI-1", "ref": "WI-2"}));
+        assert_eq!(
+            text,
+            pydantic_text(
+                None,
+                "Value error, work.get: 'id' is an alias of 'ref'; pass one of them, not both",
+                "{'id': 'WI-1', 'ref': 'WI-2'}",
+                "dict"
+            )
+        );
+        let ok = prepare("work.get", serde_json::json!({"id": "WI-1"})).unwrap();
+        assert_eq!(ok["ref"], "WI-1");
+        let listed = prepare("work.list", serde_json::json!({"status": " open, ,done"})).unwrap();
+        assert_eq!(listed["states"], serde_json::json!(["open", "done"]));
+        let moved = prepare(
+            "work.transition",
+            serde_json::json!({"id": "WI-1", "to": "done", "reason": "x"}),
+        )
+        .unwrap();
+        assert_eq!(moved["to_state"], "done");
+        let brief = prepare("project.brief", serde_json::json!({"project": "p"})).unwrap();
+        assert_eq!(brief["slug"], "p");
+    }
 
     fn prepare_issue(params: Value) -> Result<Value, VogtError> {
         prepare("token.issue", params)
@@ -1161,20 +1504,6 @@ mod tests {
             let op = case["op"].as_str().unwrap();
             let tag = case["tag"].as_str().unwrap();
             let expected = &case["py"];
-            // These probes are refused by a pydantic model validator, not by
-            // the JSON schema: `CommentParams` requires `handoff` exactly when
-            // `kind` is `handoff`, and `SessionDigestParams.context_window`
-            // must be greater than zero. The Rust side validates the schema
-            // only, because the models are not ported yet (WI-1060). Recorded
-            // rather than skipped silently, and dropped once the models land.
-            if matches!(
-                (op, tag),
-                ("work.comment", "handoff:valid" | "handoff:obj-empty")
-                    | ("session.digest", "context_window:exmin")
-                    | ("decision.ask", "options:item-int" | "options:item-bad-obj")
-            ) {
-                continue;
-            }
             match prepare(op, case["params"].clone()) {
                 Ok(value) => {
                     if !expected["ok"].as_bool().unwrap() {
