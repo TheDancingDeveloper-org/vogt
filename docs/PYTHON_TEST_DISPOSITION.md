@@ -105,7 +105,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_m2_demo.py | retired | Milestone demo script. Not a core regression. |
 | test_mcp.py | ported | `adapters/mcp/framing.rs` and the MCP HTTP adapter. |
 | test_mcp_stdio.py | ported | MCP stdio serving in `main.rs` and `adapters/mcp`. |
-| test_metrics.py | unported | Opt-in Prometheus `/metrics` listener (WI-1380). Deferred to WI-1061. |
+| test_metrics.py | ported | `adapters/http/metrics.rs` (WI-1080): the opt-in `VOGT_METRICS_ADDR` listener on its own port, wired into `serve`. Ported: nothing listens without the env, a bare port or a missing host is refused, every series carries `component="core"` under the stock process-exporter names (resident and virtual memory, CPU seconds, open fds, start time, read from `/proc/self`), a scrape is served and logs nothing, and a second start does not rebind. Python's `python_gc_*` series have no Rust counterpart. |
 | test_migration_freeze.py | retired | The pytest copy of the append-only migration freeze. The rule itself is ported in `storage/sqlite/migrator.rs`. |
 | test_migrations.py | ported | `storage/sqlite/migrator.rs` (order, checksum, lock, rollback, upgrade-with-data). |
 | test_mobile_identity.py | retired | Capacitor application id and the Android manifest. `mobile/`, not the core. |

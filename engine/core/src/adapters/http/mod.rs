@@ -7,6 +7,7 @@ pub mod app;
 pub mod etag;
 pub mod health;
 pub mod mcp;
+pub mod metrics;
 pub mod openapi;
 
 #[cfg(test)]
