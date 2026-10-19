@@ -11,12 +11,15 @@ opts into.
 
 ## Files
 
-- `fake-agent` — a POSIX-shell entry. It only finds a Python interpreter
-  (`$FAKE_AGENT_PYTHON`, else `python3`) and execs the core beside it, passing
-  argv and the environment through untouched — because the engine spawns
-  `argv[0]` directly, the way it would a real CLI.
-- `fake_agent_core.py` — the deterministic core that reads the prompt, selects
-  a scenario, and plays it.
+- `fake-agent` — a POSIX-shell entry. It only finds the `vogt-core` binary
+  (`$VOGT_CORE_BIN`, else `vogt-core` on `PATH`, else a cargo build of this
+  checkout under `$CARGO_TARGET_DIR` or `engine/target`) and execs
+  `vogt-core fake-agent`, passing argv and the environment through untouched —
+  because the engine spawns `argv[0]` directly, the way it would a real CLI.
+- `engine/core/src/scripts/fake_agent.rs` — the deterministic core that reads
+  the prompt, selects a scenario, and plays it.
+- `fake_agent_core.py` — the Python original, kept only for the Python test
+  suite until the swap (WI-1082); nothing in CI or e2e runs it.
 
 ## The invocation shape it matches
 
@@ -107,7 +110,7 @@ environment variables, so a caller sets behaviour without editing the script:
 | `FAKE_AGENT_SCHEMA_DELAY` | `0.3` | `schema` (lets the watcher subscribe first) |
 | `FAKE_AGENT_SCHEMA_GOOD` | `{"summary": "did the thing", "risk": "low"}` | `schema` |
 | `FAKE_AGENT_SCHEMA_BAD` | `{"summary": "did the thing"}` | `schema` |
-| `FAKE_AGENT_PYTHON` | `python3` | the shell entry |
+| `VOGT_CORE_BIN` | (search) | the shell entry |
 
 Run `fake-agent --print-contract` for the same information as machine-readable
 JSON.
