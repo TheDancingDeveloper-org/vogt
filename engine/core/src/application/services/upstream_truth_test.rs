@@ -907,3 +907,150 @@ fn a_walk_refused_mid_way_moves_nothing() {
     let got = get_op(&built, json!({"ref": subject(9)})).unwrap();
     assert_eq!(got["item"]["state"], json!("open"), "{got}");
 }
+
+/// `armed()`, plus an open tracking issue #20 that already carries the managed
+/// region for `platform-epic`, and the initiative itself. Python publishes the
+/// issue first; the Rust build adopts by marker, so the fixture plants it.
+fn armed_with_tracking_issue() -> (Built, crate::application::services::forge_ops_test::Forgejo) {
+    let (built, forgejo) = armed();
+    let region = crate::decisions::render_managed_region("platform-epic", "", &[], &[]);
+    forgejo
+        .issues
+        .lock()
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "number": 20, "title": "Platform epic", "state": "open", "labels": [],
+            "html_url": "https://forge.example.net/acme/Widgets/issues/20",
+            "updated_at": "2026-08-01T00:00:20Z", "created_at": "2026-08-01T00:00:20Z",
+            "user": {"login": "octo"},
+            "body": format!("Notes a person added.\n\n{region}\n\nA human footer."),
+        }));
+    crate::application::services::initiatives::initiative_create_op(
+        &built,
+        json!({"title": "Platform epic", "reason": WHY}),
+    )
+    .unwrap();
+    onboard(&built);
+    forgejo.requests.lock().unwrap().clear();
+    forgejo.bodies.lock().unwrap().clear();
+    (built, forgejo)
+}
+
+fn reprojected_rows(built: &Built) -> Vec<serde_json::Value> {
+    let audit = audit_list_op(built, json!({"limit": 100})).unwrap();
+    let rows = audit
+        .as_object()
+        .and_then(|map| map.values().find_map(serde_json::Value::as_array))
+        .cloned()
+        .unwrap_or_default();
+    rows.into_iter()
+        .filter(|row| row["operation"] == json!("initiative.publish"))
+        .collect()
+}
+
+/// Ports `test_adding_a_member_via_work_update_re_renders_the_task_list`: a
+/// membership change re-renders the marked tracking issue in place, keeps the
+/// human text, and is audited as a reprojection.
+#[test]
+fn adding_a_member_via_work_update_re_renders_the_task_list() {
+    let (built, forgejo) = armed_with_tracking_issue();
+    update_op(
+        &built,
+        json!({"ref": subject(9), "initiative": "platform-epic", "reason": WHY}),
+    )
+    .unwrap();
+
+    let mutations = forgejo.mutations();
+    assert_eq!(mutations.len(), 1, "{mutations:?}");
+    assert!(
+        mutations[0].starts_with("PATCH ") && mutations[0].ends_with("/issues/20"),
+        "{mutations:?}"
+    );
+    let sent = forgejo.bodies.lock().unwrap()[0]["body"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(sent.contains("- [ ] #9 Open and unlabelled"), "{sent}");
+    assert!(sent.starts_with("Notes a person added."), "{sent}");
+    assert!(sent.ends_with("A human footer."), "{sent}");
+    assert!(
+        !sent.contains("#12"),
+        "non-members stay off the list: {sent}"
+    );
+
+    let rows = reprojected_rows(&built);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["entity_kind"], json!("initiative"));
+}
+
+/// Leaving the initiative re-renders the left initiative's list; an update that
+/// does not move membership projects nothing. As in Python, the projection
+/// spans only repos that still hold a member, so the last member leaving
+/// re-renders nothing.
+#[test]
+fn leaving_an_initiative_re_renders_and_a_non_membership_edit_does_not() {
+    let (built, forgejo) = armed_with_tracking_issue();
+    for number in [9, 12] {
+        update_op(
+            &built,
+            json!({"ref": subject(number), "initiative": "platform-epic", "reason": WHY}),
+        )
+        .unwrap();
+    }
+    assert_eq!(reprojected_rows(&built).len(), 2);
+    forgejo.requests.lock().unwrap().clear();
+    forgejo.bodies.lock().unwrap().clear();
+
+    update_op(
+        &built,
+        json!({"ref": subject(9), "priority": "p1", "reason": WHY}),
+    )
+    .unwrap();
+    assert!(forgejo.mutations().is_empty(), "{:?}", forgejo.mutations());
+    assert_eq!(reprojected_rows(&built).len(), 2);
+
+    update_op(
+        &built,
+        json!({"ref": subject(9), "clear_initiative": true, "reason": WHY}),
+    )
+    .unwrap();
+    let sent = forgejo.bodies.lock().unwrap()[0]["body"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(sent.contains("#12 Segment fetch retries forever"), "{sent}");
+    assert!(!sent.contains("#9 "), "the leaver is off the list: {sent}");
+    assert_eq!(reprojected_rows(&built).len(), 3);
+
+    forgejo.requests.lock().unwrap().clear();
+    update_op(
+        &built,
+        json!({"ref": subject(12), "clear_initiative": true, "reason": WHY}),
+    )
+    .unwrap();
+    assert!(forgejo.mutations().is_empty(), "{:?}", forgejo.mutations());
+    assert_eq!(reprojected_rows(&built).len(), 3);
+}
+
+/// Adopt-only: with no marked tracking issue upstream, joining an initiative
+/// opens nothing and writes no projection audit row.
+#[test]
+fn a_membership_change_without_a_tracking_issue_projects_nothing() {
+    let (built, forgejo) = armed();
+    crate::application::services::initiatives::initiative_create_op(
+        &built,
+        json!({"title": "Platform epic", "reason": WHY}),
+    )
+    .unwrap();
+    onboard(&built);
+    forgejo.requests.lock().unwrap().clear();
+    update_op(
+        &built,
+        json!({"ref": subject(9), "initiative": "platform-epic", "reason": WHY}),
+    )
+    .unwrap();
+    assert!(forgejo.mutations().is_empty(), "{:?}", forgejo.mutations());
+    assert!(reprojected_rows(&built).is_empty());
+}

@@ -746,9 +746,13 @@ where
             .project_by_id(&project_id)?
             .ok_or_else(|| VogtError::NotFound(format!("no project {project_id}")))?;
         drop(view);
-        return update_upstream(ctx, &params, resolved, &project);
+        let before = resolved.initiative_id.clone();
+        let result = update_upstream(ctx, &params, resolved, &project)?;
+        reproject_membership(ctx, &params, before, &result)?;
+        return Ok(result);
     }
     let item = resolve::work_item(&view, &params.reference)?;
+    let before = item.initiative_id.clone();
     if params.touches_labels() {
         if let Some(project_id) = item.project_id.as_deref() {
             if let Some(project) = view.project_by_id(project_id)? {
@@ -759,7 +763,36 @@ where
         }
     }
     drop(view);
-    update_native(ctx, &params)
+    let result = update_native(ctx, &params)?;
+    reproject_membership(ctx, &params, before, &result)?;
+    Ok(result)
+}
+
+/// Re-render the task list of any initiative this update joined or left.
+/// Ports `_reproject_membership`: adopt-only, after the local write committed,
+/// the left initiative first and then the joined one.
+fn reproject_membership<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &UpdateParams,
+    before: Option<String>,
+    result: &Value,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let after = result["item"]["initiative_id"].as_str().map(str::to_owned);
+    if before == after {
+        return Ok(());
+    }
+    for initiative_id in [before, after].into_iter().flatten() {
+        crate::application::services::initiatives::reproject_initiative(
+            ctx,
+            &initiative_id,
+            &params.reason,
+        )?;
+    }
+    Ok(())
 }
 
 struct UpdateParams {
