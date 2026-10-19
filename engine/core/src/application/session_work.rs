@@ -932,6 +932,9 @@ mod tests {
                         model: None,
                         effort: None,
                         reason: "test".to_string(),
+                        purpose: None,
+                        started_by_session: None,
+                        started_by_kind: None,
                         started_at: at,
                         stopped_at: stopped,
                     })?;
