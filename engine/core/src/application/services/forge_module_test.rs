@@ -1040,3 +1040,71 @@ fn the_forge_demo_runs_end_to_end() {
     assert!(trail.iter().any(|op| op == "drift.resolve"), "{trail:?}");
     assert!(trail.iter().any(|op| op == "work.adopt"), "{trail:?}");
 }
+
+/// The forge is called before the declared write transaction opens, and a
+/// refused comment or close is recorded as `failed` without rolling the local
+/// change back. Each forge write probes the store for a held write lock.
+#[test]
+fn a_failed_write_back_keeps_the_local_change_and_records_the_failure() {
+    let (built, _forgejo) = forgejo_with(four_issues(), true);
+    onboard(&built);
+    let reference = adopt(&built, FORGEJO_SUBJECT_12);
+    writeback_op(
+        &built,
+        json!({"project": SLUG, "policy": "full", "reason": WHY}),
+    )
+    .unwrap();
+    let Built::StepSequential(ctx) = built else {
+        panic!("expected a step clock");
+    };
+    let store = ctx.declared.path().to_path_buf();
+    let locked_writes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&locked_writes);
+    let built = Built::StepSequential(ctx.with_forge_transport(
+        move |url, _headers, _body, method| {
+            if method == "GET" {
+                return (200, b"[]".to_vec(), BTreeMap::new());
+            }
+            // A write transaction held by the caller makes BEGIN IMMEDIATE busy.
+            let probe = rusqlite::Connection::open(&store).unwrap();
+            probe.busy_timeout(std::time::Duration::ZERO).unwrap();
+            match probe.execute_batch("BEGIN IMMEDIATE; ROLLBACK;") {
+                Ok(()) => {}
+                Err(_) => seen.lock().unwrap().push(format!("{method} {url}")),
+            }
+            (500, b"{}".to_vec(), BTreeMap::new())
+        },
+    ));
+    let commented = comment_op(
+        &built,
+        json!({"ref": reference, "body": "kept locally", "reason": WHY}),
+    )
+    .unwrap();
+    assert_eq!(commented["write_back"], json!("failed"), "{commented}");
+    for state in ["in_progress", "review", "done"] {
+        transition_op(
+            &built,
+            json!({"ref": reference, "to_state": state, "reason": WHY}),
+        )
+        .unwrap();
+    }
+    let got = get_op(&built, json!({"ref": reference})).unwrap();
+    assert_eq!(got["item"]["state"], json!("done"), "{got}");
+    assert_eq!(got["comments"][0]["body"], json!("kept locally"), "{got}");
+    let ledger = writeback_list_op(&built, json!({"outcome": "failed"})).unwrap();
+    let actions: Vec<&str> = ledger["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["action"].as_str())
+        .collect();
+    assert!(
+        actions.contains(&"comment") && actions.contains(&"close"),
+        "{ledger}"
+    );
+    assert_eq!(
+        *locked_writes.lock().unwrap(),
+        Vec::<String>::new(),
+        "no forge write runs inside the declared write transaction"
+    );
+}
