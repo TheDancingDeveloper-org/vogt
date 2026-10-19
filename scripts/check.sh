@@ -33,10 +33,13 @@
 #   vogt-core fake-agent [SCENARIO]
 #   vogt-core fixture-reset [--dry-run] [--repo OWNER/NAME]
 # The Python originals stay as the reference the ports were checked against.
-# CI-only scripts stay Python and run under a uv-less python3 on the runner
-# with no project dependency:
-#   play_preflight, check_workflow_policy, check_bundle, check_rust_version,
-#   check_engine_spec, check_demo_assets, call_latency.
+# CI-only scripts stay Python (WI-1079 decision): each imports the standard
+# library only, so none needs the project environment.
+#   python3 on the runner: play_preflight (release-mobile*.yml),
+#     check_workflow_policy (runner-policy.yml)
+#   uv run --no-project python (no project deps): check_bundle,
+#     check_rust_version, check_demo_assets (ci.yml)
+#   not wired into any workflow, run by hand: check_engine_spec, call_latency
 
 set -uo pipefail
 
