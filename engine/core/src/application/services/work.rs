@@ -1529,12 +1529,25 @@ where
         .filter(|value| !value.is_null())
         .cloned();
     let view = ctx.declared.read()?;
-    upstream::resolve_work_ref(ctx, &view, &reference)?;
+    let resolved = upstream::resolve_work_ref(ctx, &view, &reference)?;
     if view.work_item_by_ref(&reference)?.is_none() {
-        return Err(VogtError::UpstreamWriteFailed(format!(
-            "work.comment on {} is an upstream item, and the write-through is not ported — nothing was stored locally",
-            crate::core::py_repr(&reference),
-        )));
+        let project = resolved
+            .project_id
+            .as_deref()
+            .map(|id| view.project_by_id(id))
+            .transpose()?
+            .flatten()
+            .ok_or_else(|| VogtError::NotFound(format!("no project for {reference}")))?;
+        drop(view);
+        if kind == "handoff" {
+            // The forge thread has no kind: a hand-off posted there would
+            // flatten to free text and the next session could not find it.
+            return Err(VogtError::InvalidRequest(format!(
+                "{} is an upstream item; a hand-off comment is a local record and cannot be posted to the forge",
+                resolved.reference
+            )));
+        }
+        return comment_upstream(ctx, &resolved, &project, &body, &reason);
     }
     drop(view);
     let mut writing = crate::application::context::write_of(ctx);
@@ -1595,6 +1608,166 @@ where
     }))
 }
 
+/// Post a comment on an upstream item's forge thread. Ports
+/// `_comment_upstream`: the forge thread is the comment's home, so only the
+/// write-back row is stored and the comment is returned, not kept.
+fn comment_upstream<C, I>(
+    ctx: &AppContext<C, I>,
+    item: &WorkItem,
+    project: &Project,
+    body: &str,
+    reason: &str,
+) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    require_permitted(ctx, project, "comment", false)?;
+    let (provider, identity, repo) = upstream_writer(ctx, project)?;
+    let number = provider.number_of(Some(&item.reference)).ok_or_else(|| {
+        VogtError::UpstreamWriteFailed(format!(
+            "{} carries no issue number to comment on upstream",
+            item.reference
+        ))
+    })?;
+    let sent = sent_or_fail(provider.comment(&repo, number, body)?, "comment")?;
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let ids = std::sync::Arc::clone(writing.ids());
+    let project = project.clone();
+    let reference = item.reference.clone();
+    let body = body.to_string();
+    let reason_for_record = reason.to_string();
+    let (comment, outcome) =
+        audited_write(&mut writing, WORK_COMMENT, reason, move |txn, actor| {
+            let record = upstream_record(
+                &ids,
+                &clock,
+                &actor.id,
+                crate::core::WriteBackAction::Comment,
+                &project,
+                Some(&reference),
+                &reason_for_record,
+                &identity,
+                &sent,
+            );
+            txn.insert_writeback(&record)?;
+            let comment = Comment {
+                id: super::next_id(&ids, "cmt"),
+                work_item_id: reference.clone(),
+                actor_id: actor.id.clone(),
+                actor_display_name: actor.display_name.clone(),
+                body: body.clone(),
+                created_at: super::now_of(&clock),
+                kind: "note".to_string(),
+                handoff: None,
+            };
+            let comment_id = comment.id.clone();
+            let payload = serde_json::to_value(&comment).unwrap_or(Value::Null);
+            Ok(WriteOutcome::new(
+                (comment, record.outcome.to_string()),
+                "comment",
+                &comment_id,
+                payload,
+                WORK_COMMENTED,
+                json!({"ref": reference, "comment_id": comment_id}),
+            ))
+        })?;
+    Ok(json!({"comment": comment, "write_back": outcome}))
+}
+
+/// One workflow edge of an upstream item. Ports `_transition_upstream`:
+/// entering a terminal state closes the issue and leaving one reopens it,
+/// fail-loud; a move between open states is overlay-only and sends nothing.
+fn transition_upstream<C, I>(
+    ctx: &AppContext<C, I>,
+    item: WorkItem,
+    project: &Project,
+    to_state: &str,
+    reason: &str,
+) -> Result<WorkItem, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let workflow = ctx.declared.read()?.workflow_for(&item.kind.to_string())?;
+    workflow.check(&item.state, to_state)?;
+    let action = if TERMINAL_STATES.contains(&to_state) {
+        Some(("close", crate::core::WriteBackAction::Close))
+    } else if TERMINAL_STATES.contains(&item.state.as_str()) {
+        Some(("reopen", crate::core::WriteBackAction::Reopen))
+    } else {
+        None
+    };
+    let mut sent = None;
+    let mut identity = String::new();
+    if let Some((verb, _)) = action {
+        require_permitted(ctx, project, verb, false)?;
+        let (provider, who, repo) = upstream_writer(ctx, project)?;
+        let number = provider.number_of(Some(&item.reference)).ok_or_else(|| {
+            VogtError::UpstreamWriteFailed(format!(
+                "{} carries no issue number to {verb} upstream",
+                item.reference
+            ))
+        })?;
+        let state = if verb == "close" { "closed" } else { "open" };
+        sent = Some(sent_or_fail(
+            provider.set_state(&repo, number, state)?,
+            verb,
+        )?);
+        identity = who;
+    }
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let ids = std::sync::Arc::clone(writing.ids());
+    let project = project.clone();
+    let to_state = to_state.to_string();
+    let reason_for_record = reason.to_string();
+    audited_write(&mut writing, WORK_TRANSITION, reason, move |txn, actor| {
+        let now = super::now_of(&clock);
+        let mut overlay = fresh_overlay(
+            txn.work_overlay(&item.reference)?,
+            &item.reference,
+            &project,
+            now,
+        );
+        overlay.workflow_state = Some(to_state.clone());
+        txn.upsert_work_overlay(&overlay)?;
+        if let (Some(sent), Some((_, kind))) = (&sent, action) {
+            txn.insert_writeback(&upstream_record(
+                &ids,
+                &clock,
+                &actor.id,
+                kind,
+                &project,
+                Some(&item.reference),
+                &reason_for_record,
+                &identity,
+                sent,
+            ))?;
+        }
+        let mut summary = serde_json::Map::new();
+        summary.insert("ref".into(), json!(item.reference));
+        summary.insert("from".into(), json!(item.state));
+        summary.insert("to".into(), json!(to_state));
+        summary.insert("kind".into(), json!(item.kind.to_string()));
+        summary.insert("labels".into(), json!(item.labels));
+        summary.insert("project".into(), json!(project.slug));
+        let mut updated = item.clone();
+        updated.state = to_state.clone();
+        updated.updated_at = now;
+        let payload = serde_json::to_value(&updated).unwrap_or(Value::Null);
+        Ok(WriteOutcome::new(
+            updated,
+            "work_item",
+            &item.reference,
+            payload,
+            WORK_TRANSITIONED,
+            Value::Object(summary),
+        ))
+    })
+}
+
 /// Move a native item along its workflow. `walk` takes the shortest legal path
 /// one audited hop at a time. Completion is refused while a `depends_on`
 /// target is unfinished. An upstream item is the write-through and stores
@@ -1611,12 +1784,53 @@ where
     let walk = params.get("walk").and_then(Value::as_bool).unwrap_or(false);
     let reason = text_of(&params, "reason").unwrap_or_default();
     let view = ctx.declared.read()?;
-    upstream::resolve_work_ref(ctx, &view, &reference)?;
+    let resolved = upstream::resolve_work_ref(ctx, &view, &reference)?;
     if view.work_item_by_ref(&reference)?.is_none() {
-        return Err(VogtError::UpstreamWriteFailed(format!(
-            "work.transition of {} is an upstream item, and the write-through is not ported — nothing was stored locally",
-            crate::core::py_repr(&reference),
-        )));
+        let project = resolved
+            .project_id
+            .as_deref()
+            .map(|id| view.project_by_id(id))
+            .transpose()?
+            .flatten()
+            .ok_or_else(|| VogtError::NotFound(format!("no project for {reference}")))?;
+        let workflow = view.workflow_for(&resolved.kind.to_string())?;
+        drop(view);
+        let path = if walk {
+            workflow
+                .shortest_path(&resolved.state, &to_state)
+                .ok_or_else(|| {
+                    VogtError::InvalidRequest(format!(
+                        "no path from {} to {to_state}",
+                        resolved.state
+                    ))
+                })?
+        } else {
+            vec![resolved.state.clone(), to_state.clone()]
+        };
+        let hops = path.len().saturating_sub(1);
+        let mut current = resolved;
+        for (number, window) in path.windows(2).enumerate() {
+            let hop_reason = if walk {
+                format!(
+                    "{reason} (walk {}/{hops}: {} -> {})",
+                    number + 1,
+                    window[0],
+                    window[1]
+                )
+            } else {
+                reason.clone()
+            };
+            current = transition_upstream(ctx, current, &project, &window[1], &hop_reason)?;
+        }
+        return Ok(json!({
+            "item": current,
+            "comments": [],
+            "sessions": [],
+            "branches": [],
+            "git": null,
+            "walked": if walk { json!(path) } else { json!([]) },
+            "live_sessions": [],
+        }));
     }
     let item = resolve::work_item(&view, &reference)?;
     let workflow = view.workflow_for(&item.kind.to_string())?;

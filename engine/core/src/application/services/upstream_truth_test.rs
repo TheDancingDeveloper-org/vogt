@@ -718,3 +718,160 @@ fn title_and_body_edits_on_an_upstream_item_are_refused() {
     }
     assert!(forgejo.mutations().is_empty());
 }
+
+// -- write-through: comment, close and reopen (WI-1780) ----------------------
+
+/// Entering a terminal state closes the issue upstream; leaving it reopens it.
+#[test]
+fn closing_and_reopening_write_through() {
+    let (built, forgejo) = armed();
+    onboard(&built);
+    forgejo.requests.lock().unwrap().clear();
+    forgejo.bodies.lock().unwrap().clear();
+
+    let closed = transition_op(
+        &built,
+        json!({"ref": subject(9), "to_state": "wont_do", "reason": WHY}),
+    )
+    .unwrap();
+    assert_eq!(closed["item"]["state"], json!("wont_do"), "{closed}");
+    let mutations = forgejo.mutations();
+    assert_eq!(mutations.len(), 1, "{mutations:?}");
+    assert!(mutations[0].starts_with("PATCH "), "{mutations:?}");
+    assert_eq!(
+        forgejo.bodies.lock().unwrap().last().cloned(),
+        Some(json!({"state": "closed"}))
+    );
+    let stored = overlay(&built, &subject(9)).expect("overlay written");
+    assert_eq!(stored.workflow_state.as_deref(), Some("wont_do"));
+
+    let reopened = transition_op(
+        &built,
+        json!({"ref": subject(9), "to_state": "open", "reason": WHY}),
+    )
+    .unwrap();
+    assert_eq!(reopened["item"]["state"], json!("open"), "{reopened}");
+    assert_eq!(
+        forgejo.bodies.lock().unwrap().last().cloned(),
+        Some(json!({"state": "open"}))
+    );
+    let ledger = writeback_list_op(&built, json!({})).unwrap();
+    let actions: Vec<&str> = ledger["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["action"].as_str())
+        .collect();
+    assert!(
+        actions.contains(&"close") && actions.contains(&"reopen"),
+        "{ledger}"
+    );
+}
+
+/// A move between open states is overlay-only and sends nothing.
+#[test]
+fn an_open_to_open_move_on_an_upstream_item_sends_nothing() {
+    let (built, forgejo) = armed();
+    onboard(&built);
+    forgejo.requests.lock().unwrap().clear();
+    let moved = transition_op(
+        &built,
+        json!({"ref": subject(9), "to_state": "in_progress", "reason": WHY}),
+    )
+    .unwrap();
+    assert_eq!(moved["item"]["state"], json!("in_progress"));
+    assert!(forgejo.mutations().is_empty(), "{:?}", forgejo.mutations());
+}
+
+/// A comment posts to the forge thread and stores no local comment row.
+#[test]
+fn a_comment_posts_upstream_and_stores_no_local_row() {
+    let (built, forgejo) = armed();
+    onboard(&built);
+    forgejo.requests.lock().unwrap().clear();
+    forgejo.bodies.lock().unwrap().clear();
+
+    let result = comment_op(
+        &built,
+        json!({"ref": subject(9), "body": "Looking now", "reason": WHY}),
+    )
+    .unwrap();
+    assert_eq!(result["write_back"], json!("succeeded"), "{result}");
+    let mutations = forgejo.mutations();
+    assert_eq!(mutations.len(), 1, "{mutations:?}");
+    assert!(mutations[0].starts_with("POST "), "{mutations:?}");
+    assert_eq!(
+        forgejo.bodies.lock().unwrap().last().unwrap()["body"],
+        json!("Looking now")
+    );
+    let got = get_op(&built, json!({"ref": subject(9)})).unwrap();
+    assert_eq!(got["comments"], json!([]), "{got}");
+}
+
+/// A hand-off comment is a local record and is refused on an upstream item.
+#[test]
+fn a_handoff_comment_on_an_upstream_item_is_refused() {
+    let (built, forgejo) = armed();
+    onboard(&built);
+    forgejo.requests.lock().unwrap().clear();
+    let refused = comment_op(
+        &built,
+        json!({"ref": subject(9), "body": "over to you", "kind": "handoff",
+               "handoff": {"branch": "x"}, "reason": WHY}),
+    );
+    match refused {
+        Err(VogtError::InvalidRequest(message)) => {
+            assert!(message.contains("hand-off"), "{message}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    assert!(forgejo.mutations().is_empty());
+}
+
+/// A comment or close the forge refuses raises and changes nothing.
+#[test]
+fn a_failed_comment_and_close_raise_and_change_nothing() {
+    let (built, _forgejo) = armed();
+    onboard(&built);
+    let Built::StepSequential(ctx) = built else {
+        panic!("expected a step clock");
+    };
+    let built = Built::StepSequential(ctx.with_forge_transport(|_url, _headers, _body, method| {
+        if method == "GET" {
+            (200, b"[]".to_vec(), std::collections::BTreeMap::new())
+        } else {
+            (500, b"{}".to_vec(), std::collections::BTreeMap::new())
+        }
+    }));
+    let commented = comment_op(
+        &built,
+        json!({"ref": subject(9), "body": "lost", "reason": WHY}),
+    );
+    assert!(
+        matches!(commented, Err(VogtError::UpstreamWriteFailed(_))),
+        "{commented:?}"
+    );
+    let closed = transition_op(
+        &built,
+        json!({"ref": subject(9), "to_state": "wont_do", "reason": WHY}),
+    );
+    assert!(
+        matches!(closed, Err(VogtError::UpstreamWriteFailed(_))),
+        "{closed:?}"
+    );
+    let got = get_op(&built, json!({"ref": subject(9)})).unwrap();
+    assert_eq!(
+        got["item"]["state"],
+        json!("open"),
+        "the refused close did not move it"
+    );
+    let ledger = writeback_list_op(&built, json!({})).unwrap();
+    assert!(
+        ledger["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["action"] != json!("comment") && row["action"] != json!("close")),
+        "{ledger}"
+    );
+}
