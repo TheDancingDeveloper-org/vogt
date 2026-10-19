@@ -6,17 +6,24 @@ covered by `engine/core` tests, or by the black-box harness in
 `scripts/parity.py`, which drives both cores. A file is **retired** when
 it tests a Python-only tool, a packaging step, a web or engine surface the
 core crate does not own, or a demo script. Retired is a decision, not a
-gap: the reason is the row. **Unported** is a gap with an owner: the row names
-the work item that will port it.
+gap: the reason is the row. **Unported** is a deferral with an owner: the row names
+the work item that will port it, and every unported row has one. A deferral
+is a disposition (operator decision, WI-1080 review): the behaviour is not in
+the Rust core yet, so its test is ported with the feature, not here.
 
 `tests/fixtures/` stays. Both cores and the harness read it.
 
-The Python floor was `pytest --cov-fail-under=80`. On this branch
-`cargo llvm-cov -p vogt-core` measures 72.6% line coverage over the whole
-crate, so `.github/workflows/rust-core.yml` fails under 70%. The gap to 80%
-is the service modules that are still thin (sessions, inbox, import/merge,
-drift), not an exclusion of generated code. The floor moves up as those
-gain tests; it does not move down.
+The Python lint and type gates (`ruff check`, `ruff format --check`, `mypy
+--strict` in `.github/workflows/ci.yml`) are retired in favour of
+`cargo fmt --check` and `cargo clippy -- -D warnings`. They still run until
+the Python package is removed; they come out with it, not before.
+
+The Python floor was `pytest --cov-fail-under=80`. `cargo llvm-cov -p
+vogt-core` first measured 79.72% line coverage (WI-1080, at rust-core
+77ef27b6), and the gate started at 79%. Since the service ports added
+tests, it measures 80.22% (rust-core a5ac4cba), so
+`.github/workflows/rust-core.yml` now fails under 80%, the Python floor.
+The floor only moves up.
 
 | File | Disposition | Where / why |
 |---|---|---|
@@ -35,14 +42,14 @@ gain tests; it does not move down.
 | test_branch_binding.py | ported | `branches.rs` and the work-item branch binding service. |
 | test_bridge.py | ported | `adapters/mcp/bridge.rs`. |
 | test_bundle_budget.py | retired | PWA first-screen bundle budget. `web/`, not the core. |
-| test_cargo_cache.py | unported | Cargo cache survival on redeploy (`engine/deploy/cargo-cache.sh`). Owner WI-1256; the engine deploy path, not the core crate yet. |
+| test_cargo_cache.py | retired | `engine/deploy/cargo-cache.sh` (WI-1256, done): Cargo cache survival on redeploy. Shell in the engine image, not the core crate; the Python test keeps driving the script. |
 | test_chats.py | ported | Chat operations in the application services, with the engine transport stood in. |
 | test_check_engine_spec.py | retired | `scripts/check_engine_spec.py` against the Rust engine routes. Engine contract, not the core. |
 | test_check_rust_version.py | retired | `scripts/check_rust_version.py`. A Python lint over the engine toolchain pin. |
 | test_check_workflow_policy.py | retired | `scripts/check_workflow_policy.py` over GitHub workflow YAML. CI policy, not product behaviour. |
 | test_checks.py | ported | CI-revision reads in the collectors and the project brief. |
 | test_ci_watch.py | ported | Watched-ref and deployed-version reads are in `application/deployed.rs`. The bound-branch announce is in `application/ci_watch.rs`: the feed event once per conclusion, staleness, the notice text, and the session nudge (notice, then Enter; none at a permission prompt). `test_a_sweep_announces_and_survives_an_announce_failure` is `a_failed_announce_does_not_fail_the_sweep` in `application/collect.rs`, driven by the `ci_watch::seam` failure switch. |
-| test_claude_profile.py | unported | Claude Code account profiles and their bootstrap. Named accounts land on `session.start` in WI-1306 (triage row 7782a7e8, under WI-1074). |
+| test_claude_profile.py | retired | `engine/deploy/claude-profile.sh` and `mcp-bootstrap.sh` (WI-1306, done). Shell in the engine image, not the core crate; the Python test keeps driving the scripts. Named accounts on `session.start` are a sessions concern and are tested with that service. |
 | test_cli.py | ported | `adapters/cli.rs`. |
 | test_clone.py | ported | Clone service under `application/services`. |
 | test_collectors.py | ported | `collectors/` and `application/collect.rs`. |
@@ -56,7 +63,7 @@ gain tests; it does not move down.
 | test_delivery.py | ported | `delivery.rs`. |
 | test_demo_delivery.py | retired | Browser-only public demo delivery. Not the core. |
 | test_diagnostics.py | ported | Instance diagnostics service. |
-| test_dispatch.py | unported | Dispatch profiles as data (WI-1323, migration 0024 path). Owner WI-1058. |
+| test_dispatch.py | unported | Dispatch profiles as data (WI-1323, migration 0024 path). Deferred to WI-1058. |
 | test_drift.py | ported | `application/drift.rs`. |
 | test_engine_image_core.py | retired | Static checks on `engine/Dockerfile` and `engine/deploy/entrypoint.sh` (WI-1078). Engine image, not the core crate. |
 | test_engine_parity.py | retired | Rust engine wire parity. Owned by `engine/server` tests, not `engine/core`. |
@@ -74,9 +81,9 @@ gain tests; it does not move down.
 | test_git_story.py | ported | `git_story.rs` and `application/git_story.rs`. |
 | test_github.py | ported | `adapters/github.rs`. |
 | test_grants.py | ported | `application/grants.rs`. |
-| test_handoff.py | unported | Hand-off comment kind and threads (WI-1244, migration 0022). Owner WI-1058. |
+| test_handoff.py | unported | Hand-off comment kind and threads (WI-1244, migration 0022). Deferred to WI-1058. |
 | test_http.py | ported | `adapters/http/app.rs` (status, etag, validation, openapi). |
-| test_import.py | ported | `application/services/import_merge.rs`. |
+| test_import.py | unported | Forge import and merge path. Deferred to WI-1745: import is blocked on unported services. |
 | test_inbox_actors.py | ported | Inbox actor classification in the views service. |
 | test_inbox_cost.py | retired | Inbox cost ceiling against the Python process. A performance tripwire, not a behaviour the port re-pins in-process. |
 | test_initiative_projection.py | ported | Initiative ranking projection in `application/views.rs`. |
@@ -94,7 +101,7 @@ gain tests; it does not move down.
 | test_m2_demo.py | retired | Milestone demo script. Not a core regression. |
 | test_mcp.py | ported | `adapters/mcp/framing.rs` and the MCP HTTP adapter. |
 | test_mcp_stdio.py | ported | MCP stdio serving in `main.rs` and `adapters/mcp`. |
-| test_metrics.py | unported | Opt-in Prometheus `/metrics` listener (WI-1380). Owner WI-1061. |
+| test_metrics.py | unported | Opt-in Prometheus `/metrics` listener (WI-1380). Deferred to WI-1061. |
 | test_migration_freeze.py | retired | The pytest copy of the append-only migration freeze. The rule itself is ported in `storage/sqlite/migrator.rs`. |
 | test_migrations.py | ported | `storage/sqlite/migrator.rs` (order, checksum, lock, rollback, upgrade-with-data). |
 | test_mobile_identity.py | retired | Capacitor application id and the Android manifest. `mobile/`, not the core. |
@@ -104,16 +111,16 @@ gain tests; it does not move down.
 | test_oversight.py | ported | Oversight decisions in `decisions.rs`. |
 | test_parity.py | retired | In-process transport parity. Replaced by the black-box harness `scripts/parity.py`. Its four staleness checks (surface membership, exclusion names, exclusion justifications, every shared operation driven) are the harness selftest, ported with the parity chunk. |
 | test_parity_normalise.py | retired | Normalisation helpers for the in-process parity script. `scripts/parity.py` owns normalisation now. |
-| test_place_metrics_cache.py | unported | Place/metrics badge cache shared across shells (WI-1224). Owner WI-1054. |
+| test_place_metrics_cache.py | unported | Place/metrics badge cache shared across shells (WI-1224). Deferred to WI-1054. |
 | test_play_preflight.py | retired | `scripts/play_preflight.py` for the browser suite. `web/`, not the core. |
-| test_policy_hook.py | unported | Project agent-policy hook, driven through the real script (WI-1243). Owner WI-1058. |
+| test_policy_hook.py | retired | `engine/deploy/policy-hook.sh` and `install-policy`, the PreToolUse hook driven through the real script. Shell, not the core crate; the policy decision it asks the engine for is tested with the engine policy route. |
 | test_pr_work_item_edge.py | ported | `implemented_by` from pull requests, in forge sync and the work services. |
 | test_product_identity.py | retired | User-facing rename and legacy compatibility names across Python packaging. The Rust binary stays `vogt-core` for the overlap. |
 | test_product_version.py | ported | `VERSION` in `main.rs`. `scripts/check_product_version.py` keeps the fallback equal to `pyproject.toml`. |
 | test_public_delivery.py | retired | Deploy-file shape. Its 32 cases read the release tags in `pyproject.toml`, the `deploy/` compose files, `deploy/.env.example`, the `Dockerfile`s, the custom-image example and the published docs as text. Two cases run `docker compose config` to render them. None calls the core, so none pins core behaviour, and the deploy files are not a core unit. |
 | test_pwa.py | retired | Solid PWA route map. `web/`; the core crate does not embed the bundle. |
 | test_ranking.py | ported | Ranking in `decisions.rs`. |
-| test_read_pool.py | unported | Pooled read connections (WI-1224). Owner WI-1054. |
+| test_read_pool.py | unported | Pooled read connections (WI-1224). Deferred to WI-1054. |
 | test_readonly_mcp_wrappers.py | retired | `engine/deploy/readonly-mcp.sh`. An engine deploy script, not the core. |
 | test_registry.py | ported | `registry.rs` (duplicate names, routes, a required reason, scopes). |
 | test_release_workflow.py | retired | `.github/workflows/release.yml` digest promotion. CI policy, not product behaviour. |
@@ -122,10 +129,10 @@ gain tests; it does not move down.
 | test_schema_gate.py | ported | Readiness migration gate in `adapters/http/health.rs` and the migrator. |
 | test_serve.py | ported | Serve, health, and MCP-over-HTTP in `main.rs` and `adapters/http`. |
 | test_session_bind_work.py | ported | `application/session_work.rs`. |
-| test_session_digest_op.py | unported | `session.digest` operation (WI-1247, WI-1241). Owner WI-1074. |
+| test_session_digest_op.py | ported | `application/session_digest.rs`: the six `session.digest` cases (economics carried by the row, absent economics, no window, blocked report, transcript excerpt, unknown session). |
 | test_session_drive.py | ported | Session input and screen reads in `application/session_reads.rs` and `delivery.rs`. |
-| test_session_economics.py | unported | Session economics transcript reading (WI-1242). Owner WI-1074. |
-| test_session_economics_op.py | unported | `session.economics` operation (WI-1242). Owner WI-1074. |
+| test_session_economics.py | ported | `core/session_economics.rs`: Claude usage (latest turn, peak is the largest), compaction markers wherever they sit, Klaudia estimate and `compact_boundary`, repeated reads, Codex payload results, junk lines, one-turn wall clock, one turn and its output counted once across content blocks, tool names from `tool_use_id`, `budget_line`, and the shared fixtures (`engine/server/tests/fixtures/economics`: claude, klaudia, codex, klaudia_unicode, claude_gap) with the same numbers. |
+| test_session_economics_op.py | ported | `application/session_economics.rs`: metering (with the account name), no transcript, reading off with no roots, the engine reading, and an unknown session. |
 | test_session_hibernation.py | ported | Hibernate and wake in `application/services/lifecycle.rs`. |
 | test_session_last_reply.py | ported | Transcript reply reads in `adapters/transcripts.rs`. |
 | test_session_outcomes.py | ported | `collectors/session_outcomes.rs`. |
@@ -135,14 +142,14 @@ gain tests; it does not move down.
 | test_sessions.py | ported | `application/services/sessions.rs`. |
 | test_storage.py | ported | `storage/sqlite/declared.rs` (atomicity, revisions, sessions, tokens). |
 | test_test_hooks.py | retired | Deterministic hooks for the in-process golden recorder. The black-box harness records out of process and does not use them. |
-| test_transcript_index.py | unported | Conversation-id index behind transcript lookup (WI-1413). Owner WI-1074. |
+| test_transcript_index.py | unported | Conversation-id index behind transcript lookup (WI-1413). Deferred to WI-1074. |
 | test_trust_confirmation.py | ported | Trust-from-last-confirmed in `application/views.rs`. |
 | test_unlinked_surfaces.py | ported | Unlinked-project honesty in `application/projects.rs` and the views. |
 | test_upgrade_data_volume.py | retired | Compose data-volume upgrade smoke. Deployment, not a core unit test. The migrator's upgrade-with-data cases cover the product half. |
-| test_upstream_truth.py | unported | Ported in `upstream_truth_test.rs`: a vogt-only change on an adopted item sends nothing, the unlinked refusal names both ways forward, a local-only item on an unlinked project comments and closes with nothing sent, a projectless item moves, each upstream issue counts once in the backlog and the board (adopted first), a relation between upstream issues is refused with the reason, `forge.link` refuses a project with no repository URL and is audited, a policy-`none` create on a linked project refuses and names every gate, and `local_only` creates work under `none` and on an unlinked project. Not ported. Create write-through (a create leaves an overlay row, and a failed create commits nothing) is owned by WI-1068, whose gate in `work.rs` still reports the credential gate unmet. The comment, close, reopen and label write-throughs (a failed comment or close raises and changes nothing, a closed or reopened item is written through, a comment posts upstream and stores no local row, a label add writes through) name no work item in the tree. Parity gaps, pinned by ignored tests in the same file. The board gaps are WI-1778 and the upstream-truth edits are WI-1779: the board lists declared rows only, so an issue filed upstream and never adopted is missing from the board (`board_lists_an_upstream_only_issue_once`); page one carries no `next_cursor` and the cursor is not honoured on page two (`the_board_pages_with_stable_cursors`); a title or body edit on an adopted item, and a label removal, are accepted locally where the Python refuses them as upstream truth (`title_and_body_edits_on_an_adopted_item_are_refused`, `a_label_removal_on_an_adopted_item_is_refused`). Filed local-only because the vogt write-back policy is none. The import-with-consolidation link is `forge_import_clones_registers_and_consolidates_under_the_file_token`; the label refusal on an unlinked project is `a_label_edit_on_an_unlinked_project_is_refused`. |
+| test_upstream_truth.py | unported | Ported in `upstream_truth_test.rs`: a vogt-only change on an adopted item sends nothing, the unlinked refusal names both ways forward, a local-only item on an unlinked project comments and closes with nothing sent, a projectless item moves, each upstream issue counts once in the backlog and the board (adopted first), a relation between upstream issues is refused with the reason, `forge.link` refuses a project with no repository URL and is audited, a policy-`none` create on a linked project refuses and names every gate, and `local_only` creates work under `none` and on an unlinked project. Not ported. Create write-through (a create leaves an overlay row, and a failed create commits nothing) is owned by WI-1068, whose gate in `work.rs` still reports the credential gate unmet. The comment, close, reopen and label write-throughs (a failed comment or close raises and changes nothing, a closed or reopened item is written through, a comment posts upstream and stores no local row, a label add writes through) are owned by WI-1780 (comment and close write-through to the forge). Parity gaps, pinned by ignored tests in the same file. The board gaps are WI-1778 and the upstream-truth edits are WI-1779: the board lists declared rows only, so an issue filed upstream and never adopted is missing from the board (`board_lists_an_upstream_only_issue_once`); page one carries no `next_cursor` and the cursor is not honoured on page two (`the_board_pages_with_stable_cursors`); a title or body edit on an adopted item, and a label removal, are accepted locally where the Python refuses them as upstream truth (`title_and_body_edits_on_an_adopted_item_are_refused`, `a_label_removal_on_an_adopted_item_is_refused`). Filed local-only because the vogt write-back policy is none. The import-with-consolidation link is `forge_import_clones_registers_and_consolidates_under_the_file_token`; the label refusal on an unlinked project is `a_label_edit_on_an_unlinked_project_is_refused`. |
 | test_view_paging.py | ported | Ranked backlog and bugs paging in `application/views.rs`. |
 | test_voice_capabilities.py | retired | Voice sidecar policy. `voice/` is a separate workspace. |
 | test_work_get_many.py | ported | `work.get_many` batched chip read (WI-1224). Owner WI-1068. |
 | test_workflow.py | ported | Workflow machines in `decisions.rs`. |
-| test_workspace_disk.py | unported | Workspace-volume row on engine status and sweep (WI-1304). Owner WI-1066. |
+| test_workspace_disk.py | unported | Workspace-volume row on engine status and sweep (WI-1304). Deferred to WI-1066. |
 | test_writes.py | ported | `application/writes_test.rs`. |
