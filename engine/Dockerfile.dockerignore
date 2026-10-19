@@ -79,6 +79,8 @@ deploy
 # The one exception: `uv sync` reads it, because pyproject names it as the
 # project's readme and a missing one fails the build.
 !README.md
+# The brief's fixed text: the core compiles it in with `include_str!`.
+!engine/core/src/application/brief_golden/text/*.md
 
 # Editor / OS noise.
 .DS_Store
