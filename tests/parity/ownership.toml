@@ -32,3 +32,9 @@ paths = ["src/vogt/config.py", "docs/CONFIG.md", "config.example.toml"]
 [[chunk]]
 name = "tests"
 paths = ["tests/", "scripts/"]
+
+# The package version string, bumped by every release. The port tracks
+# its version separately, so a bump here is triaged as a no-op.
+[[chunk]]
+name = "version"
+paths = ["src/vogt/__init__.py"]

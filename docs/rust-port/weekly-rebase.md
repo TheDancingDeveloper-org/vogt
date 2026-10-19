@@ -30,8 +30,8 @@ Main keeps moving while the port lives on `rust-core`. Once a week:
 | --- | --- |
 | port base (merge-base) | `21c95f674e1b03ee177394f605abb1abfac41cdd` |
 | origin/main | `f8402e92b08049fcb2f499dca898776a5f83211a` (68 commits ahead of the base) |
-| rust-core | not rebased in this run (operator holds rust-core syncs) |
+| status | ledger and triage done; rebase deferred to oversight (I6, WI-1081) |
 | golden | `tests/parity/golden/21c95f6` kept (CI's selection); stale `39b89c8`, `b108fa4`, `bd7bbb8`, `fe9d4db`, `21c95f6-s4`, `21c95f6-s9` deleted (no test or workflow referenced them) |
 | parity | `check --impl python` 149 steps agree; `check --impl rust` (cli transport) 149 steps agree |
-| ledger | 36 rows touching the Python core, no new migrations. By chunk: application+core+tests 8, tests-only 6, application+tests 4, adapters+application+tests 3, adapters+tests 3, tests+unassigned 3, adapters+application+config+tests 2, adapters+application+core+tests 2, single others 5 |
-| items raised | none filed yet: the 36 rows (WI-1870/1871/1903-era session/sweep/web fixes) are owed a triage pass like `drift-triage-2026-10-16.md` when rust-core is next synced; the 3 `unassigned` rows need ownership.toml entries |
+| ledger | 36 rows touching the Python core, no new migrations, no new operations. The 3 `unassigned` rows (`src/vogt/__init__.py` version bumps) are now the `version` chunk in ownership.toml |
+| items raised | triage in `drift-triage-2026-10-19.md`: 28 actionable rows, filed as one comment each on WI-1073 (9), WI-1074 (4), WI-1058 (3), WI-1064 (4), WI-1065 (8) and WI-1050 (config cross-reference); 8 no-ops |
