@@ -19,10 +19,11 @@ The Python lint and type gates (`ruff check`, `ruff format --check`, `mypy
 the Python package is removed; they come out with it, not before.
 
 The Python floor was `pytest --cov-fail-under=80`. `cargo llvm-cov -p
-vogt-core` measures 79.72% line coverage over the whole crate (WI-1080, at
-rust-core 77ef27b6), so `.github/workflows/rust-core.yml` fails under 79%:
-the measured value, rounded down (operator decision). The floor moves up as
-the thin service modules gain tests; it does not move down.
+vogt-core` first measured 79.72% line coverage (WI-1080, at rust-core
+77ef27b6), and the gate started at 79%. Since the service ports added
+tests, it measures 80.22% (rust-core a5ac4cba), so
+`.github/workflows/rust-core.yml` now fails under 80%, the Python floor.
+The floor only moves up.
 
 | File | Disposition | Where / why |
 |---|---|---|
