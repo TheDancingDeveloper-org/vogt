@@ -637,13 +637,6 @@ impl OperationRegistry {
         Ok(())
     }
 
-    /// Every mutating operation must take a required reason.
-    ///
-    /// Python also refuses a *defaulted* reason, because a default explains
-    /// nothing. That case cannot be expressed with `reason_required` alone —
-    /// a missing field and an optional one look the same — so it is read
-    /// from the recorded schema: a mutating operation whose `reason` property
-    /// is absent from `required` is the optional-reason shape.
     /// An operation on the HTTP transport must have a REST route. The reverse
     /// is allowed: a local-only operation carries none.
     fn validate_http_routes(&self) -> Result<(), RegistryError> {
@@ -662,6 +655,13 @@ impl OperationRegistry {
         Ok(())
     }
 
+    /// Every mutating operation must take a required reason.
+    ///
+    /// Python also refuses a *defaulted* reason, because a default explains
+    /// nothing. That case cannot be expressed with `reason_required` alone —
+    /// a missing field and an optional one look the same — so it is read
+    /// from the recorded schema: a mutating operation whose `reason` property
+    /// is absent from `required` is the optional-reason shape.
     fn validate_reasons(&self) -> Result<(), RegistryError> {
         let schemas = parsed_schemas();
         for operation in &self.operations {
@@ -677,6 +677,10 @@ impl OperationRegistry {
             let Some((params, _)) = schemas.get(operation.name) else {
                 continue;
             };
+            #[cfg(test)]
+            let overridden = tests::reason_schema_override(operation.name);
+            #[cfg(test)]
+            let params = overridden.as_ref().unwrap_or(params);
             if !reason_is_required(params) {
                 return Err(RegistryError(format!(
                     "{} has an optional reason; a defaulted reason explains nothing",
@@ -925,6 +929,47 @@ mod tests {
                 operation.name
             );
         }
+    }
+
+    thread_local! {
+        /// A schema `validate_reasons` reads in place of the derived one, for
+        /// this test thread only. The derived table is a process-wide static.
+        static REASON_SCHEMA: std::cell::RefCell<Option<(&'static str, serde_json::Value)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn reason_schema_override(name: &str) -> Option<serde_json::Value> {
+        REASON_SCHEMA.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|(overridden, _)| *overridden == name)
+                .map(|(_, schema)| schema.clone())
+        })
+    }
+
+    #[test]
+    fn construction_refuses_a_defaulted_reason() {
+        // `work.create` with its reason given a default and dropped from
+        // `required`: the registry must refuse to build, as Python does.
+        let mut schema = parsed_schemas()["work.create"].0.clone();
+        schema["properties"]["reason"]["default"] = serde_json::json!("because");
+        let required: Vec<serde_json::Value> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item.as_str() != Some("reason"))
+            .cloned()
+            .collect();
+        schema["required"] = serde_json::Value::Array(required);
+        REASON_SCHEMA.with(|slot| *slot.borrow_mut() = Some(("work.create", schema)));
+        let error = OperationRegistry::new(operations::build_operations()).unwrap_err();
+        REASON_SCHEMA.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(
+            error.0,
+            "work.create has an optional reason; a defaulted reason explains nothing"
+        );
+        // Without the override the same operations build.
+        assert!(OperationRegistry::new(operations::build_operations()).is_ok());
     }
 
     #[test]
