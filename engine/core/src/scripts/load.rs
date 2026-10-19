@@ -5,16 +5,15 @@
 //! drift rule still mean the same thing: nearest-rank percentiles, the same
 //! plan growth, the same seeded relation edges, the same report JSON shape.
 //!
-//! Driving the real operations in-process is not reliable while the Rust
-//! registry and service layer are mid-port. `run` therefore shells out to
-//! `uv run python scripts/load.py` with the same arguments when that file is
-//! in the current directory, and otherwise returns a clear error. The pure
-//! comparison (`check_baseline`) stays in-process.
+//! `run` drives the real operations in-process through the registry
+//! (`driver`, WI-1744); no Python is involved.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
+
+mod driver;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
@@ -894,61 +893,72 @@ pub(crate) fn deployed_plan_from_args(args: &Args) -> Result<DeployedPlan, Strin
     DeployedPlan::new(seeded, args.requests, args.concurrency)
 }
 
-/// Drive a load, soak or deployed run.
+/// Drive a load, soak or deployed run in-process, write the report, and apply
+/// the 2× drift rule when `--check-baseline` is given (WI-1744).
 ///
-/// The in-process driver is not ported. When `scripts/load.py` is in the
-/// current directory this shells out to it with the same arguments and
-/// returns `Ok(())` only when that process exits 0 (a drift failure is an
-/// `Err` carrying its output). When the Python generator is absent, this
-/// returns a clear error rather than pretending a run happened.
+/// A run uses `--data-dir`/instance when given, and otherwise a temporary data
+/// directory removed afterwards. The report goes to `--out`, or
+/// `vogt-load-report.json` in the temp directory, and to stdout.
 pub fn run(args: &[String]) -> Result<(), String> {
     let parsed = parse_args(args)?;
-    // Validate the plan in-process so a bad knob fails before any process starts.
-    match parsed.mode.as_str() {
+    let (data_root, ephemeral) = match &parsed.data_dir {
+        Some(dir) => (PathBuf::from(dir), false),
+        None => (
+            std::env::temp_dir().join(format!(
+                "vogt-load-{}-{}",
+                std::process::id(),
+                crate::core::fresh_id("t")
+            )),
+            true,
+        ),
+    };
+    fs::create_dir_all(&data_root).map_err(|err| format!("{}: {err}", data_root.display()))?;
+    let data_dir = data_root.join("instance");
+    let report = match parsed.mode.as_str() {
         "soak" => {
-            soak_plan_from_args(&parsed)?;
+            let plan = soak_plan_from_args(&parsed)?;
+            driver::run_soak(&plan, &data_dir, parsed.seed, &parsed.produced_by)
         }
         "deployed" => {
-            deployed_plan_from_args(&parsed)?;
+            let plan = deployed_plan_from_args(&parsed)?;
+            // A deployed number is only comparable to another deployed one, so
+            // its default label says so; an explicit --produced-by still wins.
+            let produced_by = if parsed.produced_by == "in-process" {
+                "deployed (axum, require_auth)"
+            } else {
+                parsed.produced_by.as_str()
+            };
+            driver::run_deployed(&plan, &data_dir, parsed.seed, produced_by)
         }
         _ => {
-            plan_from_args(&parsed)?;
+            let plan = plan_from_args(&parsed)?;
+            driver::run_load(&plan, &data_dir, parsed.seed)
         }
+    };
+    if ephemeral {
+        let _ = fs::remove_dir_all(&data_root);
     }
-    if !Path::new("scripts/load.py").is_file() {
-        return Err("the in-process Rust load driver is not yet ported, and \
-             scripts/load.py is not in the current directory"
-            .to_string());
+    let report = report?;
+
+    let out = parsed
+        .out
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("vogt-load-report.json"));
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
     }
-    let mut command = Command::new("uv");
-    command.arg("run").arg("python").arg("scripts/load.py");
-    command.args(args);
-    let output = command
-        .output()
-        .map_err(|err| format!("failed to run uv: {err}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stdout.is_empty() {
-        print!("{stdout}");
+    let text = serde_json::to_string_pretty(&report).map_err(|err| err.to_string())?;
+    fs::write(&out, format!("{text}\n")).map_err(|err| format!("{}: {err}", out.display()))?;
+    println!("{text}\n\nreport written to {}", out.display());
+
+    if let Some(baseline_path) = &parsed.check_baseline {
+        let baseline = read_json(baseline_path)?;
+        check_baseline(&report, &baseline)
+            .map_err(|drift| format!("{drift}\nvs {baseline_path}"))?;
+        println!("\nno drift vs {baseline_path}");
     }
-    if !stderr.is_empty() {
-        eprint!("{stderr}");
-    }
-    if output.status.success() {
-        // A caller that asked to check a baseline also gets the in-process
-        // reading of the report the Python generator just wrote, so the 2×
-        // rule is applied by this port and not only by the child.
-        if let Some(baseline_path) = &parsed.check_baseline {
-            if let Some(out) = &parsed.out {
-                let report = read_json(out)?;
-                let baseline = read_json(baseline_path)?;
-                check_baseline(&report, &baseline)?;
-            }
-        }
-        return Ok(());
-    }
-    let code = output.status.code().unwrap_or(1);
-    Err(format!("scripts/load.py exited {code}"))
+    Ok(())
 }
 
 fn read_json(path: &str) -> Result<Value, String> {
@@ -1437,17 +1447,57 @@ mod tests {
     }
 
     #[test]
-    fn run_without_the_python_generator_says_so() {
-        let scratch = std::env::temp_dir().join(format!("vogt-load-absent-{}", std::process::id()));
+    fn run_writes_the_report_and_checks_a_baseline() {
+        let scratch = std::env::temp_dir().join(format!(
+            "vogt-load-run-{}-{}",
+            std::process::id(),
+            crate::core::fresh_id("t")
+        ));
+        let out = scratch.join("report.json");
+        let baseline = scratch.join("baseline.json");
+        let args = |extra: &[&str]| {
+            let mut args: Vec<String> = [
+                "--mode",
+                "soak",
+                "--iterations",
+                "2",
+                "--sweep-every",
+                "2",
+                "--projects",
+                "1",
+                "--items",
+                "1",
+                "--relations",
+                "0",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            args.extend(extra.iter().map(|s| s.to_string()));
+            args
+        };
+        let out_s = out.to_string_lossy().to_string();
+        let data_s = scratch.join("data").to_string_lossy().to_string();
+        run(&args(&["--out", &out_s, "--data-dir", &data_s])).unwrap();
+        let report = read_json(&out_s).unwrap();
+        assert_eq!(report["kind"], "soak", "{report}");
+        // A run compared to its own report shows no drift.
+        fs::copy(&out, &baseline).unwrap();
+        let data2 = scratch.join("data2").to_string_lossy().to_string();
+        let checked = run(&args(&[
+            "--out",
+            &out_s,
+            "--data-dir",
+            &data2,
+            "--check-baseline",
+            &baseline.to_string_lossy(),
+        ]));
         let _ = fs::remove_dir_all(&scratch);
-        fs::create_dir_all(&scratch).unwrap();
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&scratch).unwrap();
-        let err = run(&["--scale".to_string(), "1".to_string()]).unwrap_err();
-        std::env::set_current_dir(original).unwrap();
-        let _ = fs::remove_dir_all(&scratch);
-        assert!(err.contains("not yet ported"), "{err}");
-        assert!(err.contains("scripts/load.py"), "{err}");
+        // Timing noise on a two-iteration run can exceed 2x; only a drift
+        // message, never another failure, is acceptable here.
+        if let Err(err) = checked {
+            assert!(err.contains("DRIFT"), "{err}");
+        }
     }
 
     #[test]
