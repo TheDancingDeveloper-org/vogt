@@ -670,6 +670,52 @@ struct ServeArgs<'a> {
     tls_key: Option<&'a Path>,
 }
 
+/// The registry routes and MCP, joined to the context's store so their recorded
+/// rows use the same clock and id sequence as the rest of the process, hooks
+/// included. `serve` adds the health and OpenAPI routes; the deployed-shape
+/// load run (`vogt-core load --mode deployed`) serves this as it is.
+fn core_router(
+    built: &application::context::Built,
+    data_dir: &std::path::Path,
+    no_auth: bool,
+    writes_enabled: bool,
+) -> axum::Router {
+    use adapters::http::{app, mcp};
+    use application::context::Built;
+    macro_rules! joined {
+        ($ctx:expr, $app:path, $mcp:path) => {
+            $app(app::AppState::joined(
+                data_dir,
+                no_auth,
+                writes_enabled,
+                &$ctx.declared,
+            ))
+            .merge($mcp(mcp::McpState::joined(
+                data_dir,
+                no_auth,
+                writes_enabled,
+                &$ctx.declared,
+            )))
+        };
+    }
+    match built {
+        Built::SystemRandom(ctx) => {
+            joined!(ctx, app::router_system_random, mcp::router_system_random)
+        }
+        Built::SystemSequential(ctx) => joined!(
+            ctx,
+            app::router_system_sequential,
+            mcp::router_system_sequential
+        ),
+        Built::StepRandom(ctx) => joined!(ctx, app::router_step_random, mcp::router_step_random),
+        Built::StepSequential(ctx) => joined!(
+            ctx,
+            app::router_step_sequential,
+            mcp::router_step_sequential
+        ),
+    }
+}
+
 fn serve(args: ServeArgs<'_>) -> ExitCode {
     let ServeArgs {
         host,
@@ -746,78 +792,7 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
             writes_enabled,
         },
     ));
-    // Both routes join the context's store, so their recorded rows use the same
-    // clock and id sequence as the rest of the process, hooks included.
-    let router = match &built {
-        application::context::Built::SystemRandom(ctx) => health
-            .merge(adapters::http::app::router_system_random(
-                adapters::http::app::AppState::joined(
-                    &data_dir,
-                    no_auth,
-                    writes_enabled,
-                    &ctx.declared,
-                ),
-            ))
-            .merge(adapters::http::mcp::router_system_random(
-                adapters::http::mcp::McpState::joined(
-                    &data_dir,
-                    no_auth,
-                    writes_enabled,
-                    &ctx.declared,
-                ),
-            )),
-        application::context::Built::SystemSequential(ctx) => health
-            .merge(adapters::http::app::router_system_sequential(
-                adapters::http::app::AppState::joined(
-                    &data_dir,
-                    no_auth,
-                    writes_enabled,
-                    &ctx.declared,
-                ),
-            ))
-            .merge(adapters::http::mcp::router_system_sequential(
-                adapters::http::mcp::McpState::joined(
-                    &data_dir,
-                    no_auth,
-                    writes_enabled,
-                    &ctx.declared,
-                ),
-            )),
-        application::context::Built::StepRandom(ctx) => health
-            .merge(adapters::http::app::router_step_random(
-                adapters::http::app::AppState::joined(
-                    &data_dir,
-                    no_auth,
-                    writes_enabled,
-                    &ctx.declared,
-                ),
-            ))
-            .merge(adapters::http::mcp::router_step_random(
-                adapters::http::mcp::McpState::joined(
-                    &data_dir,
-                    no_auth,
-                    writes_enabled,
-                    &ctx.declared,
-                ),
-            )),
-        application::context::Built::StepSequential(ctx) => health
-            .merge(adapters::http::app::router_step_sequential(
-                adapters::http::app::AppState::joined(
-                    &data_dir,
-                    no_auth,
-                    writes_enabled,
-                    &ctx.declared,
-                ),
-            ))
-            .merge(adapters::http::mcp::router_step_sequential(
-                adapters::http::mcp::McpState::joined(
-                    &data_dir,
-                    no_auth,
-                    writes_enabled,
-                    &ctx.declared,
-                ),
-            )),
-    };
+    let router = health.merge(core_router(&built, &data_dir, no_auth, writes_enabled));
     // Outermost last: the line covers routing, authentication and the error
     // handlers, as Python's middleware does. The listener's scheme and bind
     // address travel with every request, for redirects and a missing Host.
