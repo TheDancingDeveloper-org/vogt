@@ -844,6 +844,9 @@ pub trait ObservedStore {
     ) -> Result<Vec<DepRef>, crate::errors::VogtError>;
     fn counts(&self) -> Result<BTreeMap<String, i64>, crate::errors::VogtError>;
     fn rebuild_latest(&self) -> Result<i64, crate::errors::VogtError>;
+    /// How many times `latest_observations` has been rebuilt: moves on every
+    /// `rebuild_latest`, in the same transaction, and is 0 before the first.
+    fn latest_generation(&self) -> Result<i64, crate::errors::VogtError>;
     fn replace_dep_refs(&self, rows: &[DepRefRow]) -> Result<i64, crate::errors::VogtError>;
     fn prune(
         &self,

@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use crate::actors::{self, ActorClass};
 use crate::application::context::{AppContext, Built};
+use crate::application::memo::StoreMemo;
 use crate::application::services::preferences::InboxSavedFilter;
 use crate::application::services::{context_parts, dispatch, now_of, write_context};
 use crate::application::writes::{audited_write, WriteOutcome};
@@ -57,6 +58,51 @@ pub fn inbox_restore_op(built: &Built, params: Value) -> Result<Value, VogtError
 /// count under the caller's saved filter (`filtered`). It is the length the
 /// Inbox list shows under the same filter, without the coverage and engine
 /// reads `inbox.list` adds. A snooze that has run out counts as active.
+/// The half of the Inbox that is a pure function of the two stores, with its
+/// triage applied, and the projects the live half names its entries by.
+#[derive(Clone)]
+struct StoredInbox {
+    projects: BTreeMap<String, Project>,
+    entries: Vec<Value>,
+}
+
+/// The stored half, shared between every badge read while the stores have not
+/// moved (WI-1224). The live half is read from the engine on every badge read.
+static STORED: std::sync::LazyLock<StoreMemo<StoredInbox>> =
+    std::sync::LazyLock::new(StoreMemo::new);
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread built the stored half of the badge.
+    pub(crate) static STORED_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Drop the shared badge projection (tests, and a restore).
+pub fn clear_badge_cache() {
+    STORED.clear();
+}
+
+fn triaged<C, I>(
+    ctx: &AppContext<C, I>,
+    view: &impl ReadView,
+    entries: Vec<Value>,
+) -> Result<Vec<Value>, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let triage = view.inbox_triage_by_keys(
+        &entries
+            .iter()
+            .map(|entry| text_of(entry, "entry_key"))
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| apply_triage(ctx, &triage, entry))
+        .collect())
+}
+
 pub(crate) fn inbox_badge<C, I>(
     ctx: &AppContext<C, I>,
     saved: Option<&InboxSavedFilter>,
@@ -66,17 +112,22 @@ where
     I: IdFactory + 'static,
 {
     let (declared, observed, _, _, _, config) = context_parts(ctx);
-    let view = declared.read()?;
-    let mut entries = collect(ctx, observed, &view, config)?;
-    let triage = view.inbox_triage_by_keys(
-        &entries
-            .iter()
-            .map(|entry| text_of(entry, "entry_key"))
-            .collect::<Vec<_>>(),
+    let stored = STORED.get(
+        ctx,
+        || {
+            #[cfg(test)]
+            STORED_COMPUTED.with(|n| n.set(n.get() + 1));
+            let view = declared.read()?;
+            let (projects, entries) = collect_stored(ctx, observed, &view, config)?;
+            let entries = triaged(ctx, &view, entries)?;
+            Ok(StoredInbox { projects, entries })
+        },
+        |_| true,
     )?;
-    for entry in &mut entries {
-        *entry = apply_triage(ctx, &triage, entry.clone());
-    }
+    let view = declared.read()?;
+    let live = collect_live(ctx, &view, &stored.projects)?;
+    let mut entries = stored.entries;
+    entries.extend(triaged(ctx, &view, live)?);
     let moment = now_of(&ctx.clock);
     let active = ["active".to_string()];
     let active_total = entries
@@ -410,6 +461,25 @@ where
     C: Clock,
     I: IdFactory,
 {
+    let (projects, mut entries) = collect_stored(ctx, observed, view, config)?;
+    entries.extend(collect_live(ctx, view, &projects)?);
+    Ok(entries)
+}
+
+/// The stored half, untriaged: a pure function of the two stores
+/// (notifications, CI, agent runs, bound branches, deploy lanes and drift).
+/// The projects come back beside it, because the live half names its
+/// entries' projects too.
+fn collect_stored<C, I>(
+    ctx: &AppContext<C, I>,
+    observed: &crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
+    view: &impl ReadView,
+    config: &crate::config::VogtConfig,
+) -> Result<(BTreeMap<String, Project>, Vec<Value>), VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
     let projects: BTreeMap<String, Project> = view
         .list_projects(MAX_SCAN, 0)?
         .into_iter()
@@ -617,18 +687,6 @@ where
         ));
     }
 
-    // The live engine session list names grant targets and surfaces sessions
-    // waiting on a person. An engine that is down or unconfigured leaves both
-    // empty, exactly as Python does.
-    let live = match &ctx.engine {
-        Some(engine) => engine.list_sessions().unwrap_or_default(),
-        None => Vec::new(),
-    };
-    let live_by_id: BTreeMap<&str, &crate::adapters::engine::EngineSession> = live
-        .iter()
-        .map(|session| (session.id.as_str(), session))
-        .collect();
-
     let mut checks_by_branch: BTreeMap<(String, String), Vec<Observation>> = BTreeMap::new();
     for observation in &checks_all {
         let Some(project_id) = observation.project_id.clone() else {
@@ -683,49 +741,6 @@ where
         }
     }
 
-    let grants = view.list_session_grants(Some("pending"), None, MAX_SCAN)?;
-    for grant in grants {
-        // Python's grant view calls `effective_state(ctx.clock())` per row, so the
-        // clock advances once here even though a stored `pending` never expires.
-        let _state = grant.effective_state(now_of(&ctx.clock));
-        if grant.state == crate::core::GrantState::Pending {
-            entries.push(grant_entry(view, &grant, &projects, &live_by_id)?);
-        }
-    }
-
-    // Decisions waiting for a person (WI-1321): one entry per question.
-    for decision in crate::application::services::decisions::pending_decisions(view, &ctx.clock)? {
-        entries.push(decision_entry(view, &decision)?);
-    }
-
-    for session in &live {
-        let declared = view.session_by_engine_id(&session.id)?;
-        if let Some(blocked) = &session.blocked {
-            if session.alive {
-                entries.push(blocked_entry(
-                    ctx,
-                    session,
-                    blocked,
-                    declared.as_ref(),
-                    &projects,
-                    view,
-                )?);
-            }
-        }
-        if matches!(
-            session.activity.as_str(),
-            "waiting-for-input" | "awaiting-approval" | "errored"
-        ) {
-            entries.push(session_entry(
-                ctx,
-                session,
-                declared.as_ref(),
-                &projects,
-                view,
-            )?);
-        }
-    }
-
     if !config.deploy_lanes.is_empty() {
         let lanes = observed.latest(
             &[crate::adapters::forge::KIND_DEPLOY_LANE.to_string()],
@@ -743,6 +758,77 @@ where
 
     for proposal in view.list_drift(Some("open"), None, None, MAX_SCAN)? {
         entries.push(drift_entry(view, &proposal, &projects)?);
+    }
+
+    Ok((projects, entries))
+}
+
+/// The live half, untriaged: grants and decisions waiting for a person and
+/// the engine's sessions that need one. Read on every call: the engine is its
+/// truth, and a session starting to wait moves no store.
+fn collect_live<C, I>(
+    ctx: &AppContext<C, I>,
+    view: &impl ReadView,
+    projects: &BTreeMap<String, Project>,
+) -> Result<Vec<Value>, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let mut entries: Vec<Value> = Vec::new();
+    // The live engine session list names grant targets and surfaces sessions
+    // waiting on a person. An engine that is down or unconfigured leaves both
+    // empty, exactly as Python does.
+    let live = match &ctx.engine {
+        Some(engine) => engine.list_sessions().unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let live_by_id: BTreeMap<&str, &crate::adapters::engine::EngineSession> = live
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect();
+
+    let grants = view.list_session_grants(Some("pending"), None, MAX_SCAN)?;
+    for grant in grants {
+        // Python's grant view calls `effective_state(ctx.clock())` per row, so the
+        // clock advances once here even though a stored `pending` never expires.
+        let _state = grant.effective_state(now_of(&ctx.clock));
+        if grant.state == crate::core::GrantState::Pending {
+            entries.push(grant_entry(view, &grant, projects, &live_by_id)?);
+        }
+    }
+
+    // Decisions waiting for a person (WI-1321): one entry per question.
+    for decision in crate::application::services::decisions::pending_decisions(view, &ctx.clock)? {
+        entries.push(decision_entry(view, &decision)?);
+    }
+
+    for session in &live {
+        let declared = view.session_by_engine_id(&session.id)?;
+        if let Some(blocked) = &session.blocked {
+            if session.alive {
+                entries.push(blocked_entry(
+                    ctx,
+                    session,
+                    blocked,
+                    declared.as_ref(),
+                    projects,
+                    view,
+                )?);
+            }
+        }
+        if matches!(
+            session.activity.as_str(),
+            "waiting-for-input" | "awaiting-approval" | "errored"
+        ) {
+            entries.push(session_entry(
+                ctx,
+                session,
+                declared.as_ref(),
+                projects,
+                view,
+            )?);
+        }
     }
 
     Ok(entries)

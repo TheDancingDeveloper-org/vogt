@@ -21,6 +21,9 @@ pub mod git_signals;
 pub mod git_story;
 pub mod grants;
 pub mod instance;
+pub mod memo;
+#[cfg(test)]
+mod memo_test;
 pub mod models;
 pub mod observations;
 pub mod place;
