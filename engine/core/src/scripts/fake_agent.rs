@@ -42,6 +42,36 @@ fn env_or(name: &str, default: &str) -> String {
     }
 }
 
+/// `repr()` of a Python `str`, so a steer echo reads as the Python original's
+/// `{steer!r}` did: single quotes unless the text holds a `'` and no `"`.
+fn py_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 fn emit(line: &str) {
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "{line}");
@@ -293,7 +323,7 @@ fn step_idle() -> Result<(), String> {
         Some(raw) => {
             let steer = raw.trim();
             if !steer.is_empty() {
-                emit(&format!("fake-agent: steered with {steer:?}"));
+                emit(&format!("fake-agent: steered with {}", py_repr(steer)));
             } else {
                 emit("fake-agent: idle continued (eof)");
             }
@@ -518,6 +548,15 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_steer_echo_quotes_like_python_repr() {
+        assert_eq!(super::py_repr("continue please"), "'continue please'");
+        assert_eq!(super::py_repr("it's"), "\"it's\"");
+        assert_eq!(super::py_repr("it's \"x\""), "'it\\'s \"x\"'");
+        assert_eq!(super::py_repr("a\\b\tc"), "'a\\\\b\\tc'");
+        assert_eq!(super::py_repr("\u{1}"), "'\\x01'");
+    }
+
     use super::*;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
