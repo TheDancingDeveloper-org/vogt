@@ -14,7 +14,8 @@ use super::sessions::{
 use crate::adapters::engine::EngineClient;
 use crate::application::context::{build_context, Built};
 use crate::core::{
-    ActorKind, ActorPreference, LinkState, Moment, Principal, Project, SequentialIds, StepClock,
+    ActorKind, ActorPreference, LinkState, Moment, Origin, Principal, Priority, Project,
+    SequentialIds, StepClock, TrustState, WorkItem, WorkKind,
 };
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn};
@@ -124,6 +125,7 @@ fn start_params(project: Option<&str>, task: Option<&str>, reason: &str) -> Star
         budget: None,
         worktree: None,
         repo_map: None,
+        explicit_null: Vec::new(),
     }
 }
 
@@ -570,4 +572,95 @@ fn a_worker_task_with_no_budget_takes_the_default_limits() {
         serde_json::json!({"turns": 120, "wall_clock_minutes": 90})
     );
     assert_eq!(audit["overrides"], serde_json::json!([]));
+}
+
+fn insert_work_item(built: &Built, project: &str, reference: &str) {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut txn = ctx.declared.write().unwrap();
+    txn.insert_work_item(&WorkItem {
+        id: format!("wrk_{reference}"),
+        reference: reference.to_string(),
+        kind: WorkKind::Feature,
+        title: "The thing".to_string(),
+        body: String::new(),
+        state: "open".to_string(),
+        priority: Priority::P2,
+        effort: None,
+        project_id: Some(format!("prj_{project}")),
+        project_slug: Some(project.to_string()),
+        initiative_id: None,
+        origin: Origin::Created,
+        trust_state: TrustState::Unverified,
+        assignee_actor_id: None,
+        assignee_identity_ref: None,
+        labels: Vec::new(),
+        relations: Vec::new(),
+        superseded_by: None,
+        created_at: moment(),
+        updated_at: moment(),
+    })
+    .unwrap();
+    txn.commit().unwrap();
+}
+
+#[test]
+fn a_review_start_records_the_resolved_item_it_reviews_in_the_audit() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-10","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    insert_work_item(&built, "beta", "WI-7");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = with_purpose(start_params(None, None, "because"), "review");
+    params.review_of = Some("WI-7".to_string());
+    start_session(ctx, &params).unwrap();
+    let audit = session_start_audit(&built);
+    assert_eq!(audit["review_of"], "WI-7");
+    assert_eq!(audit["work_item"], "WI-7");
+}
+
+#[test]
+fn a_start_with_no_purpose_records_null_worktree_and_repo_map_and_no_review() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-11","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = start_params(Some("beta"), Some("check the containers"), "because");
+    params.template = Some("claude".to_string());
+    start_session(ctx, &params).unwrap();
+    let audit = session_start_audit(&built);
+    assert_eq!(audit["worktree"], serde_json::Value::Null);
+    assert_eq!(audit["repo_map"], serde_json::Value::Null);
+    assert_eq!(audit["review_of"], serde_json::Value::Null);
+}
+
+#[test]
+fn an_explicit_null_is_an_override_the_profile_does_not_fill() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-12","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = with_purpose(start_params(Some("beta"), None, "because"), "implement");
+    params.explicit_null = vec!["worktree"];
+    start_session(ctx, &params).unwrap();
+    let audit = session_start_audit(&built);
+    assert_eq!(audit["overrides"], serde_json::json!(["worktree"]));
+    assert_eq!(audit["worktree"], serde_json::Value::Null);
+    assert_eq!(audit["repo_map"], true);
 }
