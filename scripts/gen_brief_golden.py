@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -34,12 +35,15 @@ from vogt.core.entities import (  # noqa: E402
     WorkItem,
 )
 
+if TYPE_CHECKING:
+    from vogt.storage.interface import ReadView
+
 OUT = REPO_ROOT / "engine" / "core" / "src" / "application" / "brief_golden"
 NOW = datetime(2026, 10, 17, 9, 0, tzinfo=UTC)
 SESSION = "ses_brief01"
 
 
-class FakeView:
+class _FakeView:
     def __init__(self, items: list[WorkItem], comments: list[Comment]) -> None:
         self._items = {item.id: item for item in items}
         self._comments = comments
@@ -52,6 +56,11 @@ class FakeView:
     ) -> list[Comment]:
         # The scenarios list comments newest first, as the store returns them.
         return [c for c in self._comments if c.work_item_id == work_item_id][:limit]
+
+
+def FakeView(items: list[WorkItem], comments: list[Comment]) -> ReadView:  # noqa: N802
+    # Only the two reads the brief makes are faked.
+    return cast("ReadView", _FakeView(items, comments))
 
 
 def item(**fields: object) -> WorkItem:
@@ -69,13 +78,13 @@ def item(**fields: object) -> WorkItem:
         "updated_at": NOW,
     }
     base.update(fields)
-    return WorkItem(**base)
+    return WorkItem(**cast("dict[str, Any]", base))
 
 
 def comment(
     cid: str,
     body: str,
-    kind: str = "note",
+    kind: Literal["note", "handoff"] = "note",
     handoff: HandoffFields | None = None,
     item_id: str = "wrk_1058",
 ) -> Comment:
