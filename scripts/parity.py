@@ -71,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
             cmd.add_argument("--out", type=Path, required=True)
         else:
             cmd.add_argument("--golden", type=Path, required=True)
+    cross = sub.add_parser("crossopen")
+    cross.add_argument("--writer", choices=sorted(BINS), default="python")
+    cross.add_argument("--reader", choices=sorted(BINS), default="rust")
     probe = sub.add_parser("selftest")
     probe.add_argument("--golden", type=Path, required=True)
     contract = sub.add_parser(
@@ -91,7 +94,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "errors":
         return _errors(args.golden, args.check)
 
+    if args.command == "crossopen":
+        return _crossopen(_resolve(args.writer), _resolve(args.reader))
+
     binary = _resolve(args.impl)
+    if args.only == "schema":
+        return _schema_command(args, binary)
     # `--only dump` runs the whole script and keeps only the dumps: a dump
     # step reads what the sweeps wrote, and a script cut down to the dumps
     # would dump an empty observed store.
@@ -144,6 +152,138 @@ def main(argv: list[str] | None = None) -> int:
             step for step in recorded if step["operation"].startswith(args.only)
         ]
     return _diff(golden, recorded, args.only)
+
+
+def _schema_command(args: argparse.Namespace, binary: str) -> int:
+    """`--only schema`: the SQLite schema each store has after `init`.
+
+    Both cores migrate from the same SQL files, so the declared and observed
+    schemas (every table, index, view and trigger, plus the applied migration
+    ids) must match byte for byte. The golden is `schema.json`; the transport
+    does not apply, since the schema is what `init` leaves on disk.
+    """
+    recorded = _schema(binary)
+    if args.command == "record":
+        args.out.mkdir(parents=True, exist_ok=True)
+        target = args.out / "schema.json"
+        target.write_text(json.dumps(recorded, indent=2, sort_keys=True) + "\n")
+        print(f"recorded schema to {target}")
+        return 0
+    path = args.golden / "schema.json"
+    if not path.is_file():
+        print(f"no schema golden at {path}", file=sys.stderr)
+        return 1
+    golden = json.loads(path.read_text())
+    if golden == recorded:
+        print("parity: schema matches")
+        return 0
+    for store in sorted(set(golden) | set(recorded)):
+        want, got = golden.get(store, {}), recorded.get(store, {})
+        for key in sorted(set(want) | set(got)):
+            if want.get(key) != got.get(key):
+                print(f"schema mismatch: {store}.{key}", file=sys.stderr)
+                print(f"  golden:   {json.dumps(want.get(key))}", file=sys.stderr)
+                print(f"  recorded: {json.dumps(got.get(key))}", file=sys.stderr)
+    return 1
+
+
+def _init_dir(binary: str, root: Path) -> Path:
+    """Run `init` with `binary` into `root/instance` and return the data dir."""
+    data = root / "instance"
+    init = subprocess.run(
+        [binary, "--json", "--data-dir", str(data), "init"],
+        env=_prepare_init(root, _child_env()),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if init.returncode != 0:
+        raise SystemExit(f"init exited {init.returncode}: {init.stderr.strip()}")
+    return data
+
+
+def _schema(binary: str) -> dict[str, Any]:
+    """The declared and observed schema `init` wrote, keyed by object."""
+    import sqlite3
+
+    root = Path(tempfile.mkdtemp(prefix="vogt-parity-schema-"))
+    try:
+        data = _init_dir(binary, root)
+        stores: dict[str, Any] = {}
+        for name in ("declared", "observed"):
+            conn = sqlite3.connect(data / f"{name}.sqlite3")
+            try:
+                objects = {
+                    f"{kind}:{obj}": {"table": table, "sql": sql}
+                    for kind, obj, table, sql in conn.execute(
+                        "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+                    )
+                }
+                objects["pragma:user_version"] = conn.execute(
+                    "PRAGMA user_version"
+                ).fetchone()[0]
+                objects["migrations"] = [
+                    list(row)
+                    for row in conn.execute(
+                        "SELECT id, checksum FROM migrations ORDER BY id"
+                    )
+                ]
+            finally:
+                conn.close()
+            stores[name] = objects
+        return stores
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _crossopen(writer: str, reader: str) -> int:
+    """A store `writer` initialised must have nothing pending for `reader`.
+
+    The reader's `init --check` reports the migrations it would apply; a
+    Python-written instance opened by the Rust core must report none, and a
+    real `init` by the reader must then apply none either.
+    """
+    root = Path(tempfile.mkdtemp(prefix="vogt-parity-cross-"))
+    try:
+        data = _init_dir(writer, root)
+        env = _child_env()
+        check = subprocess.run(
+            [reader, "--json", "--data-dir", str(data), "init", "--check"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if check.returncode != 0:
+            print(
+                f"crossopen: init --check exited {check.returncode}: "
+                f"{check.stdout.strip()} {check.stderr.strip()}",
+                file=sys.stderr,
+            )
+            return 1
+        pending = json.loads(check.stdout)["pending"]
+        if pending != {"declared": 0, "observed": 0}:
+            print(f"crossopen: pending migrations {pending}", file=sys.stderr)
+            return 1
+        again = subprocess.run(
+            [reader, "--json", "--data-dir", str(data), "init"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if again.returncode != 0:
+            print(f"crossopen: init exited {again.returncode}", file=sys.stderr)
+            return 1
+        reply = json.loads(again.stdout)
+        if reply.get("created") or reply.get("migrations_applied"):
+            print(f"crossopen: reader re-initialised: {reply}", file=sys.stderr)
+            return 1
+        print("parity: crossopen has no pending migrations")
+        return 0
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _merge_base() -> str:
