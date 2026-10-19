@@ -67,7 +67,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_delivery.py | ported | `delivery.rs`. |
 | test_demo_delivery.py | retired | Browser-only public demo delivery. Not the core. |
 | test_diagnostics.py | ported | Instance diagnostics service. |
-| test_dispatch.py | unported | Dispatch profiles as data (WI-1323, migration 0024 path). Deferred to WI-1058. |
+| test_dispatch.py | ported | `engine/core/src/application/dispatch_test.rs` (all 6 cases; the 8 parametrized malformed-value cases run as one table-driven test). |
 | test_drift.py | ported | `application/drift.rs`. |
 | test_engine_image_core.py | retired | Static checks on `engine/Dockerfile` and `engine/deploy/entrypoint.sh` (WI-1078). Engine image, not the core crate. |
 | test_engine_parity.py | retired | Rust engine wire parity. Owned by `engine/server` tests, not `engine/core`. |
