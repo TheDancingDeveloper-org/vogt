@@ -145,3 +145,6 @@ where
 
 #[cfg(test)]
 mod sessions_test;
+
+#[cfg(test)]
+mod handoff_test;
