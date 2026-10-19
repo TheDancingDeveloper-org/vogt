@@ -77,9 +77,9 @@ thread_local! {
     pub(crate) static STORED_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Drop the shared badge projection (tests, and a restore).
-pub fn clear_badge_cache() {
-    STORED.clear();
+/// Drop the shared badge projection over `data_dir` (a restore).
+pub fn clear_badge_cache(data_dir: &std::path::Path) {
+    STORED.forget(data_dir);
 }
 
 fn triaged<C, I>(

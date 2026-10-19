@@ -184,8 +184,16 @@ impl<T: Clone> StoreMemo<T> {
         Ok(value)
     }
 
-    /// Forget every answer (tests, and a restore or clone).
+    /// Forget every answer (tests).
     pub fn clear(&self) {
         self.lock().answers.clear();
+    }
+
+    /// Forget the answers over the stores in `data_dir`, which a restore or
+    /// clone is about to replace. Other data directories keep theirs.
+    pub fn forget(&self, data_dir: &std::path::Path) {
+        self.lock()
+            .answers
+            .retain(|((declared, _), _)| declared.parent() != Some(data_dir));
     }
 }
