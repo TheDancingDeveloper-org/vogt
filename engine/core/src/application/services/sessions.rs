@@ -154,6 +154,10 @@ where
             },
             worktree: optional_bool(&params, "worktree")?,
             repo_map: optional_bool(&params, "repo_map")?,
+            explicit_null: PROFILE_FIELDS
+                .into_iter()
+                .filter(|field| matches!(params.get(*field), Some(Value::Null)))
+                .collect(),
         };
     Ok(serde_json::to_value(start_session(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -409,7 +413,21 @@ pub struct StartSessionParams {
     pub worktree: Option<bool>,
     /// Draw a repo map into the brief. Unset, the profile decides.
     pub repo_map: Option<bool>,
+    /// Profile fields the caller sent as an explicit null. Python counts these
+    /// in `model_fields_set`: they are overrides, and the profile leaves them.
+    pub explicit_null: Vec<&'static str>,
 }
+
+/// The start fields a dispatch profile fills, in Python's override order.
+const PROFILE_FIELDS: [&str; 7] = [
+    "template",
+    "model",
+    "effort",
+    "budget",
+    "worktree",
+    "repo_map",
+    "autopilot",
+];
 
 /// The limits a start carries (Python `SessionBudgetParams`). Each field is one
 /// limit; a field left out is not set.
@@ -866,8 +884,11 @@ where
         .map(|project| project.agent_policy)
         .unwrap_or_default();
     let budget = effective_budget(params, &policy);
+    // The audit records what the start asked for (Python `params.worktree`),
+    // so a start with no purpose and no value shows null, not false.
+    let audit_worktree = params.worktree;
+    let audit_repo_map = params.repo_map;
     let worktree = params.worktree.unwrap_or(false);
-    let repo_map = params.repo_map.unwrap_or(false);
     let mut spec = build_spec(ctx, params, &subject, &secret, read_only)?;
     spec.budget = budget.as_ref().map(budget_wire);
     if worktree {
@@ -924,6 +945,11 @@ where
         let effort = params.effort.clone();
         let reason = reason.clone();
         let work_item_ref = subject.work_item_ref.clone();
+        // Python's `_review_subject` records the resolved item, not the input.
+        let review_of = params
+            .review_of
+            .as_ref()
+            .and_then(|_| subject.work_item_ref.clone());
         let project_slug = subject.project_slug.clone();
         let is_scratch = subject.is_scratch;
         let resume = params.resume.clone();
@@ -1017,8 +1043,9 @@ where
                         "purpose": purpose,
                         "overrides": audit_overrides,
                         "budget": audit_budget,
-                        "worktree": worktree,
-                        "repo_map": repo_map,
+                        "review_of": review_of,
+                        "worktree": audit_worktree,
+                        "repo_map": audit_repo_map,
                         "started_by_session": started_by_session,
                         "started_by_kind": started_by_kind,
                         "engine_spawn_ms": engine_spawn_ms,
@@ -2281,34 +2308,51 @@ where
     let profile = settings.profile(purpose).ok_or_else(|| {
         VogtError::InvalidRequest(format!("no dispatch profile for {}", py_repr(purpose)))
     })?;
-    let overrides = [
-        ("template", params.template.is_some()),
-        ("model", params.model.is_some()),
-        ("effort", params.effort.is_some()),
-        ("budget", params.budget.is_some()),
-        ("worktree", params.worktree.is_some()),
-        ("repo_map", params.repo_map.is_some()),
-        ("autopilot", params.autopilot.is_some()),
-    ]
-    .into_iter()
-    .filter_map(|(name, given)| given.then_some(name))
-    .collect();
+    // A field is the caller's when it carries a value or an explicit null.
+    let set = |name: &str, given: bool| given || params.explicit_null.contains(&name);
+    let given = [
+        params.template.is_some(),
+        params.model.is_some(),
+        params.effort.is_some(),
+        params.budget.is_some(),
+        params.worktree.is_some(),
+        params.repo_map.is_some(),
+        params.autopilot.is_some(),
+    ];
+    let overrides: Vec<&'static str> = PROFILE_FIELDS
+        .into_iter()
+        .zip(given)
+        .filter_map(|(name, given)| set(name, given).then_some(name))
+        .collect();
+    let caller = |name: &str| overrides.contains(&name);
     let mut filled = params.clone();
-    filled.template = filled.template.or_else(|| Some(profile.template.clone()));
-    filled.model = filled.model.or_else(|| Some(profile.model.clone()));
-    filled.effort = filled.effort.or_else(|| profile.effort.clone());
-    filled.budget = filled.budget.or_else(|| {
-        (profile.budget_turns.is_some() || profile.budget_wall_clock_minutes.is_some()).then(|| {
-            SessionBudget {
-                turns: profile.budget_turns,
-                wall_clock_minutes: profile.budget_wall_clock_minutes,
-                ..SessionBudget::default()
-            }
-        })
-    });
-    filled.worktree = filled.worktree.or(Some(profile.worktree));
-    filled.repo_map = filled.repo_map.or(Some(profile.repo_map));
-    filled.autopilot = filled.autopilot.or(Some(profile.autopilot));
+    if !caller("template") {
+        filled.template = Some(profile.template.clone());
+    }
+    if !caller("model") {
+        filled.model = Some(profile.model.clone());
+    }
+    if !caller("effort") {
+        filled.effort = profile.effort.clone();
+    }
+    if !caller("budget") {
+        filled.budget = (profile.budget_turns.is_some()
+            || profile.budget_wall_clock_minutes.is_some())
+        .then(|| SessionBudget {
+            turns: profile.budget_turns,
+            wall_clock_minutes: profile.budget_wall_clock_minutes,
+            ..SessionBudget::default()
+        });
+    }
+    if !caller("worktree") {
+        filled.worktree = Some(profile.worktree);
+    }
+    if !caller("repo_map") {
+        filled.repo_map = Some(profile.repo_map);
+    }
+    if !caller("autopilot") {
+        filled.autopilot = Some(profile.autopilot);
+    }
     Ok((filled, profile.read_only, overrides))
 }
 
