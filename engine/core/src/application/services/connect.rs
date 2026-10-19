@@ -145,6 +145,112 @@ fn json_string(text: &str) -> String {
 mod tests {
     use super::*;
 
+    const URL: &str = "https://vogt.example.test";
+
+    fn built(name: &str, public_url: Option<&str>) -> Built {
+        use crate::application::context::build_context;
+        use crate::core::{ActorKind, Moment, Principal, StepClock};
+        let dir = std::env::temp_dir().join(format!("vogt-connect-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            public_url: public_url.map(str::to_string),
+            ..crate::config::VogtConfig::default()
+        };
+        build_context(
+            config,
+            Some(Principal::new("local:ada", ActorKind::Human, "Ada").unwrap()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn run(built: &Built, params: Value) -> Value {
+        connect_op(built, params).unwrap()
+    }
+
+    #[test]
+    fn connect_states_where_the_instance_is() {
+        let result = run(&built("states", Some(URL)), json!({}));
+        assert_eq!(result["url"], URL);
+        assert_eq!(result["mcp_url"], format!("{URL}/mcp"));
+        assert!(result["detail"].is_null());
+    }
+
+    #[test]
+    fn an_unconfigured_instance_says_so_rather_than_guessing() {
+        let result = run(&built("unset", None), json!({}));
+        assert!(result["url"].is_null());
+        assert!(result["mcp_url"].is_null());
+        assert_eq!(result["detail"], NOT_CONFIGURED);
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_become_a_double_slash() {
+        let result = run(&built("slash", Some(&format!("{URL}/"))), json!({}));
+        assert_eq!(result["mcp_url"], format!("{URL}/mcp"));
+    }
+
+    #[test]
+    fn the_http_client_needs_no_vogt_code() {
+        let result = run(&built("http", Some(URL)), json!({"client": "http"}));
+        assert_eq!(result["requires_install"], false);
+        let config: Value =
+            serde_json::from_str(result["configuration"].as_str().unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["vogt"]["url"], format!("{URL}/mcp"));
+        assert_eq!(config["mcpServers"]["vogt"]["type"], "http");
+    }
+
+    #[test]
+    fn the_bridge_is_honest_about_its_cost() {
+        let result = run(&built("bridge", Some(URL)), json!({"client": "bridge"}));
+        assert_eq!(result["requires_install"], true);
+        let config: Value =
+            serde_json::from_str(result["configuration"].as_str().unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["vogt"]["command"], "vogt-mcp-remote");
+        assert_eq!(config["mcpServers"]["vogt"]["env"]["VOGT_URL"], URL);
+    }
+
+    #[test]
+    fn no_configuration_ever_carries_a_token_inline() {
+        let built = built("token", Some(URL));
+        for client in ["http", "bridge"] {
+            for format in ["json", "markdown"] {
+                let result = run(&built, json!({"client": client, "format": format}));
+                let rendered = result["configuration"].as_str().unwrap();
+                assert!(
+                    rendered.contains("VOGT_TOKEN") || rendered.to_lowercase().contains("token")
+                );
+                let host = rendered
+                    .rsplit("://")
+                    .next()
+                    .unwrap()
+                    .split('/')
+                    .next()
+                    .unwrap();
+                assert!(!host.contains('@'), "{rendered}");
+            }
+        }
+    }
+
+    #[test]
+    fn markdown_renders_the_connection_document() {
+        let result = run(&built("markdown", Some(URL)), json!({"format": "markdown"}));
+        let rendered = result["configuration"].as_str().unwrap();
+        assert!(rendered.starts_with("# Connecting to Vogt"));
+        assert!(rendered.contains(&format!("{URL}/mcp")));
+        assert!(rendered.contains("2025-06-18"));
+    }
+
     #[test]
     fn an_unset_or_blank_public_url_is_no_address() {
         assert_eq!(clean_url(None), None);

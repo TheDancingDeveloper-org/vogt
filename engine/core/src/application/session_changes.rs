@@ -401,6 +401,27 @@ mod tests {
     }
 
     #[test]
+    fn wait_any_cursor_now_reaches_the_engine_as_now() {
+        // Mirrors test_session_drive.py: `now` skips what is already published.
+        let (seen, client) = engine(
+            200,
+            r#"{"outcome":"timeout","change":null,"next_cursor":12}"#,
+        );
+        let built = built("cursornow", client);
+        let waited = run(
+            &built,
+            "session.wait_any",
+            json!({"cursor": "NOW", "timeout_s": 5}),
+        )
+        .unwrap();
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            "http://engine.test/api/sessions/wait-any?timeout_s=5&cursor=now"
+        );
+        assert_eq!(waited["next_cursor"], 12);
+    }
+
+    #[test]
     fn wait_any_bounds_its_timeout_and_its_cursor() {
         let (seen, client) = engine(200, "{}");
         let built = built("bounds", client);
