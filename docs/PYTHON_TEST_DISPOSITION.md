@@ -130,7 +130,7 @@ the thin service modules gain tests; it does not move down.
 | test_session_bind_work.py | ported | `application/session_work.rs`. |
 | test_session_digest_op.py | ported | `application/session_digest.rs`: the six `session.digest` cases (economics carried by the row, absent economics, no window, blocked report, transcript excerpt, unknown session). |
 | test_session_drive.py | ported | Session input and screen reads in `application/session_reads.rs` and `delivery.rs`. |
-| test_session_economics.py | unported | Transcript parser cases (Claude usage and compaction, Klaudia, Codex payloads, shared fixtures). The metering path is ported in `session_economics.rs`. Deferred to WI-1765. |
+| test_session_economics.py | ported | `core/session_economics.rs`: Claude usage (latest turn, peak is the largest), compaction markers wherever they sit, Klaudia estimate and `compact_boundary`, repeated reads, Codex payload results, junk lines, one-turn wall clock, one turn and its output counted once across content blocks, tool names from `tool_use_id`, `budget_line`, and the shared fixtures (`engine/server/tests/fixtures/economics`: claude, klaudia, codex, klaudia_unicode, claude_gap) with the same numbers. |
 | test_session_economics_op.py | ported | `application/session_economics.rs`: metering (with the account name), no transcript, reading off with no roots, the engine reading, and an unknown session. |
 | test_session_hibernation.py | ported | Hibernate and wake in `application/services/lifecycle.rs`. |
 | test_session_last_reply.py | ported | Transcript reply reads in `adapters/transcripts.rs`. |

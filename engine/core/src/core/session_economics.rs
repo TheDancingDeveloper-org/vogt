@@ -649,4 +649,168 @@ mod tests {
         assert_eq!(split_lines(""), Vec::<&str>::new());
         assert_eq!(split_lines("a\n\nb"), vec!["a", "", "b"]);
     }
+
+    #[test]
+    fn claude_peak_is_the_largest_turn_and_results_name_their_tool() {
+        let reading = metered(
+            &[
+                json!({"type": "user", "message": {"role": "user", "content": "go"}}),
+                json!({"type": "assistant", "timestamp": "2026-10-11T01:00:00Z", "message": {
+                    "model": "claude",
+                    "usage": {"input_tokens": 100, "cache_read_input_tokens": 50,
+                              "cache_creation_input_tokens": 25, "output_tokens": 10},
+                    "content": [{"type": "tool_result", "name": "Bash", "content": "x".repeat(40)}],
+                }}),
+                json!({"type": "assistant", "timestamp": "2026-10-11T01:00:30Z", "message": {
+                    "usage": {"input_tokens": 80, "output_tokens": 5}, "content": [],
+                }}),
+            ],
+            "claude",
+        );
+        assert_eq!(reading.turns, 2);
+        assert_eq!(reading.context_tokens, 80);
+        assert_eq!(reading.peak_context_tokens, 175);
+        assert_eq!(reading.output_tokens, 15);
+        assert!(reading.usage_measured);
+        assert_eq!(reading.compactions, 0);
+        assert_eq!(
+            reading.tool_result_bytes,
+            BTreeMap::from([("Bash".to_string(), 40)])
+        );
+        assert_eq!(
+            reading.wall_clock,
+            TurnTiming {
+                count: 1,
+                max_ms: 30_000,
+                mean_ms: 30_000
+            }
+        );
+    }
+
+    #[test]
+    fn claude_compaction_marker_counts_wherever_it_sits() {
+        let reading = metered(
+            &[
+                json!({"type": "system", "isCompactSummary": true}),
+                json!({"type": "assistant", "message": {"isCompactSummary": true, "usage": {"input_tokens": 1}}}),
+            ],
+            "claude",
+        );
+        assert_eq!(reading.compactions, 2);
+        assert_eq!(reading.turns, 1);
+    }
+
+    #[test]
+    fn claude_output_tokens_count_once_per_turn_across_its_blocks() {
+        let usage = json!({"input_tokens": 10, "cache_read_input_tokens": 0,
+                           "cache_creation_input_tokens": 0, "output_tokens": 7});
+        let entries: Vec<Value> = [
+            json!({"type": "thinking", "thinking": "hm"}),
+            json!({"type": "text", "text": "hello"}),
+            json!({"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+        ]
+        .into_iter()
+        .map(|block| json!({"type": "assistant", "message": {"id": "msg_1", "usage": usage, "content": [block]}}))
+        .collect();
+        let reading = metered(&entries, "claude");
+        assert_eq!(reading.turns, 1);
+        assert_eq!(reading.output_tokens, 7);
+    }
+
+    fn fixture(name: &str, agent: &str) -> SessionEconomics {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../server/tests/fixtures/economics")
+            .join(format!("{name}.jsonl"));
+        let text = std::fs::read_to_string(&path).expect("shared economics fixture");
+        meter(split_lines(&text), agent)
+    }
+
+    fn bytes(pairs: &[(&str, i64)]) -> BTreeMap<String, i64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn shared_fixtures_match_the_python_meter() {
+        assert_eq!(
+            fixture("claude", "claude"),
+            SessionEconomics {
+                turns: 2,
+                context_tokens: 80,
+                peak_context_tokens: 175,
+                compactions: 1,
+                tool_result_bytes: bytes(&[("Bash", 40), ("Read", 16)]),
+                reads_repeated: 1,
+                wall_clock: TurnTiming {
+                    count: 1,
+                    max_ms: 30_000,
+                    mean_ms: 30_000
+                },
+                output_tokens: 16,
+                usage_measured: true,
+            }
+        );
+        assert_eq!(
+            fixture("klaudia", "klaudia"),
+            SessionEconomics {
+                turns: 2,
+                context_tokens: 67,
+                peak_context_tokens: 117,
+                compactions: 1,
+                tool_result_bytes: bytes(&[("Read", 16), ("shell", 6)]),
+                reads_repeated: 1,
+                wall_clock: TurnTiming {
+                    count: 1,
+                    max_ms: 60_000,
+                    mean_ms: 60_000
+                },
+                output_tokens: 0,
+                usage_measured: false,
+            }
+        );
+        assert_eq!(
+            fixture("codex", "codex"),
+            SessionEconomics {
+                turns: 3,
+                context_tokens: 191,
+                peak_context_tokens: 191,
+                compactions: 0,
+                tool_result_bytes: bytes(&[("cat", 10), ("grep", 9), ("shell", 11)]),
+                reads_repeated: 1,
+                wall_clock: TurnTiming {
+                    count: 2,
+                    max_ms: 45_000,
+                    mean_ms: 22_500
+                },
+                output_tokens: 0,
+                usage_measured: false,
+            }
+        );
+    }
+
+    #[test]
+    fn shared_unicode_fixture_counts_characters_as_python_does() {
+        let reading = fixture("klaudia_unicode", "klaudia");
+        assert_eq!(reading.turns, 3);
+        assert_eq!(reading.context_tokens, 127);
+        assert_eq!(
+            reading.tool_result_bytes,
+            bytes(&[("Grep", 90), ("Read", 10)])
+        );
+        assert_eq!(
+            reading.wall_clock,
+            TurnTiming {
+                count: 2,
+                max_ms: 3,
+                mean_ms: 2
+            }
+        );
+    }
+
+    #[test]
+    fn shared_gap_fixture_counts_milliseconds_exactly() {
+        let reading = fixture("claude_gap", "claude");
+        assert_eq!(reading.wall_clock.max_ms, 1001);
+        assert_eq!(reading.wall_clock.mean_ms, 1001);
+        assert_eq!(reading.tool_result_bytes, bytes(&[("Grep", 71)]));
+    }
 }
