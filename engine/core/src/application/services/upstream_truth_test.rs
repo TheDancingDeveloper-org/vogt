@@ -1,11 +1,9 @@
 //! Upstream-truth work items and the local overlay, as the core can express them
 //! today.
 //!
-//! Ports the cases of `tests/test_upstream_truth.py` that do not need a
-//! write-through to the forge. The write-through itself (creating an issue,
-//! posting a comment, closing or labelling a linked item) is not ported: the
-//! work service refuses it with the credential gate unmet. Those cases are
-//! recorded as unported in the disposition row, owner WI-1068.
+//! Ports the cases of `tests/test_upstream_truth.py`. `work.create` and
+//! `work.update` write through to the forge (WI-1068); the comment and close
+//! write-through is still unported (WI-1780).
 
 use serde_json::json;
 
@@ -19,11 +17,13 @@ use crate::application::services::forge_onboard::onboard_op;
 use crate::application::services::forge_ops_test::{
     a_directory_that_is_not_a_repository, insert_project,
 };
+use crate::application::services::forge_writeback::{writeback_list_op, writeback_op};
 use crate::application::services::history::audit_list_op;
 use crate::application::services::native_migration::open_native_items;
 use crate::application::services::work::{
     board_list_op, comment_op, create_op, get_op, relate_op, transition_op, update_op,
 };
+use crate::application::taxonomy::create_label_op;
 use crate::application::views::backlog_op;
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ReadView};
@@ -344,6 +344,13 @@ fn default_create_on_linked_none_still_refuses() {
 #[test]
 fn refusal_enumerates_every_missing_gate() {
     let (built, forgejo) = forgejo_with(four_issues(), true);
+    // Withdraw the only credential the link used, leaving no way upstream.
+    let Built::StepSequential(ctx) = &built else {
+        panic!("expected a step clock");
+    };
+    for token in ctx.config.forge_token_files.values() {
+        std::fs::remove_file(token).unwrap();
+    }
     let refused = create_op(
         &built,
         json!({"kind": "bug", "title": "Refused", "project": SLUG, "reason": WHY}),
@@ -532,4 +539,189 @@ fn a_label_removal_on_an_adopted_item_is_refused() {
         }
         other => panic!("unexpected {other:?}"),
     }
+}
+
+// -- write-through: create and update (WI-1068) ----------------------------
+
+/// The subject the Forgejo stand-in answers every issue write with.
+const CREATED: &str = "forge:forge.example.net/acme/Widgets#12";
+
+/// A linked `acme` with write-back armed, onboarded so its issues resolve.
+fn armed() -> (Built, crate::application::services::forge_ops_test::Forgejo) {
+    let (built, forgejo) = forgejo_with(four_issues(), true);
+    writeback_op(
+        &built,
+        json!({"project": SLUG, "policy": "full", "reason": WHY}),
+    )
+    .unwrap();
+    forgejo.requests.lock().unwrap().clear();
+    forgejo.bodies.lock().unwrap().clear();
+    (built, forgejo)
+}
+
+fn overlay(built: &Built, subject: &str) -> Option<crate::core::WorkOverlay> {
+    let Built::StepSequential(ctx) = built else {
+        panic!("expected a step clock");
+    };
+    ctx.declared.read().unwrap().work_overlay(subject).unwrap()
+}
+
+/// A create on a linked project opens the issue upstream, and its subject key
+/// is the ref; the overlay carries the vogt-local fields and the ledger records
+/// the write.
+#[test]
+fn create_on_linked_opens_the_issue_and_keys_the_overlay() {
+    let (built, forgejo) = armed();
+    create_label_op(&built, json!({"name": "bug-ish", "reason": WHY})).unwrap();
+    let created = create_op(
+        &built,
+        json!({"kind": "bug", "title": "Retries forever", "body": "The loop never backs off.",
+               "priority": "p1", "project": SLUG, "labels": ["bug-ish"], "reason": WHY}),
+    )
+    .unwrap();
+
+    assert_eq!(reference(&created), CREATED, "the subject key is the ref");
+    assert_eq!(created["item"]["id"], json!(CREATED));
+    assert_eq!(created["item"]["origin"], json!("observed"));
+    // Forgejo opens the issue, then attaches the labels in a second write.
+    let mutations = forgejo.mutations();
+    assert!(
+        mutations[0].starts_with("POST ") && mutations[0].ends_with("/issues"),
+        "{mutations:?}"
+    );
+    assert!(
+        mutations[1..].iter().all(|m| m.ends_with("/labels")),
+        "{mutations:?}"
+    );
+    let bodies = forgejo.bodies.lock().unwrap().clone();
+    assert_eq!(bodies[0]["title"], json!("Retries forever"));
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.to_string().contains("bug-ish")),
+        "labels travel upstream at create: {bodies:?}"
+    );
+
+    let stored = overlay(&built, CREATED).expect("the keyed overlay row exists");
+    assert_eq!(stored.priority, Some(crate::core::Priority::P1));
+    assert_eq!(stored.workflow_state.as_deref(), Some("open"));
+
+    let ledger = writeback_list_op(&built, json!({})).unwrap();
+    let actions = ledger["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1, "{ledger}");
+    assert_eq!(actions[0]["action"], json!("create"));
+    assert_eq!(actions[0]["outcome"], json!("succeeded"));
+    assert_eq!(actions[0]["subject_key"], json!(CREATED));
+}
+
+/// A create the forge refuses raises and stores nothing: no overlay and no
+/// `work.create` audit row.
+#[test]
+fn a_failed_create_raises_and_commits_nothing() {
+    let (built, _forgejo) = armed();
+    // Every write now fails on the forge side.
+    let Built::StepSequential(ctx) = built else {
+        panic!("expected a step clock");
+    };
+    let built = Built::StepSequential(ctx.with_forge_transport(|_url, _headers, _body, method| {
+        if method == "GET" {
+            (200, b"[]".to_vec(), std::collections::BTreeMap::new())
+        } else {
+            (500, b"{}".to_vec(), std::collections::BTreeMap::new())
+        }
+    }));
+    let refused = create_op(
+        &built,
+        json!({"kind": "bug", "title": "Lost", "project": SLUG, "reason": WHY}),
+    );
+    assert!(
+        matches!(refused, Err(VogtError::UpstreamWriteFailed(_))),
+        "{refused:?}"
+    );
+    assert!(overlay(&built, CREATED).is_none(), "no overlay row");
+    let audit = audit_list_op(&built, json!({"limit": 100})).unwrap();
+    assert!(
+        !audit.to_string().contains("\"work.create\""),
+        "a create the forge refused is not on the record: {audit}"
+    );
+}
+
+/// Priority and effort on an upstream item are overlay-only: nothing is sent.
+#[test]
+fn update_of_an_upstream_item_is_overlay_only() {
+    let (built, forgejo) = armed();
+    onboard(&built);
+    forgejo.requests.lock().unwrap().clear();
+    let updated = update_op(
+        &built,
+        json!({"ref": subject(9), "priority": "p0", "effort": "s", "reason": WHY}),
+    )
+    .unwrap();
+    assert_eq!(updated["item"]["priority"], json!("p0"));
+    assert!(forgejo.mutations().is_empty(), "{:?}", forgejo.mutations());
+    let stored = overlay(&built, &subject(9)).expect("overlay written");
+    assert_eq!(stored.priority, Some(crate::core::Priority::P0));
+    assert_eq!(stored.effort, Some(crate::core::Effort::S));
+}
+
+/// Label adds write through; removals are refused as append-only.
+#[test]
+fn label_adds_write_through_and_removals_are_refused() {
+    let (built, forgejo) = armed();
+    create_label_op(&built, json!({"name": "shared", "reason": WHY})).unwrap();
+    onboard(&built);
+    forgejo.requests.lock().unwrap().clear();
+    forgejo.bodies.lock().unwrap().clear();
+
+    let updated = update_op(
+        &built,
+        json!({"ref": subject(9), "add_labels": ["shared"], "reason": WHY}),
+    )
+    .unwrap();
+    assert!(
+        updated["item"]["labels"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("shared")),
+        "{updated}"
+    );
+    assert_eq!(forgejo.mutations().len(), 1, "{:?}", forgejo.mutations());
+    assert_eq!(
+        forgejo.bodies.lock().unwrap().last().cloned(),
+        Some(json!({"labels": ["shared"]}))
+    );
+    let ledger = writeback_list_op(&built, json!({})).unwrap();
+    assert_eq!(ledger["actions"][0]["action"], json!("label"), "{ledger}");
+
+    match update_op(
+        &built,
+        json!({"ref": subject(9), "remove_labels": ["shared"], "reason": WHY}),
+    ) {
+        Err(VogtError::InvalidRequest(message)) => {
+            assert!(message.contains("append-only"), "{message}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// Title and body are upstream truth: an edit is refused before anything is sent.
+#[test]
+fn title_and_body_edits_on_an_upstream_item_are_refused() {
+    let (built, forgejo) = armed();
+    onboard(&built);
+    forgejo.requests.lock().unwrap().clear();
+    for edit in [json!({"title": "New"}), json!({"body": "New"})] {
+        let mut params = json!({"ref": subject(9), "reason": WHY});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(edit.as_object().unwrap().clone());
+        match update_op(&built, params) {
+            Err(VogtError::InvalidRequest(message)) => {
+                assert!(message.contains("upstream truth"), "{message}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(forgejo.mutations().is_empty());
 }
