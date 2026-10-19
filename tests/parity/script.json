@@ -2264,6 +2264,69 @@
     "exit": 0
    },
    "why": "B5: a refused write leaves the stored filter as it was"
+  },
+  {
+   "why": "WI-1073: agent CLI versions are a stated answer even with no engine configured",
+   "operation": "agent_cli.list",
+   "cli": [
+    "agent-cli",
+    "list"
+   ],
+   "params": {},
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/agent-clis",
+    "auth": "admin",
+    "status": 200
+   }
+  },
+  {
+   "why": "WI-1073: updating an agent CLI needs the engine; with none configured it is refused",
+   "operation": "agent_cli.update",
+   "cli": [
+    "agent-cli",
+    "update"
+   ],
+   "params": {
+    "tool": "claude-code",
+    "version": "image",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "invalid_request"
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/agent-clis/update",
+    "auth": "admin",
+    "body": {
+     "tool": "claude-code",
+     "version": "image",
+     "reason": "parity"
+    },
+    "status": 400,
+    "error_code": "invalid_request"
+   }
+  },
+  {
+   "why": "WI-1073: connect with no public_url says so rather than guessing; over HTTP it is not mounted under /api",
+   "operation": "connect",
+   "cli": [
+    "connect"
+   ],
+   "params": {},
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/connect",
+    "status": 404
+   }
   }
  ]
 }
