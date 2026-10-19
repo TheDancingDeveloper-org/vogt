@@ -146,7 +146,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_sessions.py | ported | `application/services/sessions.rs`. |
 | test_storage.py | ported | `storage/sqlite/declared.rs` (atomicity, revisions, sessions, tokens). |
 | test_test_hooks.py | retired | Deterministic hooks for the in-process golden recorder. The black-box harness records out of process and does not use them. |
-| test_transcript_index.py | unported | Conversation-id index behind transcript lookup (WI-1413). Deferred to WI-1074. |
+| test_transcript_index.py | ported | `engine/core/src/adapters/transcripts.rs` tests (6): lookup results for Claude/Codex ids, missing ids, new files, non-uuid Codex names (by_id now keys Codex by uuid tail or whole stem, as Python), symlinks. Scan-count and TTL assertions unported: Rust has no cached conversation-id index (WI-1413); deferred to WI-1074. |
 | test_trust_confirmation.py | ported | Trust-from-last-confirmed in `application/views.rs`. |
 | test_unlinked_surfaces.py | ported | Unlinked-project honesty in `application/projects.rs` and the views. |
 | test_upgrade_data_volume.py | retired | Compose data-volume upgrade smoke. Deployment, not a core unit test. The migrator's upgrade-with-data cases cover the product half. |

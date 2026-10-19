@@ -364,11 +364,12 @@ fn by_id(agent: &str, root: &Path, conversation_id: &str) -> Option<PathBuf> {
         }
         return None;
     }
-    let suffix = format!("-{conversation_id}.jsonl");
+    // Keyed as Python's index keys a rollout: the uuid tail of its stem, or
+    // the whole stem when it has none. Newest dates come first.
     codex_files(root).find(|path| {
-        path.file_name()
+        path.file_stem()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with(&suffix))
+            .is_some_and(|stem| uuid_tail(stem).as_deref().unwrap_or(stem) == conversation_id)
     })
 }
 
@@ -1289,5 +1290,110 @@ mod tests {
         };
         assert_eq!(runtime(&found), (None, None));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    // -- test_transcript_index.py (WI-1080) ----------------------------------
+    // The scan-count and TTL cases need Python's cached conversation-id index
+    // (WI-1413), which the Rust core does not have; only lookup results are
+    // ported here.
+
+    fn claude_root(base: &Path, sessions: usize, decoys: usize) -> PathBuf {
+        let root = base.join("claude");
+        for n in 0..decoys {
+            fs::create_dir_all(root.join(format!("dir-{n:05}"))).unwrap();
+        }
+        let keep = root.join("dir-keep");
+        fs::create_dir_all(&keep).unwrap();
+        for n in 0..sessions {
+            fs::write(keep.join(format!("conv-{n:05}.jsonl")), "{}\n").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn many_lookups_each_find_their_transcript() {
+        let tmp = temp();
+        let root = claude_root(tmp.as_path(), 70, 300);
+        for n in 0..70 {
+            let found = by_id("claude", &root, &format!("conv-{n:05}")).unwrap();
+            assert_eq!(
+                found.file_name().unwrap().to_str().unwrap(),
+                format!("conv-{n:05}.jsonl")
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_claude_id_is_none() {
+        let tmp = temp();
+        let root = claude_root(tmp.as_path(), 1, 50);
+        for _ in 0..40 {
+            assert!(by_id("claude", &root, "does-not-exist").is_none());
+        }
+    }
+
+    #[test]
+    fn a_new_claude_file_is_found() {
+        let tmp = temp();
+        let root = claude_root(tmp.as_path(), 1, 2);
+        assert!(by_id("claude", &root, "conv-00000").is_some());
+        fs::write(root.join("dir-keep").join("conv-new.jsonl"), "{}\n").unwrap();
+        let found = by_id("claude", &root, "conv-new").unwrap();
+        assert_eq!(found.file_name().unwrap(), "conv-new.jsonl");
+    }
+
+    #[test]
+    fn codex_ids_resolve_repeatedly_and_a_new_file_in_the_same_day_is_found() {
+        let tmp = temp();
+        let root = tmp.as_path().join("codex");
+        let day = root.join("2026").join("10").join("14");
+        fs::create_dir_all(&day).unwrap();
+        let first = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        fs::write(
+            day.join(format!("rollout-2026-10-14T00-00-00-{first}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+        for _ in 0..10 {
+            assert!(by_id("codex", &root, first).is_some());
+        }
+        let second = "11111111-2222-4333-8444-555555555555";
+        fs::write(
+            day.join(format!("rollout-2026-10-14T01-00-00-{second}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+        let found = by_id("codex", &root, second).unwrap();
+        assert_eq!(found.parent().unwrap(), day);
+    }
+
+    #[test]
+    fn a_non_uuid_codex_name_still_resolves() {
+        let tmp = temp();
+        let day = tmp
+            .as_path()
+            .join("codex")
+            .join("2026")
+            .join("10")
+            .join("14");
+        fs::create_dir_all(&day).unwrap();
+        fs::write(day.join("rollout-session-7.jsonl"), "{}\n").unwrap();
+        let found = by_id("codex", &tmp.as_path().join("codex"), "rollout-session-7").unwrap();
+        assert_eq!(found.file_name().unwrap(), "rollout-session-7.jsonl");
+    }
+
+    #[test]
+    fn a_symlinked_transcript_is_followed() {
+        let tmp = temp();
+        let root = tmp.as_path().join("claude");
+        let real = tmp.as_path().join("elsewhere");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("conv-1.jsonl"), "{}\n").unwrap();
+        let link_dir = root.join("dir-keep");
+        fs::create_dir_all(&link_dir).unwrap();
+        std::os::unix::fs::symlink(real.join("conv-1.jsonl"), link_dir.join("conv-1.jsonl"))
+            .unwrap();
+        let found = by_id("claude", &root, "conv-1").unwrap();
+        assert_eq!(found.file_name().unwrap(), "conv-1.jsonl");
     }
 }
