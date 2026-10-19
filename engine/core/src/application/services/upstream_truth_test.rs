@@ -427,7 +427,6 @@ fn an_onboarded_issue_is_one_backlog_row() {
 // disposition row), so the reason names the review instead.
 
 #[test]
-#[ignore = "parity: the board lists declared rows only, so an upstream-only issue is missing (WI-1778, from WI-1745 review blocker 1)"]
 fn board_lists_an_upstream_only_issue_once() {
     let (built, _) = forgejo_with(three_issues(), true);
     onboard(&built);
@@ -448,7 +447,6 @@ fn board_lists_an_upstream_only_issue_once() {
 }
 
 #[test]
-#[ignore = "parity: page one carries no next_cursor and the cursor is not honoured on page two (WI-1778, from WI-1745 review blocker 1)"]
 fn the_board_pages_with_stable_cursors() {
     let (built, _) = forgejo_with(three_issues(), true);
     onboard(&built);
@@ -476,6 +474,7 @@ fn the_board_pages_with_stable_cursors() {
             "lane_mode": "none",
             "cells": [{"lane_key": "", "state": "open", "cursor": cursor}],
             "page_size": 2,
+            "snapshot": first["snapshot"],
         }),
     )
     .unwrap();

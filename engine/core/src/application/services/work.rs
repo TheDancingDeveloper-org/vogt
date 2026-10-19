@@ -24,8 +24,8 @@ use crate::application::services::forge_writeback::writer_provider;
 use crate::application::upstream;
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{
-    Clock, Comment, Effort, IdFactory, Origin, Priority, Project, TrustState, WorkItem, WorkKind,
-    WorkLink, WorkOverlay, WriteBackRecord, TERMINAL_STATES,
+    Clock, Comment, Effort, IdFactory, Moment, Origin, Priority, Project, TrustState, WorkItem,
+    WorkKind, WorkLink, WorkOverlay, WriteBackRecord, TERMINAL_STATES,
 };
 use crate::errors::VogtError;
 use crate::storage::interface::{
@@ -2197,6 +2197,127 @@ fn text_of(params: &Value, key: &str) -> Option<String> {
     params.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
+/// The lane an upstream item lands in, mirroring the SQL lane expression.
+fn board_upstream_lane(lane_mode: &str, item: &WorkItem) -> String {
+    match lane_mode {
+        "project" => item.project_slug.clone().unwrap_or_default(),
+        "initiative" => item.initiative_id.clone().unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn board_dump_high_water(high_water: Option<&(Moment, String)>) -> Value {
+    high_water.map_or(Value::Null, |(moment, reference)| {
+        json!([moment.to_iso(), reference])
+    })
+}
+
+fn board_decode(token: &str, kind: &str) -> Result<Value, VogtError> {
+    use base64::Engine;
+    let malformed = || VogtError::InvalidCursor(format!("Board {kind} token is malformed"));
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token.trim_end_matches('='))
+        .map_err(|_| malformed())?;
+    let decoded: Value = serde_json::from_slice(&raw).map_err(|_| malformed())?;
+    if decoded.get("kind").and_then(Value::as_str) != Some(kind) {
+        return Err(malformed());
+    }
+    Ok(decoded)
+}
+
+fn board_decode_high_water(token: &Value) -> Result<Option<(Moment, String)>, VogtError> {
+    let invalid =
+        || VogtError::InvalidCursor("Board snapshot has an invalid high-water mark".to_string());
+    match token.get("high_water") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(pair)) if pair.len() == 2 => {
+            let reference = pair[1].as_str().ok_or_else(invalid)?;
+            let moment = pair[0]
+                .as_str()
+                .and_then(|text| crate::core::from_iso(text).ok())
+                .ok_or_else(invalid)?;
+            Ok(Some((moment, reference.to_string())))
+        }
+        Some(_) => Err(invalid()),
+    }
+}
+
+fn board_cell_query(
+    cell: &Value,
+    fingerprint: &str,
+    revision: i64,
+    high_water: Option<&(Moment, String)>,
+) -> Result<crate::storage::interface::BoardCellQuery, VogtError> {
+    let lane_key = cell.get("lane_key").and_then(Value::as_str).unwrap_or("");
+    let state = cell.get("state").and_then(Value::as_str).unwrap_or("");
+    let mut query = crate::storage::interface::BoardCellQuery {
+        lane_key: lane_key.to_string(),
+        state: state.to_string(),
+        after_created_at: None,
+        after_ref: None,
+    };
+    let Some(cursor) = cell.get("cursor").and_then(Value::as_str) else {
+        return Ok(query);
+    };
+    let token = board_decode(cursor, "cell")?;
+    if token.get("fingerprint").and_then(Value::as_str) != Some(fingerprint)
+        || token.get("revision").and_then(Value::as_i64) != Some(revision)
+        || token.get("lane_key").and_then(Value::as_str) != Some(lane_key)
+        || token.get("state").and_then(Value::as_str) != Some(state)
+        || token.get("high_water").cloned().unwrap_or(Value::Null)
+            != board_dump_high_water(high_water)
+    {
+        return Err(VogtError::InvalidCursor(
+            "Board cell cursor belongs to another cell or snapshot".to_string(),
+        ));
+    }
+    let malformed = || VogtError::InvalidCursor("Board cell cursor is malformed".to_string());
+    query.after_created_at = Some(
+        token
+            .get("after_created_at")
+            .and_then(Value::as_str)
+            .and_then(|text| crate::core::from_iso(text).ok())
+            .ok_or_else(malformed)?,
+    );
+    query.after_ref = Some(
+        token
+            .get("after_ref")
+            .and_then(Value::as_str)
+            .ok_or_else(malformed)?
+            .to_string(),
+    );
+    Ok(query)
+}
+
+/// One cell's declared page merged with its upstream items in
+/// `(created_at, ref)` order. Each stream is complete up to `limit` rows past
+/// the cursor, so the first `limit` of the merge are the union's first.
+fn board_merge_cell(
+    declared: Vec<WorkItem>,
+    entries: &[(String, WorkItem)],
+    query: &crate::storage::interface::BoardCellQuery,
+    limit: usize,
+) -> Vec<WorkItem> {
+    let after = query.after_created_at.zip(query.after_ref.as_ref());
+    let mine: Vec<WorkItem> = entries
+        .iter()
+        .filter(|(lane, item)| *lane == query.lane_key && item.state == query.state)
+        .filter(|(_, item)| {
+            after.is_none_or(|(moment, reference)| {
+                (item.created_at, &item.reference) > (moment, reference)
+            })
+        })
+        .map(|(_, item)| item.clone())
+        .collect();
+    let mut merged = declared;
+    if !mine.is_empty() {
+        merged.extend(mine);
+        merged.sort_by(|a, b| (a.created_at, &a.reference).cmp(&(b.created_at, &b.reference)));
+    }
+    merged.truncate(limit);
+    merged
+}
+
 /// A bounded, snapshot-stable Board for native items.
 ///
 /// An unlinked project answers with empty cells and `link_state: "unlinked"`.
@@ -2225,6 +2346,30 @@ fn list_board<C: Clock, I: IdFactory>(
         .get("page_size")
         .and_then(Value::as_i64)
         .unwrap_or(25);
+    let mut seen = std::collections::BTreeSet::new();
+    for cell in &cells {
+        let lane_key = cell.get("lane_key").and_then(Value::as_str).unwrap_or("");
+        let state = cell.get("state").and_then(Value::as_str).unwrap_or("");
+        if !seen.insert((lane_key, state)) {
+            return Err(VogtError::InvalidRequest(format!(
+                "board.list cell {}/{} is duplicated",
+                crate::core::py_repr(lane_key),
+                crate::core::py_repr(state)
+            )));
+        }
+        if lane_mode == "none" && !lane_key.is_empty() {
+            return Err(VogtError::InvalidRequest(
+                "board.list lane_key must be blank in `none` mode".to_string(),
+            ));
+        }
+        if cell.get("cursor").is_some_and(|cursor| !cursor.is_null())
+            && params.get("snapshot").is_none_or(Value::is_null)
+        {
+            return Err(VogtError::InvalidCursor(
+                "a Board cell cursor requires its snapshot token".to_string(),
+            ));
+        }
+    }
     let view = ctx.declared.read()?;
     let project = params
         .get("project")
@@ -2279,28 +2424,111 @@ fn list_board<C: Clock, I: IdFactory>(
         kinds: strings(params.get("kinds")),
         states: strings(params.get("states")),
         priorities: strings(params.get("priorities")),
+        assignee_actor_id: params
+            .get("assignee")
+            .and_then(Value::as_str)
+            .map(|identity| resolve::actor(&view, identity).map(|actor| actor.id))
+            .transpose()?,
+        initiative_id: params
+            .get("initiative")
+            .and_then(Value::as_str)
+            .map(|slug| resolve::initiative(&view, slug).map(|initiative| initiative.id))
+            .transpose()?,
+        label: text_of(&params, "label"),
+        // The Board draws terminal columns when asked; the forge-less
+        // withdrawal keeps unlinked projects' native rows off the global Board.
+        exclude_terminal: false,
+        exclude_unlinked_native: true,
         ..WorkFilter::default()
     };
+    let excluded_unlinked = view.count_work_items(&WorkFilter {
+        exclude_unlinked_native: false,
+        ..filter.clone()
+    })? - view.count_work_items(&filter)?;
+    let fingerprint = board_fingerprint(&params);
     let revision = view.current_revision()?;
-    let high_water = view.board_high_water(&filter)?;
-    let queries: Vec<crate::storage::interface::BoardCellQuery> = cells
-        .iter()
-        .map(|cell| crate::storage::interface::BoardCellQuery {
-            lane_key: cell
-                .get("lane_key")
+
+    // The upstream-truth half: linked projects' items live in the observed
+    // mirror + overlay, not in `work_items`, so they are merged into every
+    // count and page here, each issue once (adopted subjects are excluded).
+    let mut upstream_entries: Vec<(String, WorkItem)> = Vec::new();
+    for linked in upstream::linked_projects(&view, project.as_ref())? {
+        for item in upstream::upstream_items(ctx, &view, &linked, true, 1000)? {
+            if upstream::matches(&item, &filter) {
+                upstream_entries.push((board_upstream_lane(lane_mode, &item), item));
+            }
+        }
+    }
+    upstream_entries
+        .sort_by(|a, b| (a.1.created_at, &a.1.reference).cmp(&(b.1.created_at, &b.1.reference)));
+
+    let (high_water, snapshot_at, snapshot) = match params.get("snapshot").and_then(Value::as_str) {
+        Some(token) => {
+            let decoded = board_decode(token, "snapshot")?;
+            if decoded.get("fingerprint").and_then(Value::as_str) != Some(fingerprint.as_str()) {
+                return Err(VogtError::InvalidCursor(
+                    "Board snapshot belongs to another filter or lane mode".to_string(),
+                ));
+            }
+            if decoded.get("revision").and_then(Value::as_i64) != Some(revision) {
+                return Err(VogtError::InvalidCursor(
+                    "Board snapshot is stale because declared work changed; refresh the Board"
+                        .to_string(),
+                ));
+            }
+            let high_water = board_decode_high_water(&decoded)?;
+            let snapshot_at = decoded
+                .get("snapshot_at")
                 .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            state: cell
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            after_created_at: None,
-            after_ref: None,
+                .and_then(|text| crate::core::from_iso(text).ok())
+                .ok_or_else(|| {
+                    VogtError::InvalidCursor("Board snapshot has an invalid timestamp".to_string())
+                })?;
+            (high_water, snapshot_at, token.to_string())
+        }
+        None => {
+            let mut high_water = view.board_high_water(&filter)?;
+            if let Some(last) = upstream_entries
+                .iter()
+                .map(|(_, item)| (item.created_at, item.reference.clone()))
+                .max()
+            {
+                if high_water.as_ref().is_none_or(|mark| &last > mark) {
+                    high_water = Some(last);
+                }
+            }
+            let snapshot_at = super::now_of(&ctx.clock);
+            let snapshot = board_token(&json!({
+                "kind": "snapshot",
+                "fingerprint": fingerprint,
+                "revision": revision,
+                "snapshot_at": snapshot_at.to_iso(),
+                "high_water": board_dump_high_water(high_water.as_ref()),
+            }));
+            (high_water, snapshot_at, snapshot)
+        }
+    };
+    upstream_entries.retain(|(_, item)| {
+        high_water.as_ref().is_some_and(|(moment, reference)| {
+            (item.created_at, &item.reference) <= (*moment, reference)
         })
-        .collect();
-    let counts = view.board_counts(&filter, lane_mode, high_water.as_ref())?;
+    });
+
+    let mut queries = Vec::with_capacity(cells.len());
+    for cell in &cells {
+        queries.push(board_cell_query(
+            cell,
+            &fingerprint,
+            revision,
+            high_water.as_ref(),
+        )?);
+    }
+    let mut counts = view.board_counts(&filter, lane_mode, high_water.as_ref())?;
+    for (lane, item) in &upstream_entries {
+        *counts
+            .entry((lane.clone(), item.state.clone()))
+            .or_insert(0) += 1;
+    }
     let pages = view.board_work_items(
         &filter,
         lane_mode,
@@ -2318,29 +2546,36 @@ fn list_board<C: Clock, I: IdFactory>(
         let lane_total = lane_totals.entry(lane.clone()).or_insert(json!(0));
         *lane_total = json!(lane_total.as_i64().unwrap_or(0) + count);
     }
+    let limit = (page_size + 1).max(0) as usize;
     let rendered: Vec<Value> = queries
         .iter()
         .map(|query| {
             let key = (query.lane_key.clone(), query.state.clone());
-            let fetched = pages.get(&key).cloned().unwrap_or_default();
+            let declared = pages.get(&key).cloned().unwrap_or_default();
+            let fetched = board_merge_cell(declared, &upstream_entries, query, limit);
             let shown: Vec<&WorkItem> = fetched.iter().take(page_size.max(0) as usize).collect();
+            let next_cursor = match shown.last() {
+                Some(last) if fetched.len() > shown.len() => Value::String(board_token(&json!({
+                    "kind": "cell",
+                    "fingerprint": fingerprint,
+                    "revision": revision,
+                    "high_water": board_dump_high_water(high_water.as_ref()),
+                    "lane_key": query.lane_key,
+                    "state": last.state,
+                    "after_created_at": last.created_at.to_iso(),
+                    "after_ref": last.reference,
+                }))),
+                _ => Value::Null,
+            };
             json!({
                 "lane_key": query.lane_key,
                 "state": query.state,
                 "items": shown,
                 "total": counts.get(&key).copied().unwrap_or(0),
-                "next_cursor": if fetched.len() > shown.len() { Value::String("more".into()) } else { Value::Null },
+                "next_cursor": next_cursor,
             })
         })
         .collect();
-    let snapshot_at = super::now_of(&ctx.clock);
-    let snapshot = board_token(&json!({
-        "kind": "snapshot",
-        "fingerprint": board_fingerprint(&params),
-        "revision": revision,
-        "snapshot_at": snapshot_at.to_iso(),
-        "high_water": high_water.as_ref().map(|(moment, reference)| json!([moment.to_iso(), reference])),
-    }));
     // Python's `candidate_population`, read after the snapshot as Python reads
     // the clock: the observed-inclusive count and the declared-only count.
     let (backlog_candidates, declared_total) = crate::application::views::candidate_population(
@@ -2360,7 +2595,7 @@ fn list_board<C: Clock, I: IdFactory>(
         "backlog_candidates": backlog_candidates,
         "declared_total": declared_total,
         "link_state": project.as_ref().map(|_| "linked"),
-        "excluded_unlinked": 0,
+        "excluded_unlinked": excluded_unlinked,
         "snapshot": snapshot,
         "snapshot_at": snapshot_at,
         "revision": revision,
@@ -2706,8 +2941,10 @@ mod tests {
         )
         .unwrap();
         let board = list_board(ctx, json!({"cells": [{"lane_key": "", "state": "open"}]})).unwrap();
-        assert_eq!(board["total"], 1);
-        assert_eq!(board["cells"][0]["items"][0]["ref"], "WI-1");
+        // An unlinked project's native rows are withdrawn from the global
+        // Board, as in Python, and reported as `excluded_unlinked`.
+        assert_eq!(board["total"], 0);
+        assert_eq!(board["excluded_unlinked"], 1);
     }
 
     #[test]
