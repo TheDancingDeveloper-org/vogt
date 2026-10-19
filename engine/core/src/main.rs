@@ -825,7 +825,21 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
             data_dir.display()
         );
     }
+    let metrics_addr = match adapters::http::metrics::addr_from_env(
+        std::env::var(adapters::http::metrics::METRICS_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        Ok(addr) => addr,
+        Err(err) => {
+            eprintln!("vogt-core serve: {err}");
+            return ExitCode::from(2);
+        }
+    };
     let result = runtime.block_on(async move {
+        if let Some(addr) = metrics_addr {
+            adapters::http::metrics::start(addr).await?;
+        }
         match tls_cert {
             Some(pem) => {
                 let tls = load_tls(pem, tls_key)?;
