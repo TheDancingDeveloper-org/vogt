@@ -38,6 +38,8 @@ pub mod suppressions;
 pub mod taxonomy;
 pub mod upstream;
 pub mod views;
+#[cfg(test)]
+mod workspace_disk_test;
 pub mod writes;
 #[cfg(test)]
 mod writes_test;
