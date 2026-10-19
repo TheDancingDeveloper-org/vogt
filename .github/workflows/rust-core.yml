@@ -319,11 +319,10 @@ jobs:
         run: uv run python scripts/drift_ledger.py
 
   coverage:
-    name: line coverage >= 79%
-    # The Python gate was pytest --cov-fail-under=80. Measured line coverage
-    # of engine/core is 79.72% (cargo llvm-cov 0.6.16, the whole crate, tests
-    # included, at the WI-1080 rebase onto rust-core 77ef27b6). The floor is
-    # that measurement rounded down, and it only moves up.
+    name: line coverage >= 80%
+    # The Python gate was pytest --cov-fail-under=80, and this floor matches
+    # it. Measured line coverage of engine/core is 80.22% (the whole crate,
+    # tests included, at rust-core a5ac4cba; WI-1080). It only moves up.
     # See docs/PYTHON_TEST_DISPOSITION.md.
     runs-on: [self-hosted, bigmem]
     timeout-minutes: 45
@@ -345,4 +344,4 @@ jobs:
 
       - name: line coverage
         working-directory: engine
-        run: cargo llvm-cov -p vogt-core --fail-under-lines 79
+        run: cargo llvm-cov -p vogt-core --fail-under-lines 80
