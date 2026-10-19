@@ -1878,6 +1878,7 @@
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "initiative.publish"
   },
@@ -1910,6 +1911,7 @@
   },
   {
     "body": null,
+    "error_code": "preference_version_conflict",
     "exit": 1,
     "operation": "preference.set"
   },
@@ -1998,16 +2000,19 @@
   },
   {
     "body": null,
+    "error_code": "inbox_entry_not_found",
     "exit": 1,
     "operation": "inbox.archive"
   },
   {
     "body": null,
+    "error_code": "invalid_snooze",
     "exit": 1,
     "operation": "inbox.snooze"
   },
   {
     "body": null,
+    "error_code": "inbox_entry_not_found",
     "exit": 1,
     "operation": "inbox.restore"
   },
@@ -2117,6 +2122,7 @@
   },
   {
     "body": null,
+    "error_code": "project_not_linked",
     "exit": 1,
     "operation": "work.create"
   },
@@ -2151,6 +2157,7 @@
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "work.list"
   },
@@ -2436,6 +2443,7 @@
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "backlog"
   },
@@ -2464,11 +2472,13 @@
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "bugs"
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "deps"
   },
@@ -2637,6 +2647,7 @@
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "forge.repos"
   },
@@ -2649,36 +2660,43 @@
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "forge.account_link"
   },
   {
     "body": null,
+    "error_code": "forge_link_refused",
     "exit": 1,
     "operation": "forge.link"
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "forge.link"
   },
   {
     "body": null,
+    "error_code": "forge_publish_refused",
     "exit": 1,
     "operation": "forge.publish"
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "forge.publish"
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "forge.import"
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "forge.import"
   },
@@ -2701,11 +2719,13 @@
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "forge.onboard"
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "forge.account_unlink"
   },
@@ -2774,6 +2794,7 @@
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "why"
   },
@@ -2936,11 +2957,13 @@
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "work.bind_branch"
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "work.adopt"
   },
@@ -3416,51 +3439,61 @@
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.start"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.input"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.screen"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.wait"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.answer"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.hibernate"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.keep_awake"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.set_role"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.wake"
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "session.stop"
   },
@@ -3562,11 +3595,13 @@
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "session.bind_work"
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "session.last_reply"
   },
@@ -3580,36 +3615,43 @@
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.report_blocked"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.report_unblocked"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.changes"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.wait_any"
   },
   {
     "body": null,
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "session.commit_for"
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "session.economics"
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "session.digest"
   },
@@ -3638,12 +3680,14 @@
   {
     "body": null,
     "error": "error: engine_unavailable: no session engine is configured, and chats run on it (set VOGT_ENGINE_URL)",
+    "error_code": "engine_unavailable",
     "exit": 1,
     "operation": "chat.list"
   },
   {
     "body": null,
     "error": "error: invalid_request: 'nope' is not a chat id (a UUID, from chat.list or chat.create)",
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "chat.get"
   },
@@ -3730,6 +3774,7 @@
   {
     "body": null,
     "error": "error: invalid arguments for token.issue:",
+    "error_code": null,
     "exit": 2,
     "operation": "token.issue"
   },
@@ -3849,12 +3894,14 @@
   {
     "body": null,
     "error": "error: conflict: <root>/backup already exists and is not empty",
+    "error_code": "conflict",
     "exit": 1,
     "operation": "backup"
   },
   {
     "body": null,
     "error": "error: invalid_request: this replaces the stores in <root>/instance with the backup taken at 2026-01-02T03:04:05+00:00. Pass --confirm.",
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "restore"
   },
@@ -4113,26 +4160,31 @@
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "clone"
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "clone"
   },
   {
     "body": null,
+    "error_code": "not_found",
     "exit": 1,
     "operation": "clone"
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "project.import"
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "project.import"
   },
@@ -4493,11 +4545,13 @@
   },
   {
     "body": null,
+    "error_code": "conflict",
     "exit": 1,
     "operation": "decision.answer"
   },
   {
     "body": null,
+    "error_code": "invalid_request",
     "exit": 1,
     "operation": "decision.answer"
   },
@@ -4638,11 +4692,13 @@
   },
   {
     "body": null,
+    "error_code": "invalid_preference",
     "exit": 1,
     "operation": "preference.set"
   },
   {
     "body": null,
+    "error_code": "invalid_preference",
     "exit": 1,
     "operation": "preference.set"
   },

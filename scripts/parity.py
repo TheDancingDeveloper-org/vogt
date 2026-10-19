@@ -41,6 +41,17 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO / "tests" / "parity" / "script.json"
 RULES_PATH = REPO / "tests" / "parity" / "normalise.toml"
 CLOCK_START = "2026-01-02T03:04:05+00:00"
+# Bumped whenever the shape of what `record` writes changes, so a golden says
+# which recorder made it. 2: error codes on failing steps, audit trails,
+# asserted HTTP status (WI-1046).
+RECORDER_VERSION = 2
+ERRORS_PATH = REPO / "tests" / "parity" / "errors.json"
+GOLDEN_ROOT = REPO / "tests" / "parity" / "golden"
+# `error: <code>: <message>` on the CLI, `<code>: <message>` in an MCP error.
+# A CLI line without a code (`error: invalid arguments for ...`, exit 2) has
+# none: the CLI refuses before the core raises a typed error.
+CLI_ERROR_CODE = re.compile(r"^error: ([a-z][a-z0-9_]*): ")
+MCP_ERROR_CODE = re.compile(r"^([a-z][a-z0-9_]*): ")
 
 BINS = {
     "python": ("VOGT_PARITY_PYTHON_BIN", "vogt"),
@@ -62,10 +73,23 @@ def main(argv: list[str] | None = None) -> int:
             cmd.add_argument("--golden", type=Path, required=True)
     probe = sub.add_parser("selftest")
     probe.add_argument("--golden", type=Path, required=True)
+    contract = sub.add_parser(
+        "contract", help="cli-help.txt, CONFIG.md and config.example.toml"
+    )
+    contract.add_argument("--impl", choices=sorted(BINS), required=True)
+    contract.add_argument("--golden", type=Path, default=GOLDEN_ROOT)
+    contract.add_argument("--write", action="store_true")
+    errors = sub.add_parser("errors", help="derive tests/parity/errors.json")
+    errors.add_argument("--golden", type=Path, required=True)
+    errors.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "selftest":
         return _selftest(args.golden)
+    if args.command == "contract":
+        return _contract(_resolve(args.impl), args.impl, args.golden, args.write)
+    if args.command == "errors":
+        return _errors(args.golden, args.check)
 
     binary = _resolve(args.impl)
     # `--only dump` runs the whole script and keeps only the dumps: a dump
@@ -75,16 +99,22 @@ def main(argv: list[str] | None = None) -> int:
     if not steps and args.only != "dump":
         print(f"no steps match --only {args.only!r}", file=sys.stderr)
         return 2
-    recorded = _run(binary, steps, args.transport)
+    recorded, audit = _run(binary, steps, args.transport)
+    audit_name = f"audit.{args.transport}.json"
 
     if args.command == "record":
         args.out.mkdir(parents=True, exist_ok=True)
         target = args.out / f"{args.transport}.json"
         target.write_text(json.dumps(recorded, indent=2, sort_keys=True) + "\n")
+        if not args.only:
+            (args.out / audit_name).write_text(
+                json.dumps(audit, indent=2, sort_keys=True) + "\n"
+            )
         meta = {
             "main_sha": _merge_base(),
             "recorded_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "recorder": "scripts/parity.py",
+            "recorder_version": RECORDER_VERSION,
         }
         (args.out / "meta.json").write_text(
             json.dumps(meta, indent=2, sort_keys=True) + "\n"
@@ -93,6 +123,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     golden = json.loads((args.golden / f"{args.transport}.json").read_text())
+    if not args.only:
+        # The audit trail is the whole run's, so only a full run compares it.
+        trail = json.loads((args.golden / audit_name).read_text())
+        if _diff(trail, audit, audit_name) != 0:
+            print(f"{audit_name} differs from the golden", file=sys.stderr)
+            _diff(golden, recorded, args.only)
+            return 1
     if args.only == "dump":
         golden = [step for step in golden if step["operation"].startswith("dump.")]
         # A dump run executes the whole script so each mid-script dump sees the
@@ -162,12 +199,42 @@ def _prepare_init(root: Path, env: dict[str, str]) -> dict[str, str]:
 
 def _run(
     binary: str, steps: list[dict[str, Any]], transport: str
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The answers, and the declared audit trail the run left behind."""
     if transport == "http":
         return _run_http(binary, steps)
     if transport == "mcp":
         return _run_mcp(binary, steps)
     return _run_cli(binary, steps)
+
+
+def _audit_trail(data: Path) -> list[dict[str, Any]]:
+    """The declared `audit` rows at the end of a run, normalised.
+
+    Payload digests are blanked as a mid-script dump blanks them: a project's
+    payload names the run's scratch root, which differs between transports
+    and, for the CLI and HTTP runs, between runs.
+    """
+    rows = _dump(data, ("declared",))["declared"].get("audit") or []
+    for row in rows:
+        if "payload_digest" in row:
+            row["payload_digest"] = "<payload-digest>"
+    return rows
+
+
+def _error_code(text: str | None, pattern: re.Pattern[str]) -> str | None:
+    match = pattern.match(text or "")
+    return match.group(1) if match else None
+
+
+def _expect_code(step: dict[str, Any], key: str, got: str | None, where: str) -> None:
+    """Fail the run when a step names the error code it must answer with."""
+    want = step["expect"].get(key) if key in step.get("expect", {}) else None
+    if key in step.get("expect", {}) and got != want:
+        raise SystemExit(
+            f"{step['operation']} over {where} answered error code {got!r}, "
+            f"wanted {want!r}"
+        )
 
 
 @contextlib.contextmanager
@@ -336,17 +403,29 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     except json.JSONDecodeError:
                         body = {"text": text}
                     seen[step["operation"]] = body
+                    is_error = bool(result.get("isError", False))
                     answer = {
                         "operation": step["operation"],
-                        "is_error": bool(result.get("isError", False)),
+                        "is_error": is_error,
                         "body": _normalise(body, root, data, step["operation"]),
                     }
+                    code = _error_code(text, MCP_ERROR_CODE) if is_error else None
+                    if is_error:
+                        answer["error_code"] = code
+                    key = (
+                        "mcp_error_code"
+                        if "mcp_error_code" in step.get("expect", {})
+                        else "error_code"
+                    )
+                    if step.get("expect", {}).get("exit", 0) != 0 or is_error:
+                        _expect_code(step, key, code, "MCP")
                 recorded.append(answer)
+            audit = _audit_trail(data)
         finally:
             if server is not None:
                 server.close()
             engine.__exit__(None, None, None)
-    return recorded
+    return recorded, audit
 
 
 def _child_env() -> dict[str, str]:
@@ -517,25 +596,37 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "body": _normalise(reply, root, data, step["operation"]),
             }
             # A failure writes nothing to stdout, so the exit alone cannot say
-            # which refusal it was. Keep the error line, with the data
-            # directory blanked the way every other path is.
-            if completed.returncode != 0 and expect.get("capture_error"):
+            # which refusal it was. The error code is always kept; the whole
+            # error line, with the data directory blanked the way every other
+            # path is, when the step asks for it.
+            if completed.returncode != 0:
                 # The hooks banner is printed on every line of a parity run;
                 # the error line is the one the step is there to pin down.
+                lines = completed.stderr.strip().splitlines()
                 line = next(
-                    (
-                        item
-                        for item in reversed(completed.stderr.strip().splitlines())
-                        if item.startswith("error:")
-                    ),
-                    completed.stderr.strip(),
+                    (item for item in reversed(lines) if item.startswith("error:")),
+                    None,
                 )
-                answer["error"] = _normalise(line, root, data, step["operation"])
+                if line is None:
+                    # argparse refuses with `<prog>: error: ...` and exit 2.
+                    usage = next(
+                        (item for item in reversed(lines) if ": error: " in item),
+                        None,
+                    )
+                    code = "usage" if usage is not None else None
+                    line = usage or completed.stderr.strip()
+                else:
+                    code = _error_code(line, CLI_ERROR_CODE)
+                answer["error_code"] = code
+                _expect_code(step, "error_code", code, "the CLI")
+                if expect.get("capture_error"):
+                    answer["error"] = _normalise(line, root, data, step["operation"])
             answers.append(answer)
+        audit = _audit_trail(data)
     finally:
         engine.__exit__(None, None, None)
         shutil.rmtree(root, ignore_errors=True)
-    return answers
+    return answers, audit
 
 
 def _dump_names(step: dict[str, Any]) -> tuple[str, ...]:
@@ -748,6 +839,19 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         ),
                     }
                 )
+                if "status" in spec and status != spec["status"]:
+                    raise SystemExit(
+                        f"{step['operation']} over HTTP answered {status}, "
+                        f"wanted {spec['status']}: {result!r}"
+                    )
+                if "error_code" in spec:
+                    error = result.get("error") if isinstance(result, dict) else None
+                    code = error.get("code") if isinstance(error, dict) else None
+                    if code != spec["error_code"]:
+                        raise SystemExit(
+                            f"{step['operation']} over HTTP answered error code "
+                            f"{code!r}, wanted {spec['error_code']!r}"
+                        )
                 if "capture" in spec:
                     # `admin` is the install's operator token, `token` the one
                     # token.issue mints, and `session` the login's session. The
@@ -764,10 +868,11 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             dumped = _normalise(_dump(data), Path(scratch), data)["declared"]
             _mark_token_hash(dumped, secrets)
             recorded.append({"operation": "dump", "result": dumped})
+            audit = _audit_trail(data)
         finally:
             server.terminate()
             server.wait(timeout=10)
-    return recorded
+    return recorded, audit
 
 
 def _wait_until(url: str, server: subprocess.Popen[str], attempts: int = 50) -> None:
@@ -897,14 +1002,214 @@ def _walk(
     return value
 
 
+_SUBCOMMAND_HEADER = re.compile(r"^  <(?:command|subcommand)>$")
+_SUBCOMMAND = re.compile(r"^    (\S+)")
+
+
+def _help_tree(binary: str) -> str:
+    """Every `--help` page, depth first, each under a `$ vogt ...` header.
+
+    The width is pinned so argparse wraps the same on every terminal. The
+    program name is written as `vogt` whatever the binary is called.
+    """
+    env = {**_child_env(), "COLUMNS": "80"}
+    pages: list[str] = []
+
+    def visit(words: list[str]) -> None:
+        completed = subprocess.run(
+            [binary, *words, "--help"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        text = completed.stdout
+        pages.append(
+            f"$ vogt {' '.join([*words, '--help'])}\n"
+            f"[exit {completed.returncode}]\n{text}"
+        )
+        children: list[str] = []
+        inside = False
+        for line in text.splitlines():
+            if _SUBCOMMAND_HEADER.match(line):
+                inside = True
+                continue
+            if inside:
+                if not line.startswith("    "):
+                    inside = False
+                    continue
+                match = _SUBCOMMAND.match(line)
+                if match:
+                    children.append(match.group(1))
+        for child in children:
+            visit([*words, child])
+
+    visit([])
+    return "\n".join(pages)
+
+
+def _config_artifacts(binary: str, impl: str) -> dict[str, str]:
+    """CONFIG.md and config.example.toml as the implementation renders them.
+
+    Python renders them from `vogt.config.config_artifacts`, the source
+    `gen_config_docs.py` writes into the tree. The Rust core has no renderer
+    yet; its config surface is compared through the CLI help and the answers,
+    so for Rust these goldens are reported as not comparable rather than
+    silently passed.
+    """
+    if impl != "python":
+        return {}
+    sys.path.insert(0, str(REPO / "src"))
+    from vogt.config import config_artifacts
+
+    rendered = config_artifacts(REPO)
+    return {path.name: content for path, content in rendered.items()}
+
+
+def _contract(binary: str, impl: str, golden: Path, write: bool) -> int:
+    """Record or check cli-help.txt, CONFIG.md and config.example.toml."""
+    produced = {"cli-help.txt": _help_tree(binary)}
+    config = _config_artifacts(binary, impl)
+    if not config:
+        print(
+            f"contract: {impl} renders no CONFIG.md/config.example.toml; not compared",
+            file=sys.stderr,
+        )
+    produced.update(config)
+    failed = 0
+    for name, content in produced.items():
+        target = golden / name
+        if write:
+            target.write_text(content, encoding="utf-8")
+            print(f"recorded {target}")
+            continue
+        want = target.read_text(encoding="utf-8")
+        if want != content:
+            failed = 1
+            sys.stdout.writelines(
+                difflib.unified_diff(
+                    want.splitlines(keepends=True),
+                    content.splitlines(keepends=True),
+                    fromfile=f"golden/{name}",
+                    tofile=f"{impl}/{name}",
+                )
+            )
+    return failed
+
+
+def _aligned(steps: list[dict[str, Any]], transport: str) -> list[int | None]:
+    """The script index behind each recorded answer, `None` for a dump the
+    runner adds on its own (the after-init and final dumps)."""
+    out: list[int | None] = []
+    if transport in ("cli", "mcp"):
+        out.append(None)
+    for index, step in enumerate(steps):
+        if transport == "cli":
+            if step.get("dump") or "params" in step:
+                out.append(index)
+        elif transport == "mcp":
+            if "params" in step or "dump" in step:
+                out.append(index)
+        elif "http" in step or "dump" in step:
+            out.append(index)
+    if transport == "http":
+        out.append(None)
+    return out
+
+
+def _errors(golden: Path, check: bool) -> int:
+    """Derive the typed-error to transport mapping from the goldens.
+
+    One row per script step that fails on any transport, saying what each
+    transport answered, and a summary per error code. The table is test data:
+    it is regenerated from the goldens, never edited by hand.
+    """
+    steps = json.loads(SCRIPT_PATH.read_text())["steps"]
+    rows: dict[int, dict[str, Any]] = {}
+    for transport in ("cli", "http", "mcp"):
+        answers = json.loads((golden / f"{transport}.json").read_text())
+        indices = _aligned(steps, transport)
+        if len(indices) != len(answers):
+            raise SystemExit(
+                f"{transport}: {len(answers)} answers for {len(indices)} steps; "
+                "the golden and the script disagree"
+            )
+        for index, answer in zip(indices, answers, strict=True):
+            if index is None:
+                continue
+            if transport == "cli" and answer.get("exit", 0) != 0:
+                got: dict[str, Any] = {
+                    "exit": answer["exit"],
+                    "error_code": answer.get("error_code"),
+                }
+            elif transport == "http" and answer.get("status", 200) >= 400:
+                result = answer.get("result")
+                error = result.get("error") if isinstance(result, dict) else None
+                got = {
+                    "status": answer["status"],
+                    "error_code": error.get("code")
+                    if isinstance(error, dict)
+                    else None,
+                }
+            elif transport == "mcp" and (
+                answer.get("is_error") or "rpc_error" in answer
+            ):
+                got = {"error_code": answer.get("error_code")}
+                if "rpc_error" in answer:
+                    got["rpc_error"] = answer["rpc_error"]
+            else:
+                continue
+            row = rows.setdefault(
+                index, {"step": index, "operation": steps[index]["operation"]}
+            )
+            row[transport] = got
+    codes: dict[str, dict[str, set[Any]]] = {}
+    for row in rows.values():
+        for transport in ("cli", "http", "mcp"):
+            got = row.get(transport)
+            if not got or not got.get("error_code"):
+                continue
+            entry = codes.setdefault(
+                got["error_code"],
+                {"cli_exit": set(), "http_status": set(), "transports": set()},
+            )
+            entry["transports"].add(transport)
+            if "exit" in got:
+                entry["cli_exit"].add(got["exit"])
+            if "status" in got:
+                entry["http_status"].add(got["status"])
+    document = {
+        "generated_by": "scripts/parity.py errors",
+        "golden": golden.name,
+        "codes": {
+            code: {key: sorted(value) for key, value in entry.items()}
+            for code, entry in sorted(codes.items())
+        },
+        "steps": [rows[index] for index in sorted(rows)],
+    }
+    text = json.dumps(document, indent=2, sort_keys=True) + "\n"
+    if check:
+        if ERRORS_PATH.read_text() != text:
+            print(
+                "tests/parity/errors.json is stale; run scripts/parity.py errors",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+    ERRORS_PATH.write_text(text)
+    print(f"wrote {ERRORS_PATH} ({len(rows)} failing steps, {len(codes)} codes)")
+    return 0
+
+
 def _selftest(golden_dir: Path) -> int:
     """A mutated recording must fail the check.
 
-    The id mutation runs against the committed golden. The title scoping cannot:
+    The id mutation runs against the committed golden. The title check cannot:
     none of the recorded steps returns a titled entity. A synthetic fixture
-    carries both shapes — an answer whose `title` must survive normalisation,
-    and a schema object (it has `properties`) whose `title` must be dropped.
-    Mutating the first must fail the diff; mutating the second must not.
+    carries both shapes — an answer and a schema object (it has `properties`).
+    Titles are not blanked in either (operator ruling, WI-1046), so mutating
+    either must fail the diff. A changed error code on a failing CLI step must
+    fail it too.
     """
     root, data = Path("/parity/root"), Path("/parity/data")
     golden = _normalise(json.loads((golden_dir / "cli.json").read_text()), root, data)
@@ -939,18 +1244,21 @@ def _selftest(golden_dir: Path) -> int:
         "schema": {"properties": {"name": {"type": "string"}}, "title": "ModelName"},
     }
     normalised = _normalise(fixture, root, data)
-    if normalised["schema"].get("title") is not None:
-        print("selftest: a schema title survived normalisation", file=sys.stderr)
+    for shape in ("answer", "schema"):
+        changed = json.loads(json.dumps(fixture))
+        changed[shape]["title"] += "-mutated"
+        if _diff(normalised, _normalise(changed, root, data), "") == 0:
+            print(f"selftest: mutating a {shape} title was not caught", file=sys.stderr)
+            return 1
+
+    coded = json.loads((golden_dir / "cli.json").read_text())
+    failing = next((step for step in coded if step.get("error_code")), None)
+    if failing is None:
+        print("selftest: no failing CLI step carries an error_code", file=sys.stderr)
         return 1
-    changed = json.loads(json.dumps(fixture))
-    changed["answer"]["title"] += "-mutated"
-    if _diff(normalised, _normalise(changed, root, data), "") == 0:
-        print("selftest: mutating an answer title was not caught", file=sys.stderr)
-        return 1
-    dropped = json.loads(json.dumps(fixture))
-    dropped["schema"]["title"] += "-mutated"
-    if _diff(normalised, _normalise(dropped, root, data), "") != 0:
-        print("selftest: mutating a schema title was not dropped", file=sys.stderr)
+    failing["error_code"] += "-mutated"
+    if _diff(golden, _normalise(coded, root, data), "") == 0:
+        print("selftest: mutating an error_code was not caught", file=sys.stderr)
         return 1
 
     http = json.loads((golden_dir / "http.json").read_text())
@@ -965,8 +1273,8 @@ def _selftest(golden_dir: Path) -> int:
         print("selftest: mutating 'instance_id' was not caught", file=sys.stderr)
         return 1
     print(
-        "selftest passed: id, dumped workflow definition, answer title and "
-        "instance_id caught, schema title dropped"
+        "selftest passed: id, dumped workflow definition, answer and schema "
+        "titles, error_code and instance_id caught"
     )
     return 0
 

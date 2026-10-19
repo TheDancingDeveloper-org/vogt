@@ -77,28 +77,32 @@
    "operation": "http.health.live",
    "http": {
     "method": "GET",
-    "path": "/health/live"
+    "path": "/health/live",
+    "status": 200
    }
   },
   {
    "operation": "http.health.ready",
    "http": {
     "method": "GET",
-    "path": "/health/ready"
+    "path": "/health/ready",
+    "status": 200
    }
   },
   {
    "operation": "http.version",
    "http": {
     "method": "GET",
-    "path": "/version"
+    "path": "/version",
+    "status": 200
    }
   },
   {
    "operation": "http.connection_info",
    "http": {
     "method": "GET",
-    "path": "/connection-info"
+    "path": "/connection-info",
+    "status": 200
    }
   },
   {
@@ -264,7 +268,8 @@
     "reason": "ship it"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    }
   },
   {
@@ -296,7 +301,8 @@
     "reason": "stale"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "preference_version_conflict"
    }
   },
   {
@@ -320,7 +326,8 @@
     "reason": "missing"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "inbox_entry_not_found"
    }
   },
   {
@@ -331,7 +338,8 @@
     "reason": "too late"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "invalid_snooze"
    }
   },
   {
@@ -341,7 +349,8 @@
     "reason": "back"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "inbox_entry_not_found"
    }
   },
   {
@@ -376,7 +385,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 0
+    "exit": 0,
+    "mcp_error_code": "invalid_params"
    }
   },
   {
@@ -388,7 +398,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "project_not_linked"
    }
   },
   {
@@ -404,7 +415,8 @@
     "project": "missing"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    }
   },
   {
@@ -447,7 +459,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 0
+    "exit": 0,
+    "mcp_error_code": "not_found"
    }
   },
   {
@@ -459,7 +472,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 0
+    "exit": 0,
+    "mcp_error_code": "not_found"
    }
   },
   {
@@ -489,7 +503,8 @@
     "project": "missing"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    }
   },
   {
@@ -505,7 +520,8 @@
     "project": "missing"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    }
   },
   {
@@ -514,7 +530,8 @@
     "project": "missing"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    }
   },
   {
@@ -568,7 +585,8 @@
     "host": "no.such.host"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "invalid_request"
    }
   },
   {
@@ -596,7 +614,8 @@
     "reason": "parity harness"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "invalid_request"
    }
   },
   {
@@ -606,7 +625,8 @@
     "reason": "parity harness"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "forge_link_refused"
    }
   },
   {
@@ -616,7 +636,8 @@
     "reason": "parity harness"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    }
   },
   {
@@ -626,7 +647,8 @@
     "reason": "parity harness"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "forge_publish_refused"
    }
   },
   {
@@ -636,7 +658,8 @@
     "reason": "parity harness"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    }
   },
   {
@@ -648,7 +671,8 @@
     "reason": "parity harness"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "invalid_request"
    }
   },
   {
@@ -659,7 +683,8 @@
     "reason": "parity harness"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "invalid_request"
    }
   },
   {
@@ -679,7 +704,8 @@
     "reason": "parity harness"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    }
   },
   {
@@ -694,7 +720,8 @@
     "reason": "parity harness"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "invalid_request"
    }
   },
   {
@@ -705,7 +732,8 @@
     "body": {
      "display_name": "Ada Lovelace"
     },
-    "capture": "admin"
+    "capture": "admin",
+    "status": 200
    }
   },
   {
@@ -716,7 +744,9 @@
    "http": {
     "method": "GET",
     "path": "/api/why?ref=WI-1",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 404,
+    "error_code": "not_found"
    },
    "expect": {
     "exit": 0
@@ -730,10 +760,13 @@
    "http": {
     "method": "GET",
     "path": "/api/why?ref=WI-404",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 404,
+    "error_code": "not_found"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    }
   },
   {
@@ -745,7 +778,8 @@
    "http": {
     "method": "GET",
     "path": "/api/work?mode=full&limit=1",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    },
    "expect": {
     "exit": 0
@@ -760,7 +794,8 @@
    "http": {
     "method": "GET",
     "path": "/api/work?limit=1&offset=1",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    },
    "expect": {
     "exit": 0
@@ -778,7 +813,8 @@
    "http": {
     "method": "GET",
     "path": "/api/work/get-many?refs=WI-1&refs=WI-404&refs=WI-2",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    },
    "expect": {
     "exit": 0
@@ -796,7 +832,8 @@
    "http": {
     "method": "GET",
     "path": "/api/audit?limit=5",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    },
    "expect": {
     "exit": 0
@@ -817,10 +854,13 @@
      "ref": "WI-1",
      "branch": "wi-1-parity",
      "reason": "parity"
-    }
+    },
+    "status": 404,
+    "error_code": "not_found"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "invalid_request"
    },
    "cli": [
     "work",
@@ -840,10 +880,13 @@
     "body": {
      "subject": "gh:parity-org/parity#404",
      "reason": "parity"
-    }
+    },
+    "status": 404,
+    "error_code": "not_found"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    }
   },
   {
@@ -856,7 +899,8 @@
      "name": "Second",
      "root_path": "{root}/instance/repos/second",
      "reason": "parity harness"
-    }
+    },
+    "status": 200
    },
    "why": "HTTP has no project of its own: the same registration the CLI made for Second, here so the HTTP sweep has a project to sweep"
   },
@@ -879,7 +923,8 @@
      "name": "Broken",
      "root_path": "{root}/instance/repos/broken",
      "reason": "parity harness"
-    }
+    },
+    "status": 200
    }
   },
   {
@@ -891,7 +936,8 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    }
   },
   {
@@ -903,7 +949,8 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions/sweep",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    }
   },
   {
@@ -920,13 +967,16 @@
     "auth": "admin",
     "body": {
      "reason": "parity harness"
-    }
+    },
+    "status": 200
    }
   },
   {
    "operation": "sweep",
    "params": {
-    "collectors": ["git-local"],
+    "collectors": [
+     "git-local"
+    ],
     "reason": "parity harness"
    },
    "expect": {
@@ -938,9 +988,12 @@
     "path": "/api/sweep",
     "auth": "admin",
     "body": {
-     "collectors": ["git-local"],
+     "collectors": [
+      "git-local"
+     ],
      "reason": "parity harness"
-    }
+    },
+    "status": 200
    }
   },
   {
@@ -952,7 +1005,8 @@
    "http": {
     "method": "GET",
     "path": "/api/coverage",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    }
   },
   {
@@ -978,7 +1032,8 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions/log?id=ses_00000000000000000000000000",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    }
   },
   {
@@ -987,7 +1042,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "POST",
@@ -995,7 +1051,9 @@
     "auth": "admin",
     "body": {
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1006,7 +1064,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "POST",
@@ -1016,7 +1075,9 @@
      "id": "ses_00000000000000000000000000",
      "text": "hi",
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1025,12 +1086,15 @@
     "id": "ses_00000000000000000000000000"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "GET",
     "path": "/api/sessions/screen?id=ses_00000000000000000000000000",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1039,12 +1103,15 @@
     "id": "ses_00000000000000000000000000"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "GET",
     "path": "/api/sessions/wait?id=ses_00000000000000000000000000",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1055,7 +1122,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "POST",
@@ -1065,7 +1133,9 @@
      "id": "ses_00000000000000000000000000",
      "option": 1,
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1075,7 +1145,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "POST",
@@ -1084,7 +1155,9 @@
     "body": {
      "id": "ses_00000000000000000000000000",
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1099,7 +1172,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "POST",
@@ -1109,7 +1183,9 @@
      "id": "ses_00000000000000000000000000",
      "keep_awake": true,
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1124,7 +1200,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "POST",
@@ -1134,7 +1211,9 @@
      "id": "ses_00000000000000000000000000",
      "role": "worker",
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1144,7 +1223,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "POST",
@@ -1153,7 +1233,9 @@
     "body": {
      "id": "ses_00000000000000000000000000",
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1163,7 +1245,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    },
    "http": {
     "method": "POST",
@@ -1172,7 +1255,9 @@
     "body": {
      "id": "ses_00000000000000000000000000",
      "reason": "parity"
-    }
+    },
+    "status": 404,
+    "error_code": "not_found"
    }
   },
   {
@@ -1207,7 +1292,9 @@
      "uses": "once",
      "ttl_seconds": 60,
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1258,7 +1345,8 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions/grants?state=pending",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    }
   },
   {
@@ -1276,7 +1364,8 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions/history?limit=5",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    }
   },
   {
@@ -1291,7 +1380,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    },
    "http": {
     "method": "POST",
@@ -1301,7 +1391,9 @@
      "id": "ses_00000000000000000000000000",
      "work_item": "WI-1074",
      "reason": "parity"
-    }
+    },
+    "status": 404,
+    "error_code": "not_found"
    }
   },
   {
@@ -1314,12 +1406,15 @@
     "id": "ses_00000000000000000000000000"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    },
    "http": {
     "method": "GET",
     "path": "/api/sessions/last-reply?id=ses_00000000000000000000000000",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 404,
+    "error_code": "not_found"
    }
   },
   {
@@ -1337,7 +1432,8 @@
    "http": {
     "method": "GET",
     "path": "/api/sessions/history/search?q=parity",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    }
   },
   {
@@ -1352,7 +1448,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "POST",
@@ -1362,7 +1459,9 @@
      "id": "ses_00000000000000000000000000",
      "blocker": "parity needs a person",
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1376,7 +1475,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "POST",
@@ -1385,7 +1485,9 @@
     "body": {
      "id": "ses_00000000000000000000000000",
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1395,12 +1497,15 @@
     "limit": 10
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "GET",
     "path": "/api/sessions/changes?since=0&limit=10",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1414,12 +1519,15 @@
     "cursor": 0
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "GET",
     "path": "/api/sessions/wait-any?timeout_s=1&cursor=0",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1434,7 +1542,8 @@
     "reason": "parity"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "engine_unavailable"
    },
    "http": {
     "method": "POST",
@@ -1444,7 +1553,9 @@
      "id": "ses_00000000000000000000000000",
      "message": "parity commit",
      "reason": "parity"
-    }
+    },
+    "status": 502,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1453,12 +1564,15 @@
     "id": "ses_00000000000000000000000000"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    },
    "http": {
     "method": "GET",
     "path": "/api/sessions/economics?id=ses_00000000000000000000000000",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 404,
+    "error_code": "not_found"
    }
   },
   {
@@ -1467,12 +1581,15 @@
     "id": "ses_00000000000000000000000000"
    },
    "expect": {
-    "exit": 1
+    "exit": 1,
+    "error_code": "not_found"
    },
    "http": {
     "method": "GET",
     "path": "/api/sessions/digest?id=ses_00000000000000000000000000",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 404,
+    "error_code": "not_found"
    }
   },
   {
@@ -1490,7 +1607,8 @@
    "http": {
     "method": "GET",
     "path": "/api/agent-activity?limit=5",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    }
   },
   {
@@ -1508,7 +1626,8 @@
    "http": {
     "method": "GET",
     "path": "/api/agent-activity/summary?economics=true",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    }
   },
   {
@@ -1520,7 +1639,8 @@
     "body": {
      "name": "bug",
      "reason": "seed"
-    }
+    },
+    "status": 200
    }
   },
   {
@@ -1535,7 +1655,8 @@
      "scopes": "read",
      "reason": "a read token"
     },
-    "capture": "token"
+    "capture": "token",
+    "status": 200
    }
   },
   {
@@ -1547,7 +1668,9 @@
     "body": {
      "name": "chore",
      "reason": "should be refused"
-    }
+    },
+    "status": 403,
+    "error_code": "forbidden"
    }
   },
   {
@@ -1558,7 +1681,8 @@
     "auth": "token",
     "body": {
      "reason": "done"
-    }
+    },
+    "status": 200
    }
   },
   {
@@ -1566,7 +1690,8 @@
    "params": {},
    "expect": {
     "exit": 1,
-    "capture_error": true
+    "capture_error": true,
+    "error_code": "engine_unavailable"
    }
   },
   {
@@ -1576,7 +1701,8 @@
    },
    "expect": {
     "exit": 1,
-    "capture_error": true
+    "capture_error": true,
+    "error_code": "invalid_request"
    }
   },
   {
@@ -1596,7 +1722,8 @@
      "password": "correct horse battery",
      "display_name": "Ada Lovelace",
      "reason": "parity harness"
-    }
+    },
+    "status": 200
    },
    "expect": {
     "exit": 0
@@ -1614,7 +1741,8 @@
    "http": {
     "method": "GET",
     "path": "/api/users",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    },
    "expect": {
     "exit": 0
@@ -1635,7 +1763,8 @@
      "username": "ada",
      "password": "another passphrase",
      "reason": "parity harness"
-    }
+    },
+    "status": 200
    },
    "expect": {
     "exit": 0
@@ -1672,7 +1801,9 @@
    },
    "expect": {
     "exit": 2,
-    "capture_error": true
+    "capture_error": true,
+    "error_code": null,
+    "mcp_error_code": "invalid_params"
    },
    "why": "a non-positive expiry is a validation refusal, exit 2"
   },
@@ -1684,7 +1815,8 @@
    "http": {
     "method": "GET",
     "path": "/api/tokens?include_revoked=true",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    },
    "expect": {
     "exit": 0
@@ -1703,10 +1835,12 @@
     "body": {
      "id": "tok_0002",
      "reason": "parity harness"
-    }
+    },
+    "status": 200
    },
    "expect": {
-    "exit": 0
+    "exit": 0,
+    "mcp_error_code": "not_found"
    }
   },
   {
@@ -1715,7 +1849,8 @@
    "http": {
     "method": "GET",
     "path": "/api/auth/whoami",
-    "auth": "admin"
+    "auth": "admin",
+    "status": 200
    },
    "expect": {
     "exit": 0
@@ -1740,7 +1875,8 @@
    },
    "expect": {
     "exit": 1,
-    "capture_error": true
+    "capture_error": true,
+    "error_code": "conflict"
    },
    "why": "a second backup over a non-empty destination is refused and writes nothing"
   },
@@ -1753,7 +1889,8 @@
    },
    "expect": {
     "exit": 1,
-    "capture_error": true
+    "capture_error": true,
+    "error_code": "invalid_request"
    },
    "why": "restore without --confirm is refused before anything is replaced"
   },
@@ -1778,7 +1915,8 @@
      "username": "ada",
      "password": "another passphrase"
     },
-    "capture": "session"
+    "capture": "session",
+    "status": 200
    }
   },
   {
@@ -1786,7 +1924,8 @@
    "http": {
     "method": "GET",
     "path": "/api/auth/whoami",
-    "auth": "session"
+    "auth": "session",
+    "status": 200
    }
   },
   {
@@ -1802,312 +1941,329 @@
     "body": {
      "username": "ada",
      "reason": "parity harness"
-    }
+    },
+    "status": 200
    },
    "expect": {
     "exit": 0
    }
-  }
-,
-  {
-    "operation": "events.list",
-    "params": {
-      "after": 0,
-      "limit": 5
-    },
-    "expect": {
-      "exit": 0
-    },
-    "http": {
-      "method": "GET",
-      "path": "/api/events?after=0&limit=5",
-      "auth": "admin"
-    }
   },
   {
-    "operation": "events.list",
-    "params": {
-      "after": 1,
-      "limit": 2
-    },
-    "expect": {
-      "exit": 0
-    },
-    "http": {
-      "method": "GET",
-      "path": "/api/events?after=1&limit=2",
-      "auth": "admin"
-    }
+   "operation": "events.list",
+   "params": {
+    "after": 0,
+    "limit": 5
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/events?after=0&limit=5",
+    "auth": "admin",
+    "status": 200
+   }
   },
   {
-    "operation": "audit.list",
-    "params": {
-      "limit": 5
-    },
-    "expect": {
-      "exit": 0
-    },
-    "http": {
-      "method": "GET",
-      "path": "/api/audit?limit=5",
-      "auth": "admin"
-    }
+   "operation": "events.list",
+   "params": {
+    "after": 1,
+    "limit": 2
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/events?after=1&limit=2",
+    "auth": "admin",
+    "status": 200
+   }
   },
   {
-    "operation": "audit.list",
-    "params": {
-      "limit": 2,
-      "offset": 1
-    },
-    "expect": {
-      "exit": 0
-    },
-    "http": {
-      "method": "GET",
-      "path": "/api/audit?limit=2&offset=1",
-      "auth": "admin"
-    }
+   "operation": "audit.list",
+   "params": {
+    "limit": 5
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/audit?limit=5",
+    "auth": "admin",
+    "status": 200
+   }
   },
   {
-    "operation": "clone",
-    "params": {
-      "source": "{root}/backup",
-      "confirm": false,
-      "reason": "parity harness"
-    },
-    "expect": {
-      "exit": 1
-    },
-    "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+   "operation": "audit.list",
+   "params": {
+    "limit": 2,
+    "offset": 1
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/audit?limit=2&offset=1",
+    "auth": "admin",
+    "status": 200
+   }
   },
   {
-    "operation": "clone",
-    "params": {
-      "source": "{root}/backup",
-      "confirm": true,
-      "reason": "parity harness"
-    },
-    "expect": {
-      "exit": 1
-    },
-    "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+   "operation": "clone",
+   "params": {
+    "source": "{root}/backup",
+    "confirm": false,
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "invalid_request"
+   },
+   "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
   },
   {
-    "operation": "clone",
-    "params": {
-      "source": "{root}/missing",
-      "confirm": true,
-      "reason": "parity harness"
-    },
-    "expect": {
-      "exit": 1
-    },
-    "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+   "operation": "clone",
+   "params": {
+    "source": "{root}/backup",
+    "confirm": true,
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "invalid_request"
+   },
+   "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
   },
   {
-    "operation": "project.import",
-    "params": {
-      "repo": "not a repo!",
-      "reason": "parity harness",
-      "consolidate": false
-    },
-    "expect": {
-      "exit": 1
-    },
-    "why": "a reference that names no repository is refused before any clone",
-    "http": {
-      "method": "POST",
-      "path": "/api/projects/import",
-      "auth": "admin",
-      "body": {
-        "repo": "not a repo!",
-        "reason": "parity harness",
-        "consolidate": false
-      }
-    }
+   "operation": "clone",
+   "params": {
+    "source": "{root}/missing",
+    "confirm": true,
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "not_found"
+   },
+   "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
   },
   {
-    "operation": "project.import",
-    "params": {
-      "repo": "not a repo!",
-      "reason": "parity harness",
-      "consolidate": true
+   "operation": "project.import",
+   "params": {
+    "repo": "not a repo!",
+    "reason": "parity harness",
+    "consolidate": false
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "invalid_request"
+   },
+   "why": "a reference that names no repository is refused before any clone",
+   "http": {
+    "method": "POST",
+    "path": "/api/projects/import",
+    "auth": "admin",
+    "body": {
+     "repo": "not a repo!",
+     "reason": "parity harness",
+     "consolidate": false
     },
-    "expect": {
-      "exit": 1
-    },
-    "why": "the reference check runs before consolidation, as in Python",
-    "http": {
-      "method": "POST",
-      "path": "/api/projects/import",
-      "auth": "admin",
-      "body": {
-        "repo": "not a repo!",
-        "reason": "parity harness",
-        "consolidate": true
-      }
-    }
+    "status": 400,
+    "error_code": "invalid_request"
+   }
   },
   {
-    "operation": "decision.ask",
-    "params": {
-      "question": "Merge the branch?",
-      "options": [
-        {
-          "label": "Merge",
-          "description": "land it now",
-          "recommended": true
-        },
-        {
-          "label": "Hold",
-          "description": "wait for the review"
-        }
-      ],
-      "context": "CI is green.",
-      "reason": "parity harness"
+   "operation": "project.import",
+   "params": {
+    "repo": "not a repo!",
+    "reason": "parity harness",
+    "consolidate": true
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "invalid_request"
+   },
+   "why": "the reference check runs before consolidation, as in Python",
+   "http": {
+    "method": "POST",
+    "path": "/api/projects/import",
+    "auth": "admin",
+    "body": {
+     "repo": "not a repo!",
+     "reason": "parity harness",
+     "consolidate": true
     },
-    "expect": {
-      "exit": 0
-    },
-    "why": "a person-run ask records the asker as the person; the id is the first dec_ issued"
+    "status": 400,
+    "error_code": "invalid_request"
+   }
   },
   {
-    "operation": "decision.ask",
-    "params": {
-      "question": "Ship the release?",
-      "options": [
-        {
-          "label": "Ship",
-          "recommended": true
-        },
-        {
-          "label": "Wait"
-        }
-      ],
-      "reason": "parity harness"
-    },
-    "expect": {
-      "exit": 0
-    }
-  },
-  {
-    "operation": "decision.list",
-    "params": {},
-    "expect": {
-      "exit": 0
-    }
-  },
-  {
-    "operation": "decision.list",
-    "params": {
-      "state": "pending"
-    },
-    "expect": {
-      "exit": 0
-    }
-  },
-  {
-    "operation": "inbox.list",
-    "params": {},
-    "expect": {
-      "exit": 0
-    }
-  },
-  {
-    "operation": "decision.answer",
-    "params": {
-      "id": "dec_0001",
+   "operation": "decision.ask",
+   "params": {
+    "question": "Merge the branch?",
+    "options": [
+     {
       "label": "Merge",
-      "note": "reviewed",
-      "reason": "parity harness"
-    },
-    "expect": {
-      "exit": 0
-    }
-  },
-  {
-    "operation": "decision.answer",
-    "params": {
-      "id": "dec_0001",
+      "description": "land it now",
+      "recommended": true
+     },
+     {
       "label": "Hold",
-      "reason": "parity harness"
-    },
-    "expect": {
-      "exit": 1
-    },
-    "why": "an answered decision is no longer pending"
+      "description": "wait for the review"
+     }
+    ],
+    "context": "CI is green.",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "why": "a person-run ask records the asker as the person; the id is the first dec_ issued"
   },
   {
-    "operation": "decision.answer",
-    "params": {
-      "id": "dec_0002",
-      "label": "Deploy",
-      "reason": "parity harness"
-    },
-    "expect": {
-      "exit": 1
-    },
-    "why": "the label must be one the decision offers"
+   "operation": "decision.ask",
+   "params": {
+    "question": "Ship the release?",
+    "options": [
+     {
+      "label": "Ship",
+      "recommended": true
+     },
+     {
+      "label": "Wait"
+     }
+    ],
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
   },
   {
-    "operation": "decision.withdraw",
-    "params": {
-      "id": "dec_0002",
-      "reason": "parity harness"
-    },
-    "expect": {
-      "exit": 0
-    }
+   "operation": "decision.list",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
   },
   {
-    "operation": "decision.list",
-    "params": {
-      "state": "answered"
-    },
-    "expect": {
-      "exit": 0
-    }
+   "operation": "decision.list",
+   "params": {
+    "state": "pending"
+   },
+   "expect": {
+    "exit": 0
+   }
   },
   {
-    "operation": "inbox.list",
-    "params": {},
-    "expect": {
-      "exit": 0
-    }
+   "operation": "inbox.list",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
   },
   {
-    "operation": "preference.set",
-    "params": {
-      "key": "inbox.filter",
-      "value": "{\"sources\": [\"bogus\"]}",
-      "reason": "parity harness"
-    },
-    "expect": {
-      "exit": 1
-    },
-    "why": "B5: an inbox.filter value the Inbox model refuses is refused, not stored"
+   "operation": "decision.answer",
+   "params": {
+    "id": "dec_0001",
+    "label": "Merge",
+    "note": "reviewed",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
   },
   {
-    "operation": "preference.set",
-    "params": {
-      "key": "inbox.filter",
-      "value": "{\"unknown\": 1}",
-      "reason": "parity harness"
-    },
-    "expect": {
-      "exit": 1
-    },
-    "why": "B5: the saved filter forbids unknown fields"
+   "operation": "decision.answer",
+   "params": {
+    "id": "dec_0001",
+    "label": "Hold",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "conflict"
+   },
+   "why": "an answered decision is no longer pending"
   },
   {
-    "operation": "preference.get",
-    "params": {
-      "key": "inbox.filter"
-    },
-    "expect": {
-      "exit": 0
-    },
-    "why": "B5: a refused write leaves the stored filter as it was"
+   "operation": "decision.answer",
+   "params": {
+    "id": "dec_0002",
+    "label": "Deploy",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "invalid_request"
+   },
+   "why": "the label must be one the decision offers"
+  },
+  {
+   "operation": "decision.withdraw",
+   "params": {
+    "id": "dec_0002",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "decision.list",
+   "params": {
+    "state": "answered"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "inbox.list",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "preference.set",
+   "params": {
+    "key": "inbox.filter",
+    "value": "{\"sources\": [\"bogus\"]}",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "invalid_preference"
+   },
+   "why": "B5: an inbox.filter value the Inbox model refuses is refused, not stored"
+  },
+  {
+   "operation": "preference.set",
+   "params": {
+    "key": "inbox.filter",
+    "value": "{\"unknown\": 1}",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "invalid_preference"
+   },
+   "why": "B5: the saved filter forbids unknown fields"
+  },
+  {
+   "operation": "preference.get",
+   "params": {
+    "key": "inbox.filter"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "why": "B5: a refused write leaves the stored filter as it was"
   }
  ]
 }

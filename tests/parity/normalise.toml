@@ -1,3 +1,12 @@
+# Operator ruling on these rules, 2026-10-19 (WI-1046):
+# - Answers are compared semantically: volatile values are blanked (the
+#   [volatile] keys below; ids and timestamps are fixed by the test hooks, so
+#   they are not volatile and compare verbatim), and keys are sorted
+#   (`json.dumps(..., sort_keys=True)` in the diff).
+# - Schema SQL is compared byte-exact, ignoring whitespace (the schema slice,
+#   WI-1048).
+# - Titles are not blanked, in answers or in schema objects.
+#
 # What two independent runs of the same script may differ on, and why.
 # Applied to answers, audit trails and OpenAPI. MCP tools/list is not covered
 # here: the parity script records no tools/list step, so a rule for it would
@@ -72,11 +81,11 @@ operations = ["http.health.live", "http.version", "http.connection_info"]
 key = "version"
 
 [schema]
-# pydantic emits a `title` per model and orders `anyOf` by declaration. Those
-# are properties of a schema document, not of an answer: dropping `title` from
-# an answer deletes every work-item title. Apply both rules only inside a
-# schema object, which is one that carries a `$schema` or `properties` key.
-why = "pydantic titles and anyOf order are generator accidents, not contract"
-drop_keys = ["title"]
+# pydantic orders `anyOf` by declaration, which is a generator accident, not
+# contract; the rule applies only inside a schema object, one that carries a
+# `$schema` or `properties` key. Titles are no longer dropped anywhere, schema
+# titles included (operator ruling below), so the goldens pin real content.
+why = "anyOf order is a generator accident, not contract; titles are compared"
+drop_keys = []
 sort_any_of = true
 schema_markers = ["$schema", "properties"]

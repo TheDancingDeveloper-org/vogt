@@ -1790,6 +1790,7 @@
     "body": {
       "text": "not_found: no initiative with slug 'missing'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "initiative.publish"
   },
@@ -1824,6 +1825,7 @@
     "body": {
       "text": "preference_version_conflict: preference 'inbox.filter' is at version 1, not 0; re-read it and apply the change on top of the current value"
     },
+    "error_code": "preference_version_conflict",
     "is_error": true,
     "operation": "preference.set"
   },
@@ -1902,6 +1904,7 @@
     "body": {
       "text": "inbox_entry_not_found: no current Inbox entry 'nope'"
     },
+    "error_code": "inbox_entry_not_found",
     "is_error": true,
     "operation": "inbox.archive"
   },
@@ -1909,6 +1912,7 @@
     "body": {
       "text": "invalid_snooze: snooze deadline must be in the future"
     },
+    "error_code": "invalid_snooze",
     "is_error": true,
     "operation": "inbox.snooze"
   },
@@ -1916,6 +1920,7 @@
     "body": {
       "text": "inbox_entry_not_found: no current Inbox entry 'nope'"
     },
+    "error_code": "inbox_entry_not_found",
     "is_error": true,
     "operation": "inbox.restore"
   },
@@ -1975,6 +1980,7 @@
     "body": {
       "text": "invalid_params: labels: Input should be a valid list. work_create takes required: kind, title, reason; optional: body, priority, effort, project, initiative, assignee, labels, local_only"
     },
+    "error_code": "invalid_params",
     "is_error": true,
     "operation": "work.create"
   },
@@ -1982,6 +1988,7 @@
     "body": {
       "text": "project_not_linked: work.create needs a forge-linked project, and 'parity' is not linked: link it (`forge link`, or re-import through `project import`) or publish it (`forge publish`) first; or pass `local_only: true` to keep a native item in this project. Native items (WI-n) on this project still take comments, transitions (including to done) and field edits by ref."
     },
+    "error_code": "project_not_linked",
     "is_error": true,
     "operation": "work.create"
   },
@@ -2006,6 +2013,7 @@
     "body": {
       "text": "not_found: no project with slug 'missing'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "work.list"
   },
@@ -2081,6 +2089,7 @@
     "body": {
       "text": "not_found: no work item 'WI-2'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "work.relate"
   },
@@ -2088,6 +2097,7 @@
     "body": {
       "text": "not_found: no work item 'WI-2'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "work.unrelate"
   },
@@ -2155,6 +2165,7 @@
     "body": {
       "text": "not_found: no project with slug 'missing'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "backlog"
   },
@@ -2181,6 +2192,7 @@
     "body": {
       "text": "not_found: no project with slug 'missing'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "bugs"
   },
@@ -2188,6 +2200,7 @@
     "body": {
       "text": "not_found: no project with slug 'missing'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "deps"
   },
@@ -2345,6 +2358,7 @@
     "body": {
       "text": "invalid_request: 'no.such.host' is not a configured forge host; add it to forge_token_files before listing repositories"
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "forge.repos"
   },
@@ -2359,6 +2373,7 @@
     "body": {
       "text": "invalid_request: 'no.such.host' has no provider to validate a token against; configure the host under forge_token_files first"
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "forge.account_link"
   },
@@ -2366,6 +2381,7 @@
     "body": {
       "text": "forge_link_refused: cannot link 'parity': no configured forge reads example.invalid; this build reads github.com only, so nothing was collected here and no conclusion should be drawn from the counts. Set a supported repo_url with `project update`, or import the repository through `project import`."
     },
+    "error_code": "forge_link_refused",
     "is_error": true,
     "operation": "forge.link"
   },
@@ -2373,6 +2389,7 @@
     "body": {
       "text": "not_found: no project with slug 'missing'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "forge.link"
   },
@@ -2380,6 +2397,7 @@
     "body": {
       "text": "forge_publish_refused: 'parity' already names a repository (https://example.invalid/parity.git); publish never overwrites that association \u2014 attach to it with `forge link`, or clear the repo_url first if it is wrong"
     },
+    "error_code": "forge_publish_refused",
     "is_error": true,
     "operation": "forge.publish"
   },
@@ -2387,6 +2405,7 @@
     "body": {
       "text": "not_found: no project with slug 'missing'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "forge.publish"
   },
@@ -2394,6 +2413,7 @@
     "body": {
       "text": "invalid_request: 'no.such.host' is not a configured forge host; add it to forge_token_files before importing by host"
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "forge.import"
   },
@@ -2401,6 +2421,7 @@
     "body": {
       "text": "invalid_request: no forge credential is available for this host \u2014 neither a linked account (`forge account link`) nor the instance file token  \u2014 so there is nothing to clone github.com/acme/widget with"
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "forge.import"
   },
@@ -2425,6 +2446,7 @@
     "body": {
       "text": "not_found: no project with slug 'missing'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "forge.onboard"
   },
@@ -2432,6 +2454,7 @@
     "body": {
       "text": "invalid_request: 'no.such.host' has no provider to validate a token against; configure the host under forge_token_files first"
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "forge.account_unlink"
   },
@@ -2502,6 +2525,7 @@
     "body": {
       "text": "not_found: no work item or observed subject 'WI-404'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "why"
   },
@@ -2636,6 +2660,7 @@
     "body": {
       "text": "invalid_request: WI-1 belongs to no project, so there is no branch to bind it to"
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "work.bind_branch"
   },
@@ -2643,6 +2668,7 @@
     "body": {
       "text": "not_found: no observed subject 'gh:parity-org/parity#404'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "work.adopt"
   },
@@ -3102,6 +3128,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.start"
   },
@@ -3109,6 +3136,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.input"
   },
@@ -3116,6 +3144,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.screen"
   },
@@ -3123,6 +3152,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.wait"
   },
@@ -3130,6 +3160,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.answer"
   },
@@ -3137,6 +3168,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.hibernate"
   },
@@ -3144,6 +3176,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.keep_awake"
   },
@@ -3151,6 +3184,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.set_role"
   },
@@ -3158,6 +3192,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.wake"
   },
@@ -3165,6 +3200,7 @@
     "body": {
       "text": "not_found: no session 'ses_00000000000000000000000000'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "session.stop"
   },
@@ -3257,6 +3293,7 @@
     "body": {
       "text": "not_found: no session 'ses_00000000000000000000000000'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "session.bind_work"
   },
@@ -3264,6 +3301,7 @@
     "body": {
       "text": "not_found: no session 'ses_00000000000000000000000000'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "session.last_reply"
   },
@@ -3279,6 +3317,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.report_blocked"
   },
@@ -3286,6 +3325,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.report_unblocked"
   },
@@ -3293,6 +3333,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.changes"
   },
@@ -3300,6 +3341,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.wait_any"
   },
@@ -3307,6 +3349,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "session.commit_for"
   },
@@ -3314,6 +3357,7 @@
     "body": {
       "text": "not_found: no session 'ses_00000000000000000000000000'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "session.economics"
   },
@@ -3321,6 +3365,7 @@
     "body": {
       "text": "not_found: no session 'ses_00000000000000000000000000'"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "session.digest"
   },
@@ -3346,6 +3391,7 @@
     "body": {
       "text": "engine_unavailable: no session engine is configured, and chats run on it (set VOGT_ENGINE_URL)"
     },
+    "error_code": "engine_unavailable",
     "is_error": true,
     "operation": "chat.list"
   },
@@ -3353,6 +3399,7 @@
     "body": {
       "text": "invalid_request: 'nope' is not a chat id (a UUID, from chat.list or chat.create)"
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "chat.get"
   },
@@ -3436,6 +3483,7 @@
     "body": {
       "text": "invalid_params: expires_in_days: Input should be greater than or equal to 1. token_issue takes required: actor, name, reason; optional: scopes, expires_in_days"
     },
+    "error_code": "invalid_params",
     "is_error": true,
     "operation": "token.issue"
   },
@@ -3541,6 +3589,7 @@
     "body": {
       "text": "conflict: <root>/backup already exists and is not empty"
     },
+    "error_code": "conflict",
     "is_error": true,
     "operation": "backup"
   },
@@ -3548,6 +3597,7 @@
     "body": {
       "text": "invalid_request: this replaces the stores in <root>/instance with the backup taken at 2026-01-02T03:04:13+00:00. Pass --confirm."
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "restore"
   },
@@ -3808,6 +3858,7 @@
     "body": {
       "text": "invalid_request: <root>/backup is a backup of this instance (ins_0001); a clone copies another instance. Use `restore` to put this one back."
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "clone"
   },
@@ -3815,6 +3866,7 @@
     "body": {
       "text": "invalid_request: <root>/backup is a backup of this instance (ins_0001); a clone copies another instance. Use `restore` to put this one back."
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "clone"
   },
@@ -3822,6 +3874,7 @@
     "body": {
       "text": "not_found: <root>/missing has no manifest.json; it is not a Vogt backup"
     },
+    "error_code": "not_found",
     "is_error": true,
     "operation": "clone"
   },
@@ -3829,6 +3882,7 @@
     "body": {
       "text": "invalid_request: 'not a repo!' does not name a GitHub repository or a configured Forgejo repository; give owner/name, host/owner/name, or a repository URL"
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "project.import"
   },
@@ -3836,6 +3890,7 @@
     "body": {
       "text": "invalid_request: 'not a repo!' does not name a GitHub repository or a configured Forgejo repository; give owner/name, host/owner/name, or a repository URL"
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "project.import"
   },
@@ -4136,6 +4191,7 @@
     "body": {
       "text": "conflict: decision dec_0001 is answered, not pending"
     },
+    "error_code": "conflict",
     "is_error": true,
     "operation": "decision.answer"
   },
@@ -4143,6 +4199,7 @@
     "body": {
       "text": "invalid_request: 'Deploy' is not an option of dec_0002; it offers 'Ship', 'Wait'"
     },
+    "error_code": "invalid_request",
     "is_error": true,
     "operation": "decision.answer"
   },
@@ -4268,6 +4325,7 @@
     "body": {
       "text": "invalid_preference: invalid inbox.filter value \u2014 sources.0: Input should be 'github', 'drift', 'ci' or 'agent'"
     },
+    "error_code": "invalid_preference",
     "is_error": true,
     "operation": "preference.set"
   },
@@ -4275,6 +4333,7 @@
     "body": {
       "text": "invalid_preference: invalid inbox.filter value \u2014 unknown: Extra inputs are not permitted"
     },
+    "error_code": "invalid_preference",
     "is_error": true,
     "operation": "preference.set"
   },

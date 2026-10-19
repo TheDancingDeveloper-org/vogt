@@ -1062,10 +1062,10 @@ mod tests {
         );
     }
 
-    /// The schema normaliser of `tests/parity/normalise.toml` `[schema]`: drop
-    /// `title` and sort `anyOf`, applied only inside a schema object (one that
-    /// carries `$schema` or `properties`). Pydantic's titles and union order
-    /// are generator accidents, not contract.
+    /// The schema normaliser of `tests/parity/normalise.toml` `[schema]`: sort
+    /// `anyOf`, applied only inside a schema object (one that carries
+    /// `$schema` or `properties`). Pydantic's union order is a generator
+    /// accident, not contract. Titles are compared (operator ruling, WI-1046).
     fn normalise_schema(value: &serde_json::Value) -> serde_json::Value {
         use serde_json::Value;
         match value {
@@ -1073,9 +1073,6 @@ mod tests {
                 let is_schema = object.contains_key("$schema") || object.contains_key("properties");
                 let mut out = serde_json::Map::new();
                 for (key, child) in object {
-                    if is_schema && key == "title" {
-                        continue;
-                    }
                     let child = if is_schema && key == "anyOf" {
                         let mut options: Vec<Value> = child
                             .as_array()
