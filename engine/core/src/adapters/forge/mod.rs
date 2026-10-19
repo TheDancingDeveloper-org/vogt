@@ -47,4 +47,4 @@ pub use provider::ForgeProvider;
 pub use registry::has_configured_forge;
 pub use sync::{commit_sync, ForgeDirectory, ForgeSyncCollector, PendingSync};
 pub use transport::{api_path, ForgeResponse, ForgeTransport, WriteMethod};
-pub use writeback::{permits, WriteBackOutcome};
+pub use writeback::{permits, WriteBackOutcome, WriteBackResult};

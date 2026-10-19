@@ -835,63 +835,35 @@ fn get_project<C: Clock, I: IdFactory>(
     Ok(json!({"project": project}))
 }
 
-fn list_projects<C: Clock, I: IdFactory>(
+fn list_projects<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     params: Value,
 ) -> Result<Value, VogtError> {
     let params = list_params(params)?;
-    let view = ctx.declared.read()?;
-    let projects = view.list_projects(params.limit, params.offset)?;
-    let total = view.counts()?.projects;
-    let listings: Vec<Value> = projects
-        .iter()
-        .map(|project| {
-            let mut listing = serde_json::to_value(project).unwrap_or(Value::Null);
-            if let Value::Object(map) = &mut listing {
-                let (writable, reason) = writability(project);
-                map.insert("writable".to_string(), Value::Bool(writable));
-                map.insert("writable_reason".to_string(), Value::String(reason));
-            }
-            listing
-        })
-        .collect();
+    let (projects, total, actor) = {
+        let view = ctx.declared.read()?;
+        (
+            view.list_projects(params.limit, params.offset)?,
+            view.counts()?.projects,
+            view.actor_by_identity(&ctx.principal.identity_ref)?,
+        )
+    };
+    // The same gates `work.create` applies, evaluated without writing.
+    let mut listings: Vec<Value> = Vec::with_capacity(projects.len());
+    for project in &projects {
+        let mut listing = serde_json::to_value(project).unwrap_or(Value::Null);
+        if let Value::Object(map) = &mut listing {
+            let (writable, reason) = crate::application::services::work::create_writability(
+                ctx,
+                project,
+                actor.as_ref(),
+            )?;
+            map.insert("writable".to_string(), Value::Bool(writable));
+            map.insert("writable_reason".to_string(), Value::String(reason));
+        }
+        listings.push(listing);
+    }
     Ok(json!({"projects": listings, "total": total}))
-}
-
-/// Whether `work.create` lands in a project right now. Ports
-/// `work.create_writability`.
-///
-/// An unlinked project is refused outright: there is no forge issue to write
-/// through to, so the answer depends only on the link state. A linked one also
-/// needs the write-back policy to permit `create`. The credential gate beyond
-/// that (`writeback._writer_provider`) is not ported, so a linked project whose
-/// policy allows the action is reported with that gap named rather than as a
-/// guessed yes.
-fn writability(project: &Project) -> (bool, String) {
-    if project.link_state == LinkState::Unlinked {
-        return (
-            false,
-            "not forge-linked: work.create refuses with project_not_linked. Pass \
-             local_only=true for a local record, or link (`forge link`) or publish \
-             (`forge publish`) the project."
-                .to_string(),
-        );
-    }
-    let policy = project.write_back.to_string();
-    if !crate::adapters::forge::permits(&policy, "create") {
-        return (
-            false,
-            format!(
-                "write-back policy is {}, which does not permit 'create'",
-                py_repr(&policy)
-            ),
-        );
-    }
-    (
-        false,
-        "forge credential resolution is not ported, so a linked project's write is not confirmed"
-            .to_string(),
-    )
 }
 
 fn brief_project<C: Clock, I: IdFactory>(

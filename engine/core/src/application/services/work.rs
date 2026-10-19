@@ -10,14 +10,17 @@
 //!
 //! `work.create` with no project, or with `local_only`, writes a native
 //! declared item. A linked project without `local_only` is the forge
-//! write-through, which this port does not do: it fails typed rather than
-//! storing a local item the forge never heard of. An unlinked project without
-//! `local_only` is the decision-10 refusal.
+//! write-through: the issue is opened upstream first and the overlay is stored
+//! only once the forge accepted it. An unlinked project without `local_only`
+//! is the decision-10 refusal.
 
 use serde_json::{json, Value};
 
+use crate::adapters::forge::registry::ForgeClient;
+use crate::adapters::forge::{ForgeProvider, RepoRef, WriteBackOutcome, WriteBackResult};
 use crate::application::context::{AppContext, Built};
 use crate::application::resolve;
+use crate::application::services::forge_writeback::writer_provider;
 use crate::application::upstream;
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{
@@ -86,9 +89,9 @@ pub fn board_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
 }
 
 /// Create a work item. No project, or `local_only`, writes a native declared
-/// item. A linked project without `local_only` is the forge write-through,
-/// which is not ported and fails typed. An unlinked project without
-/// `local_only` is the decision-10 refusal.
+/// item. A linked project without `local_only` is the forge write-through
+/// (`_create_upstream`). An unlinked project without `local_only` is the
+/// decision-10 refusal.
 pub(crate) fn create_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
@@ -111,18 +114,160 @@ where
     if !upstream::is_linked(&project) {
         return Err(refuse_unlinked(&project, "work.create"));
     }
-    // Decision 9: the forge write-through runs before anything local exists.
-    // The precondition chain is local — policy, then a forge credential — and
-    // a gap refuses the whole operation. Only a chain that would actually
-    // reach the forge falls through to the not-ported failure, and that still
-    // stores nothing.
-    let gaps = write_through_gaps(ctx, &project, "create");
-    if !gaps.is_empty() {
-        return Err(refuse_gaps(&project, "create", &gaps, true));
-    }
-    Err(VogtError::UpstreamWriteFailed(
-        "work.create on a linked project writes through to the forge, and that path is not ported — nothing was stored locally. Pass local_only to keep a native item instead.".to_string(),
-    ))
+    create_upstream(ctx, &params, &project)
+}
+
+/// Write-through create: the issue first, the overlay only on success. Ports
+/// `_create_upstream`.
+///
+/// Decision 9: the provider call runs before the declared transaction opens,
+/// so a network round trip never holds the write lock, and a refusal or
+/// failure returns before anything local exists. The crash window left (issue
+/// created, local transaction lost) heals on the next sweep.
+fn create_upstream<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &CreateParams,
+    project: &Project,
+) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    require_permitted(ctx, project, "create", true)?;
+    let kind: WorkKind = params.kind.parse().map_err(|_| {
+        VogtError::InvalidRequest(format!(
+            "unknown work kind {}",
+            crate::core::py_repr(&params.kind)
+        ))
+    })?;
+    let priority: Priority = params.priority.parse().map_err(|_| {
+        VogtError::InvalidRequest(format!(
+            "unknown priority {}",
+            crate::core::py_repr(&params.priority)
+        ))
+    })?;
+    let effort = params
+        .effort
+        .as_deref()
+        .map(|value| {
+            value.parse::<Effort>().map_err(|_| {
+                VogtError::InvalidRequest(format!("unknown effort {}", crate::core::py_repr(value)))
+            })
+        })
+        .transpose()?;
+    let labels = params.labels.clone();
+    let (workflow, initiative_id, assignee_id) = {
+        let view = ctx.declared.read()?;
+        let workflow = view.workflow_for(&kind.to_string())?;
+        let initiative_id = params
+            .initiative
+            .as_deref()
+            .map(|slug| resolve::initiative(&view, slug).map(|found| found.id))
+            .transpose()?;
+        let assignee_id = params
+            .assignee
+            .as_deref()
+            .map(|identity| resolve::actor(&view, identity).map(|found| found.id))
+            .transpose()?;
+        for name in &labels {
+            resolve::label_exists(&view, name)?;
+        }
+        (workflow, initiative_id, assignee_id)
+    };
+
+    let (provider, identity, repo) = upstream_writer(ctx, project)?;
+    let sent = sent_or_fail(
+        provider.create_issue(
+            &repo,
+            &params.title,
+            &params.body,
+            (!labels.is_empty()).then_some(labels.as_slice()),
+        )?,
+        "issue create",
+    )?;
+    let Some(subject_key) = sent.subject_key.clone().filter(|key| !key.is_empty()) else {
+        return Err(VogtError::UpstreamWriteFailed(
+            "the forge accepted the issue but returned no number, so there is no subject key to track it under — nothing was stored locally".to_string(),
+        ));
+    };
+
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let ids = std::sync::Arc::clone(writing.ids());
+    let project = project.clone();
+    let title = params.title.clone();
+    let body = params.body.clone();
+    let reason = params.reason.clone();
+    let stored = audited_write(
+        &mut writing,
+        WORK_CREATE,
+        &params.reason,
+        move |txn, actor| {
+            let now = super::now_of(&clock);
+            let mut overlay =
+                fresh_overlay(txn.work_overlay(&subject_key)?, &subject_key, &project, now);
+            overlay.workflow_state = Some(workflow.initial_state.clone());
+            overlay.priority = Some(priority);
+            overlay.effort = effort;
+            overlay.assignee_actor_id = assignee_id.clone();
+            overlay.initiative_id = initiative_id.clone();
+            txn.upsert_work_overlay(&overlay)?;
+            txn.insert_writeback(&upstream_record(
+                &ids,
+                &clock,
+                &actor.id,
+                crate::core::WriteBackAction::Create,
+                &project,
+                Some(&subject_key),
+                &reason,
+                &identity,
+                &sent,
+            ))?;
+            // The mirror learns about the issue on the next sweep; until then the
+            // item is assembled from what was just sent.
+            let item = WorkItem {
+                id: subject_key.clone(),
+                reference: subject_key.clone(),
+                kind,
+                title: title.clone(),
+                body: body.clone(),
+                state: workflow.initial_state.clone(),
+                priority,
+                effort,
+                project_id: Some(project.id.clone()),
+                project_slug: Some(project.slug.clone()),
+                initiative_id: initiative_id.clone(),
+                origin: Origin::Observed,
+                trust_state: TrustState::Unverified,
+                assignee_actor_id: assignee_id.clone(),
+                assignee_identity_ref: None,
+                labels: labels.clone(),
+                relations: Vec::new(),
+                superseded_by: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let payload = serde_json::to_value(&item).unwrap_or(Value::Null);
+            let summary = json!({"ref": subject_key, "kind": kind, "title": title});
+            Ok(WriteOutcome::new(
+                item,
+                "work_item",
+                &subject_key,
+                payload,
+                WORK_CREATED_EVENT,
+                summary,
+            ))
+        },
+    )?;
+    Ok(json!({
+        "item": stored,
+        "comments": [],
+        "sessions": [],
+        "branches": [],
+        "git": null,
+        "walked": [],
+        "live_sessions": [],
+    }))
 }
 
 struct CreateParams {
@@ -200,32 +345,228 @@ fn refuse_unlinked_for(project: &Project, operation: &str) -> VogtError {
 /// reports them. Ports `_gaps_for`.
 ///
 /// The chain is the policy, then a forge credential, then whether the
-/// project's `repo_url` parses for that provider. Credential resolution
-/// (`writeback._writer_provider`) is not ported: with no provider wired, the
-/// credential gate is unmet and the parse gate never runs, which is exactly
-/// what an instance with no token answers. A chain that passes every gate is
-/// empty, and that is the case the caller still has to fail as not-ported.
-fn write_through_gaps<C: Clock, I: IdFactory>(
-    _ctx: &AppContext<C, I>,
+/// project's `repo_url` parses for that provider. Credentials resolve from
+/// local configuration (`writer_provider`); nothing here touches the network.
+fn write_through_gaps<C, I>(
+    ctx: &AppContext<C, I>,
     project: &Project,
     action: &str,
-) -> Vec<String> {
-    let mut gaps = Vec::new();
-    let policy = project.write_back.to_string();
-    if !crate::adapters::forge::permits(&policy, action) {
-        gaps.push(format!(
-            "write-back policy is {}, which does not permit {} — set it with `forge writeback`",
-            crate::core::py_repr(&policy),
-            crate::core::py_repr(action),
+) -> Result<Vec<String>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let gaps = policy_gap(project, action);
+    let actor = ctx
+        .declared
+        .read()?
+        .actor_by_identity(&ctx.principal.identity_ref)?;
+    gaps_for(ctx, project, actor.as_ref(), gaps)
+}
+
+/// `write_through_gaps` with the acting actor already resolved, after the
+/// policy gate. Ports the credential and parse half of `_gaps_for`.
+fn gaps_for<C, I>(
+    ctx: &AppContext<C, I>,
+    project: &Project,
+    actor: Option<&crate::core::Actor>,
+    mut gaps: Vec<String>,
+) -> Result<Vec<String>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let (provider, _identity) = writer_provider(ctx, actor, project.repo_url.as_deref())?;
+    match provider {
+        None => gaps.push(
+            "no forge credential resolves for this project — link your forge account with `forge account link`, or configure the instance token file".to_string(),
+        ),
+        Some(provider) if provider.parse(project.repo_url.as_deref()).is_none() => {
+            gaps.push(format!(
+                "the project's repo_url {} does not parse for the forge provider — correct it with `project update`",
+                py_repr_option(project.repo_url.as_deref()),
+            ))
+        }
+        Some(_) => {}
+    }
+    Ok(gaps)
+}
+
+/// Would a default `work.create` land in `project` now, and why. Ports
+/// `create_writability`: the decision-10 link check, then every write-through
+/// precondition, evaluated without writing or touching the network.
+pub(crate) fn create_writability<C, I>(
+    ctx: &AppContext<C, I>,
+    project: &Project,
+    actor: Option<&crate::core::Actor>,
+) -> Result<(bool, String), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    if !upstream::is_linked(project) {
+        return Ok((
+            false,
+            "not forge-linked: work.create refuses with project_not_linked. Pass local_only=true for a local record, or link (`forge link`) or publish (`forge publish`) the project.".to_string(),
         ));
     }
-    // No provider resolves: the port has neither an actor PAT nor a file-token
-    // provider, so the credential gate is the honest answer rather than a
-    // guessed pass.
-    gaps.push(
-        "no forge credential resolves for this project — link your forge account with `forge account link`, or configure the instance token file".to_string(),
-    );
-    gaps
+    let gaps = gaps_for(ctx, project, actor, policy_gap(project, "create"))?;
+    if gaps.is_empty() {
+        return Ok((
+            true,
+            "linked and write-back permits create: work.create opens the issue upstream."
+                .to_string(),
+        ));
+    }
+    Ok((
+        false,
+        format!(
+            "linked, but work.create refuses with upstream_write_refused: {}. Or pass local_only=true for a local record.",
+            gaps.join("; ")
+        ),
+    ))
+}
+
+/// The policy gate of `_gaps_for`: empty when the policy permits `action`.
+fn policy_gap(project: &Project, action: &str) -> Vec<String> {
+    let policy = project.write_back.to_string();
+    if crate::adapters::forge::permits(&policy, action) {
+        return Vec::new();
+    }
+    vec![format!(
+        "write-back policy is {}, which does not permit {} — set it with `forge writeback`",
+        crate::core::py_repr(&policy),
+        crate::core::py_repr(action),
+    )]
+}
+
+/// Python's `repr` of an optional string: `None` or the quoted text.
+fn py_repr_option(value: Option<&str>) -> String {
+    value.map_or_else(|| "None".to_string(), crate::core::py_repr)
+}
+
+/// Refuse a write-through whose chain is incomplete, naming every gap. Ports
+/// `_require_permitted`.
+fn require_permitted<C, I>(
+    ctx: &AppContext<C, I>,
+    project: &Project,
+    action: &str,
+    offer_local_only: bool,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let gaps = write_through_gaps(ctx, project, action)?;
+    if gaps.is_empty() {
+        return Ok(());
+    }
+    Err(refuse_gaps(project, action, &gaps, offer_local_only))
+}
+
+/// The provider, identity and repo a write-through will use, resolved before
+/// the declared transaction opens. Ports `_upstream_writer`.
+fn upstream_writer<C, I>(
+    ctx: &AppContext<C, I>,
+    project: &Project,
+) -> Result<(ForgeClient, String, RepoRef), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let actor = ctx
+        .declared
+        .read()?
+        .actor_by_identity(&ctx.principal.identity_ref)?;
+    let (provider, identity) = writer_provider(ctx, actor.as_ref(), project.repo_url.as_deref())?;
+    let Some(provider) = provider else {
+        return Err(VogtError::UpstreamWriteFailed(format!(
+            "{} is linked but no usable forge credential resolves for it now — link a forge account or restore the instance token file, then retry",
+            crate::core::py_repr(&project.slug)
+        )));
+    };
+    let Some(repo) = provider.parse(project.repo_url.as_deref()) else {
+        return Err(VogtError::UpstreamWriteFailed(format!(
+            "{} is linked but its repo_url {} no longer parses for the provider",
+            crate::core::py_repr(&project.slug),
+            py_repr_option(project.repo_url.as_deref()),
+        )));
+    };
+    Ok((provider, identity, repo))
+}
+
+/// Decision 9: anything but an upstream success aborts the operation.
+fn sent_or_fail(result: WriteBackResult, action: &str) -> Result<WriteBackResult, VogtError> {
+    if result.outcome != WriteBackOutcome::Succeeded {
+        return Err(VogtError::UpstreamWriteFailed(format!(
+            "the forge did not accept the {action}: {} — nothing was changed locally",
+            result
+                .detail
+                .as_deref()
+                .filter(|detail| !detail.is_empty())
+                .unwrap_or("no detail from the provider"),
+        )));
+    }
+    Ok(result)
+}
+
+/// The write-back ledger row for one successful write-through. Ports
+/// `_upstream_record`.
+#[allow(clippy::too_many_arguments)]
+fn upstream_record(
+    ids: &std::sync::Arc<std::sync::Mutex<impl IdFactory>>,
+    clock: &std::sync::Arc<std::sync::Mutex<impl Clock>>,
+    actor_id: &str,
+    action: crate::core::WriteBackAction,
+    project: &Project,
+    subject_key: Option<&str>,
+    reason: &str,
+    identity: &str,
+    sent: &WriteBackResult,
+) -> WriteBackRecord {
+    WriteBackRecord {
+        id: super::next_id(ids, "wbk"),
+        at: super::now_of(clock),
+        project_id: Some(project.id.clone()),
+        work_item_id: None,
+        actor_id: actor_id.to_string(),
+        action,
+        subject_key: sent
+            .subject_key
+            .clone()
+            .filter(|key| !key.is_empty())
+            .or_else(|| subject_key.map(str::to_string)),
+        policy: project.write_back.to_string(),
+        outcome: crate::core::WriteBackOutcome::Succeeded,
+        reason: reason.to_string(),
+        detail: Some(format!("as {identity}")),
+        source_url: sent.source_url.clone(),
+    }
+}
+
+/// The overlay row to build on: the existing one, or an empty one for this
+/// subject. The caller sets the changed fields; `updated_at` is `now`.
+fn fresh_overlay(
+    existing: Option<WorkOverlay>,
+    subject_key: &str,
+    project: &Project,
+    now: crate::core::Moment,
+) -> WorkOverlay {
+    let mut overlay = existing.unwrap_or_else(|| WorkOverlay {
+        subject_key: subject_key.to_string(),
+        project_id: project.id.clone(),
+        rank: None,
+        workflow_state: None,
+        priority: None,
+        effort: None,
+        assignee_actor_id: None,
+        initiative_id: None,
+        branches: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    });
+    overlay.updated_at = now;
+    overlay
 }
 
 /// `_require_permitted`'s message: every gap numbered, with the create escape
@@ -381,9 +722,8 @@ where
 /// A native item on an unlinked project refuses only when the edit touches
 /// labels, which are shared vocabulary with the forge (decision 10); every
 /// other field stays a local edit. An item that exists only upstream — the
-/// forge mirror, not a declared row — is the write-through, which is not
-/// ported and fails typed rather than writing an overlay the forge never
-/// confirmed. The initiative re-projection that follows a committed update is
+/// forge mirror, not a declared row — goes through `update_upstream`. The
+/// initiative re-projection that follows a committed update is
 /// a forge write and is not done here.
 fn update_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
@@ -395,13 +735,18 @@ where
     // Declared ref first, then an upstream subject key, then not_found. A
     // typo'd `WI-n` never reaches the write-through: only a ref that resolves
     // to an observed item on a linked project does.
-    upstream::resolve_work_ref(ctx, &view, &params.reference)?;
+    let resolved = upstream::resolve_work_ref(ctx, &view, &params.reference)?;
     let native = view.work_item_by_ref(&params.reference)?.is_some();
     if !native {
-        return Err(VogtError::UpstreamWriteFailed(format!(
-            "work.update of {} is an upstream item, and the write-through is not ported — nothing was stored locally",
-            crate::core::py_repr(&params.reference),
-        )));
+        let project_id = resolved
+            .project_id
+            .clone()
+            .ok_or_else(|| VogtError::NotFound(format!("{} has no project", resolved.reference)))?;
+        let project = view
+            .project_by_id(&project_id)?
+            .ok_or_else(|| VogtError::NotFound(format!("no project {project_id}")))?;
+        drop(view);
+        return update_upstream(ctx, &params, resolved, &project);
     }
     let item = resolve::work_item(&view, &params.reference)?;
     if params.touches_labels() {
@@ -483,6 +828,178 @@ fn parse_update(params: Value) -> Result<UpdateParams, VogtError> {
         remove_labels: names("remove_labels"),
         reason: text("reason").unwrap_or_default(),
     })
+}
+
+/// Split an upstream item's update along the boundary decision 2 draws. Ports
+/// `_update_upstream`.
+///
+/// Labels are shared vocabulary: an upstream `add_labels` write, fail-loud.
+/// Title and body are upstream truth vogt does not edit, an item cannot move
+/// project, and the write surface never removes a label. Priority, effort,
+/// assignee and initiative are vogt-local: overlay only, no provider call.
+fn update_upstream<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &UpdateParams,
+    item: WorkItem,
+    project: &Project,
+) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    if params.title.is_some() || params.body.is_some() {
+        return Err(VogtError::InvalidRequest(format!(
+            "{} is upstream truth: vogt does not edit issue titles or bodies on a linked project (the write-back verb set has no edit) — edit it on the forge",
+            item.reference
+        )));
+    }
+    if params.project.is_some() {
+        return Err(VogtError::InvalidRequest(format!(
+            "{} lives in {}'s repository; an upstream issue cannot be moved to another project",
+            item.reference,
+            crate::core::py_repr(&project.slug)
+        )));
+    }
+    if !params.remove_labels.is_empty() {
+        return Err(VogtError::InvalidRequest(format!(
+            "{} is upstream truth and the write surface is append-only: labels can be added upstream, never removed from here — remove them on the forge",
+            item.reference
+        )));
+    }
+    let priority = params
+        .priority
+        .as_deref()
+        .map(|value| {
+            value.parse::<Priority>().map_err(|_| {
+                VogtError::InvalidRequest("priority must be one of p0, p1, p2, p3, p4".to_string())
+            })
+        })
+        .transpose()?;
+    let effort = params
+        .effort
+        .as_deref()
+        .map(|value| {
+            value.parse::<Effort>().map_err(|_| {
+                VogtError::InvalidRequest(format!("unknown effort {}", crate::core::py_repr(value)))
+            })
+        })
+        .transpose()?;
+    let add_labels = params.add_labels.clone();
+    let (assignee_id, initiative_id) = {
+        let view = ctx.declared.read()?;
+        for name in &add_labels {
+            resolve::label_exists(&view, name)?;
+        }
+        let assignee_id = params
+            .assignee
+            .as_deref()
+            .map(|identity| resolve::actor(&view, identity).map(|found| found.id))
+            .transpose()?;
+        let initiative_id = params
+            .initiative
+            .as_deref()
+            .map(|slug| resolve::initiative(&view, slug).map(|found| found.id))
+            .transpose()?;
+        (assignee_id, initiative_id)
+    };
+
+    let mut sent = None;
+    let mut identity = String::new();
+    if !add_labels.is_empty() {
+        require_permitted(ctx, project, "label", false)?;
+        let (provider, who, repo) = upstream_writer(ctx, project)?;
+        let number = provider.number_of(Some(&item.reference)).ok_or_else(|| {
+            VogtError::UpstreamWriteFailed(format!(
+                "{} carries no issue number to label upstream",
+                item.reference
+            ))
+        })?;
+        sent = Some(sent_or_fail(
+            provider.add_labels(&repo, number, &add_labels)?,
+            "label add",
+        )?);
+        identity = who;
+    }
+
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let ids = std::sync::Arc::clone(writing.ids());
+    let project = project.clone();
+    let reason = params.reason.clone();
+    let clear_effort = params.clear_effort;
+    let clear_assignee = params.clear_assignee;
+    let clear_initiative = params.clear_initiative;
+    let stored = audited_write(
+        &mut writing,
+        WORK_UPDATE,
+        &params.reason,
+        move |txn, actor| {
+            let now = super::now_of(&clock);
+            let mut overlay = fresh_overlay(
+                txn.work_overlay(&item.reference)?,
+                &item.reference,
+                &project,
+                now,
+            );
+            let mut updated = item.clone();
+            if let Some(priority) = priority {
+                overlay.priority = Some(priority);
+                updated.priority = priority;
+            }
+            if effort.is_some() || clear_effort {
+                overlay.effort = effort;
+                updated.effort = effort;
+            }
+            if assignee_id.is_some() || clear_assignee {
+                overlay.assignee_actor_id = assignee_id.clone();
+                updated.assignee_actor_id = assignee_id.clone();
+            }
+            if initiative_id.is_some() || clear_initiative {
+                overlay.initiative_id = initiative_id.clone();
+                updated.initiative_id = initiative_id.clone();
+            }
+            txn.upsert_work_overlay(&overlay)?;
+            if let Some(sent) = &sent {
+                txn.insert_writeback(&upstream_record(
+                    &ids,
+                    &clock,
+                    &actor.id,
+                    crate::core::WriteBackAction::Label,
+                    &project,
+                    Some(&item.reference),
+                    &reason,
+                    &identity,
+                    sent,
+                ))?;
+            }
+            for label in &add_labels {
+                if !updated.labels.contains(label) {
+                    updated.labels.push(label.clone());
+                }
+            }
+            updated.updated_at = now;
+            let payload = serde_json::to_value(&updated).unwrap_or(Value::Null);
+            Ok(WriteOutcome::new(
+                updated,
+                "work_item",
+                &item.reference,
+                payload,
+                WORK_UPDATED_EVENT,
+                json!({"ref": item.reference}),
+            ))
+        },
+    )?;
+    // Python re-projects initiative membership after the commit; that is a
+    // forge write the native path does not do here either.
+    Ok(json!({
+        "item": stored,
+        "comments": [],
+        "sessions": [],
+        "branches": [],
+        "git": null,
+        "walked": [],
+        "live_sessions": [],
+    }))
 }
 
 fn update_native<C, I>(ctx: &AppContext<C, I>, params: &UpdateParams) -> Result<Value, VogtError>

@@ -886,7 +886,7 @@ fn push_branch_refuses_a_non_fast_forward_and_keeps_the_remote_history() {
 /// Write-through after publish: an issue written through the published
 /// repository's provider lands upstream on the new repository and comes back
 /// with its upstream ref. This is the provider write the link migration uses;
-/// the `work.create` hook that calls it is not ported (WI-1068).
+/// `work.create` calls it on a linked project (WI-1068).
 #[test]
 fn a_published_repository_takes_writes_through_its_provider() {
     let standin = StandInForge::one_of_each();
