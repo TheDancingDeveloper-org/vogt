@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Store from "../store";
 import type * as Wake from "../wakeCoordinator";
+import { STREAM_SETTLE_MS } from "../store";
 
 // The event stream is replaced by a recorder: each subscribe call is kept so
 // a test can open it, fail it, heartbeat it, and see whether the store tore it
@@ -85,7 +86,7 @@ describe("A: a failed stream retry does not wake the app", () => {
     fail();
     await vi.advanceTimersByTimeAsync(10_000);
     open();
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(STREAM_SETTLE_MS + 250);
     expect(wakes).toEqual(["sse-reconnect"]);
   });
 
@@ -97,7 +98,7 @@ describe("A: a failed stream retry does not wake the app", () => {
     fail();
     await vi.advanceTimersByTimeAsync(1_000);
     open();
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(STREAM_SETTLE_MS + 250);
     expect(wakes).toEqual(["sse-reconnect"]);
   });
 });
@@ -111,7 +112,7 @@ describe("C: a stream torn down on focus is read again when it reopens", () => {
     await vi.advanceTimersByTimeAsync(250);
     // The forced reconnect is a drop too: events sent while it was down are lost.
     open();
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(STREAM_SETTLE_MS + 250);
     expect(wakes.filter((reason) => reason === "sse-reconnect")).toEqual(["sse-reconnect"]);
   });
 });
@@ -173,5 +174,68 @@ describe("C: a grace period before the app shows disconnected", () => {
     open();
     await vi.advanceTimersByTimeAsync(5_000);
     expect(isConnected()).toBe(true);
+  });
+});
+
+describe("D: a stream that drops right after each open (WI-1903)", () => {
+  // Prod 0.7.20: a tab's stream was lost within moments of every open. The
+  // backoff reset on each open kept the retry at ~1 s forever, each reopen
+  // woke the app (aborting and refiring every list), and the banner flipped.
+  let handled = 1;
+  /** Wait for the scheduled retry to subscribe a stream not yet handled. */
+  const nextStream = async () => {
+    while (mocks.streams.length <= handled) await vi.advanceTimersByTimeAsync(100);
+    handled = mocks.streams.length;
+  };
+  const flap = async (times: number) => {
+    for (let i = 0; i < times; i++) {
+      await nextStream();
+      open();
+      await vi.advanceTimersByTimeAsync(200);
+      fail();
+    }
+  };
+
+  beforeEach(() => {
+    handled = 1;
+  });
+
+  it("never wakes the app for reopens that do not settle", async () => {
+    startEventStream();
+    open();
+    await vi.advanceTimersByTimeAsync(10);
+    fail();
+    await flap(4);
+    expect(wakes).toEqual([]);
+  });
+
+  it("keeps growing the reconnect backoff instead of resetting it per open", async () => {
+    startEventStream();
+    open();
+    await vi.advanceTimersByTimeAsync(10);
+    fail();
+    const start = Date.now();
+    await flap(5);
+    // 1 + 2 + 4 + 8 + 16 s of backoff at least, not five ~1 s retries.
+    expect(Date.now() - start).toBeGreaterThan(30_000);
+  });
+
+  it("holds Disconnected until a reopened stream has stayed up", async () => {
+    startEventStream();
+    open();
+    await vi.advanceTimersByTimeAsync(10);
+    fail();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(isConnected()).toBe(false);
+    await flap(2);
+    expect(isConnected()).toBe(false);
+    await nextStream();
+    open();
+    await vi.advanceTimersByTimeAsync(STREAM_SETTLE_MS - 100);
+    expect(isConnected()).toBe(false);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(isConnected()).toBe(true);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(wakes).toEqual(["sse-reconnect"]);
   });
 });

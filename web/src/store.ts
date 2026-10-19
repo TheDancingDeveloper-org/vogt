@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { createStore, produce } from "solid-js/store";
+import { createStore, produce, reconcile as reconcileStore } from "solid-js/store";
 import type {
   ActivityState,
   CreateSessionRequest,
@@ -135,18 +135,20 @@ async function loadSessions(signal?: AbortSignal): Promise<void> {
     // stall timer armed so *some* list still has to land.
     if (signal?.aborted) return;
     disarmStallTimer();
-    setStore(
-      produce((s) => {
-        s.sessions = {};
-        s.order = [];
-        for (const sess of list.sessions) {
-          s.sessions[sess.id] = sess;
-          s.order.push(sess.id);
-        }
-        s.hiddenCount = list.hidden_count;
-        s.ready = true;
-      }),
-    );
+    // Merged, not replaced: a poll that answers what the rail already shows
+    // keeps every row's identity, so nothing re-renders. Clearing the map and
+    // rebuilding it handed every row a new object on every read, and with a
+    // busy roster that re-laid-out the whole rail each second (WI-1903).
+    const next: Record<string, SessionSummary> = {};
+    const ids: string[] = [];
+    for (const sess of list.sessions) {
+      next[sess.id] = sess;
+      ids.push(sess.id);
+    }
+    setStore("sessions", reconcileStore(next, { key: "id", merge: true }));
+    setStore("order", reconcileStore(ids));
+    setStore("hiddenCount", list.hidden_count);
+    setStore("ready", true);
     setError(null);
     markConnected();
     setStore("lastAnswerAt", new Date().toISOString());
@@ -256,6 +258,37 @@ export const EVENT_STREAM_QUIET_MS = 20_000;
  */
 export const DISCONNECT_GRACE_MS = 2_500;
 
+/**
+ * How long a reopened stream must stay up before it counts as back (WI-1903).
+ * Until then it neither resets the reconnect backoff, nor wakes the app to
+ * re-read every surface, nor clears "Disconnected". A stream lost moments
+ * after each open used to do all three on every open: the backoff never grew
+ * past its first second, each reopen aborted and refired every list, and the
+ * banner flipped on and off every two seconds.
+ */
+export const STREAM_SETTLE_MS = 1_500;
+/** When the open stream was accepted, or null while there is none. */
+let openedAt: number | null = null;
+let settleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function streamSettled(): boolean {
+  return streamOpen && openedAt !== null && Date.now() - openedAt >= STREAM_SETTLE_MS;
+}
+
+function disarmSettleTimer(): void {
+  if (settleTimer !== null) {
+    clearTimeout(settleTimer);
+    settleTimer = null;
+  }
+}
+
+/** The stream is gone: it no longer counts toward a settle. */
+function noteStreamGone(): void {
+  streamOpen = false;
+  openedAt = null;
+  disarmSettleTimer();
+}
+
 let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
 /** Last frame or keep-alive from the stream, for the quiet check. */
 let lastAliveAt = 0;
@@ -276,6 +309,12 @@ function markConnected(): void {
     clearTimeout(disconnectTimer);
     disconnectTimer = null;
   }
+  if (connected()) return;
+  // Already showing "Disconnected": only a stream that has stayed up clears
+  // it, so a stream that keeps dropping does not flip the banner per open.
+  // The settle timer calls back here once it has.
+  // A first open (nothing lost yet) connects at once, so boot does not flash.
+  if (streamStarted && lostAt !== null && !streamSettled()) return;
   setConnected(true);
 }
 
@@ -309,7 +348,7 @@ function armStaleTimer(): void {
     // this is a dead socket, not a refusing server.
     unsubscribeEvents();
     unsubscribeEvents = null;
-    streamOpen = false;
+    noteStreamGone();
     markDisconnected();
     reconnectAttempts = 0;
     // Not a wake: the reopen answers it (see onOpen).
@@ -330,8 +369,11 @@ function armStaleTimer(): void {
 function noteStreamAlive(): void {
   streamOpen = true;
   lastAliveAt = Date.now();
+  if (openedAt === null) openedAt = lastAliveAt;
   markConnected();
-  reconnectAttempts = 0;
+  // The backoff resets only for a stream that has proven itself; see
+  // STREAM_SETTLE_MS.
+  if (streamSettled()) reconnectAttempts = 0;
   markAnswered();
   armStaleTimer();
   // The stream is the one reader that keeps probing while the transport breaker
@@ -503,7 +545,11 @@ export function startEventStream(): void {
     },
     () => {
       disarmStaleTimer();
-      streamOpen = false;
+      // A stream that stayed up was a healthy connection that broke: start
+      // the backoff over. One that died inside the settle window keeps
+      // growing it.
+      if (streamSettled()) reconnectAttempts = 0;
+      noteStreamGone();
       markDisconnected();
       unsubscribeEvents = null;
       // Every failed retry lands here. Waking the app on each one refetched
@@ -518,20 +564,30 @@ export function startEventStream(): void {
     },
     {
       onOpen: () => {
-        const lostSince = lostAt;
-        lostAt = null;
+        openedAt = null;
         noteStreamAlive();
-        if (lostSince !== null) {
+        disarmSettleTimer();
+        if (lostAt === null) {
+          // A first open lost nothing, so there is no wake to hold back: the
+          // first load is the boot wake's, and this only retries a list that
+          // failed — or never landed — now that the same origin has answered.
+          if (sessionListPending()) void refreshSessions();
+          return;
+        }
+        // Nothing below runs until the stream has stayed up: a reopen that
+        // drops again at once must not wake every surface (WI-1903). The
+        // loss stays recorded, so whichever open does settle answers it.
+        settleTimer = setTimeout(() => {
+          settleTimer = null;
+          if (!streamSettled()) return;
+          reconnectAttempts = 0;
+          markConnected();
+          lostAt = null;
           // Any drop, however short: events sent while the stream was down
           // are gone, so the lists and open surfaces are read again. One wake
           // for the whole drop; the session-list reconcile covers its refetch.
           noteForeground("sse-reconnect");
-        } else if (sessionListPending()) {
-          // The first load is the boot wake's; this retries a list that
-          // failed — or one that never landed at all — now that the same
-          // origin has just answered.
-          void refreshSessions();
-        }
+        }, STREAM_SETTLE_MS);
       },
       onHeartbeat: noteStreamAlive,
     },
@@ -540,7 +596,7 @@ export function startEventStream(): void {
 
 export function stopEventStream(): void {
   streamStarted = false;
-  streamOpen = false;
+  noteStreamGone();
   lostAt = null;
   disarmStaleTimer();
   disarmStallTimer();
@@ -568,7 +624,7 @@ export function stopEventStream(): void {
 export function forceReconnectEventStream(): void {
   if (!streamStarted) return;
   reconnectAttempts = 0;
-  streamOpen = false;
+  noteStreamGone();
   disarmStaleTimer();
   // Events sent while this stream is torn down are lost like any drop's, so
   // the reopen reads the lists again.
