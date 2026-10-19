@@ -500,44 +500,38 @@ fn the_board_pages_with_stable_cursors() {
     assert!(second["cells"][0]["next_cursor"].is_null(), "{second}");
 }
 
+/// An adopted subject is a native row (`observed_first.adopt` inserts one), so
+/// Python's `update_work` takes the native path: title, body and label
+/// removal are local edits and nothing is sent. The upstream-truth refusals
+/// apply to the un-adopted subject (`title_and_body_edits_on_an_upstream_item_are_refused`).
 #[test]
-#[ignore = "parity: title and body edits on an adopted item are accepted locally, Python refuses them as upstream truth (WI-1779, from WI-1745 review blocker 2)"]
-fn title_and_body_edits_on_an_adopted_item_are_refused() {
-    let (built, _) = forgejo_with(four_issues(), true);
+fn title_body_and_label_removal_on_an_adopted_item_are_local_edits() {
+    let (built, forgejo) = forgejo_with(four_issues(), true);
+    create_label_op(&built, json!({"name": "shared", "reason": WHY})).unwrap();
     onboard(&built);
     let reference = adopt(&built, &subject(9));
-
-    for edit in [json!({"title": "New"}), json!({"body": "New"})] {
-        let mut params = json!({"ref": reference, "reason": WHY});
-        params
-            .as_object_mut()
-            .unwrap()
-            .extend(edit.as_object().unwrap().clone());
-        match update_op(&built, params) {
-            Err(VogtError::InvalidRequest(message)) => {
-                assert!(message.contains("upstream truth"), "{message}");
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-}
-
-#[test]
-#[ignore = "parity: label removal on an adopted item is accepted, Python refuses it as append-only (WI-1779, from WI-1745 review blocker 2)"]
-fn a_label_removal_on_an_adopted_item_is_refused() {
-    let (built, _) = forgejo_with(four_issues(), true);
-    onboard(&built);
-    let reference = adopt(&built, &subject(9));
-
-    match update_op(
+    update_op(
         &built,
-        json!({"ref": reference, "remove_labels": ["bug"], "reason": WHY}),
-    ) {
-        Err(VogtError::InvalidRequest(message)) => {
-            assert!(message.contains("append-only"), "{message}");
-        }
-        other => panic!("unexpected {other:?}"),
-    }
+        json!({"ref": reference, "add_labels": ["shared"], "reason": WHY}),
+    )
+    .unwrap();
+    forgejo.requests.lock().unwrap().clear();
+
+    let updated = update_op(
+        &built,
+        json!({"ref": reference, "title": "New", "body": "New body", "remove_labels": ["shared"], "reason": WHY}),
+    )
+    .unwrap();
+    assert_eq!(updated["item"]["title"], json!("New"), "{updated}");
+    assert_eq!(updated["item"]["body"], json!("New body"), "{updated}");
+    assert!(
+        !updated["item"]["labels"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("shared")),
+        "{updated}"
+    );
+    assert!(forgejo.mutations().is_empty(), "{:?}", forgejo.mutations());
 }
 
 // -- write-through: create and update (WI-1068) ----------------------------
