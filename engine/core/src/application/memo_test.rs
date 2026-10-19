@@ -363,3 +363,34 @@ fn the_live_inbox_half_is_read_on_every_badge() {
     );
     assert_eq!(listed.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn forgetting_one_data_directory_keeps_the_others() {
+    // A restore forgets only the stores it replaces: a restore of another
+    // instance in the same process must not wipe this one's answers.
+    let memo: StoreMemo<&'static str> = StoreMemo::new();
+    let (kept, replaced) = (data_dir("kept"), data_dir("replaced"));
+    for dir in [&kept, &replaced] {
+        let built = fresh(dir);
+        crate::with_ctx!(&built, |ctx| memo
+            .get(ctx, || Ok("answer"), |_| true)
+            .unwrap());
+    }
+    let resolved = crate::with_ctx!(&fresh(&replaced), |ctx| ctx
+        .declared
+        .path()
+        .parent()
+        .unwrap()
+        .to_path_buf());
+    memo.forget(&resolved);
+    let built = fresh(&kept);
+    let answer = crate::with_ctx!(&built, |ctx| memo
+        .get(ctx, || Ok("again"), |_| true)
+        .unwrap());
+    assert_eq!(answer, "answer");
+    let built = fresh(&replaced);
+    let answer = crate::with_ctx!(&built, |ctx| memo
+        .get(ctx, || Ok("again"), |_| true)
+        .unwrap());
+    assert_eq!(answer, "again");
+}

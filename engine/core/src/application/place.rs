@@ -41,9 +41,9 @@ thread_local! {
     pub(crate) static COUNTS_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Drop the shared badge counts (tests, and a restore).
-pub fn clear_metrics_cache() {
-    COUNTS.clear();
+/// Drop the shared badge counts over `data_dir` (a restore).
+pub fn clear_metrics_cache(data_dir: &std::path::Path) {
+    COUNTS.forget(data_dir);
 }
 
 /// The store counts, in Python's order. The backlog badge is the whole
