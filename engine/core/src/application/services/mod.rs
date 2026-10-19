@@ -68,6 +68,8 @@ mod forge_module_test;
 #[cfg(test)]
 mod forge_ops_test;
 #[cfg(test)]
+mod project_import_test;
+#[cfg(test)]
 mod services_test;
 #[cfg(test)]
 mod upstream_truth_test;
