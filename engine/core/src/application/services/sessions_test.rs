@@ -21,7 +21,7 @@ use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn};
 use serde_json::json;
 
-fn moment() -> Moment {
+pub(super) fn moment() -> Moment {
     Moment::from_unix(1_700_000_000, 0)
 }
 
@@ -32,8 +32,8 @@ fn unique() -> u64 {
 }
 
 /// What the engine was asked, in order, and the body it answers with.
-struct Script {
-    seen: Mutex<Vec<String>>,
+pub(super) struct Script {
+    pub(super) seen: Mutex<Vec<String>>,
     /// Status and body for the next call. Empty means 200 with an empty object.
     answers: Mutex<Vec<(u16, String)>>,
 }
@@ -57,7 +57,7 @@ fn engine(script: Arc<Script>) -> EngineClient {
     EngineClient::new("http://engine", Some("tok".to_string()), Some(transport))
 }
 
-fn opened(script: Option<Arc<Script>>) -> Built {
+pub(super) fn opened(script: Option<Arc<Script>>) -> Built {
     opened_as(
         script,
         Principal::new("local:test-user", ActorKind::Human, "Test").unwrap(),
@@ -95,7 +95,7 @@ fn opened_as(script: Option<Arc<Script>>, principal: Principal) -> Built {
     built
 }
 
-fn insert_project(built: &Built, slug: &str) {
+pub(super) fn insert_project(built: &Built, slug: &str) {
     let Built::StepSequential(ctx) = built else {
         unreachable!("opened() builds a step clock");
     };
@@ -106,7 +106,11 @@ fn insert_project(built: &Built, slug: &str) {
     txn.commit().unwrap();
 }
 
-fn start_params(project: Option<&str>, task: Option<&str>, reason: &str) -> StartSessionParams {
+pub(super) fn start_params(
+    project: Option<&str>,
+    task: Option<&str>,
+    reason: &str,
+) -> StartSessionParams {
     StartSessionParams {
         project: project.map(str::to_string),
         work_item: None,
@@ -129,7 +133,7 @@ fn start_params(project: Option<&str>, task: Option<&str>, reason: &str) -> Star
     }
 }
 
-fn script_with(answers: Vec<(u16, String)>) -> Arc<Script> {
+pub(super) fn script_with(answers: Vec<(u16, String)>) -> Arc<Script> {
     Arc::new(Script {
         seen: Mutex::new(Vec::new()),
         answers: Mutex::new(answers),
