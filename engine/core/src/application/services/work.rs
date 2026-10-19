@@ -2312,7 +2312,6 @@ where
     Ok(json!({"item": item, "link": link}))
 }
 
-#[allow(clippy::too_many_arguments)]
 /// One write-back attempt from a native item, recorded either way. Ports
 /// `writeback.attempt`: policy, link and forge gates answer `skipped` with
 /// the reason; otherwise the provider is called and its outcome recorded.
