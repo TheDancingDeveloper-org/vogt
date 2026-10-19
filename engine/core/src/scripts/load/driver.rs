@@ -463,6 +463,8 @@ fn request_for(
             .set("Authorization", auth)
             .query("limit", limit)
             .call()
+            .map(drop)
+            .map_err(|err| err.to_string())
     };
     let post = |path: &str, body: Value| {
         agent
@@ -470,6 +472,8 @@ fn request_for(
             .set("Authorization", auth)
             .set("Content-Type", "application/json")
             .send_string(&body.to_string())
+            .map(drop)
+            .map_err(|err| err.to_string())
     };
     let response = match operation {
         "work.list" => get("/api/work", "50"),
@@ -501,7 +505,7 @@ fn request_for(
         other => return Err(format!("unknown deployed op {other:?}")),
     };
     // ureq reports a 4xx/5xx as an error, so only a 2xx/3xx arrives here.
-    response.map(drop).map_err(|err| err.to_string())
+    response
 }
 
 /// Drive `plan.requests` HTTP calls with `plan.concurrency` of them in flight.
