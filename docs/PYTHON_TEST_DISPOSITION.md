@@ -155,5 +155,5 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_voice_capabilities.py | retired | Voice sidecar policy. `voice/` is a separate workspace. |
 | test_work_get_many.py | ported | `work.get_many` batched chip read (WI-1224). Owner WI-1068. |
 | test_workflow.py | ported | Workflow machines in `decisions.rs`. |
-| test_workspace_disk.py | unported | Workspace-volume row on engine status and sweep (WI-1304). Deferred to WI-1066. |
+| test_workspace_disk.py | ported | `engine/core/src/application/workspace_disk_test.rs`: status/sweep carry the disk row; row absent with no engine, engine unavailable, or a non-object answer; no row when `disk` is missing or not an object. Not ported: `test_engine_status_carries_the_disk_row` and `test_engine_status_without_a_disk_row_says_none` (`engine.status` is not ported to Rust yet). Rust checks only that `disk` is an object, not its field types (Python drops `{"used_percent":"x"}`). |
 | test_writes.py | ported | `application/writes_test.rs`. |
