@@ -102,6 +102,13 @@ where
     }
 }
 
+impl<C, I> SqliteObservedStore<C, I> {
+    /// The database file this store reads and writes.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 impl<C, I> crate::storage::interface::ObservedStore for SqliteObservedStore<C, I>
 where
     C: Clock,
@@ -658,6 +665,25 @@ where
             })
         })?;
         Ok(outcome)
+    }
+
+    fn latest_generation(&self) -> Result<i64, VogtError> {
+        if !self.path.exists() {
+            return Ok(0);
+        }
+        let conn = self.open(false)?;
+        if !table_exists(&conn, "meta").map_err(VogtError::from)? {
+            return Ok(0);
+        }
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?",
+                [META_LATEST_GENERATION],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        Ok(stored.and_then(|value| value.parse().ok()).unwrap_or(0))
     }
 
     fn replace_dep_refs(&self, rows: &[DepRefRow]) -> Result<i64, VogtError> {

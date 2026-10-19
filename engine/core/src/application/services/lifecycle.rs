@@ -314,6 +314,14 @@ fn verify_store(source: &Path, name: &str) -> Result<(), VogtError> {
 
 /// Verify the manifest, then replace the data directory's stores. Verification
 /// happens before anything is touched.
+/// Drop the answers remembered from the stores about to be replaced
+/// (WI-1224), in this process. Another process serving the same data
+/// directory sees the swap through the memo's key.
+fn forget_live_stores() {
+    crate::application::services::inbox::clear_badge_cache();
+    crate::application::place::clear_metrics_cache();
+}
+
 pub fn restore<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     params: &Value,
@@ -338,6 +346,7 @@ pub fn restore<C: Clock, I: IdFactory>(
             data_dir = data_dir.display()
         ))
     })?;
+    forget_live_stores();
     for name in ["declared.sqlite3", "observed.sqlite3"] {
         std::fs::copy(source.join(name), data_dir.join(name))
             .map_err(|err| VogtError::InvalidRequest(format!("copying {name} failed: {err}")))?;
@@ -506,6 +515,7 @@ pub fn clone_instance<C: Clock + 'static, I: IdFactory + 'static>(
         })?;
         staged.observed.rebind_instance(&instance_id)?;
 
+        forget_live_stores();
         for name in ["declared.sqlite3", "observed.sqlite3"] {
             for suffix in ["-wal", "-shm"] {
                 let stale = data_dir.join(format!("{name}{suffix}"));

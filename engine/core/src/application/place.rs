@@ -7,9 +7,12 @@
 //! Read order follows Python's, because the step clock is read along the way
 //! and the answer's `generated_at` is the last of those reads.
 
+use std::sync::LazyLock;
+
 use serde_json::{json, Value};
 
 use super::context::{AppContext, Built};
+use super::memo::StoreMemo;
 use super::services::inbox::inbox_badge;
 use super::services::now_of;
 use super::services::preferences::{saved_inbox_filter, InboxSavedFilter};
@@ -17,6 +20,60 @@ use super::views::backlog_total_considered;
 use crate::core::{Clock, IdFactory};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ReadView, WorkFilter};
+
+/// The badge counts that are pure functions of the two stores.
+#[derive(Debug, Clone)]
+struct StoreCounts {
+    projects_total: i64,
+    work_total: i64,
+    backlog_total: Option<i64>,
+    drift_present: bool,
+}
+
+/// Shared between every badge read while the stores have not moved
+/// (WI-1224). `backlog_total_considered` alone ranks the whole backlog, and
+/// every tab asked for it on every change.
+static COUNTS: LazyLock<StoreMemo<StoreCounts>> = LazyLock::new(StoreMemo::new);
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread computed the store counts.
+    pub(crate) static COUNTS_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Drop the shared badge counts (tests, and a restore).
+pub fn clear_metrics_cache() {
+    COUNTS.clear();
+}
+
+/// The store counts, in Python's order. The backlog badge is the whole
+/// candidate population, which `backlog` ranks and reports.
+fn store_counts<C, I>(ctx: &AppContext<C, I>) -> Result<StoreCounts, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    #[cfg(test)]
+    COUNTS_COMPUTED.with(|n| n.set(n.get() + 1));
+    let projects_total = ctx.declared.read()?.counts()?.projects;
+    let work_total = ctx.declared.read()?.count_work_items(&WorkFilter {
+        exclude_terminal: true,
+        limit: 1,
+        ..WorkFilter::default()
+    })?;
+    let backlog_total = backlog_total_considered(ctx).ok();
+    let drift_present = !ctx
+        .declared
+        .read()?
+        .list_drift(Some("open"), None, None, 1)?
+        .is_empty();
+    Ok(StoreCounts {
+        projects_total,
+        work_total,
+        backlog_total,
+        drift_present,
+    })
+}
 
 /// Return all shell badge values in one bounded response.
 pub fn place_metrics_op(ctx: &Built, _params: Value) -> Result<Value, VogtError> {
@@ -32,30 +89,24 @@ where
     // unreadable filter means "no filter", and an unreadable badge is null.
     let saved: Option<InboxSavedFilter> = saved_inbox_filter(ctx).ok().flatten();
     let badge = inbox_badge(ctx, saved.as_ref()).ok();
-    // The store counts, in Python's order. The backlog badge is the whole
-    // candidate population, which `backlog` ranks and reports.
-    let projects_total = ctx.declared.read()?.counts()?.projects;
-    let work_total = ctx.declared.read()?.count_work_items(&WorkFilter {
-        exclude_terminal: true,
-        limit: 1,
-        ..WorkFilter::default()
-    })?;
-    let backlog_total = backlog_total_considered(ctx).ok();
-    let drift_present = !ctx
-        .declared
-        .read()?
-        .list_drift(Some("open"), None, None, 1)?
-        .is_empty();
+    // The store counts, shared between every badge read while the stores have
+    // not moved (WI-1224). An answer with the backlog missing is not
+    // remembered: it is asked for again next time.
+    let counts = COUNTS.get(
+        ctx,
+        || store_counts(ctx),
+        |counts| counts.backlog_total.is_some(),
+    )?;
     let revision = ctx.declared.read()?.current_revision()?;
     let generated_at = now_of(&ctx.clock);
     Ok(json!({
         "inbox_active": badge.map(|(filtered, _)| filtered),
         "inbox_active_unfiltered": badge.map(|(_, active)| active),
         "inbox_filter": saved,
-        "projects_total": projects_total,
-        "work_total": work_total,
-        "backlog_total_considered": backlog_total,
-        "drift_present": drift_present,
+        "projects_total": counts.projects_total,
+        "work_total": counts.work_total,
+        "backlog_total_considered": counts.backlog_total,
+        "drift_present": counts.drift_present,
         "revision": revision,
         "generated_at": generated_at,
     }))
