@@ -41,14 +41,14 @@ the thin service modules gain tests; it does not move down.
 | test_branch_binding.py | ported | `branches.rs` and the work-item branch binding service. |
 | test_bridge.py | ported | `adapters/mcp/bridge.rs`. |
 | test_bundle_budget.py | retired | PWA first-screen bundle budget. `web/`, not the core. |
-| test_cargo_cache.py | unported | Cargo cache survival on redeploy (`engine/deploy/cargo-cache.sh`). Deferred to WI-1256; the engine deploy path, not the core crate yet. |
+| test_cargo_cache.py | retired | `engine/deploy/cargo-cache.sh` (WI-1256, done): Cargo cache survival on redeploy. Shell in the engine image, not the core crate; the Python test keeps driving the script. |
 | test_chats.py | ported | Chat operations in the application services, with the engine transport stood in. |
 | test_check_engine_spec.py | retired | `scripts/check_engine_spec.py` against the Rust engine routes. Engine contract, not the core. |
 | test_check_rust_version.py | retired | `scripts/check_rust_version.py`. A Python lint over the engine toolchain pin. |
 | test_check_workflow_policy.py | retired | `scripts/check_workflow_policy.py` over GitHub workflow YAML. CI policy, not product behaviour. |
 | test_checks.py | ported | CI-revision reads in the collectors and the project brief. |
 | test_ci_watch.py | ported | Watched-ref and deployed-version reads are in `application/deployed.rs`. The bound-branch announce is in `application/ci_watch.rs`: the feed event once per conclusion, staleness, the notice text, and the session nudge (notice, then Enter; none at a permission prompt). `test_a_sweep_announces_and_survives_an_announce_failure` is `a_failed_announce_does_not_fail_the_sweep` in `application/collect.rs`, driven by the `ci_watch::seam` failure switch. |
-| test_claude_profile.py | unported | Claude Code account profiles and their bootstrap. Named accounts land on `session.start`. Deferred to WI-1306 (triage row 7782a7e8, under WI-1074). |
+| test_claude_profile.py | retired | `engine/deploy/claude-profile.sh` and `mcp-bootstrap.sh` (WI-1306, done). Shell in the engine image, not the core crate; the Python test keeps driving the scripts. Named accounts on `session.start` are a sessions concern and are tested with that service. |
 | test_cli.py | ported | `adapters/cli.rs`. |
 | test_clone.py | ported | Clone service under `application/services`. |
 | test_collectors.py | ported | `collectors/` and `application/collect.rs`. |
@@ -112,7 +112,7 @@ the thin service modules gain tests; it does not move down.
 | test_parity_normalise.py | retired | Normalisation helpers for the in-process parity script. `scripts/parity.py` owns normalisation now. |
 | test_place_metrics_cache.py | unported | Place/metrics badge cache shared across shells (WI-1224). Deferred to WI-1054. |
 | test_play_preflight.py | retired | `scripts/play_preflight.py` for the browser suite. `web/`, not the core. |
-| test_policy_hook.py | unported | Project agent-policy hook, driven through the real script (WI-1243). Deferred to WI-1058. |
+| test_policy_hook.py | retired | `engine/deploy/policy-hook.sh` and `install-policy`, the PreToolUse hook driven through the real script. Shell, not the core crate; the policy decision it asks the engine for is tested with the engine policy route. |
 | test_pr_work_item_edge.py | ported | `implemented_by` from pull requests, in forge sync and the work services. |
 | test_product_identity.py | retired | User-facing rename and legacy compatibility names across Python packaging. The Rust binary stays `vogt-core` for the overlap. |
 | test_product_version.py | ported | `VERSION` in `main.rs`. `scripts/check_product_version.py` keeps the fallback equal to `pyproject.toml`. |
