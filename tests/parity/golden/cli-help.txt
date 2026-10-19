@@ -1,0 +1,2994 @@
+$ vogt --help
+[exit 0]
+usage: vogt [-h] [--version] [--data-dir DATA_DIR] [--json] <command> ...
+
+Vogt — per-repo and estate-wide product development state, with provenance and
+freshness on every answer.
+
+positional arguments:
+  <command>
+    init               Create or bring forward the instance in the data
+                       directory.
+    migrate            Bring both stores forward to this build's schema.
+    status             Report instance identity, schema versions, and row
+                       counts.
+    registry           registry operations
+    diagnostics        Deploy diagnostics: version, image digest, uptime,
+                       readiness checks, migration state and recent error log
+                       lines (redacted); peer=true also asks the configured
+                       peer instance (e.g. prod).
+    engine             engine operations
+    place              place operations
+    connect            How to reach this instance, and the client
+                       configuration for doing so. Renders the connection
+                       document.
+    mcp                mcp operations
+    project            project operations
+    work               work operations
+    board              board operations
+    backlog            The ranked backlog, globally or for one project, paged
+                       (limit/offset, next_offset). mode=summary (default)
+                       omits each row's full item; mode=full includes it.
+    bugs               Open bugs across every project, ranked.
+    why                Per-input score contributions for one ranked item.
+    label              label operations
+    initiative         initiative operations
+    actor              actor operations
+    workflow           workflow operations
+    sweep              Run collectors over the registered projects.
+    coverage           What has looked at what, and how long ago.
+    observations       observations operations
+    deps               Dependency references out of a project, and into it.
+    suppress           Exclude an observed subject from ranked views.
+    suppression        suppression operations
+    contract           contract operations
+    compliance         A project's last recorded contract result, with its
+                       age.
+    drift              drift operations
+    serve              Serve the API, MCP and health endpoints on one port.
+    session            session operations
+    decision           decision operations
+    agent-cli          agent-cli operations
+    agent-activity     agent-activity operations
+    token              token operations
+    auth               auth operations
+    user               user operations
+    backup             Snapshot both stores with a schema-version manifest.
+    restore            Verify a backup's manifest, then replace the live
+                       stores.
+    clone              Restore another instance's backup here as a copy: keep
+                       this instance's id and credentials, revoke the source's
+                       tokens, disarm forge write-back, never copy push
+                       subscriptions.
+    export             Write the declared entities as JSON (format 2: with
+                       comments, relations and the clone stamp; --project for
+                       one).
+    import             Merge an export into this instance under the documented
+                       conflict policy. A dry-run diff unless --apply
+                       --confirm; --strict refuses any both-sides change.
+    forge              forge operations
+    events             events operations
+    notifications      What GitHub is trying to say about the registered
+                       projects. Separate from the events feed, which is this
+                       instance's own history.
+    deployed-versions  What each configured deployment lane runs (deployed
+                       SHA/version) against its branch head, with the commits
+                       and work items merged but not yet deployed. Read from
+                       the deploy-lanes collector's last sweep.
+    inbox              inbox operations
+    preference         preference operations
+    chat               chat operations
+    audit              audit operations
+
+options:
+  -h, --help           show this help message and exit
+  --version            show program's version number and exit
+  --data-dir DATA_DIR  Instance data directory (overrides VOGT_DATA_DIR).
+  --json               Emit the raw result as JSON instead of formatted text.
+
+$ vogt init --help
+[exit 0]
+usage: vogt init [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt migrate --help
+[exit 0]
+usage: vogt migrate [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt status --help
+[exit 0]
+usage: vogt status [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt registry --help
+[exit 0]
+usage: vogt registry [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    dump        The operation registry as a manifest: every operation's scope,
+                bindings, schemas and transport exclusion.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt registry dump --help
+[exit 0]
+usage: vogt registry dump [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt diagnostics --help
+[exit 0]
+usage: vogt diagnostics [-h] [--peer | --no-peer] [--log-lines LOG_LINES]
+
+options:
+  -h, --help            show this help message and exit
+  --peer, --no-peer     Also ask the configured peer instance
+                        (`diagnostics_peer_url`) for its diagnostics, e.g.
+                        prod from dev.
+  --log-lines LOG_LINES
+                        How many recent warning-or-worse log lines to return.
+
+$ vogt engine --help
+[exit 0]
+usage: vogt engine [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    status      The session engine's operational report, as the GUI's Settings
+                shows it: build, session / push / GUI-process counts, history
+                archive and agent-task storage, workspace root, and event
+                subscribers that fell behind. `engine` says why when it could
+                not be asked.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt engine status --help
+[exit 0]
+usage: vogt engine status [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt place --help
+[exit 0]
+usage: vogt place [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    metrics     Read all bounded shell navigation counts in one response.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt place metrics --help
+[exit 0]
+usage: vogt place metrics [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt connect --help
+[exit 0]
+usage: vogt connect [-h] [--client {http,bridge}] [--format {json,markdown}]
+
+options:
+  -h, --help            show this help message and exit
+  --client {http,bridge}
+                        `http` for a client that speaks streamable HTTP MCP —
+                        the ordinary case, and the one that needs nothing
+                        installed. `bridge` for a client that can only spawn a
+                        local process.
+  --format {json,markdown}
+                        `markdown` renders the connection document
+                        `DEPLOYMENT.md` describes; redirect it to
+                        CONNECTING.md if you want it on disk.
+
+$ vogt mcp --help
+[exit 0]
+usage: vogt mcp [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    stdio       Serve MCP over stdin/stdout until the stream closes.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt mcp stdio --help
+[exit 0]
+usage: vogt mcp stdio [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt project --help
+[exit 0]
+usage: vogt project [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    register    Register an existing folder or repository as a project.
+    create      Scaffold a contract-compliant skeleton, then register it.
+    import      Clone a GitHub repository into the import root, register it,
+                and consolidate its existing forge state.
+    get         Fetch one project by slug.
+    list        List registered projects, each with `writable`: whether a
+                default work.create lands there now, and why not.
+    brief       The per-repo view: state, work, bugs, version, compliance.
+                mode=summary (default) omits full items from top_backlog.
+    update      Correct a project's declared repo URL or exclusions.
+    transition  Move a project through its lifecycle states.
+    scaffold    Write the contract's skeleton into a registered project, never
+                overwriting.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt project register --help
+[exit 0]
+usage: vogt project register [-h] --name NAME --root-path ROOT_PATH
+                             [--repo-url REPO_URL]
+                             [--lifecycle-state {incubating,active,maintenance,archived}]
+                             [--exclusions EXCLUSIONS] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --name NAME           Display name; the slug is derived from it.
+  --root-path ROOT_PATH
+                        Folder or git repository this project is.
+  --repo-url REPO_URL   Optional remote the project is published at.
+  --lifecycle-state {incubating,active,maintenance,archived}
+                        incubating / active / maintenance / archived.
+  --exclusions EXCLUSIONS
+                        Paths collection skips, replacing the defaults
+                        entirely rather than adding to them. Omit for the
+                        defaults. A repository that vendors a corpus or
+                        carries agent worktrees needs this at registration,
+                        because the first sweep is the baseline every later
+                        answer is compared against.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt project create --help
+[exit 0]
+usage: vogt project create [-h] --name NAME --root-path ROOT_PATH
+                           [--owner OWNER] [--repo-url REPO_URL]
+                           [--lifecycle-state {incubating,active,maintenance,archived}]
+                           --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --name NAME           Display name; the slug is derived from it.
+  --root-path ROOT_PATH
+                        Directory to scaffold into. Created if absent;
+                        existing files are never overwritten.
+  --owner OWNER         Recorded in the scaffold. Defaults to the acting
+                        principal.
+  --repo-url REPO_URL
+  --lifecycle-state {incubating,active,maintenance,archived}
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt project import --help
+[exit 0]
+usage: vogt project import [-h] --repo REPO [--name NAME]
+                           [--root-path ROOT_PATH]
+                           [--lifecycle-state {incubating,active,maintenance,archived}]
+                           [--consolidate | --no-consolidate] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --repo REPO           Repository to import: `owner/name`, `host/owner/name`,
+                        or an HTTPS/SSH repository URL for GitHub or a
+                        configured Forgejo host.
+  --name NAME           Display name. Defaults to the repository's own name.
+  --root-path ROOT_PATH
+                        Where to clone to. Defaults to `<import_root>/<slug>`;
+                        supply this only when one repository must live
+                        somewhere specific.
+  --lifecycle-state {incubating,active,maintenance,archived}
+  --consolidate, --no-consolidate
+                        Read existing issues, PRs, labels and releases after
+                        registering. Read-only, and on by default because a
+                        project that arrives empty looks like a project with
+                        no work.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt project get --help
+[exit 0]
+usage: vogt project get [-h] --slug SLUG
+
+options:
+  -h, --help   show this help message and exit
+  --slug SLUG  Project slug.
+
+$ vogt project list --help
+[exit 0]
+usage: vogt project list [-h] [--limit LIMIT] [--offset OFFSET]
+
+options:
+  -h, --help       show this help message and exit
+  --limit LIMIT
+  --offset OFFSET
+
+$ vogt project brief --help
+[exit 0]
+usage: vogt project brief [-h] --slug SLUG [--backlog-limit BACKLOG_LIMIT]
+                          [--mode {summary,full}]
+
+options:
+  -h, --help            show this help message and exit
+  --slug SLUG           Project slug. Aliases: `project`, `id`.
+  --backlog-limit BACKLOG_LIMIT
+  --mode {summary,full}
+                        `summary` (default) ranks `top_backlog` without each
+                        row's full work item (`item` is null); `full` includes
+                        it, bodies and all.
+
+$ vogt project update --help
+[exit 0]
+usage: vogt project update [-h] --slug SLUG [--repo-url REPO_URL]
+                           [--exclusions EXCLUSIONS]
+                           [--agent-policy AGENT_POLICY] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --slug SLUG           Project to update.
+  --repo-url REPO_URL   Leave unset to keep the current value.
+  --exclusions EXCLUSIONS
+                        Replaces the current list entirely. Leave unset to
+                        keep it; pass an empty list to collect everything.
+  --agent-policy AGENT_POLICY
+                        Replaces the project's agent policy entirely. Leave
+                        unset to keep it. `forbidden_text` entries are regexes
+                        and must compile, and so must `landing.branch_pattern`
+                        once `{n}` stands for a number; `landing.merge_mode`
+                        is `fast_forward` or `rebase` — `merge` is refused. A
+                        pattern that does not compile is refused rather than
+                        stored.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt project transition --help
+[exit 0]
+usage: vogt project transition [-h] --slug SLUG --to-state
+                               {incubating,active,maintenance,archived}
+                               --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --slug SLUG
+  --to-state {incubating,active,maintenance,archived}
+                        Target lifecycle state.
+  --reason REASON
+
+$ vogt project scaffold --help
+[exit 0]
+usage: vogt project scaffold [-h] --project PROJECT --reason REASON
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  A registered project slug.
+  --reason REASON
+
+$ vogt work --help
+[exit 0]
+usage: vogt work [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    create       Create a work item (feature / bug / chore / question).
+    get          Fetch one work item with its relations, labels and comments
+                 (`id` is accepted for `ref`).
+    get-many     Compact rows (ref, title, kind, state, priority, project) for
+                 up to 200 refs in one read; refs that name nothing come back
+                 in `missing`.
+    list         List work items with filters, paged (limit/offset,
+                 next_offset). mode=summary (default) returns compact rows;
+                 mode=full returns whole items. `query` searches
+                 title/body/ref; `status`/`state` alias `states`.
+    update       Change a work item's fields, assignee, or labels.
+    transition   Move a work item to another state, validating the edge; a
+                 refusal lists the allowed edges and the shortest path.
+                 walk=true takes that path, one audited hop per edge.
+    relate       Add a typed relation between two work items.
+    unrelate     Remove a typed relation between two work items.
+    bind-branch  Declare the git branch a work item is worked on.
+    comment      Comment on a work item, attributed to the acting actor.
+    adopt        Promote an observed subject into a declared work item.
+
+options:
+  -h, --help     show this help message and exit
+
+$ vogt work create --help
+[exit 0]
+usage: vogt work create [-h] --kind {feature,bug,chore,question} --title TITLE
+                        [--body BODY] [--priority {p0,p1,p2,p3,p4}]
+                        [--effort {xs,s,m,l,xl}] [--project PROJECT]
+                        [--initiative INITIATIVE] [--assignee ASSIGNEE]
+                        [--labels LABELS] [--local-only | --no-local-only]
+                        --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --kind {feature,bug,chore,question}
+                        feature / bug / chore / question.
+  --title TITLE
+  --body BODY
+  --priority {p0,p1,p2,p3,p4}
+  --effort {xs,s,m,l,xl}
+  --project PROJECT     Project slug.
+  --initiative INITIATIVE
+                        Initiative slug.
+  --assignee ASSIGNEE   Actor identity_ref, e.g. local:sprooty.
+  --labels LABELS       Existing label names to attach.
+  --local-only, --no-local-only
+                        Create the item locally without writing it upstream.
+                        On a linked project a create normally goes through to
+                        the forge, and a write-back policy that does not
+                        permit 'create' refuses it; pass this to opt in to a
+                        native, local-only item instead — it carries no
+                        upstream subject yet and is exactly what a later
+                        `forge link` or `forge writeback` migrates upstream.
+                        Default off: the refusal stays the default so nothing
+                        is created locally by surprise.
+  --reason REASON
+
+$ vogt work get --help
+[exit 0]
+usage: vogt work get [-h] --ref REF [--comment-limit COMMENT_LIMIT]
+                     [--mode {summary,full}] [--comment-order {newest,oldest}]
+
+options:
+  -h, --help            show this help message and exit
+  --ref REF             Work item reference, e.g. WI-7. Alias: `id`.
+  --comment-limit COMMENT_LIMIT
+  --mode {summary,full}
+                        `summary` omits the item body and comments; `full`
+                        (default) keeps them.
+  --comment-order {newest,oldest}
+                        Which end of the comment thread `comment_limit` keeps.
+                        `newest` (default) returns the newest comments, newest
+                        first; `oldest` returns the oldest, oldest first.
+
+$ vogt work get-many --help
+[exit 0]
+usage: vogt work get-many [-h] --refs REFS
+
+options:
+  -h, --help   show this help message and exit
+  --refs REFS  Work item references to read, e.g. [WI-7, WI-9]; a subject key
+               resolves as it does for `work.get`. A repeated ref is read
+               once.
+
+$ vogt work list --help
+[exit 0]
+usage: vogt work list [-h] [--project PROJECT] [--kinds KINDS]
+                      [--states STATES] [--query QUERY]
+                      [--priorities PRIORITIES] [--assignee ASSIGNEE]
+                      [--initiative INITIATIVE] [--label LABEL]
+                      [--include-finished | --no-include-finished]
+                      [--mode {summary,full}] [--limit LIMIT]
+                      [--offset OFFSET]
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT     Project slug.
+  --kinds KINDS
+  --states STATES       Workflow states to include, e.g. [open, in_progress].
+                        Aliases: `status`, `state` (a single state or a comma-
+                        separated string is accepted). Naming a terminal state
+                        (done, wont_do) includes finished items without
+                        needing `include_finished`.
+  --query QUERY         Case-insensitive text matched against the title, body
+                        and ref. Aliases: `text`, `search`, `q`.
+  --priorities PRIORITIES
+  --assignee ASSIGNEE   Actor identity_ref.
+  --initiative INITIATIVE
+                        Initiative slug.
+  --label LABEL
+  --include-finished, --no-include-finished
+                        Include done and wont_do items.
+  --mode {summary,full}
+                        `summary` (default) returns compact rows — ref, title,
+                        kind, state, priority, project — so a long page fits
+                        one tool result; `full` returns every field, bodies
+                        included.
+  --limit LIMIT
+  --offset OFFSET
+
+$ vogt work update --help
+[exit 0]
+usage: vogt work update [-h] --ref REF [--title TITLE] [--body BODY]
+                        [--priority {p0,p1,p2,p3,p4}] [--effort {xs,s,m,l,xl}]
+                        [--project PROJECT] [--initiative INITIATIVE]
+                        [--assignee ASSIGNEE]
+                        [--clear-effort | --no-clear-effort]
+                        [--clear-assignee | --no-clear-assignee]
+                        [--clear-initiative | --no-clear-initiative]
+                        [--add-labels ADD_LABELS]
+                        [--remove-labels REMOVE_LABELS] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --ref REF
+  --title TITLE
+  --body BODY
+  --priority {p0,p1,p2,p3,p4}
+  --effort {xs,s,m,l,xl}
+  --project PROJECT     Project slug.
+  --initiative INITIATIVE
+                        Initiative slug.
+  --assignee ASSIGNEE   Actor identity_ref.
+  --clear-effort, --no-clear-effort
+  --clear-assignee, --no-clear-assignee
+  --clear-initiative, --no-clear-initiative
+  --add-labels ADD_LABELS
+  --remove-labels REMOVE_LABELS
+  --reason REASON
+
+$ vogt work transition --help
+[exit 0]
+usage: vogt work transition [-h] --ref REF --to-state TO_STATE --reason REASON
+                            [--walk | --no-walk]
+
+options:
+  -h, --help           show this help message and exit
+  --ref REF            Work item reference, e.g. WI-7. Alias: `id`.
+  --to-state TO_STATE  Target state, e.g. in_progress. Aliases: `to`, `state`.
+  --reason REASON      Why the item is moving (audited, required on every
+                       write). With `walk`, each hop records this reason
+                       annotated with the hop.
+  --walk, --no-walk    Walk the shortest path of valid edges to `to_state`,
+                       one audited transition per hop (e.g. open ->
+                       in_progress -> review -> done). Only the workflow's own
+                       edges are taken and finished states are never passed
+                       through, so no review step is skipped.
+
+$ vogt work relate --help
+[exit 0]
+usage: vogt work relate [-h] --ref REF --kind
+                        {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
+                        --target TARGET --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --ref REF
+  --kind {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
+                        depends_on / relates_to / duplicate_of / parent_of.
+                        (implemented_by is observed from pull requests, not
+                        declarable.)
+  --target TARGET       The other work item's reference.
+  --reason REASON
+
+$ vogt work unrelate --help
+[exit 0]
+usage: vogt work unrelate [-h] --ref REF --kind
+                          {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
+                          --target TARGET --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --ref REF
+  --kind {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
+  --target TARGET
+  --reason REASON
+
+$ vogt work bind-branch --help
+[exit 0]
+usage: vogt work bind-branch [-h] --ref REF [--branch BRANCH] --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --ref REF        Work item reference, e.g. WI-7.
+  --branch BRANCH  The branch name to declare. Defaults from
+                   `branch_binding_template` when omitted (`WI-7` becomes
+                   `wi-7`, an upstream item its `gh-<n>` form). Declaring a
+                   branch already on the item is a no-op, not an error.
+                   Additive and forward-only: this records a name, it never
+                   creates, renames or deletes a branch in git.
+  --reason REASON
+
+$ vogt work comment --help
+[exit 0]
+usage: vogt work comment [-h] --ref REF --body BODY [--kind {note,handoff}]
+                         [--handoff HANDOFF] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --ref REF
+  --body BODY           The comment text.
+  --kind {note,handoff}
+                        `note` (default) is an ordinary remark. `handoff` is
+                        the structured hand-off a fresh session starts from,
+                        and requires `handoff`.
+  --handoff HANDOFF     The structured fields of a hand-off: branch, head_sha,
+                        base, done, remaining, touch_points, gates_run,
+                        blockers, session. Required when kind is `handoff`,
+                        refused on a note.
+  --reason REASON
+
+$ vogt work adopt --help
+[exit 0]
+usage: vogt work adopt [-h] --subject SUBJECT
+                       [--kind {feature,bug,chore,question}]
+                       [--priority {p0,p1,p2,p3,p4}] [--project PROJECT]
+                       [--assignee ASSIGNEE] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --subject SUBJECT     The observed subject key to adopt.
+  --kind {feature,bug,chore,question}
+                        Override the inferred work kind.
+  --priority {p0,p1,p2,p3,p4}
+                        Override the inferred priority.
+  --project PROJECT     Override the project the subject belongs to.
+  --assignee ASSIGNEE
+  --reason REASON
+
+$ vogt board --help
+[exit 0]
+usage: vogt board [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        Read bounded, independently pageable Board cells in one
+                snapshot.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt board list --help
+[exit 0]
+usage: vogt board list [-h] [--project PROJECT] [--kinds KINDS]
+                       [--states STATES] [--priorities PRIORITIES]
+                       [--assignee ASSIGNEE] [--initiative INITIATIVE]
+                       [--label LABEL] [--lane-mode {none,project,initiative}]
+                       --cells CELLS [--page-size PAGE_SIZE]
+                       [--snapshot SNAPSHOT]
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT     Project slug.
+  --kinds KINDS
+  --states STATES
+  --priorities PRIORITIES
+  --assignee ASSIGNEE   Actor identity_ref.
+  --initiative INITIATIVE
+                        Initiative slug.
+  --label LABEL
+  --lane-mode {none,project,initiative}
+  --cells CELLS
+  --page-size PAGE_SIZE
+  --snapshot SNAPSHOT   Opaque snapshot returned by the first batch. Required
+                        when adding another cell or continuing one against
+                        that same Board view.
+
+$ vogt backlog --help
+[exit 0]
+usage: vogt backlog [-h] [--project PROJECT] [--kinds KINDS]
+                    [--priorities PRIORITIES] [--assignee ASSIGNEE]
+                    [--initiative INITIATIVE] [--label LABEL]
+                    [--trust-states TRUST_STATES]
+                    [--include-prs | --no-include-prs] [--mode {summary,full}]
+                    [--limit LIMIT] [--offset OFFSET]
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT     Project slug; omit for the global backlog.
+  --kinds KINDS
+  --priorities PRIORITIES
+  --assignee ASSIGNEE
+  --initiative INITIATIVE
+  --label LABEL
+  --trust-states TRUST_STATES
+  --include-prs, --no-include-prs
+                        Whether open pull requests rank in the backlog. On by
+                        default: a synced PR is worklike, and now that closure
+                        is observed a merged one self-heals out rather than
+                        lingering. Set false to see issues and markers only —
+                        a view choice, not a data one; the PRs stay queryable
+                        through `observations list`.
+  --mode {summary,full}
+                        `summary` (default) returns each ranked row without
+                        its full work item (`item` is null; ref, title, kind,
+                        state, priority and score remain); `full` includes it,
+                        bodies and all.
+  --limit LIMIT
+  --offset OFFSET       Ranked rows to skip. `total_considered` is the full
+                        count, so a caller knows whether another page exists.
+                        Ranking is recomputed per request and staleness grows
+                        with the clock, so two pages fetched far enough apart
+                        can repeat or skip an item near a score boundary — the
+                        same caveat `audit.list` carries, for the same reason.
+
+$ vogt bugs --help
+[exit 0]
+usage: vogt bugs [-h] [--project PROJECT] [--priorities PRIORITIES]
+                 [--assignee ASSIGNEE] [--label LABEL] [--limit LIMIT]
+                 [--offset OFFSET]
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT
+  --priorities PRIORITIES
+  --assignee ASSIGNEE
+  --label LABEL
+  --limit LIMIT
+  --offset OFFSET       Ranked rows to skip. `total_considered` is the full
+                        count, so a caller knows whether another page exists.
+                        Ranking is recomputed per request and staleness grows
+                        with the clock, so two pages fetched far enough apart
+                        can repeat or skip an item near a score boundary — the
+                        same caveat `audit.list` carries, for the same reason.
+
+$ vogt why --help
+[exit 0]
+usage: vogt why [-h] --ref REF
+
+options:
+  -h, --help  show this help message and exit
+  --ref REF
+
+$ vogt label --help
+[exit 0]
+usage: vogt label [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    create      Define a label.
+    list        List labels.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt label create --help
+[exit 0]
+usage: vogt label create [-h] --name NAME [--color COLOR] --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --name NAME
+  --color COLOR    Hex colour, e.g. #d73a4a.
+  --reason REASON
+
+$ vogt label list --help
+[exit 0]
+usage: vogt label list [-h] [--limit LIMIT] [--offset OFFSET]
+
+options:
+  -h, --help       show this help message and exit
+  --limit LIMIT
+  --offset OFFSET
+
+$ vogt initiative --help
+[exit 0]
+usage: vogt initiative [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    create      Create a cross-project initiative with a ranking weight.
+    list        List initiatives.
+    update      Correct an initiative's title, body or weight, or close or
+                reopen it.
+    publish     Create or adopt one forge tracking issue per linked repo the
+                initiative spans, each carrying a managed checkbox task list
+                of its member work items. Additive and forward-only; a closed
+                initiative proposes closing its tracking issues, never writes
+                it.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt initiative create --help
+[exit 0]
+usage: vogt initiative create [-h] --title TITLE [--body BODY]
+                              [--weight WEIGHT] [--state {open,closed}]
+                              --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --title TITLE
+  --body BODY
+  --weight WEIGHT       Feeds ranking; 0 means no lift.
+  --state {open,closed}
+  --reason REASON
+
+$ vogt initiative list --help
+[exit 0]
+usage: vogt initiative list [-h] [--limit LIMIT] [--offset OFFSET]
+                            [--mode {summary,full}]
+
+options:
+  -h, --help            show this help message and exit
+  --limit LIMIT
+  --offset OFFSET
+  --mode {summary,full}
+                        `summary` omits each initiative's body; `full`
+                        (default) keeps it.
+
+$ vogt initiative update --help
+[exit 0]
+usage: vogt initiative update [-h] --slug SLUG [--title TITLE] [--body BODY]
+                              [--weight WEIGHT] [--state {open,closed}]
+                              --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --slug SLUG           Initiative to update.
+  --title TITLE
+  --body BODY
+  --weight WEIGHT       Feeds ranking; 0 means no lift.
+  --state {open,closed}
+                        `closed` ends it; `initiative publish` then proposes
+                        closing its tracking issues.
+  --reason REASON
+
+$ vogt initiative publish --help
+[exit 0]
+usage: vogt initiative publish [-h] --slug SLUG --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --slug SLUG      Initiative slug to publish.
+  --reason REASON
+
+$ vogt actor --help
+[exit 0]
+usage: vogt actor [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    create      Register a human or agent so work can be assigned to it.
+    list        List actors.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt actor create --help
+[exit 0]
+usage: vogt actor create [-h] --identity-ref IDENTITY_REF [--kind KIND]
+                         --display-name DISPLAY_NAME --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --identity-ref IDENTITY_REF
+                        Stable identity, e.g. agent:claude-code or
+                        local:sprooty.
+  --kind KIND           human or agent.
+  --display-name DISPLAY_NAME
+  --reason REASON
+
+$ vogt actor list --help
+[exit 0]
+usage: vogt actor list [-h] [--limit LIMIT] [--offset OFFSET]
+
+options:
+  -h, --help       show this help message and exit
+  --limit LIMIT
+  --offset OFFSET
+
+$ vogt workflow --help
+[exit 0]
+usage: vogt workflow [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        The state machine each work-item kind is governed by.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt workflow list --help
+[exit 0]
+usage: vogt workflow list [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt sweep --help
+[exit 0]
+usage: vogt sweep [-h] [--project PROJECT] [--collectors COLLECTORS]
+                  [--offline-only | --no-offline-only] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT     Narrow the sweep to one project. Scope is never
+                        widened.
+  --collectors COLLECTORS
+                        Collector names; omit to run all of them.
+  --offline-only, --no-offline-only
+                        Skip every collector that needs the network (NFR-PO2).
+  --reason REASON
+
+$ vogt coverage --help
+[exit 0]
+usage: vogt coverage [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt observations --help
+[exit 0]
+usage: vogt observations [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        Raw evidence, including subjects ranked views filter out.
+    prune       Apply the retention policy to observation history.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt observations list --help
+[exit 0]
+usage: vogt observations list [-h] [--project PROJECT] [--kind KIND]
+                              [--subject-key SUBJECT_KEY]
+                              [--promoted-only | --no-promoted-only]
+                              [--latest-only | --no-latest-only]
+                              [--limit LIMIT] [--offset OFFSET]
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT
+  --kind KIND           Observation kind, e.g. marker or forge.issue.
+  --subject-key SUBJECT_KEY
+  --promoted-only, --no-promoted-only
+  --latest-only, --no-latest-only
+                        Newest per subject. Set false for the full history.
+  --limit LIMIT
+  --offset OFFSET
+
+$ vogt observations prune --help
+[exit 0]
+usage: vogt observations prune [-h] --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --reason REASON
+
+$ vogt deps --help
+[exit 0]
+usage: vogt deps [-h] --project PROJECT
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  Project slug.
+
+$ vogt suppress --help
+[exit 0]
+usage: vogt suppress [-h] --subject SUBJECT [--pattern | --no-pattern]
+                     [--project PROJECT] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --subject SUBJECT     An exact subject key, or a glob pattern when --pattern
+                        is set.
+  --pattern, --no-pattern
+                        Treat `subject` as a glob pattern.
+  --project PROJECT     Limit the suppression to one project.
+  --reason REASON
+
+$ vogt suppression --help
+[exit 0]
+usage: vogt suppression [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        List suppressions.
+    revoke      Revoke a suppression, returning the subject to ranked views.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt suppression list --help
+[exit 0]
+usage: vogt suppression list [-h] [--include-revoked | --no-include-revoked]
+                             [--limit LIMIT]
+
+options:
+  -h, --help            show this help message and exit
+  --include-revoked, --no-include-revoked
+  --limit LIMIT
+
+$ vogt suppression revoke --help
+[exit 0]
+usage: vogt suppression revoke [-h] --id ID --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID
+  --reason REASON
+
+$ vogt contract --help
+[exit 0]
+usage: vogt contract [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    evaluate      Evaluate the contract against any path; stores nothing.
+    check         Evaluate the project contract; returns every failing rule.
+    adopt         Opt a project into the contract; it is not applied by
+                  default.
+    decline       Opt a project back out of the contract.
+    inapplicable  Declare that a criterion cannot apply to a project, and why.
+    applicable    Withdraw an inapplicability declaration.
+
+options:
+  -h, --help      show this help message and exit
+
+$ vogt contract evaluate --help
+[exit 0]
+usage: vogt contract evaluate [-h] --path PATH
+
+options:
+  -h, --help   show this help message and exit
+  --path PATH  Any folder or repository, registered or not. Stores nothing.
+
+$ vogt contract check --help
+[exit 0]
+usage: vogt contract check [-h] --project PROJECT --reason REASON
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  A registered project slug. Records the result with its
+                     age.
+  --reason REASON
+
+$ vogt contract adopt --help
+[exit 0]
+usage: vogt contract adopt [-h] --project PROJECT --reason REASON
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  A registered project slug.
+  --reason REASON
+
+$ vogt contract decline --help
+[exit 0]
+usage: vogt contract decline [-h] --project PROJECT --reason REASON
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  A registered project slug.
+  --reason REASON
+
+$ vogt contract inapplicable --help
+[exit 0]
+usage: vogt contract inapplicable [-h] --project PROJECT --rule RULE --target
+                                  TARGET --reason REASON
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  A registered project slug.
+  --rule RULE        The criterion's rule, as an evaluation reports it:
+                     `required_file` or `required_dir`.
+  --target TARGET    The criterion's target, as an evaluation reports it:
+                     `LICENSE`, `src`, `design`.
+  --reason REASON
+
+$ vogt contract applicable --help
+[exit 0]
+usage: vogt contract applicable [-h] --project PROJECT --rule RULE --target
+                                TARGET --reason REASON
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT
+  --rule RULE
+  --target TARGET
+  --reason REASON
+
+$ vogt compliance --help
+[exit 0]
+usage: vogt compliance [-h] --project PROJECT
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT
+
+$ vogt drift --help
+[exit 0]
+usage: vogt drift [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    detect      Compare declared state against observation; raise proposals.
+    list        Open drift proposals and their evidence.
+    resolve     Accept, reject, or contest a drift proposal.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt drift detect --help
+[exit 0]
+usage: vogt drift detect [-h] [--auto-accept | --no-auto-accept] --reason
+                         REASON
+
+options:
+  -h, --help            show this help message and exit
+  --auto-accept, --no-auto-accept
+                        Apply the shipped low-risk policy: state-sync kinds
+                        are accepted automatically, destructive or structural
+                        ones never are.
+  --reason REASON
+
+$ vogt drift list --help
+[exit 0]
+usage: vogt drift list [-h] [--status STATUS] [--kind KIND]
+                       [--project PROJECT] [--limit LIMIT]
+
+options:
+  -h, --help         show this help message and exit
+  --status STATUS    open / accepted / rejected / contested.
+  --kind KIND
+  --project PROJECT
+  --limit LIMIT
+
+$ vogt drift resolve --help
+[exit 0]
+usage: vogt drift resolve [-h] --id ID --resolution
+                          {accepted,rejected,contested} --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID
+  --resolution {accepted,rejected,contested}
+  --reason REASON
+
+$ vogt serve --help
+[exit 0]
+usage: vogt serve [-h] --host HOST --port PORT [--tls-cert TLS_CERT]
+                  [--tls-key TLS_KEY] [--no-auth]
+                  [--read-only | --no-read-only] [--no-schedule]
+
+options:
+  -h, --help            show this help message and exit
+  --host HOST           Listen address. No default anywhere — it encodes
+                        exposure . The compose file supplies it.
+  --port PORT           Listen port. No default, for the same reason as host.
+  --tls-cert TLS_CERT   Operator-owned certificate, mounted read-only.
+  --tls-key TLS_KEY
+  --no-auth             Serve without authentication. Only sane on loopback.
+  --read-only, --no-read-only
+                        Refuse every write, whatever scope a token holds.
+  --no-schedule         Do not collect in the background. The schedule is on
+                        by default because an instance that never looks cannot
+                        tell stale evidence from none; this is the switch for
+                        a diagnostic run.
+
+$ vogt session --help
+[exit 0]
+usage: vogt session [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    start          Open a coding session (a terminal) for a work item or a
+                   project. With `template` (e.g. claude) it runs that agent,
+                   and a `task` is delivered as the agent's first prompt, so
+                   it starts working instead of opening idle. `cwd` opens it
+                   in an existing worktree under the workspace Active/
+                   directory instead of the project's checkout; it cannot be
+                   combined with `worktree=true`. Returns both ids (ses_… and
+                   engine_session_id); then poll session_screen until `ready`.
+    list           List coding sessions with their live activity state
+                   (running / idle / waiting-for-input / exited / errored) and
+                   `alive`, including sessions opened from the GUI (unlinked,
+                   engine UUID only). Each row has both ids: `id` (ses_…) and
+                   `engine_session_id`. `started_by_session` keeps only the
+                   sessions that one started (engine id or ses_…). `fields`
+                   accepts a list or a comma-separated string.
+    stop           Stop a coding session and revoke the token it ran with.
+                   Takes either id: Vogt's ses_… id or the engine's session
+                   UUID (an unlinked GUI session is killed, with no token to
+                   revoke). The process is killed; its screen and log stay
+                   readable.
+    input          Type into a session: text, then named keys (enter, esc,
+                   tab, arrows, ctrl-c, ctrl-d, backspace), then Enter. Enter
+                   is pressed by default; pass draft=true (or submit=false) to
+                   type without sending. Takes either id: ses_… or the engine
+                   UUID. Read session_screen first and never send a blind
+                   Enter: at a menu it accepts whatever is highlighted
+                   (dismiss with esc). While a permission prompt shows, only a
+                   person's input is typed: an agent's is refused (403
+                   person_required). On a hibernated session it wakes first,
+                   and that wake is never forced: a session handed to a
+                   successor, or whose work item is already live in the same
+                   directory, is refused (409). Audited (byte count and keys,
+                   never the text).
+    sweep          Oversee every session at once: one row per live or
+                   hibernated session with its activity, turn timing, last
+                   reply excerpt, blocked report, permission dialog and the
+                   last lines of its screen, ordered by who needs attention
+                   (approval, blocked, waiting, stalled, running, idle,
+                   hibernated) with the reason. Use this instead of
+                   session_screen per session.
+    hibernate      Hibernate a session: stop its processes to free their
+                   memory, keep it listed (activity `hibernated`, with its
+                   last screen), and revoke its token. session_wake (or
+                   session_input, which wakes it) resumes the same agent
+                   conversation under the same id. Only for a session whose
+                   conversation id the engine knows (Claude Code started by
+                   Vogt, or any resume); a shell needs allow_shell and wakes
+                   fresh. superseded_by names the session taking over the work
+                   (ses_… or the engine UUID); a later wake is then refused
+                   unless forced. Takes either id.
+    wake           Wake a hibernated session: start it again under the same
+                   id, resuming its agent conversation in the directory it ran
+                   in, with a new token for the same actor. Refused (409) when
+                   the session was hibernated naming a successor, or when
+                   another live session holds the same work item in the same
+                   directory, unless force, which only a person or an
+                   oversight session may set. A live session is returned as it
+                   is. session_input wakes one by itself and never forces;
+                   wait for ready (session_wait) before typing after this.
+                   Takes either id.
+    keep-awake     Pin a session awake so the engine's idle policy never
+                   hibernates it (keep_awake=true), or unpin it. Takes either
+                   id.
+    commit         Commit a worker session's staged changes on its behalf. The
+                   worker must be idle, hibernated or blocked — never mid-turn
+                   — and the commit is refused when the staged diff carries a
+                   conflict marker, a secret or an intent-to-add entry, or
+                   when the message or branch matches the project's forbidden
+                   text. Committed under the repo's own git identity. Returns
+                   a digest line and the SHA; the full diff only when asked.
+                   Takes either id.
+    rename         Rename a session, live or hibernated: the display name the
+                   GUI shows and session_list returns as `name`. Takes either
+                   id.
+    remove         Remove a session: kill it if it still runs and have the
+                   engine forget it — its record, kept screen and brief — as
+                   the GUI's Remove does. session_stop keeps it listed with
+                   its output readable; this drops it. A linked session's
+                   record is closed and its token revoked as a stop would.
+                   Takes either id.
+    set-role       Nominate a session as oversight (role=oversight): one that
+                   supervises other sessions. It is pinned awake, so it comes
+                   back by itself after a redeploy, and the GUI lists it
+                   first. role=worker makes it an ordinary session again and
+                   lifts the pin oversight set. Person-only. Takes either id.
+    bind           Declare which work item a session serves (work_item=WI-n),
+                   or that it serves none (work_item=null) — one current item
+                   per session, re-declarable, audited. Any principal with
+                   work.write may bind: a person, the session itself (omit id
+                   inside a session Vogt started), or its overseer. Never
+                   moves the terminal or the item's state; the item then shows
+                   the session as being worked by it. Takes either id.
+    grant-request  Ask a person to approve one scoped item for one live
+                   session (WI-973): a named credential (secret_name +
+                   project_id) the target then fetches with `vogt-agent-auth
+                   fetch VAR`. It appears in the Inbox; nothing is granted
+                   until a person approves. Ask for your own session, or — as
+                   an oversight session — for a session you drive. uses=once
+                   (default) or ttl; ttl_seconds 60..86400.
+    grant-decide   Approve or deny a pending grant. A person's decision only:
+                   every agent is refused. Approval is applied to the live
+                   session by the engine before it is recorded.
+    grant-revoke   Withdraw a pending grant or revoke an approved one at once.
+                   A person, or the session that asked, may.
+    grants         Grants to sessions, newest first, by state (pending,
+                   approved, denied, revoked, expired) or target. Names only,
+                   never a value.
+    answer         Answer the dialog a session shows (activity awaiting-
+                   approval) by choice: `option` (its number) or `label`
+                   (unique text of it); the engine moves the highlight itself.
+                   Startup gates (folder trust, external CLAUDE.md imports)
+                   take anyone's answer; a permission prompt (approval.kind
+                   permission or read-outside-cwd) only a person's — an agent
+                   is refused (403 person_required) and should leave it for
+                   the Inbox. Pass expect_question = approval.question so a
+                   stale answer is refused. Audited. Takes either id.
+    screen         Read what a session's terminal shows right now: visible
+                   lines, cursor, title, activity and readiness. `ready` true
+                   means the program is waiting for input — wait for it before
+                   typing. Takes either id: ses_… or the engine UUID. Needs an
+                   engine with the screen route.
+    last-reply     Read the last N replies of a session's agent (Claude Code
+                   or Codex) from its own transcript — whole, current and
+                   redacted, unlike the screen. Says how the conversation was
+                   found (`basis`). Takes either id.
+    economics      Read what a session's agent transcript cost: turns, context
+                   tokens (measured for Claude Code, estimated otherwise),
+                   peak context, compactions, tool-result bytes, repeated
+                   reads and per-turn wall clock. Cost is null (no price
+                   table) and the worktree is not counted. Takes either id.
+    digest         Read one session's digest from the engine row: activity,
+                   the blocked report, a last-reply excerpt the row already
+                   carries (at most 120 characters), and the economics the
+                   engine already computed (turns, context, compactions).
+                   Numbers are null when the row has none — this does not
+                   meter a transcript. Pass context_window to get context_pct.
+                   Takes either id.
+    wait           Wait for a session instead of polling it: blocks (up to
+                   timeout_s, max 600) until it is ready for input — or needs
+                   a person (awaiting-approval, blocked) or exits — or, with
+                   until=exited / any_change, until it exits or changes at
+                   all. Returns why (`outcome`, `matched`) and the screen
+                   then. Takes either id.
+    changes        Read session deltas published after `since`: ready,
+                   approval, exited, errored, blocked, unblocked, hibernated,
+                   woken. `next_cursor` is the seq to pass next; `truncated`
+                   means the ring dropped events, so the page starts at the
+                   oldest still kept. `ids` names the sessions (either id
+                   form); empty reads every session. One page instead of re-
+                   sweeping.
+    wait-any       Wait for any of the named sessions instead of polling them:
+                   blocks (up to timeout_s, max 600) until one publishes a
+                   kind in `until` (default: ready, blocked, approval, exited,
+                   errored). Returns the delta, or `timeout`. Pass `cursor`
+                   (the previous `next_cursor`) so a replayed page is not
+                   waited on twice. `cursor=now` skips events already
+                   published and waits only for one that lands after the call
+                   starts; a timeout then returns that head as `next_cursor`.
+                   `ids` empty waits on every session.
+    blocked        Report that this session's agent is blocked on a person:
+                   what it needs (`blocker`) and the concrete `items` to do.
+                   Shown on session_list/session_screen, raised in the Inbox
+                   and pushed; drivers stop re-prompting. Omit `id` from
+                   inside a session Vogt started. Clear with
+                   session_report_unblocked.
+    unblocked      Clear a session's blocked report once the person has acted
+                   (or the agent found a way on). Omit `id` from inside a
+                   session Vogt started.
+    history        List archived sessions (history), newest first.
+    search         Search session output (live sessions included).
+    log            Read the tail of a session's output log, readable — the
+                   history of what it printed, not its current screen (use
+                   session_screen for that). Takes either id: Vogt's ses_… id
+                   or the engine's session UUID.
+
+options:
+  -h, --help       show this help message and exit
+
+$ vogt session start --help
+[exit 0]
+usage: vogt session start [-h] [--work-item WORK_ITEM] [--project PROJECT]
+                          [--template TEMPLATE] [--task TASK] [--files FILES]
+                          [--symbols SYMBOLS] [--done DONE] [--gates GATES]
+                          [--repo-map | --no-repo-map]
+                          [--permission-mode {default,accept_edits,bypass}]
+                          [--account ACCOUNT] [--resume RESUME] [--name NAME]
+                          [--model MODEL] [--effort EFFORT]
+                          [--autopilot | --no-autopilot]
+                          [--role {worker,oversight}]
+                          [--from-handoff FROM_HANDOFF]
+                          [--review-of REVIEW_OF] [--budget BUDGET]
+                          [--worktree | --no-worktree] [--cwd CWD] --reason
+                          REASON
+                          [--purpose {implement,implement-careful,review,mechanical,investigate,design}]
+
+options:
+  -h, --help            show this help message and exit
+  --work-item WORK_ITEM
+                        Work item ref, e.g. WI-7.
+  --project PROJECT     Project slug.
+  --template TEMPLATE   Session template to run, by name or by tag — the
+                        engine expands it against the deployment's templates.
+                        Use this to run an agent rather than a plain shell:
+                        `claude` (or `codex`, `opencode`, `klaudia`) starts
+                        that agent under the deployment's protected wrapper,
+                        so a request to *do* something in a session names one
+                        here. Omitted means a plain shell, which does nothing
+                        until typed into.
+  --task TASK           What the session's agent should do, in the user's
+                        words. Folded into the brief as its Task section; an
+                        agent template (Claude Code, Codex, OpenCode, Klaudia)
+                        is started with a first prompt telling it to read the
+                        brief and carry that task out, so 'start a session on
+                        X and check its containers' opens an agent already
+                        checking them. A plain shell only gets the brief's
+                        path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a
+                        task with `template` when it is something to carry
+                        out.
+  --files FILES         Files the task touches, each `path` or `path:start-
+                        end`. Rendered under Touch points; a line range is a
+                        hint, not a slice of the file.
+  --symbols SYMBOLS     Symbols the task touches. Rendered under Touch points.
+  --done DONE           What finished looks like, one line each. Rendered
+                        under Touch points.
+  --gates GATES         Checks that must pass before the task is done.
+                        Rendered under Touch points.
+  --repo-map, --no-repo-map
+                        Include a two-level outline of the touch-point
+                        directories in the brief. Omitted means include one
+                        when touch points name files, and not otherwise. The
+                        outline is capped; it is a map, not a listing.
+  --permission-mode {default,accept_edits,bypass}
+                        The agent's permission posture. `default`: Claude
+                        Code's own mode (auto) with the deployment's driven-
+                        session policy — routine safe work proceeds, prod-
+                        mutating, destructive, shared-resource and secret-
+                        exposing actions are denied. `accept_edits`: file
+                        edits auto-accepted, everything else asks. `bypass`:
+                        no permission checks at all, for one trusted task —
+                        only a person may grant it (an agent is refused), and
+                        it is audited. Claude Code, Codex, opencode and
+                        Klaudia templates. Codex maps the same three postures:
+                        `default` is `-a on-request -s danger-full-access`;
+                        `accept_edits` adds
+                        `approvals_reviewer="auto_review"`; `bypass` is
+                        `--dangerously-bypass-approvals-and-sandbox` and stays
+                        people-only. A named Codex requirements file that is
+                        missing, empty or unreadable refuses the Codex launch
+                        (400) and does not fall through to bypass. Klaudia
+                        takes `default` and `bypass` only (its `acceptEdits`
+                        is an alias for its default autonomous mode, so
+                        `accept_edits` is refused).
+  --account ACCOUNT     Run the session under a named Claude Code subscription
+                        account (a name from the engine's
+                        ENGINE_AGENT_CLAUDE_ACCOUNTS). Omitted uses the
+                        engine's default account. Claude Code templates only;
+                        an unknown name is refused, never started on the
+                        default login.
+  --resume RESUME       Continue a previous conversation of the template's
+                        agent CLI instead of starting a new one: its own
+                        conversation id, mapped to `claude --resume <id>`,
+                        `codex resume <id>`, `opencode --session <id>` or
+                        `klaudia --resume <id>`. A Claude Code (or Klaudia)
+                        session Vogt started fresh has the engine session id
+                        (`engine_session_id`) as its conversation id, so a
+                        session lost to a restart can be resumed by that. The
+                        engine starts a resumed conversation in the directory
+                        its transcript records (when inside the workspace), so
+                        one begun under a worktree or a parent folder resumes
+                        from any project. Requires `template`; letters, digits
+                        and . _ - only, never a leading dash.
+  --name NAME           Session name. Derived from the subject if omitted.
+  --model MODEL         Model id for the agent CLI this template runs, e.g.
+                        'gpt-5.6' or 'claude-sonnet-4-5'. Omitted means the
+                        CLI's own default. Requires `template`: a plain shell
+                        has no model. A template that cannot be told which
+                        model to use refuses rather than ignoring this.
+  --effort EFFORT       Reasoning effort for the agent CLI, e.g. 'low' /
+                        'medium' / 'high'. Omitted means the CLI's own
+                        default. Requires `template`: a plain shell has no
+                        effort to set, so do not volunteer one for a terminal
+                        that runs no agent.
+  --autopilot, --no-autopilot
+                        Keep the agent working unattended: its brief tells it
+                        to carry on when its next step needs no person,
+                        stopping only when it is blocked on a person (reported
+                        with session_report_blocked) or no unblocked work is
+                        left (then it prints `AUTOPILOT: DONE`). The engine
+                        also re-prompts it whenever it stops at its prompt
+                        with work left, and its idle policy leaves it awake.
+                        Omitted means on for an agent template started with a
+                        `task`, off otherwise; `false` turns it off.
+  --role {worker,oversight}
+                        `oversight` nominates the session to supervise others
+                        (drive rollouts, check on and revive worker sessions):
+                        it is pinned awake, so it comes back by itself after a
+                        redeploy, and the GUI lists it first. `worker`
+                        (default) is every other session. Only a person starts
+                        an oversight session; an agent caller is refused.
+                        Change it later with session.set_role.
+  --from-handoff FROM_HANDOFF
+                        Start a fresh session from a work item's hand-off
+                        comment: the work item ref (e.g. WI-7). Refused when
+                        that item has no hand-off comment, and refused when
+                        `work_item` is also given and names a different item.
+                        The brief carries the latest hand-off.
+  --review-of REVIEW_OF
+                        Start a reviewer on this work item (e.g. WI-7) instead
+                        of a worker. The brief checks the diff named by the
+                        item's latest hand-off against the item's own
+                        acceptance criteria, and it does not carry the work
+                        on. Refused without a work item — a review is of an
+                        item — and when `work_item` or `from_handoff` names a
+                        different one.
+  --budget BUDGET       Limits the engine enforces on this session (C7): a
+                        soft warning as one is approached, then hibernation
+                        (trigger `budget`) when one is reached. Omitted means
+                        the default for an agent template started with a
+                        `task` as a worker — 120 turns and 90 minutes of wall
+                        clock, no context limit — and no budget otherwise. An
+                        empty object sets no limits, which is how a start
+                        declines the default.
+  --worktree, --no-worktree
+                        Start the session in a git worktree of its own rather
+                        than in the project's shared checkout (WI-1298). The
+                        engine cuts the worktree from the project's
+                        integration branch — `agent_policy.base_branch` when
+                        the project states one, otherwise `main` — onto a new
+                        branch `<work item>-<session>` (or
+                        `<project>-<session>` when no work item is given), and
+                        the session's working directory is that worktree. The
+                        shared checkout is never written to, so a dirty tree
+                        there cannot leak into the session and the session
+                        cannot disturb it. Requires a project, or a work item
+                        that belongs to one. Unset, the purpose's dispatch
+                        profile decides (WI-1323), and with no purpose the
+                        session opens in the project's checkout, as `false`
+                        does. Cannot be combined with `cwd` (WI-1671).
+                        Recorded on the audit row.
+  --cwd CWD             Open the session in this existing directory instead of
+                        the project's registered checkout (WI-1671). Use it
+                        when a worktree already exists and `worktree=true`
+                        cannot cut a new one — a private origin the engine
+                        cannot fetch, for example. The path must exist, must
+                        sit under the workspace's `Active/` directory (the
+                        parent of the project's checkout), must not be inside
+                        that checkout (a subdirectory shares its git toplevel;
+                        a linked worktree nested under it does not), and must
+                        be a git worktree of the same repository (the same
+                        `commondir`). Anything else is refused, and so is
+                        combining it with an explicit `worktree=true`. A
+                        purpose profile that would have set `worktree` does
+                        not, when `cwd` is given. Recorded as the session's
+                        cwd.
+  --reason REASON       Why this write is being made (audited).
+  --purpose {implement,implement-careful,review,mechanical,investigate,design}
+                        What the session is for (WI-1323, design §2.4):
+                        implement, implement-careful, review, mechanical,
+                        investigate or design. The deployment's dispatch
+                        profile for it fills template, model, effort, budget,
+                        worktree, repo_map and autopilot wherever this start
+                        leaves them unset; a value given here wins and is
+                        audited as an override. Recorded on the session.
+
+$ vogt session list --help
+[exit 0]
+usage: vogt session list [-h] [--project PROJECT] [--order {started,rss}]
+                         [--work-item WORK_ITEM]
+                         [--include-stopped | --no-include-stopped]
+                         [--mode {digest,full}] [--fields FIELDS]
+                         [--started-by-session STARTED_BY_SESSION]
+                         [--states STATES]
+                         [--stall-after-minutes STALL_AFTER_MINUTES]
+                         [--include-hidden | --no-include-hidden]
+                         [--limit LIMIT] [--offset OFFSET]
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT     Project slug.
+  --order {started,rss}
+                        `started` (default): newest Vogt links first, then
+                        unlinked sessions. `rss`: heaviest process tree first,
+                        to find the session holding the memory. Either order
+                        is applied to the joined set before the page is cut.
+  --work-item WORK_ITEM
+                        Work item ref.
+  --include-stopped, --no-include-stopped
+                        Include sessions Vogt has already stopped.
+  --mode {digest,full}  `digest` (default) or `full` (every SessionSummary
+                        field).
+  --fields FIELDS       Extra SessionSummary attribute names on each digest
+                        row. A comma-separated string is accepted as well as a
+                        list.
+  --started-by-session STARTED_BY_SESSION
+                        Keep only sessions this one started: the starter's
+                        engine session id, or its Vogt `ses_…` id. Unlinked
+                        engine sessions (no starter) never match.
+  --states STATES       Keep only these activities. Default excludes
+                        hibernated, stopped and exited; pass an empty list for
+                        every state.
+  --stall-after-minutes STALL_AFTER_MINUTES
+                        A running session that has printed nothing for this
+                        long is classified `stalled` on a digest row.
+  --include-hidden, --no-include-hidden
+                        Also return sessions the engine hides from its default
+                        list (WI-1289): aged out, finished or idle-and-not-
+                        alive, with no recent person input. Off by default.
+                        `hidden_count` on the result counts them either way,
+                        and session.get still resolves one.
+  --limit LIMIT
+  --offset OFFSET
+
+$ vogt session stop --help
+[exit 0]
+usage: vogt session stop [-h] --id ID --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          Session id, in either form: Vogt's `ses_…` id or the
+                   engine's session UUID (`engine_session_id` in session.list;
+                   the only id an unlinked session has).
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt session input --help
+[exit 0]
+usage: vogt session input [-h] --id ID [--text TEXT] [--keys KEYS]
+                          [--submit | --no-submit] [--draft | --no-draft]
+                          --reason REASON [--confirm | --no-confirm]
+                          [--wake-timeout-s WAKE_TIMEOUT_S]
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --text TEXT           Text to type, sent verbatim (at most 64 KiB of UTF-8).
+                        Sent first, before any keys.
+  --keys KEYS           Named keys to press after the text, in order: enter,
+                        esc, tab, up, down, left, right, ctrl-c, ctrl-d,
+                        backspace. Each is its own write, so an Esc is not
+                        read as Alt+<next key>.
+  --submit, --no-submit
+                        Press Enter last, after the text and keys. The default
+                        when text is given: the line is sent, not left sitting
+                        in the input. A call that names only keys does not
+                        press Enter unless this is set. `draft` or an explicit
+                        `false` types without pressing Enter.
+  --draft, --no-draft   Type but do not press Enter: the text (and any keys)
+                        sit in the input. Forces `submit` off. Use it to
+                        compose a line without sending it.
+  --reason REASON       Why this write is being made (audited).
+  --confirm, --no-confirm
+                        When Enter is pressed, watch the session for up to ~2
+                        s and say whether the input was delivered (a turn
+                        started) or queued behind a running turn. False
+                        returns at once (`unconfirmed`).
+  --wake-timeout-s WAKE_TIMEOUT_S
+                        When the session is hibernated, it is woken first and
+                        the input waits until it is ready, for at most this
+                        many seconds.
+
+$ vogt session sweep --help
+[exit 0]
+usage: vogt session sweep [-h] [--project PROJECT] [--mode {digest,full}]
+                          [--fields FIELDS] [--states STATES]
+                          [--attention ATTENTION] [--limit LIMIT]
+                          [--screen-lines SCREEN_LINES]
+                          [--stall-after-minutes STALL_AFTER_MINUTES]
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT     Only sessions Vogt linked to this project (slug).
+  --mode {digest,full}  `digest` (default) is one line per session; `full` is
+                        the SessionSummary a GUI renders, including command.
+  --fields FIELDS       Extra SessionSummary attribute names copied onto each
+                        digest row.
+  --states STATES       Keep only these activities (or attention classes).
+                        Default excludes hibernated, stopped and exited; pass
+                        an empty list for every state.
+  --attention ATTENTION
+                        Keep only these attention classes. `needs_you` means
+                        approval, blocked and waiting.
+  --limit LIMIT         How many rows to return. Counts cover every session.
+  --screen-lines SCREEN_LINES
+                        Non-blank lines from the bottom of each session's
+                        screen. Zero (the default) asks for none; a positive
+                        value is honoured.
+  --stall-after-minutes STALL_AFTER_MINUTES
+                        A running session that has printed nothing for this
+                        long is reported `stalled`.
+
+$ vogt session hibernate --help
+[exit 0]
+usage: vogt session hibernate [-h] --id ID [--allow-shell | --no-allow-shell]
+                              [--superseded-by SUPERSEDED_BY] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --allow-shell, --no-allow-shell
+                        Hibernate a session that has no agent conversation to
+                        resume (a shell). It wakes as a fresh process in the
+                        same directory.
+  --superseded-by SUPERSEDED_BY
+                        The session taking over this one's work (ses_… or the
+                        engine UUID). Recorded on the hibernation, and a later
+                        wake is refused unless forced — so the work stays with
+                        one session.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt session wake --help
+[exit 0]
+usage: vogt session wake [-h] --id ID [--force | --no-force] --reason REASON
+
+options:
+  -h, --help           show this help message and exit
+  --id ID              Session id, in either form: Vogt's `ses_…` id or the
+                       engine's session UUID (`engine_session_id` in
+                       session.list; the only id an unlinked session has).
+  --force, --no-force  Wake even though the session was superseded, or another
+                       live session holds the same work item in the same
+                       directory. Off by default, and session.input never sets
+                       it.
+  --reason REASON      Why this write is being made (audited).
+
+$ vogt session keep-awake --help
+[exit 0]
+usage: vogt session keep-awake [-h] --id ID [--keep-awake | --no-keep-awake]
+                               --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --keep-awake, --no-keep-awake
+                        True pins the session awake; false lets policy
+                        hibernate it.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt session commit --help
+[exit 0]
+usage: vogt session commit [-h] --id ID --message MESSAGE [--paths PATHS]
+                           [--full-diff | --no-full-diff]
+                           [--worktree WORKTREE] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --message MESSAGE     The commit message. The repo's own git identity
+                        authors it.
+  --paths PATHS         Paths to stage before committing, relative to the
+                        repo. Empty commits whatever the worker already
+                        staged.
+  --full-diff, --no-full-diff
+                        Return the full staged diff. Off by default, so the
+                        diff never enters a caller's context unasked; the
+                        digest and stat always do.
+  --worktree WORKTREE   Commit in this linked worktree instead of the
+                        session's own directory. It must be a worktree of the
+                        repo that directory belongs to; a stranger repo is
+                        refused. A worker's commit never lands in the repo's
+                        main checkout, where pool workers are launched: name
+                        the worker's own worktree (absolute or workspace-
+                        relative).
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt session rename --help
+[exit 0]
+usage: vogt session rename [-h] --id ID --name NAME --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          Session id, in either form: Vogt's `ses_…` id or the
+                   engine's session UUID (`engine_session_id` in session.list;
+                   the only id an unlinked session has).
+  --name NAME      The new display name. Trimmed by the engine, which refuses
+                   an empty one or one over its byte limit.
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt session remove --help
+[exit 0]
+usage: vogt session remove [-h] --id ID --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          Session id, in either form: Vogt's `ses_…` id or the
+                   engine's session UUID (`engine_session_id` in session.list;
+                   the only id an unlinked session has).
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt session set-role --help
+[exit 0]
+usage: vogt session set-role [-h] --id ID --role {worker,oversight} --reason
+                             REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --role {worker,oversight}
+                        `oversight` nominates the session to supervise others
+                        (and pins it awake); `worker` makes it an ordinary
+                        session again and, for a session that was oversight,
+                        lifts that pin so the idle policy applies again.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt session bind --help
+[exit 0]
+usage: vogt session bind [-h] [--id ID] [--work-item WORK_ITEM] --reason
+                         REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+                        Omit it from inside a session Vogt started to bind
+                        that session itself.
+  --work-item WORK_ITEM
+                        The work item the session now serves, e.g. WI-7 (a
+                        native ref or an upstream subject key); null unbinds
+                        it. Rebinding from one item to another is one call.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt session grant-request --help
+[exit 0]
+usage: vogt session grant-request [-h] --target TARGET
+                                  [--kind {credential,capability}]
+                                  [--secret-name SECRET_NAME]
+                                  [--project-id PROJECT_ID] [--var VAR]
+                                  [--capability CAPABILITY]
+                                  [--uses {once,ttl}]
+                                  [--ttl-seconds TTL_SECONDS] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --target TARGET       The session the grant is for: ses_… or the engine's
+                        UUID. Asking for a session other than your own needs
+                        you to be an oversight session.
+  --kind {credential,capability}
+                        `credential` (one named secret). `capability` is not
+                        available yet (milestone 2).
+  --secret-name SECRET_NAME
+                        The secret's name in the secrets manager, e.g.
+                        100.109.218.11_SSH. Cadastre `lookup` says where a
+                        credential lives.
+  --project-id PROJECT_ID
+                        The secrets-manager project that holds it. The engine
+                        accepts only projects open to grants.
+  --var VAR             The name the session fetches it under (`vogt-agent-
+                        auth fetch VAR`). Defaults to GRANT_<secret name>.
+  --capability CAPABILITY
+  --uses {once,ttl}     `once`: the first fetch consumes it. `ttl`: any number
+                        of fetches until it expires.
+  --ttl-seconds TTL_SECONDS
+                        Lifetime once approved, 60 s to 24 h.
+  --reason REASON       Why the target needs it. The approver reads this.
+
+$ vogt session grant-decide --help
+[exit 0]
+usage: vogt session grant-decide [-h] --id ID --decision {approve,deny}
+                                 --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               The grant id (grt_…).
+  --decision {approve,deny}
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt session grant-revoke --help
+[exit 0]
+usage: vogt session grant-revoke [-h] --id ID --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          The grant id (grt_…).
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt session grants --help
+[exit 0]
+usage: vogt session grants [-h]
+                           [--state {pending,approved,denied,revoked,expired}]
+                           [--target TARGET] [--limit LIMIT]
+
+options:
+  -h, --help            show this help message and exit
+  --state {pending,approved,denied,revoked,expired}
+  --target TARGET       Only grants for this session (either id).
+  --limit LIMIT
+
+$ vogt session answer --help
+[exit 0]
+usage: vogt session answer [-h] --id ID [--option OPTION] [--label LABEL]
+                           [--expect-question EXPECT_QUESTION] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --option OPTION       The option's number on the dialog's menu.
+  --label LABEL         Or: text of the option's label (case-insensitive; must
+                        match one option only).
+  --expect-question EXPECT_QUESTION
+                        Refuse unless the dialog still asks exactly this
+                        question, so an answer meant for one dialog never
+                        lands on the next. Pass `approval.question` from the
+                        screen or list you read.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt session screen --help
+[exit 0]
+usage: vogt session screen [-h] --id ID [--scrollback-lines SCROLLBACK_LINES]
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --scrollback-lines SCROLLBACK_LINES
+                        Also return this many lines that scrolled off the top
+                        of the screen (oldest first), for a reply or a command
+                        taller than the screen.
+
+$ vogt session last-reply --help
+[exit 0]
+usage: vogt session last-reply [-h] --id ID [--n N]
+
+options:
+  -h, --help  show this help message and exit
+  --id ID     Session id, in either form: Vogt's `ses_…` id or the engine's
+              session UUID (`engine_session_id` in session.list; the only id
+              an unlinked session has).
+  --n N       How many of the last replies (1-20).
+
+$ vogt session economics --help
+[exit 0]
+usage: vogt session economics [-h] --id ID
+
+options:
+  -h, --help  show this help message and exit
+  --id ID     Session id, in either form: Vogt's `ses_…` id or the engine's
+              session UUID (`engine_session_id` in session.list; the only id
+              an unlinked session has).
+
+$ vogt session digest --help
+[exit 0]
+usage: vogt session digest [-h] --id ID [--context-window CONTEXT_WINDOW]
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --context-window CONTEXT_WINDOW
+                        The model's context window, in tokens. Given,
+                        `context_pct` is `context_tokens` over this window;
+                        omitted, the percentage is null. There is no model
+                        table.
+
+$ vogt session wait --help
+[exit 0]
+usage: vogt session wait [-h] --id ID [--until {ready,exited,any_change}]
+                         [--timeout-s TIMEOUT_S] [--screen | --no-screen]
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --until {ready,exited,any_change}
+                        `ready` (default): until the program is at its prompt
+                        — or needs a person (a permission dialog, a blocked
+                        report) or has exited, which also end the wait;
+                        `exited`: until the process ends; `any_change`: until
+                        its activity, blocked state or liveness changes at
+                        all.
+  --timeout-s TIMEOUT_S
+                        Seconds to wait at most (1-600). Answers `timeout`
+                        then.
+  --screen, --no-screen
+                        True restores the full screen. False (default) returns
+                        the digest row plus an 8-line screen tail.
+
+$ vogt session changes --help
+[exit 0]
+usage: vogt session changes [-h] [--since SINCE] [--ids IDS] [--limit LIMIT]
+
+options:
+  -h, --help     show this help message and exit
+  --since SINCE  Return deltas published after this seq. 0 reads the retained
+                 ring. Pass the previous result's `next_cursor`.
+  --ids IDS      Sessions to read, each `ses_…` or an engine UUID. Empty reads
+                 every session. There is no supervised-by-me filter yet.
+  --limit LIMIT  How many deltas at most (1-500).
+
+$ vogt session wait-any --help
+[exit 0]
+usage: vogt session wait-any [-h] [--ids IDS] [--until UNTIL]
+                             [--cursor CURSOR] [--timeout-s TIMEOUT_S]
+
+options:
+  -h, --help            show this help message and exit
+  --ids IDS             Sessions to wait on, each `ses_…` or an engine UUID.
+                        Empty waits on every session. There is no supervised-
+                        by-me filter yet.
+  --until UNTIL         Kinds that end the wait: ready, approval, exited,
+                        errored, blocked, unblocked, hibernated, woken. Empty
+                        uses the engine's default (ready, blocked, approval,
+                        exited, errored).
+  --cursor CURSOR       Ignore deltas at or before this seq, so a replayed
+                        page is not waited on twice. Omit to accept the next
+                        match. `now` skips everything already published and
+                        waits only for a change that lands after this call
+                        starts; the result's `next_cursor` is that head when
+                        nothing new arrives.
+  --timeout-s TIMEOUT_S
+                        Seconds to wait at most (1-600). Answers `timeout`
+                        then.
+
+$ vogt session blocked --help
+[exit 0]
+usage: vogt session blocked [-h] [--id ID] --blocker BLOCKER [--items ITEMS]
+                            --reason REASON
+
+options:
+  -h, --help         show this help message and exit
+  --id ID            The blocked session, in either id form. Omit it from
+                     inside a session Vogt started (its token names the
+                     session); otherwise pass `$VOGT_ENGINE_SESSION_ID`.
+  --blocker BLOCKER  What you are blocked on, for the person: what they must
+                     decide or do before you can go on.
+  --items ITEMS      The concrete things the person has to do, one per entry.
+  --reason REASON    Why this write is being made (audited).
+
+$ vogt session unblocked --help
+[exit 0]
+usage: vogt session unblocked [-h] [--id ID] --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          The session, in either id form; omit from inside a session
+                   Vogt started.
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt session history --help
+[exit 0]
+usage: vogt session history [-h] [--limit LIMIT] [--offset OFFSET]
+                            [--mode {summary,full}]
+
+options:
+  -h, --help            show this help message and exit
+  --limit LIMIT
+  --offset OFFSET
+  --mode {summary,full}
+                        `summary` omits each row's command; `full` (default)
+                        keeps it.
+
+$ vogt session search --help
+[exit 0]
+usage: vogt session search [-h] --q Q [--limit LIMIT]
+                           [--include-live | --no-include-live]
+
+options:
+  -h, --help            show this help message and exit
+  --q Q                 Search terms. Plain words, ANDed together — not FTS
+                        query syntax.
+  --limit LIMIT
+  --include-live, --no-include-live
+                        Scan running sessions' output too, not just the
+                        archive, so output that has not been archived yet is
+                        still found. Live hits are flagged `live: true`.
+
+$ vogt session log --help
+[exit 0]
+usage: vogt session log [-h] --id ID [--tail-bytes TAIL_BYTES]
+                        [--strip-ansi | --no-strip-ansi]
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --tail-bytes TAIL_BYTES
+                        Trailing bytes of the log to read; capped at 256 KiB.
+  --strip-ansi, --no-strip-ansi
+                        Remove terminal escape codes so the text is readable.
+                        Pass false for the raw escape stream.
+
+$ vogt decision --help
+[exit 0]
+usage: vogt decision [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    ask         Ask a person to decide (WI-1321): a question, 2-4 options
+                (label, description) with exactly one recommended, and the
+                context they need. It appears in the Inbox; you do not block —
+                carry on with what does not depend on it and read the answer
+                with decision.list. Pending past expires_at (default 24 h, max
+                7 d) it reads `expired`, with no implied answer. Your session
+                is recorded from your token.
+    answer      Answer a pending decision with one of its option labels and an
+                optional note. A person only: every agent is refused (403
+                person_required). Nothing is applied when it is answered.
+    list        Decisions, newest first, by state (pending, answered,
+                withdrawn, expired), work item or asker (identity_ref).
+    withdraw    Withdraw a pending decision. A person, or the session that
+                asked, may.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt decision ask --help
+[exit 0]
+usage: vogt decision ask [-h] --question QUESTION --options OPTIONS
+                         [--context CONTEXT] [--work-item WORK_ITEM]
+                         [--ttl-seconds TTL_SECONDS] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --question QUESTION
+  --options OPTIONS     2-4 options; exactly one has recommended=true.
+  --context CONTEXT     The facts the person needs, in your words.
+  --work-item WORK_ITEM
+                        WI ref, if any.
+  --ttl-seconds TTL_SECONDS
+                        How long it stays answerable: default 24 h, at most 7
+                        d. Past it the decision reads `expired`, with no
+                        implied answer.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt decision answer --help
+[exit 0]
+usage: vogt decision answer [-h] --id ID --label LABEL [--note NOTE] --reason
+                            REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          The decision id (dec_…).
+  --label LABEL    The label of the option chosen.
+  --note NOTE
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt decision list --help
+[exit 0]
+usage: vogt decision list [-h] [--state {pending,answered,withdrawn,expired}]
+                          [--work-item WORK_ITEM] [--asker ASKER]
+                          [--limit LIMIT]
+
+options:
+  -h, --help            show this help message and exit
+  --state {pending,answered,withdrawn,expired}
+  --work-item WORK_ITEM
+                        WI ref.
+  --asker ASKER         identity_ref of the asker, e.g. agent:session:…
+  --limit LIMIT
+
+$ vogt decision withdraw --help
+[exit 0]
+usage: vogt decision withdraw [-h] --id ID --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          The decision id (dec_…).
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt agent-cli --help
+[exit 0]
+usage: vogt agent-cli [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        Report the pod's agent CLIs: active, baked and upstream
+                versions.
+    update      Make a version of an agent CLI the one new sessions run.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt agent-cli list --help
+[exit 0]
+usage: vogt agent-cli list [-h] [--upstream | --no-upstream]
+
+options:
+  -h, --help            show this help message and exit
+  --upstream, --no-upstream
+                        Also ask npm for each package's latest version; the
+                        engine caches the answer for an hour and leaves it out
+                        when npm does not answer.
+
+$ vogt agent-cli update --help
+[exit 0]
+usage: vogt agent-cli update [-h] --tool TOOL --version VERSION --reason
+                             REASON
+
+options:
+  -h, --help         show this help message and exit
+  --tool TOOL        A tool from agent_cli.list, e.g. claude-code or codex.
+  --version VERSION  An exact version (2.1.261), `image` for the copy baked
+                     into the pod, or a dist-tag (`latest`, `stable`) the
+                     deployment has opted into.
+  --reason REASON    Why this write is being made (audited).
+
+$ vogt agent-activity --help
+[exit 0]
+usage: vogt agent-activity [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    search      Search the tool calls agents made (from their transcripts,
+                redacted): by text, service, tool, errors, time, project or
+                session.
+    summary     Per agent conversation: tool counts, error rate and time spent
+                waiting on tools, for a session or a project.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt agent-activity search --help
+[exit 0]
+usage: vogt agent-activity search [-h] [--q Q] [--service SERVICE]
+                                  [--tool TOOL]
+                                  [--errors-only | --no-errors-only]
+                                  [--since SINCE] [--project PROJECT]
+                                  [--session SESSION] [--limit LIMIT]
+                                  [--offset OFFSET]
+
+options:
+  -h, --help            show this help message and exit
+  --q Q                 Text to find, case-insensitively, in a call's tool
+                        name, its redacted one-line summary, or its error
+                        excerpt.
+  --service SERVICE     A service tag, e.g. github, docker, komodo, infisical.
+  --tool TOOL           An exact tool name, e.g. Bash or exec_command.
+  --errors-only, --no-errors-only
+                        Only calls that failed.
+  --since SINCE         Inclusive lower bound on the call's time.
+  --project PROJECT     Project slug: calls made in its root or anywhere under
+                        it.
+  --session SESSION     A Vogt session (`ses_…`), an engine session id, or an
+                        agent's own conversation id.
+  --limit LIMIT
+  --offset OFFSET
+
+$ vogt agent-activity summary --help
+[exit 0]
+usage: vogt agent-activity summary [-h] [--session SESSION]
+                                   [--project PROJECT] [--since SINCE]
+                                   [--limit LIMIT] [--offset OFFSET]
+                                   [--economics | --no-economics]
+
+options:
+  -h, --help            show this help message and exit
+  --session SESSION     A Vogt session (`ses_…`), an engine session id, or an
+                        agent's own conversation id.
+  --project PROJECT     Project slug: conversations with calls in or under its
+                        root.
+  --since SINCE         Count only calls at or after this time.
+  --limit LIMIT
+  --offset OFFSET
+  --economics, --no-economics
+                        Also meter each conversation's transcript (turns,
+                        context, compactions). Off by default: a summary must
+                        not read every transcript on the page.
+
+$ vogt token --help
+[exit 0]
+usage: vogt token [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    issue       Issue a scoped token bound to an actor. Shown once.
+    list        List tokens. Never returns a secret.
+    revoke      Revoke a token.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt token issue --help
+[exit 0]
+usage: vogt token issue [-h] --actor ACTOR --name NAME [--scopes SCOPES]
+                        [--expires-in-days EXPIRES_IN_DAYS] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --actor ACTOR         Actor identity_ref the token is bound to.
+  --name NAME           What this token is for, e.g. 'claude-code'.
+  --scopes SCOPES       Comma-separated: read, work.write, project.write,
+                        admin, writeback.
+  --expires-in-days EXPIRES_IN_DAYS
+                        Omit for a token that does not expire.
+  --reason REASON
+
+$ vogt token list --help
+[exit 0]
+usage: vogt token list [-h] [--include-revoked | --no-include-revoked]
+                       [--limit LIMIT]
+
+options:
+  -h, --help            show this help message and exit
+  --include-revoked, --no-include-revoked
+  --limit LIMIT
+
+$ vogt token revoke --help
+[exit 0]
+usage: vogt token revoke [-h] --id ID --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID
+  --reason REASON
+
+$ vogt auth --help
+[exit 0]
+usage: vogt auth [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    decisions   The allow and deny log. The denials are the interesting half.
+    whoami      Who the caller is, as authentication decided, and their
+                scopes.
+    logout      Revoke the session or token this call arrived with.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt auth decisions --help
+[exit 0]
+usage: vogt auth decisions [-h] [--decision {allow,deny}] [--limit LIMIT]
+
+options:
+  -h, --help            show this help message and exit
+  --decision {allow,deny}
+                        Filter to allows or denials.
+  --limit LIMIT
+
+$ vogt auth whoami --help
+[exit 0]
+usage: vogt auth whoami [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt auth logout --help
+[exit 0]
+usage: vogt auth logout [-h] --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --reason REASON
+
+$ vogt user --help
+[exit 0]
+usage: vogt user [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    create      Give a human a username and password to sign in with.
+    list        List logins. Never returns a hash.
+    passwd      Replace a user's password, ending their sessions.
+    remove      Take a login away. The actor and its history stay.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt user create --help
+[exit 0]
+usage: vogt user create [-h] --username USERNAME
+                        [--password-file PASSWORD__FILE | --password-stdin]
+                        [--display-name DISPLAY_NAME] [--actor ACTOR]
+                        [--scopes SCOPES] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --username USERNAME   Login name: lower-case letters, digits, '.', '-', '_'.
+  --password-file PASSWORD__FILE
+                        Read the password from this file (never pass it in
+                        argv).
+  --password-stdin      Read the password from standard input.
+  --display-name DISPLAY_NAME
+                        Defaults to the username.
+  --actor ACTOR         An existing human actor's identity_ref to attach the
+                        login to. Omitted, a new actor human:<username> is
+                        created.
+  --scopes SCOPES       Comma-separated scopes every session this user logs in
+                        to holds.
+  --reason REASON
+
+$ vogt user list --help
+[exit 0]
+usage: vogt user list [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt user passwd --help
+[exit 0]
+usage: vogt user passwd [-h] --username USERNAME
+                        [--password-file PASSWORD__FILE | --password-stdin]
+                        [--scopes SCOPES]
+                        [--revoke-sessions | --no-revoke-sessions] --reason
+                        REASON
+
+options:
+  -h, --help            show this help message and exit
+  --username USERNAME
+  --password-file PASSWORD__FILE
+                        Read the password from this file (never pass it in
+                        argv).
+  --password-stdin      Read the password from standard input.
+  --scopes SCOPES       Replace the login's scopes as well.
+  --revoke-sessions, --no-revoke-sessions
+                        Also revoke every live session this user holds.
+  --reason REASON
+
+$ vogt user remove --help
+[exit 0]
+usage: vogt user remove [-h] --username USERNAME --reason REASON
+
+options:
+  -h, --help           show this help message and exit
+  --username USERNAME
+  --reason REASON
+
+$ vogt backup --help
+[exit 0]
+usage: vogt backup [-h] [--destination DESTINATION] [--label LABEL] --reason
+                   REASON
+
+options:
+  -h, --help            show this help message and exit
+  --destination DESTINATION
+                        Defaults to <data-dir>/backups/<timestamp>.
+  --label LABEL
+  --reason REASON
+
+$ vogt restore --help
+[exit 0]
+usage: vogt restore [-h] --source SOURCE [--confirm | --no-confirm] --reason
+                    REASON
+
+options:
+  -h, --help            show this help message and exit
+  --source SOURCE       A backup directory containing manifest.json.
+  --confirm, --no-confirm
+                        Required: this replaces the live stores.
+  --reason REASON
+
+$ vogt clone --help
+[exit 0]
+usage: vogt clone [-h] --source SOURCE [--confirm | --no-confirm]
+                  [--include-engine-state | --no-include-engine-state]
+                  --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --source SOURCE       A backup directory containing manifest.json.
+  --confirm, --no-confirm
+                        Required: this replaces the live stores.
+  --include-engine-state, --no-include-engine-state
+                        Also copy the source engine's session history
+                        (history.db, session-logs/, assistant-log.db) into
+                        this engine's state directory. Push subscriptions and
+                        agent tasks are never copied.
+  --reason REASON
+
+$ vogt export --help
+[exit 0]
+usage: vogt export [-h] --destination DESTINATION [--project PROJECT] --reason
+                   REASON
+
+options:
+  -h, --help            show this help message and exit
+  --destination DESTINATION
+  --project PROJECT     Export one project (by slug): its work items with
+                        their comments and relations, and only the
+                        initiatives, labels and actors they reference.
+                        Omitted, the whole instance is exported.
+  --reason REASON
+
+$ vogt import --help
+[exit 0]
+usage: vogt import [-h] --source SOURCE [--project PROJECT]
+                   [--apply | --no-apply] [--confirm | --no-confirm]
+                   [--strict | --no-strict] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --source SOURCE       An export file written by `vogt export`.
+  --project PROJECT     Merge only this project (by slug): its work items,
+                        comments and relations, and the initiatives, labels
+                        and actors they reference.
+  --apply, --no-apply   Write the merge. Without it the import is a dry run:
+                        the same report, nothing written.
+  --confirm, --no-confirm
+                        Required with apply: this writes into the live store.
+  --strict, --no-strict
+                        Fail, writing nothing, if any entity changed on both
+                        sides, instead of keeping this instance's version and
+                        recording the incoming one as a conflict comment.
+  --reason REASON
+
+$ vogt forge --help
+[exit 0]
+usage: vogt forge [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    onboard     Read a repository's existing issues, PRs, labels and releases
+                into observations. Changes nothing upstream.
+    writeback   Set a project's write-back policy: none, comment_only, full.
+    link        Make a registered project upstream-truth: its work items
+                become its forge issues, work writes go through, and any open
+                native items migrate upstream.
+    publish     Create a repository under your forge credential, push the
+                local default branch, and make the project upstream-truth.
+                Refuses existing remotes; never force-pushes.
+    account     account operations
+    repos       List the repositories your linked credential can see, so you
+                can pick which to import (clone + full sync).
+    import      Import a repository the picker listed as a project: clone it
+                under your forge credential, register it, and consolidate its
+                forge state so it comes back linked and ready for write-back.
+    actions     The ledger of what Vogt has said upstream, and what landed.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt forge onboard --help
+[exit 0]
+usage: vogt forge onboard [-h] --project PROJECT [--max-pages MAX_PAGES]
+                          --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT     Project slug to consolidate.
+  --max-pages MAX_PAGES
+                        How far back to walk. Bounded so a busy repository
+                        cannot turn onboarding into an unbounded run; coverage
+                        reports what was actually swept.
+  --reason REASON
+
+$ vogt forge writeback --help
+[exit 0]
+usage: vogt forge writeback [-h] --project PROJECT --policy
+                            {none,comment_only,full} --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT
+  --policy {none,comment_only,full}
+                        none: observe and never speak. comment_only: post
+                        comments authored here. full: also create, label, and
+                        close/reopen. Never deletion, history rewriting or
+                        force.
+  --reason REASON
+
+$ vogt forge link --help
+[exit 0]
+usage: vogt forge link [-h] --project PROJECT --reason REASON
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  Project slug.
+  --reason REASON
+
+$ vogt forge publish --help
+[exit 0]
+usage: vogt forge publish [-h] --project PROJECT [--name NAME]
+                          [--private | --no-private]
+                          [--description DESCRIPTION] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT     Project slug.
+  --name NAME           Repository name to create; defaults to the project
+                        slug.
+  --private, --no-private
+                        Whether the new repository is private. Private by
+                        default: publishing makes a repository, not an
+                        announcement.
+  --description DESCRIPTION
+                        Repository description, if any.
+  --reason REASON
+
+$ vogt forge account --help
+[exit 0]
+usage: vogt forge account [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    link        Link your own forge account by pasting a PAT, stored
+                encrypted; upstream writes are then attributed to you.
+    status      Whether you have linked a forge account, and as whom. Never
+                returns the token.
+    unlink      Remove your linked forge account; writes fall back to the
+                instance file token.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt forge account link --help
+[exit 0]
+usage: vogt forge account link [-h] [--host HOST] --token TOKEN --reason
+                               REASON
+
+options:
+  -h, --help       show this help message and exit
+  --host HOST      The configured forge host to link, for example github.com
+                   or a Forgejo host named under forge_token_files.
+  --token TOKEN    The Personal Access Token. Validated, then stored encrypted
+                   at rest under `forge_account_key_file` and never returned
+                   by any surface. To revoke it, unlink here and revoke it
+                   upstream too.
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt forge account status --help
+[exit 0]
+usage: vogt forge account status [-h] [--host HOST]
+
+options:
+  -h, --help   show this help message and exit
+  --host HOST  Restrict to one host; unset lists every host you linked.
+
+$ vogt forge account unlink --help
+[exit 0]
+usage: vogt forge account unlink [-h] [--host HOST] --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --host HOST      The forge host to unlink. Deletes the stored token.
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt forge repos --help
+[exit 0]
+usage: vogt forge repos [-h] [--host HOST]
+
+options:
+  -h, --help   show this help message and exit
+  --host HOST  The configured forge host to enumerate, for example github.com
+               or a Forgejo host named under forge_token_files.
+
+$ vogt forge import --help
+[exit 0]
+usage: vogt forge import [-h] --owner OWNER --name NAME [--host HOST]
+                         [--display-name DISPLAY_NAME] [--root-path ROOT_PATH]
+                         [--lifecycle-state {incubating,active,maintenance,archived}]
+                         [--consolidate | --no-consolidate] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --owner OWNER         Repository owner, as `forge repos` lists it.
+  --name NAME           Repository name, as `forge repos` lists it.
+  --host HOST           The configured forge host, for example github.com or a
+                        Forgejo host named under forge_token_files.
+  --display-name DISPLAY_NAME
+                        Project display name. Defaults to the repository name.
+  --root-path ROOT_PATH
+                        Where to clone to. Defaults to `<import_root>/<slug>`;
+                        supply this only when the repository must live
+                        somewhere specific.
+  --lifecycle-state {incubating,active,maintenance,archived}
+  --consolidate, --no-consolidate
+                        Read existing issues, PRs, labels and releases after
+                        registering . Read-only, and on by default so the
+                        imported project arrives as upstream-truth rather than
+                        looking empty.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt forge actions --help
+[exit 0]
+usage: vogt forge actions [-h]
+                          [--outcome {attempted,succeeded,failed,skipped}]
+                          [--limit LIMIT]
+
+options:
+  -h, --help            show this help message and exit
+  --outcome {attempted,succeeded,failed,skipped}
+  --limit LIMIT
+
+$ vogt events --help
+[exit 0]
+usage: vogt events [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        Read the cursor-based event feed.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt events list --help
+[exit 0]
+usage: vogt events list [-h] [--after AFTER] [--limit LIMIT]
+                        [--entity-id ENTITY_ID]
+
+options:
+  -h, --help            show this help message and exit
+  --after AFTER         Cursor: return events with seq greater than this.
+  --limit LIMIT
+  --entity-id ENTITY_ID
+                        Only events about this entity. The id, not the ref —
+                        the same shape audit.list takes, so the two feeds
+                        narrow alike.
+
+$ vogt notifications --help
+[exit 0]
+usage: vogt notifications [-h] [--project PROJECT] [--reason REASON]
+                          [--unread-only | --no-unread-only] [--limit LIMIT]
+                          [--offset OFFSET]
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT     Project slug. Omit for every registered project.
+  --reason REASON       GitHub's reason, e.g. mention, review_requested,
+                        ci_activity.
+  --unread-only, --no-unread-only
+                        Only threads GitHub still considers unread for this
+                        token.
+  --limit LIMIT
+  --offset OFFSET
+
+$ vogt deployed-versions --help
+[exit 0]
+usage: vogt deployed-versions [-h] [--project PROJECT] [--lane LANE]
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  Project slug. Omit for every configured lane.
+  --lane LANE        One lane by name, e.g. `dev`. Omit for all.
+
+$ vogt inbox --help
+[exit 0]
+usage: vogt inbox [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        List the normalized attention Inbox with coverage.
+    archive     Archive one normalized Inbox occurrence.
+    snooze      Snooze one normalized Inbox occurrence until a deadline.
+    restore     Restore one archived or snoozed Inbox occurrence.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt inbox list --help
+[exit 0]
+usage: vogt inbox list [-h] [--sources SOURCES]
+                       [--triage-states TRIAGE_STATES]
+                       [--actor {any,external,org,bot}] [--project PROJECT]
+                       [--work-item WORK_ITEM] [--limit LIMIT]
+                       [--cursor CURSOR]
+
+options:
+  -h, --help            show this help message and exit
+  --sources SOURCES
+  --triage-states TRIAGE_STATES
+  --actor {any,external,org,bot}
+                        Who caused the entry: any; external (people outside
+                        the repository's org — never bots, and entries whose
+                        author is unknown are hidden and counted in
+                        actor_unknown_hidden); org (org members); bot (bots
+                        and the instance's own drift/CI/agent entries).
+  --project PROJECT
+  --work-item WORK_ITEM
+  --limit LIMIT
+  --cursor CURSOR
+
+$ vogt inbox archive --help
+[exit 0]
+usage: vogt inbox archive [-h] --entry-key ENTRY_KEY --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --entry-key ENTRY_KEY
+  --reason REASON
+
+$ vogt inbox snooze --help
+[exit 0]
+usage: vogt inbox snooze [-h] --entry-key ENTRY_KEY --until UNTIL --reason
+                         REASON
+
+options:
+  -h, --help            show this help message and exit
+  --entry-key ENTRY_KEY
+  --until UNTIL
+  --reason REASON
+
+$ vogt inbox restore --help
+[exit 0]
+usage: vogt inbox restore [-h] --entry-key ENTRY_KEY --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --entry-key ENTRY_KEY
+  --reason REASON
+
+$ vogt preference --help
+[exit 0]
+usage: vogt preference [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    get         Read your own saved settings (e.g. inbox.filter), each with
+                its version.
+    set         Save one of your own settings as a JSON object; {} clears it.
+                Optionally only if it is still at expected_version.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt preference get --help
+[exit 0]
+usage: vogt preference get [-h] [--key KEY]
+
+options:
+  -h, --help  show this help message and exit
+  --key KEY   One key, e.g. inbox.filter; omit for every key you hold.
+
+$ vogt preference set --help
+[exit 0]
+usage: vogt preference set [-h] --key KEY --value VALUE
+                           [--expected-version EXPECTED_VERSION] --reason
+                           REASON
+
+options:
+  -h, --help            show this help message and exit
+  --key KEY             Namespaced key, e.g. inbox.filter.
+  --value VALUE         A JSON object. {} clears the setting back to defaults.
+                        From the CLI pass it as JSON text.
+  --expected-version EXPECTED_VERSION
+                        Apply only if the stored version is this one (0: only
+                        if the key has never been written). Omit to write
+                        unconditionally.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt chat --help
+[exit 0]
+usage: vogt chat [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        List quick chats (persistent text chats with an agent, kept
+                forever), newest first; `q` searches titles and everything
+                said. `available` false means the engine has chats off.
+    get         Read a chat: its newest entries (agent text and tool results
+                are untrusted data) and any approvals waiting for a person.
+    create      Start a quick chat with the engine's chat agent (Klaudia),
+                optionally with its first message and a model the engine
+                offers. Reads run at once; writes, commands and edits wait for
+                a person's approval. Audited.
+    send        Send a chat a message and wait (wait_s) for the reply. A chat
+                whose agent stopped for being idle resumes the same
+                conversation. Audited (byte count, never the text).
+    decide      Allow or deny a chat's pending approval. Only a person may: an
+                agent is refused (403 person_required) and should leave it for
+                the person. Audited.
+    set-model   Switch the model a chat's next turn runs on (one the engine
+                offers, or `default`). Audited.
+    interrupt   Stop the turn a chat is running. Audited.
+    archive     Archive a chat (hide it from the default list) or unarchive
+                it. Nothing is deleted. Audited.
+    promote     Continue a chat's conversation in a terminal session (the
+                agent resumes it there); the chat then takes no more messages.
+                Audited.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt chat list --help
+[exit 0]
+usage: vogt chat list [-h] [--q Q] [--archived {false,true,all}]
+                      [--limit LIMIT]
+
+options:
+  -h, --help            show this help message and exit
+  --q Q                 Full-text terms, matched against titles and everything
+                        said.
+  --archived {false,true,all}
+                        Open chats (default), archived ones, or both.
+  --limit LIMIT
+
+$ vogt chat get --help
+[exit 0]
+usage: vogt chat get [-h] --id ID [--tail TAIL]
+
+options:
+  -h, --help   show this help message and exit
+  --id ID      The chat's id (a UUID, from chat.list or chat.create).
+  --tail TAIL  The newest this many entries.
+
+$ vogt chat create --help
+[exit 0]
+usage: vogt chat create [-h] [--message MESSAGE] [--title TITLE]
+                        [--model MODEL] [--work-item WORK_ITEM]
+                        [--wait-s WAIT_S] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --message MESSAGE     The first message, sent as soon as it exists.
+  --title TITLE
+  --model MODEL         A model the engine offers (/api/config `chat`);
+                        default: its first.
+  --work-item WORK_ITEM
+                        e.g. WI-7
+  --wait-s WAIT_S       Wait up to this long for the first reply.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt chat send --help
+[exit 0]
+usage: vogt chat send [-h] --id ID --text TEXT [--wait-s WAIT_S] --reason
+                      REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          The chat's id (a UUID, from chat.list or chat.create).
+  --text TEXT
+  --wait-s WAIT_S  Wait up to this long for the turn to end and return what it
+                   said. A turn parked on an approval waits for a person.
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt chat decide --help
+[exit 0]
+usage: vogt chat decide [-h] --id ID --approval-id APPROVAL_ID
+                        [--allow | --no-allow] [--message MESSAGE] --reason
+                        REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               The chat's id (a UUID, from chat.list or chat.create).
+  --approval-id APPROVAL_ID
+  --allow, --no-allow
+  --message MESSAGE     Told to the agent with a denial.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt chat set-model --help
+[exit 0]
+usage: vogt chat set-model [-h] --id ID --model MODEL --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          The chat's id (a UUID, from chat.list or chat.create).
+  --model MODEL    A model the engine offers, or `default` for the driver's
+                   own.
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt chat interrupt --help
+[exit 0]
+usage: vogt chat interrupt [-h] --id ID --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          The chat's id (a UUID, from chat.list or chat.create).
+  --reason REASON  Why this write is being made (audited).
+
+$ vogt chat archive --help
+[exit 0]
+usage: vogt chat archive [-h] --id ID [--archived | --no-archived] --reason
+                         REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               The chat's id (a UUID, from chat.list or chat.create).
+  --archived, --no-archived
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt chat promote --help
+[exit 0]
+usage: vogt chat promote [-h] --id ID [--cwd CWD] [--name NAME]
+                         [--work-item WORK_ITEM] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               The chat's id (a UUID, from chat.list or chat.create).
+  --cwd CWD             Where the session opens, inside the engine's
+                        workspace.
+  --name NAME
+  --work-item WORK_ITEM
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt audit --help
+[exit 0]
+usage: vogt audit [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        Query the audit log.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt audit list --help
+[exit 0]
+usage: vogt audit list [-h] [--limit LIMIT] [--offset OFFSET]
+                       [--actor-id ACTOR_ID] [--operation OPERATION]
+                       [--entity-id ENTITY_ID] [--project PROJECT]
+                       [--since SINCE] [--until UNTIL]
+
+options:
+  -h, --help            show this help message and exit
+  --limit LIMIT
+  --offset OFFSET       Records to skip. Paging a log that is being written to
+                        can repeat a record, because new rows arrive at the
+                        front.
+  --actor-id ACTOR_ID
+  --operation OPERATION
+  --entity-id ENTITY_ID
+                        An entity's id. A work item's trail also carries the
+                        writes audited against that item's comments.
+  --project PROJECT     Project slug. Keeps the writes this instance can
+                        attribute to that project; see the operation's
+                        docstring for the kinds that carry one.
+  --since SINCE         Inclusive lower bound on the write's time.
+  --until UNTIL         Exclusive upper bound on the write's time.

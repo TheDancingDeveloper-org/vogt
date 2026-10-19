@@ -278,6 +278,7 @@ jobs:
           uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/golden"
           uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/again"
           diff -q "$RUNNER_TEMP/golden/cli.json" "$RUNNER_TEMP/again/cli.json"
+          diff -q "$RUNNER_TEMP/golden/audit.cli.json" "$RUNNER_TEMP/again/audit.cli.json"
           uv run python scripts/parity.py record --impl python --transport http --out "$RUNNER_TEMP/http"
           uv run python scripts/parity.py record --impl python --transport http --out "$RUNNER_TEMP/http-again"
           diff -q "$RUNNER_TEMP/http/http.json" "$RUNNER_TEMP/http-again/http.json"
@@ -302,6 +303,12 @@ jobs:
             uv run python scripts/parity.py check --impl rust --golden "$golden" --only dump
           uv run python scripts/parity.py check --impl python --golden "$golden" --only actor
           uv run python scripts/parity.py selftest --golden "$golden"
+          # The typed-error table is derived from the goldens, never edited.
+          uv run python scripts/parity.py errors --golden "$golden" --check
+          # The recursive --help tree, CONFIG.md and config.example.toml.
+          uv run python scripts/parity.py contract --impl python
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py contract --impl rust
 
       - name: registry matches the Python source
         # The Rust registry and its golden are generated. This fails the
