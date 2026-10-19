@@ -301,6 +301,14 @@ jobs:
           VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
             uv run python scripts/parity.py check --impl rust --golden "$golden" --only dump
           uv run python scripts/parity.py check --impl python --golden "$golden" --only actor
+          # Both cores migrate from the same SQL: the schema init leaves must
+          # match the golden, and a Python-written store must have nothing
+          # pending when the Rust core opens it (WI-1048).
+          uv run python scripts/parity.py check --impl python --golden "$golden" --only schema
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py check --impl rust --golden "$golden" --only schema
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py crossopen --writer python --reader rust
           uv run python scripts/parity.py selftest --golden "$golden"
 
       - name: registry matches the Python source
