@@ -205,7 +205,7 @@ jobs:
           export ENGINE_PUBLIC_URL="http://127.0.0.1:${ENGINE_PORT}"
           set -euo pipefail
           docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
-          docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:rust .
+          docker build -t vogt-engine:local -f engine/Dockerfile .
           docker build -t vogt-engine-e2e:local -f deploy/e2e.engine.Dockerfile .
           docker build -t vogt-e2e-playwright:local -f deploy/e2e.playwright.Dockerfile .
           # Tokens go through the named volume, never a host file (see `compose`).

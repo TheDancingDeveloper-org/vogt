@@ -151,9 +151,10 @@ services:
 
       # One value both starts the core and tells the engine where to proxy.
       # Loopback means "the core is ours to run", so the entrypoint supervises
-      # `vogt init && vogt serve` here; the engine proxies `/api/vogt`, `/mcp`
-      # and `/ui-legacy` to the same address. Deriving one from the other is
-      # what stops a front door confidently pointed at a port nothing serves.
+      # `vogt-core init && vogt-core serve` here; the engine proxies
+      # `/api/vogt`, `/mcp` and `/ui-legacy` to the same address. Deriving one
+      # from the other is what stops a front door confidently pointed at a
+      # port nothing serves.
       VOGT_CORE_URL: "http://127.0.0.1:8000"
       # The token the engine presents on `/api/vogt`; the core adopts the same
       # file at `init` if it does not already hold one. Both halves reading one

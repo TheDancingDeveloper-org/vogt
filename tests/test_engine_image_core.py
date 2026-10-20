@@ -63,3 +63,16 @@ def test_the_entrypoint_runs_vogt_core_not_the_python_cli() -> None:
     assert not any(re.search(r"(?<![\w-])vogt (init|serve)\b", line) for line in lines)
     assert "if ! vogt-core init; then" in code
     assert 'vogt-core serve --host "$host" --port "$port"' in code
+
+
+def test_no_workflow_passes_core_image_to_the_engine_dockerfile() -> None:
+    # engine/Dockerfile declares no CORE_IMAGE, so a workflow passing one is a
+    # dead build-arg that suggests the engine still lifts a core from an image.
+    workflows = REPO_ROOT / ".github" / "workflows"
+    offenders = [
+        f"{path.name}:{number}"
+        for path in sorted(workflows.glob("*.yml"))
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "engine/Dockerfile" in line and "CORE_IMAGE" in line
+    ]
+    assert not offenders, f"CORE_IMAGE passed to engine/Dockerfile at {offenders}"
