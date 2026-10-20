@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from vogt.adapters.engine import EngineUnavailable
@@ -67,7 +67,13 @@ MAX_ATTEMPTS = 5
 #: Active watches evaluated per pass; more wait for the next pass.
 MAX_ACTIVE = 500
 #: How long a delivery waits for a woken session to be ready.
-WAKE_TIMEOUT_S = 120
+#: Short, because the loop is serial: one unready session must not hold
+#: every other watch for minutes.
+WAKE_TIMEOUT_S = 30
+#: The first retry waits this long; each later one doubles it (60 s, 2, 4,
+#: 8 min), so a refused session is not re-tried — and does not block the
+#: loop — on every pass.
+RETRY_BASE_S = 60
 FIRE_REASON = "watch fired: deliver its outcome (WI-2036)"
 
 
@@ -211,6 +217,8 @@ def evaluate_watches(ctx: AppContext) -> WatchPass:
             _settle(ctx, watch, state="expired", event=WATCH_EXPIRED_EVENT)
             done.expired.append(watch.id)
             continue
+        if not _due(watch, now):
+            continue
         try:
             outcome = watch.outcome or _evaluate(ctx, evidence, watch)
         except (VogtError, EngineUnavailable) as exc:
@@ -246,11 +254,27 @@ def evaluate_watches(ctx: AppContext) -> WatchPass:
                 watch,
                 state="active",
                 event=WATCH_FAILED_EVENT,
-                outcome=outcome,
+                outcome={
+                    **outcome,
+                    "next_attempt_at": (
+                        now + timedelta(seconds=RETRY_BASE_S * 2**watch.attempts)
+                    ).isoformat(),
+                },
                 error=error,
             )
             done.retrying.append(watch.id)
     return done
+
+
+def _due(watch: Watch, now: datetime) -> bool:
+    """Whether a watch whose delivery failed has waited out its backoff."""
+    stamp = None if watch.outcome is None else watch.outcome.get("next_attempt_at")
+    if not isinstance(stamp, str):
+        return True
+    try:
+        return datetime.fromisoformat(stamp) <= now
+    except ValueError:
+        return True
 
 
 class _Evidence:

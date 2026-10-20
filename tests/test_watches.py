@@ -263,7 +263,9 @@ def test_ci_on_a_sha_reports_the_failing_checks(
     create_watch(
         wired,
         CreateWatchParams(
-            trigger=WatchTriggerModel(kind="ci", project="vogt", sha=HEAD[:12]),
+            trigger=WatchTriggerModel(
+                kind="ci", project="vogt", sha=HEAD[:12], checks=["ci", "lint"]
+            ),
             session=ses_id,
             reason=WHY,
         ),
@@ -335,7 +337,9 @@ def test_a_trigger_names_the_fields_its_kind_needs() -> None:
     with pytest.raises(ValueError, match="project and number"):
         WatchTriggerModel(kind="pr", project="vogt")
     with pytest.raises(ValueError, match="exactly one of sha or pr"):
-        WatchTriggerModel(kind="ci", project="vogt", sha=HEAD, pr=1)
+        WatchTriggerModel(kind="ci", project="vogt", sha=HEAD, pr=1, checks=["ci"])
+    with pytest.raises(ValueError, match="needs checks"):
+        WatchTriggerModel(kind="ci", project="vogt", sha=HEAD)
 
 
 # -- lifecycle ---------------------------------------------------------------
@@ -366,8 +370,14 @@ def test_cancel_expiry_and_a_refused_delivery(
     first = evaluate_watches(later)
     assert first.expired == [lapsing.id]
     assert first.retrying == [stuck.id]
-    for _ in range(MAX_ATTEMPTS - 1):
-        evaluate_watches(later)
+    # Backoff: a pass before the retry is due neither retries nor blocks.
+    assert evaluate_watches(later).retrying == []
+    for attempt in range(1, MAX_ATTEMPTS):
+        # Past each doubling delay (1, 2, 4, 8 min after the hour).
+        offset = timedelta(hours=1, minutes=2**attempt * 2)
+        evaluate_watches(
+            dataclasses.replace(wired, clock=lambda o=offset: wired.clock() + o)
+        )
 
     by_id = {w.id: w for w in list_watches(wired, ListWatchesParams()).watches}
     assert by_id[cancelled.id].state == "cancelled"
