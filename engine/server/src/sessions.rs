@@ -1508,7 +1508,15 @@ impl SessionRegistry {
             .fresh_prompt
             .as_deref()
             .map(str::trim)
-            .filter(|p| !p.is_empty() && record.conversation.is_some())
+            // Only an agent the engine can pin to a new conversation id: one
+            // it cannot (stock Codex) would leave nothing to resume next time.
+            .filter(|p| {
+                !p.is_empty()
+                    && record.conversation.as_ref().is_some_and(|c| {
+                        matches!(c.agent.as_str(), "claude" | "klaudia")
+                            || (c.agent == "codex" && self.cfg.codex_session_id)
+                    })
+            })
             .map(|summary| {
                 record.fresh_conversation = Some(Uuid::new_v4());
                 fresh_wake_prompt(summary, &record)
