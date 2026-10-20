@@ -4708,8 +4708,8 @@ class WatchTriggerModel(Params):
     - `pr`: `project` + `number`; fires when the PR reads one of `on`
       (default merged or closed).
     - `ci`: `project` + `sha` or `pr`; fires when every run on that revision
-      (a PR's head) has concluded. `checks` names the required checks: only
-      they count, and each must be observed.
+      (a PR's head) — each named required check in `checks` (at least
+      one) — has been observed and concluded.
     - `work_item`: `work_item`; fires when it is in one of `states` (default
       a terminal state).
     - `session`: `session`; fires when it ends (`until=ended`: exited,
@@ -4736,7 +4736,12 @@ class WatchTriggerModel(Params):
     checks: list[str] = Field(
         default_factory=list,
         max_length=50,
-        description="Required check names (ci); empty means every observed run.",
+        description=(
+            "Required check names (ci), at least one. Vogt does not read "
+            "branch protection, so name the checks that gate the merge: the "
+            "watch fires only when each has been observed and concluded, and "
+            "ignores every other run."
+        ),
     )
     work_item: str | None = Field(default=None, description="WI ref (work_item).")
     states: list[str] = Field(
@@ -4759,6 +4764,12 @@ class WatchTriggerModel(Params):
             self.project is None or (self.sha is None) == (self.pr is None)
         ):
             missing = "a ci watch needs project and exactly one of sha or pr"
+        elif self.kind == "ci" and not any(c.strip() for c in self.checks):
+            missing = (
+                "a ci watch needs checks: the required check names (Vogt does "
+                "not read branch protection, and waiting on whatever runs were "
+                "observed can fire before a slower required check starts)"
+            )
         elif self.kind == "work_item" and not self.work_item:
             missing = "a work_item watch needs work_item"
         elif self.kind == "session" and not self.session:
