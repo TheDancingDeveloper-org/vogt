@@ -4066,6 +4066,11 @@ def _brief_with_task(
         if overrides:
             text = f"{text.rstrip()}\n\n{overrides}"
         text = f"{text.rstrip()}\n\n{heading}\n\n{task}\n"
+    if params.purpose == "implement":
+        # Every agent template, Claude and Codex alike: a worker that polls
+        # CI or picks up a second item re-reads its whole context each turn
+        # (WI-2035).
+        text = f"{text.rstrip()}\n\n{IMPLEMENT_FOOTER}\n"
     if touch:
         text = f"{text.rstrip()}\n\n{touch}"
     return text
@@ -4081,6 +4086,13 @@ _REVIEW_TASK = (
 
 #: How a reason says it is the task (WI-1854): `Task: do the thing`.
 _TASK_PREFIX = re.compile(r"^\s*task\s*:\s*", re.IGNORECASE)
+
+
+#: Said at the foot of every implement brief (WI-2035).
+IMPLEMENT_FOOTER = (
+    "Stop when your branch is pushed: do not wait for or poll CI, "
+    "oversight lands it. One work item per session."
+)
 
 
 def _default_task(params: StartSessionParams) -> str:

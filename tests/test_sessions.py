@@ -54,6 +54,7 @@ from vogt.application.services import (
     stop_session,
     update_project,
 )
+from vogt.application.services.sessions import IMPLEMENT_FOOTER
 from vogt.core.auth import hash_token
 from vogt.core.entities import AgentPolicy, ReviewPolicy
 from vogt.errors import (
@@ -2565,6 +2566,14 @@ def test_purpose_implement_resolves_the_implement_profile(
     assert summary["repo_map"] is True
     assert summary["overrides"] == []
     assert result.session.purpose == "implement"
+    assert IMPLEMENT_FOOTER in spec["prompt"]
+
+
+def test_only_an_implement_start_gets_the_stop_at_push_footer(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(wired, StartSessionParams(work_item="WI-1", task="look", reason=WHY))
+    assert IMPLEMENT_FOOTER not in engine.last_spec["prompt"]
 
 
 def test_a_purpose_whose_model_the_project_forbids_is_refused(
