@@ -651,6 +651,20 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "reason": WHY,
         },
     ),
+    # A watch (WI-2036): armed on the harness's session, listed, cancelled.
+    (
+        "watch.create",
+        lambda seen: {
+            "trigger": {"kind": "work_item", "work_item": "WI-1"},
+            "session": seen["session.start"]["session"]["id"],
+            "reason": WHY,
+        },
+    ),
+    ("watch.list", {"state": "active"}),
+    (
+        "watch.cancel",
+        lambda seen: {"id": seen["watch.create"]["watch"]["id"], "reason": WHY},
+    ),
     (
         "session.stop",
         lambda seen: {

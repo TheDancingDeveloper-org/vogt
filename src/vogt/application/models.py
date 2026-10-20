@@ -4630,6 +4630,16 @@ WATCH_TTL_DESCRIPTION = (
 )
 
 
+def _watch_trigger_text(value: object) -> object:
+    """The generated CLI hands a nested object over as JSON text."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
 class HibernateSessionParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     allow_shell: bool = Field(
@@ -4658,6 +4668,8 @@ class HibernateSessionParams(Params):
         default=86_400, ge=60, le=1_209_600, description=WATCH_TTL_DESCRIPTION
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+
+    _wake_on_text = field_validator("wake_on", mode="before")(_watch_trigger_text)
 
 
 class WakeSessionParams(Params):
@@ -5033,6 +5045,8 @@ class CreateWatchParams(Params):
         default=86_400, ge=60, le=1_209_600, description=WATCH_TTL_DESCRIPTION
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+
+    _trigger_text = field_validator("trigger", mode="before")(_watch_trigger_text)
 
 
 class CancelWatchParams(Params):
