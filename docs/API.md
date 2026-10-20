@@ -205,7 +205,18 @@ again. Together they are the overseer's loop: wait, read, act.
 `session.report_blocked` / `session.report_unblocked`
 (`work.write`, audited) let an agent say it is blocked on a person; the report
 shows as `blocked` on `session.list` and `session.screen`, raises an Inbox
-`session.blocked` entry and a push. `session.start` takes `autopilot` (see
+`session.blocked` entry and a push. `session.report` (`work.write`, audited)
+is a session's own short typed report — `kind` `progress`, `result`,
+`question` or `blocker`, with `summary`, `branch`, `sha`, `pr`, `checks`,
+`blockers` and `next_step` (WI-2039). The newest one rides on every
+`session.list`/`session.sweep` row as `latest_report` and on
+`session.digest`; in digest mode it replaces `last_reply_excerpt` with a
+one-line `report`. It raises an Inbox `session.report.<kind>` entry (the
+newest per session) and is left as a note on the work item: the session's
+bound item, or the one `work_item` names. A session reports only for
+itself. With `autopilot_done_requires_result_report` on (off by default), the
+sweep reads an `AUTOPILOT: DONE` with no `result` report this turn as
+`waiting`. `session.start` takes `autopilot` (see
 [`AGENT_GUIDE.md`](AGENT_GUIDE.md)).
 
 Rows of `session.list` and `session.sweep` carry `running`. It holds the
