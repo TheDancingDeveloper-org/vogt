@@ -677,37 +677,60 @@ pub fn with_codex_guidance(
 /// Linux caps one argv entry at 128 KiB; a charter that would push Codex's
 /// `developer_instructions` past this stays in the brief alone.
 const MAX_CHARTER_ARG_BYTES: usize = 120 * 1024;
+/// Largest charter text inlined into `developer_instructions`, which rides on
+/// every Codex request (WI-2035 trimmed it to a few KiB). A larger one is
+/// replaced by [`CHARTER_POINTER`]: the brief carries the full text.
+const MAX_CHARTER_INLINE_BYTES: usize = 4 * 1024;
+const CHARTER_POINTER: &str = "## Charters\n\nThis scope has standing instructions \
+(charters) too long to repeat here. They are in the `## Charters` section of \
+the session brief; follow them as if they were written here.";
 
 /// `command` with the scope's charters (WI-2038) appended to Codex's
 /// `developer_instructions`, or `None` when it is not a Codex launch, there is
-/// no charter, or the result would not fit in one argument. Runs after
+/// no charter, or the result cannot be built. Runs after
 /// [`with_codex_guidance`]: an override already present is decoded and
-/// extended, otherwise one is added right after the Codex binary. The
-/// charters are in the brief either way; this keeps them in the standing
-/// instructions too, which a compacted conversation does not drop.
+/// extended, otherwise one is added right after the Codex binary. A charter
+/// over [`MAX_CHARTER_INLINE_BYTES`] is appended as a pointer to the brief.
 pub fn with_codex_charter(command: &[String], charter: &str) -> Option<Vec<String>> {
     const PREFIX: &str = "developer_instructions=";
     let charter = charter.trim();
     if charter.is_empty() || agent_name(command).as_deref() != Some("codex") {
         return None;
     }
+    let charter = if charter.len() > MAX_CHARTER_INLINE_BYTES {
+        tracing::info!(
+            bytes = charter.len(),
+            "charter over the inline cap; Codex gets a pointer to the brief"
+        );
+        CHARTER_POINTER
+    } else {
+        charter
+    };
     let mut out = command.to_vec();
     let encode = |body: &str| format!("{PREFIX}{}", crate::codex_guidance::toml_basic_string(body));
     match out.iter().position(|arg| arg.starts_with(PREFIX)) {
         Some(pos) => {
-            let parsed: toml::Table =
-                toml::from_str(&format!("v = {}", &out[pos][PREFIX.len()..])).ok()?;
-            let existing = parsed.get("v")?.as_str()?;
+            let parsed: Option<String> =
+                toml::from_str::<toml::Table>(&format!("v = {}", &out[pos][PREFIX.len()..]))
+                    .ok()
+                    .and_then(|t| t.get("v").and_then(|v| v.as_str()).map(str::to_owned));
+            let Some(existing) = parsed else {
+                tracing::warn!(
+                    "codex developer_instructions did not parse; charter left to the brief"
+                );
+                return None;
+            };
             out[pos] = encode(&format!("{}\n\n{charter}", existing.trim_end()));
             if out[pos].len() > MAX_CHARTER_ARG_BYTES {
+                tracing::warn!(
+                    bytes = out[pos].len(),
+                    "codex developer_instructions with charter over the argv cap; charter left to the brief"
+                );
                 return None;
             }
         }
         None => {
             let value = encode(charter);
-            if value.len() > MAX_CHARTER_ARG_BYTES {
-                return None;
-            }
             let (idx, _) = agent_binary(command);
             out.splice(idx + 1..idx + 1, ["-c".to_string(), value]);
         }
@@ -805,7 +828,7 @@ mod tests {
         let home = tmp.path().join("home");
         let repo = home.join("Working").join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::write(home.join("Working").join("AGENTS.md"), "WS \"quoted\"").unwrap();
+        std::fs::write(repo.join("CLAUDE.md"), "WS \"quoted\"").unwrap();
         let command: Vec<String> = ["/usr/bin/codex", "--yolo"].map(String::from).to_vec();
         let guided = with_codex_guidance(&command, &repo, Some(&home)).unwrap();
         let out = with_codex_charter(&guided, "## Charters\n\nNo brand names.").unwrap();
@@ -829,8 +852,16 @@ mod tests {
         // Other agents, and an empty charter, are left alone.
         assert!(with_codex_charter(&["claude".to_string()], "x").is_none());
         assert!(with_codex_charter(&command, "  ").is_none());
-        // Too large for one argument: the brief carries it alone.
-        assert!(with_codex_charter(&command, &"x".repeat(MAX_CHARTER_ARG_BYTES)).is_none());
+        // Over the inline cap: a pointer to the brief, not the text.
+        let big = with_codex_charter(&command, &"x".repeat(MAX_CHARTER_INLINE_BYTES + 1)).unwrap();
+        assert_eq!(instructions(&big[4]), CHARTER_POINTER);
+        // An existing override already near the argv cap: left alone.
+        let huge = format!(
+            "developer_instructions={}",
+            crate::codex_guidance::toml_basic_string(&"y".repeat(MAX_CHARTER_ARG_BYTES))
+        );
+        let near: Vec<String> = vec!["codex".into(), "-c".into(), huge];
+        assert!(with_codex_charter(&near, "Stop at push.").is_none());
     }
     use super::*;
 

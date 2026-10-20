@@ -12,6 +12,10 @@ Three rules shape this module:
   write is audited like any other.
 - **Empty clears.** Setting an empty body is a new version that says "no
   charter"; the brief then carries nothing for that scope.
+- **The workspace charter is a person's.** It reaches every session on every
+  project, so an agent principal (a worker, or one steered by injected text)
+  cannot rewrite it; project and initiative charters stay `work.write`, so
+  oversight can set them.
 - **Optimistic.** `expected_version` refuses a write made against a version
   that is no longer current, as `preference.set` does.
 """
@@ -32,7 +36,7 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.entities import Actor, Charter
-from vogt.errors import CharterVersionConflict, InvalidRequest
+from vogt.errors import CharterVersionConflict, InvalidRequest, PersonRequired
 from vogt.storage.interface import ReadView, WriteTxn
 
 CHARTER_SET = "charter.set"
@@ -90,6 +94,12 @@ def get_charter(ctx: AppContext, params: CharterGetParams) -> CharterGetResult:
 
 def set_charter(ctx: AppContext, params: CharterSetParams) -> CharterSetResult:
     body_text = params.body.strip()
+    if params.scope == "workspace" and ctx.principal.kind == "agent":
+        msg = (
+            "the workspace charter reaches every session on every project, so "
+            f"only a person sets it, not an agent ({ctx.principal.identity_ref})"
+        )
+        raise PersonRequired(msg)
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[CharterSetResult]:
         scope = _scope(txn, params.scope, params.ref)

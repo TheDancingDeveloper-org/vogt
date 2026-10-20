@@ -427,7 +427,7 @@ asking session may. `decision.list` (`read`) filters by `state` (`pending`,
 be answered and implies no answer. Nothing is applied when a decision is
 answered. The design is `design/agent-harness-services.md` §2.3.
 
-`charter.set` (`work.write`, audited) sets the standing instructions of a
+`charter.set` (`work.write`, audited; the `workspace` scope is a person's only, `403 person_required` for any agent, because it reaches every session) sets the standing instructions of a
 scope (WI-2038): `scope` is `workspace`, `project` or `initiative`, `ref` the
 project or initiative slug (none for the workspace), `body` Markdown (≤ 8000;
 empty clears), optional `expected_version` (0 for never set; a stale one is

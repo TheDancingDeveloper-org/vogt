@@ -515,7 +515,8 @@ op that checks the action.
 **Charters.** Standing instructions that apply to every session on a scope
 (commit identity, forbidden names, the delivery footer) belong in a charter,
 not in each brief: `charter_set` with `scope` (`workspace`, `project`,
-`initiative`), `ref` (the slug) and `body`; `charter_get` reads it, with
+`initiative`), `ref` (the slug) and `body`; The workspace charter is a person's to set: an agent gets
+`person_required`. `charter_get` reads it, with
 `history: true` for earlier versions. Every brief on that scope carries them
 under `## Charters`, workspace first, then project, then initiative, then the
 brief. A later one refines an earlier one.

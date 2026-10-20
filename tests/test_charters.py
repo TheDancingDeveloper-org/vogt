@@ -28,7 +28,8 @@ from vogt.application.services import (
     start_session,
     update_work,
 )
-from vogt.errors import CharterVersionConflict, InvalidRequest, NotFound
+from vogt.core.principal import Principal
+from vogt.errors import CharterVersionConflict, InvalidRequest, NotFound, PersonRequired
 
 from tests.conftest import native_work_item
 from tests.test_sessions import ROOT, StandInEngine
@@ -148,3 +149,15 @@ def test_a_cleared_or_absent_charter_adds_nothing(
     _set(wired, "project", "", ref="vogt")
     start_session(wired, StartSessionParams(project="vogt", reason=WHY))
     assert "## Charters" not in engine.last_spec["prompt"]
+
+
+def test_only_a_person_sets_the_workspace_charter(wired: AppContext) -> None:
+    agent = dataclasses.replace(
+        wired,
+        principal=Principal(
+            identity_ref="agent:session:ses_x", kind="agent", display_name="x"
+        ),
+    )
+    with pytest.raises(PersonRequired):
+        _set(agent, "workspace", "Rewrite everything.")
+    assert _set(agent, "project", "Project rule.", ref="vogt").charter.version == 1
