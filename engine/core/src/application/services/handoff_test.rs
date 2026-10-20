@@ -4,8 +4,9 @@
 //! hand-off is a comment with a kind and structured fields; the worker brief
 //! leads with the latest one and a review brief checks the diff it names. The
 //! upstream refusal is ported in `upstream_truth_test.rs`
-//! (`a_handoff_comment_on_an_upstream_item_is_refused`). `from_handoff` is not
-//! wired into `session.start` in Rust yet, so its three cases are not ported.
+//! (`a_handoff_comment_on_an_upstream_item_is_refused`), and the refusal of a
+//! hand-off without fields is the registry validator's
+//! (`a_handoff_comment_without_fields_is_refused` in `registry/validate.rs`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -166,8 +167,9 @@ fn a_handoff_round_trips_and_a_note_stays_a_note() {
     );
 }
 
-/// Python refuses both halves at model validation. Rust refuses fields on a
-/// note; a hand-off without fields is not refused (gap, see disposition).
+/// Python refuses both halves at model validation. The service refuses fields
+/// on a note; a hand-off without fields is refused by the registry validator
+/// (`a_handoff_comment_without_fields_is_refused` in `registry/validate.rs`).
 #[test]
 fn fields_on_a_note_are_refused() {
     let built = built();
@@ -411,6 +413,75 @@ fn review_of_refuses_a_different_item() {
     let err = start_session(ctx, &params).unwrap_err();
     assert!(
         matches!(&err, VogtError::InvalidRequest(m) if m.contains("work_item names")),
+        "{err:?}"
+    );
+    assert!(script.seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn from_handoff_opens_on_the_item() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-10","name":"vogt","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "vogt");
+    let reference = item(&built, "WI-7", "Resume me", "");
+    handoff(&built, &reference, "where I stopped", fields(json!({})));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = start_params(None, None, WHY);
+    params.from_handoff = Some(reference.clone());
+    let started = start_session(ctx, &params).unwrap();
+    assert_eq!(
+        serde_json::to_value(&started).unwrap()["session"]["work_item"],
+        reference
+    );
+    let seen = script.seen.lock().unwrap().join("\n");
+    assert!(seen.contains("## Hand-off"), "{seen}");
+    assert!(seen.contains("where I stopped"));
+}
+
+#[test]
+fn from_handoff_refuses_a_different_work_item() {
+    let script = script_with(Vec::new());
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "vogt");
+    let first = item(&built, "WI-1", "One", "");
+    let second = item(&built, "WI-2", "Two", "");
+    handoff(&built, &first, "stopped", fields(json!({})));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = start_params(None, None, WHY);
+    params.from_handoff = Some(first);
+    params.work_item = Some(second);
+    let err = start_session(ctx, &params).unwrap_err();
+    assert!(
+        matches!(&err, VogtError::InvalidRequest(m)
+            if m == "from_handoff names WI-1, but work_item names WI-2"),
+        "{err:?}"
+    );
+    assert!(script.seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn from_handoff_refuses_an_item_with_no_handoff() {
+    let script = script_with(Vec::new());
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "vogt");
+    let reference = item(&built, "WI-1", "Bare", "");
+    note(&built, &reference, "only a note");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = start_params(None, None, WHY);
+    params.from_handoff = Some(reference);
+    let err = start_session(ctx, &params).unwrap_err();
+    assert!(
+        matches!(&err, VogtError::InvalidRequest(m)
+            if m == "WI-1 has no hand-off comment to start a session from"),
         "{err:?}"
     );
     assert!(script.seen.lock().unwrap().is_empty());

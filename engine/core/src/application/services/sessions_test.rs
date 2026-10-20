@@ -126,6 +126,7 @@ pub(super) fn start_params(
         role: "worker".to_string(),
         purpose: None,
         review_of: None,
+        from_handoff: None,
         budget: None,
         worktree: None,
         repo_map: None,

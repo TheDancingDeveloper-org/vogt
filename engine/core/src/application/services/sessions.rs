@@ -146,6 +146,7 @@ where
             role: optional_string(&params, "role")?.unwrap_or_else(|| "worker".to_string()),
             purpose: optional_string(&params, "purpose")?,
             review_of: optional_string(&params, "review_of")?,
+            from_handoff: optional_string(&params, "from_handoff")?,
             budget: match params.get("budget") {
                 None | Some(Value::Null) => None,
                 Some(raw) => Some(serde_json::from_value(raw.clone()).map_err(|error| {
@@ -407,6 +408,10 @@ pub struct StartSessionParams {
     /// The work item a review is of (Python `review_of`). A review's brief
     /// checks the item's diff rather than carrying the work on.
     pub review_of: Option<String>,
+    /// Open on the work item this names, resumed from its latest hand-off
+    /// (Python `from_handoff`). Sugar for `work_item`; refused when the item
+    /// has no hand-off comment.
+    pub from_handoff: Option<String>,
     /// The limits the start asks for. Unset, the default rule applies.
     pub budget: Option<SessionBudget>,
     /// Cut a worktree for the session. Unset, the profile decides.
@@ -2026,24 +2031,51 @@ where
     C: Clock,
     I: IdFactory,
 {
-    // Both is a bad request, and it is reported before either is resolved so a
-    // missing work item does not hide it.
-    if params.work_item.is_some() && params.project.is_some() {
-        return Err(VogtError::InvalidRequest(
-            "give at most one of --work-item or --project".to_string(),
-        ));
-    }
     // A review is of one work item: `review_of` names it, and a different
-    // `work_item` beside it is a contradiction, refused before anything starts.
-    let work_ref = match (&params.review_of, &params.work_item) {
-        (Some(review), Some(work)) if review != work => {
+    // `work_item` or `from_handoff` beside it is a contradiction, refused
+    // before anything starts. Naming it is enough: it becomes the work item.
+    let mut work_ref = params.work_item.clone();
+    if let Some(review) = &params.review_of {
+        if let Some(work) = params.work_item.as_ref().filter(|work| *work != review) {
             return Err(VogtError::InvalidRequest(format!(
                 "review_of names {review}, but work_item names {work}"
             )));
         }
-        (Some(review), _) => Some(review.clone()),
-        (None, work) => work.clone(),
-    };
+        if let Some(from) = params.from_handoff.as_ref().filter(|from| *from != review) {
+            return Err(VogtError::InvalidRequest(format!(
+                "review_of names {review}, but from_handoff names {from}"
+            )));
+        }
+        work_ref = Some(resolve::work_item(&ctx.declared.read()?, review)?.reference);
+    }
+    // `from_handoff` is sugar for "a fresh session on the item the hand-off
+    // belongs to". The brief carries the hand-off because it always does once
+    // the item is the subject; an item with no hand-off is refused.
+    if let Some(from) = &params.from_handoff {
+        if let Some(work) = work_ref.as_ref().filter(|work| *work != from) {
+            return Err(VogtError::InvalidRequest(format!(
+                "from_handoff names {from}, but work_item names {work}"
+            )));
+        }
+        let view = ctx.declared.read()?;
+        let item = resolve::work_item(&view, from)?;
+        let comments = view.comments_for(&item.id, 200, true)?;
+        if !comments.iter().any(|one| one.kind == "handoff") {
+            return Err(VogtError::InvalidRequest(format!(
+                "{} has no hand-off comment to start a session from",
+                item.reference
+            )));
+        }
+        work_ref = Some(item.reference);
+    }
+    // Both is a bad request, and it is reported before either is resolved
+    // (beyond the review and hand-off checks above) so a missing work item or
+    // project does not hide it.
+    if work_ref.is_some() && params.project.is_some() {
+        return Err(VogtError::InvalidRequest(
+            "give at most one of --work-item or --project".to_string(),
+        ));
+    }
     let work_item = match &work_ref {
         Some(reference) => Some(resolve::work_item(&ctx.declared.read()?, reference)?),
         None => None,
