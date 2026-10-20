@@ -1086,6 +1086,82 @@ pub struct WorkItemGitStory {
     pub task_conclusion_available: bool,
 }
 
+/// A pull request a completion claim was checked against (WI-1835).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimPull {
+    pub number: i64,
+    pub state: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub merged_at: Option<String>,
+    /// Who merged it, when the forge observation says.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub merged_by: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub checks: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub head_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum ClaimCheckClaim {
+    #[serde(rename = "autopilot-done")]
+    AutopilotDone,
+    #[serde(rename = "review")]
+    Review,
+    #[serde(rename = "done")]
+    Done,
+}
+
+/// A session's completion claim checked against git and the forge (WI-1835).
+///
+/// Recorded when a session says `AUTOPILOT: DONE` or moves its item to
+/// review or done. `mismatches` lists, in words, where the claim and the
+/// facts disagree; `unchecked` lists the facts that could not be read, so
+/// an empty `mismatches` is never mistaken for verified.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimCheck {
+    pub claim: ClaimCheckClaim,
+    /// The session's Vogt id.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub session: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub work_item: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub session_started_at: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub branch: Option<String>,
+    /// The worktree's HEAD commit.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub head: Option<String>,
+    /// Whether HEAD is on the branch's upstream.
+    #[serde(default)]
+    pub pushed: Option<bool>,
+    /// Commits on HEAD committed since the session started.
+    #[serde(default)]
+    pub new_commits: Option<i64>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub pulls: Vec<ClaimPull>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub mismatches: Vec<String>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub unchecked: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub enum WorkItemPullRequestViewState {
@@ -1623,6 +1699,9 @@ pub struct SessionSweepRow {
     pub screen_tail: Vec<String>,
     #[serde(default)]
     pub ready: Option<bool>,
+    /// On a `done` row bound to a work item: its AUTOPILOT: DONE claim checked against git and the forge (WI-1835).
+    #[serde(default)]
+    pub claim_check: Option<ClaimCheck>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]

@@ -9,6 +9,7 @@
 
 #![allow(dead_code)]
 
+pub mod claims;
 pub mod session_economics;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

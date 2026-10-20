@@ -267,6 +267,7 @@ where
         "git": null,
         "walked": [],
         "live_sessions": [],
+        "claim_check": null,
     }))
 }
 
@@ -714,6 +715,7 @@ where
         "git": null,
         "walked": [],
         "live_sessions": [],
+        "claim_check": null,
     }))
 }
 
@@ -1032,6 +1034,7 @@ where
         "git": null,
         "walked": [],
         "live_sessions": [],
+        "claim_check": null,
     }))
 }
 
@@ -1135,6 +1138,7 @@ where
         "git": null,
         "walked": [],
         "live_sessions": [],
+        "claim_check": null,
     }))
 }
 
@@ -1468,6 +1472,7 @@ fn get_work<C: Clock, I: IdFactory>(
         "git": git,
         "walked": [],
         "live_sessions": [],
+        "claim_check": null,
     }))
 }
 
@@ -1825,21 +1830,94 @@ where
     })
 }
 
-/// Move a native item along its workflow. `walk` takes the shortest legal path
-/// one audited hop at a time. Completion is refused while a `depends_on`
-/// target is unfinished. An upstream item is the write-through and stores
-/// nothing.
+/// Move a native item along its workflow, then check a session's completion
+/// claim (WI-1835). See [`transition_moves`] and [`check_session_claim`].
 fn transition_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let reference = text_of(&params, "ref")
+    let result = transition_moves(ctx, &params)?;
+    check_session_claim(ctx, &params, result)
+}
+
+/// Check a session's move to review or done against git and the forge.
+///
+/// Only a session's own move is checked: a person closing an item is not
+/// claiming work. A mismatch is recorded on the item as a note, and the
+/// check rides on the result. Nothing is refused (WI-1835).
+fn check_session_claim<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &Value,
+    mut result: Value,
+) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    // The states a session's move into is a completion claim.
+    let claim = match text_of(params, "to_state").as_deref() {
+        Some("review") => crate::application::models::ClaimCheckClaim::Review,
+        Some("done") => crate::application::models::ClaimCheckClaim::Done,
+        _ => return Ok(result),
+    };
+    let Some(engine_id) = crate::application::session_commit::caller_engine_session_id(ctx)? else {
+        return Ok(result);
+    };
+    let Some(reference) = result
+        .get("item")
+        .and_then(|item| item.get("ref"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Ok(result);
+    };
+    let sessions = super::sessions::list_sessions(
+        ctx,
+        &super::sessions::ListSessionsParams {
+            project: None,
+            work_item: Some(reference),
+            include_stopped: false,
+            limit: 50,
+            offset: 0,
+            order: "started".to_string(),
+        },
+    )?
+    .sessions;
+    let Some(summary) = sessions
+        .iter()
+        .find(|row| row.engine_session_id == engine_id)
+    else {
+        return Ok(result);
+    };
+    let reason = text_of(params, "reason");
+    let text = [reason.as_deref(), summary.last_reply_excerpt.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let check = crate::application::claims::check_claim(ctx, summary, claim, Some(&text))?;
+    crate::application::claims::record_claim_check(ctx, &check, None)?;
+    result["claim_check"] = serde_json::to_value(&check).expect("a claim check serialises");
+    Ok(result)
+}
+
+/// Move a native item along its workflow. `walk` takes the shortest legal path
+/// one audited hop at a time. Completion is refused while a `depends_on`
+/// target is unfinished. An upstream item is the write-through and stores
+/// nothing.
+fn transition_moves<C, I>(ctx: &AppContext<C, I>, params: &Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let reference = text_of(params, "ref")
         .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
-    let to_state = text_of(&params, "to_state")
+    let to_state = text_of(params, "to_state")
         .ok_or_else(|| VogtError::InvalidRequest("to_state is required".into()))?;
     let walk = params.get("walk").and_then(Value::as_bool).unwrap_or(false);
-    let reason = text_of(&params, "reason").unwrap_or_default();
+    let reason = text_of(params, "reason").unwrap_or_default();
     let view = ctx.declared.read()?;
     let resolved = upstream::resolve_work_ref(ctx, &view, &reference)?;
     if view.work_item_by_ref(&reference)?.is_none() {
@@ -1895,6 +1973,7 @@ where
             "git": null,
             "walked": if walk { json!(path) } else { json!([]) },
             "live_sessions": [],
+            "claim_check": null,
         }));
     }
     let item = resolve::work_item(&view, &reference)?;
@@ -2054,6 +2133,7 @@ where
         "git": null,
         "walked": if walk { path } else { Vec::<String>::new() },
         "live_sessions": [],
+        "claim_check": null,
     }))
 }
 
@@ -2132,7 +2212,7 @@ where
     })?;
     Ok(json!({
         "item": stored, "comments": [], "sessions": [], "branches": [],
-        "git": null, "walked": [], "live_sessions": [],
+        "git": null, "walked": [], "live_sessions": [], "claim_check": null,
     }))
 }
 
@@ -2182,7 +2262,7 @@ where
     })?;
     Ok(json!({
         "item": stored, "comments": [], "sessions": [], "branches": [],
-        "git": null, "walked": [], "live_sessions": [],
+        "git": null, "walked": [], "live_sessions": [], "claim_check": null,
     }))
 }
 
@@ -2279,7 +2359,7 @@ where
     })?;
     Ok(json!({
         "item": stored, "comments": [], "sessions": [], "branches": [],
-        "git": null, "walked": [], "live_sessions": [],
+        "git": null, "walked": [], "live_sessions": [], "claim_check": null,
     }))
 }
 

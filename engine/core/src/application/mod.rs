@@ -5,6 +5,7 @@
 
 pub mod brief;
 pub mod ci_watch;
+pub mod claims;
 pub mod collect;
 pub mod context;
 pub mod contracts;

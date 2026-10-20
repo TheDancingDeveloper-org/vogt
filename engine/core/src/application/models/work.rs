@@ -12,11 +12,11 @@ use super::views::{
     BacklogParamsKindsItem, BacklogParamsMode, BacklogParamsPrioritiesItem,
     BacklogParamsTrustStatesItem, BacklogResultLinkState, BoardCellParams, BoardCellResult,
     BoardListParamsKindsItem, BoardListParamsLaneMode, BoardListParamsPrioritiesItem,
-    BoardListResultLinkState, BugsParamsPrioritiesItem, CiSummary, Comment, CommentParamsKind,
-    ContractExemptionView, CoverageEntry, CreateInitiativeParamsState, CreateWorkParamsEffort,
-    CreateWorkParamsKind, CreateWorkParamsPriority, CriterionView, DepRef, DependencySummary,
-    DepsResultStatus, DriftProposal, DriftResolveParamsResolution, EngineDiskStatus,
-    GetWorkParamsCommentOrder, GetWorkParamsMode, HandoffFields, Initiative,
+    BoardListResultLinkState, BugsParamsPrioritiesItem, CiSummary, ClaimCheck, Comment,
+    CommentParamsKind, ContractExemptionView, CoverageEntry, CreateInitiativeParamsState,
+    CreateWorkParamsEffort, CreateWorkParamsKind, CreateWorkParamsPriority, CriterionView, DepRef,
+    DependencySummary, DepsResultStatus, DriftProposal, DriftResolveParamsResolution,
+    EngineDiskStatus, GetWorkParamsCommentOrder, GetWorkParamsMode, HandoffFields, Initiative,
     InitiativeTrackingIssue, ListInitiativesParamsMode, ListWorkParamsKindsItem,
     ListWorkParamsMode, ListWorkParamsPrioritiesItem, MirroredSource, Observation,
     ProjectBriefParamsMode, PublishInitiativeResultState, RankedItem, RecommendationView,
@@ -134,6 +134,8 @@ pub struct WorkResult {
     #[serde(default)]
     #[schemars(extend("x-keep-default" = true))]
     pub live_sessions: Vec<SessionSummary>,
+    #[serde(default)]
+    pub claim_check: Option<ClaimCheck>,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

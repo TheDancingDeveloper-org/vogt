@@ -865,6 +865,11 @@ pub struct SessionSweepRow {
     pub session: SessionSummary,
     pub screen_tail: Vec<String>,
     pub ready: Option<bool>,
+    /// On a `done` row bound to a work item: its AUTOPILOT: DONE claim checked
+    /// against git and the forge (WI-1835). Always null here until the sweep
+    /// classifies `done` rows (WI-1518); `claims::check_claim` and
+    /// `claims::record_claim_check` with a once key are what that row calls.
+    pub claim_check: Option<crate::application::models::ClaimCheck>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1496,6 +1501,7 @@ where
             screen_tail: entry.screen_tail.clone(),
             ready: Some(entry.ready),
             session: summary,
+            claim_check: None,
         });
     }
     rows.sort_by(|left, right| {
