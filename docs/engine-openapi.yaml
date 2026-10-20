@@ -1105,6 +1105,14 @@ components:
             maxItems: 2
         cols: { type: integer }
         rows: { type: integer }
+        fresh_prompt:
+          type: string
+          maxLength: 65536
+          description: >-
+            Cold-wake compaction (WI-2037): do not resume the recorded
+            conversation; start a new one, under a new conversation id, whose
+            first prompt is this summary followed by the session directory's
+            git facts and the original brief. vogt-core sends it.
     BlockedReport:
       type: object
       required: [reason, since]
