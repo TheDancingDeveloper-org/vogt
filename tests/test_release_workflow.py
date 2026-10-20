@@ -165,13 +165,12 @@ def test_core_and_stack_are_built_once_and_tagged_after_smoke() -> None:
     assert "push-by-digest=true" in image
     assert "docker pull" in image and "${IMAGE}@${DIGEST}" in image
     assert image.index("docker pull") < image.index("imagetools create")
-    assert image.index("imagetools create") < image.index("cosign sign")
+    assert "cosign" not in build
     assert "docker/build-push-action" not in stack
     assert ".github/stack-bake.hcl" in stack
     assert "stack gitguard" in stack
     assert stack.index("docker pull") < stack.index("codex_gitguard_e2e")
     assert stack.index("codex_gitguard_e2e") < stack.index("imagetools create")
-    assert stack.index("imagetools create") < stack.index("cosign sign")
     bake = (ROOT / ".github" / "stack-bake.hcl").read_text(encoding="utf-8")
     assert 'target "stack"' in bake and 'target "gitguard"' in bake
     assert "push-by-digest=true" in bake
