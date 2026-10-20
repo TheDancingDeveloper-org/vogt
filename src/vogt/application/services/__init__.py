@@ -164,6 +164,7 @@ from vogt.application.services.taxonomy import (
     list_workflows,
     update_initiative,
 )
+from vogt.application.services.usage import usage_board_read
 from vogt.application.services.views import backlog, bugs, why
 from vogt.application.services.work import (
     bind_branch,
@@ -330,6 +331,7 @@ __all__ = [
     "update_initiative",
     "update_project",
     "update_work",
+    "usage_board_read",
     "wake_session",
     "whoami",
     "why",

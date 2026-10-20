@@ -80,6 +80,22 @@
 # default policy: behaviour
 # deploy_lanes = [{ name = "dev", project = "my-app", version_url = "https://dev.example.com/api/config" }]
 
+# Provider accounts `usage.board` reports on, each a table with `name`, `agent` (`claude` or `codex`) and `dir` (that account's config directory). Read on request only: the newest limit and reset the account's own transcripts recorded. Empty, no account is reported.
+# default policy: behaviour
+# usage_accounts = []
+
+# Base URL of a LiteLLM proxy whose keys' spend `usage.board` reads through `/key/info`. Unset, no key spend is read.
+# default policy: behaviour
+# usage_litellm_url = null
+
+# LiteLLM keys `usage.board` reports spend for: `name`, `key_env` (the environment variable holding the key) and an optional `daily_alert_usd`.
+# default policy: behaviour
+# usage_litellm_keys = []
+
+# Default day-spend alert threshold, in USD, for every LiteLLM key without its own `daily_alert_usd`. Unset, no alert is raised.
+# default policy: behaviour
+# usage_daily_spend_alert_usd = null
+
 # File types the marker collector reads. Configuration rather than a hard-coded list, because which extensions hold source is a workspace's business, not Vogt's.
 # default policy: behaviour
 # marker_file_extensions = [".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rb", ".sh", ".sql", ".toml", ".yaml", ".yml", ".md"]

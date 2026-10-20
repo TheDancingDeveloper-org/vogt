@@ -4086,6 +4086,84 @@ class DeployedVersionsResult(Result):
     freshness: Freshness = Freshness()
 
 
+# -- usage board (WI-2040) -------------------------------------------
+
+
+class UsageBoardParams(Params):
+    """The usage board takes no filter: it is one view of every account."""
+
+
+class UsageWindowView(Result):
+    """One rate-limit window a provider reported for an account."""
+
+    name: str = Field(
+        description="`primary` / `secondary` (Codex), or `limit` for a "
+        "Claude limit-hit message."
+    )
+    used_percent: float | None = None
+    window_minutes: int | None = None
+    resets_at: datetime | None = None
+    resets_text: str | None = Field(
+        default=None, description="The provider's own words for the reset."
+    )
+
+
+class UsageAccountView(Result):
+    """One provider account: its reported windows, and whether it is limited."""
+
+    name: str
+    agent: str
+    limited: bool = Field(description="A window at 100% or a hit not yet reset.")
+    windows: list[UsageWindowView] = []
+    limited_at: datetime | None = None
+    limit_reached: str | None = None
+    plan: str | None = None
+    tokens_5h: int = Field(
+        default=0, description="Tokens the transcripts record in the last 5h."
+    )
+    observed_at: datetime | None = Field(
+        default=None, description="The newest transcript entry read."
+    )
+    detail: str | None = None
+
+
+class UsageKeyView(Result):
+    """One LiteLLM key's spend, never the key itself."""
+
+    name: str
+    alias: str | None = None
+    spend_usd: float | None = None
+    daily: bool = Field(
+        default=False,
+        description="True when `spend_usd` is today's (a one-day budget window).",
+    )
+    max_budget_usd: float | None = None
+    budget_duration: str | None = None
+    budget_reset_at: datetime | None = None
+    alert_usd: float | None = None
+    alert: bool = False
+    detail: str | None = None
+
+
+class UsageAlert(Result):
+    """A spend alert: a key at or over its day threshold."""
+
+    key: str
+    spend_usd: float
+    threshold_usd: float
+    message: str
+
+
+class UsageBoardResult(Result):
+    """Every configured account and key, read now from what each reported."""
+
+    accounts: list[UsageAccountView]
+    keys: list[UsageKeyView]
+    alerts: list[UsageAlert]
+    generated_at: datetime
+    detail: str | None = None
+
+
 # -- connecting a client -------------------------------------------
 
 
