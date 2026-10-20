@@ -247,12 +247,27 @@ pub type Transport = Box<
     ) -> (u16, Vec<u8>, BTreeMap<String, String>),
 >;
 
+/// The transport once a client holds it: shared, so a GitHub App client, its
+/// token provider and the personal-token fallback all talk through the one
+/// stand-in a caller passed (`app_auth.github_client_for`).
+pub type SharedTransport = std::rc::Rc<
+    dyn Fn(
+        &str,
+        &BTreeMap<String, String>,
+        &[u8],
+        &str,
+    ) -> (u16, Vec<u8>, BTreeMap<String, String>),
+>;
+
 /// Read-only access to one GitHub installation, plus the one mutating method.
 pub struct GitHubClient {
     token: Option<String>,
     api_root: String,
-    transport: Option<Transport>,
+    transport: Option<SharedTransport>,
     timeout: Duration,
+    /// When set, wins over `token`: asked for a bearer token on every request
+    /// (a GitHub App installation, WI-1838).
+    token_provider: Option<std::rc::Rc<super::github_app::GitHubAppAuth>>,
 }
 
 impl GitHubClient {
@@ -260,8 +275,15 @@ impl GitHubClient {
         &self.api_root
     }
 
+    /// The fixed token, if this client has one. A GitHub App client has none:
+    /// its bearer is minted per request ([`Self::bearer`]).
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref()
+    }
+
+    /// The App this client authenticates as, if any.
+    pub fn token_provider(&self) -> Option<&super::github_app::GitHubAppAuth> {
+        self.token_provider.as_deref()
     }
 
     /// Build a client, or `None` when the adapter is not configured. `None` is
@@ -275,27 +297,80 @@ impl GitHubClient {
         path: Option<&Path>,
         transport: Option<Transport>,
     ) -> Result<Option<Self>, VogtError> {
+        Self::from_token_file_shared(path, transport.map(SharedTransport::from))
+    }
+
+    /// [`Self::from_token_file`] over a transport already shared.
+    pub(crate) fn from_token_file_shared(
+        path: Option<&Path>,
+        transport: Option<SharedTransport>,
+    ) -> Result<Option<Self>, VogtError> {
         let Some(token) = read_token_file(path)? else {
             return Ok(None);
         };
-        Ok(Some(Self::new(Some(token), transport)))
+        Ok(Some(Self::shared(Some(token), transport)))
     }
 
     /// A client with an explicit token, or none. A token-less client is what
     /// identity and public-import use; it never reads a file. An empty token
     /// is the same as none.
     pub fn new(token: Option<String>, transport: Option<Transport>) -> Self {
+        Self::shared(token, transport.map(SharedTransport::from))
+    }
+
+    /// [`Self::new`] over a transport already shared.
+    pub(crate) fn shared(token: Option<String>, transport: Option<SharedTransport>) -> Self {
         Self {
             token: token.filter(|token| !token.is_empty()),
             api_root: API_ROOT.to_string(),
             transport,
             timeout: DEFAULT_TIMEOUT,
+            token_provider: None,
+        }
+    }
+
+    /// A client whose bearer comes from a GitHub App installation.
+    pub(crate) fn with_token_provider(
+        provider: super::github_app::GitHubAppAuth,
+        transport: Option<SharedTransport>,
+    ) -> Self {
+        Self {
+            token_provider: Some(std::rc::Rc::new(provider)),
+            ..Self::shared(None, transport)
         }
     }
 
     /// A token-less client whose requests go through `transport`.
     pub fn with_transport(transport: Transport) -> Self {
         Self::new(None, Some(transport))
+    }
+
+    /// The token a request to `path` (or a clone) would use now.
+    pub fn bearer(&self, path: Option<&str>) -> Result<Option<String>, VogtError> {
+        match &self.token_provider {
+            Some(provider) => provider.token(path),
+            None => Ok(self.token.clone()),
+        }
+    }
+
+    /// The rate-limit and ETag bucket a request to `path` spends.
+    pub(crate) fn budget_key(&self, path: Option<&str>) -> Result<String, VogtError> {
+        match &self.token_provider {
+            Some(provider) => provider.cache_key(path),
+            None => Ok(token_key(self.token.as_deref())),
+        }
+    }
+
+    /// The account an App installation acts for, or `None` for a PAT.
+    ///
+    /// A user token creates repositories under its user; an installation token
+    /// has no user, so `create_repo` targets the installation's account instead
+    /// — the configured installation, or the only one discovered so far.
+    pub fn default_owner(&self) -> Result<Option<serde_json::Map<String, Value>>, VogtError> {
+        match &self.token_provider {
+            Some(provider) => provider.account(None),
+            None => Ok(None),
+        }
     }
 
     /// GET one resource. A 404 is `Missing`, a 204 is `Empty`, and a 403 is
@@ -308,7 +383,7 @@ impl GitHubClient {
     pub fn get(&self, path: &str, query: &[(&str, String)]) -> Result<ForgeResponse, VogtError> {
         let url = self.url(path, query);
         let mut headers = self.headers(false);
-        let key = token_key(self.token.as_deref());
+        let key = self.budget_key(Some(path))?;
         let blocked = with_budget(|state| {
             let reset = state.budget.blocked_until(&key)?;
             Some((state.budget.floor, reset))
@@ -328,7 +403,8 @@ impl GitHubClient {
             headers.insert("If-None-Match".to_string(), etag.clone());
         }
 
-        let (mut status, mut body, response_headers) = self.fetch(&url, &headers, b"", "GET")?;
+        let (mut status, mut body, response_headers) =
+            self.authed_fetch(path, &url, headers, b"", "GET")?;
         with_budget(|state| state.budget.observe(&key, &response_headers));
         if let (304, Some((_, kept))) = (status, &cached) {
             // Unchanged since the last read, and free: replay what we kept.
@@ -364,13 +440,26 @@ impl GitHubClient {
         let verb = method.as_str();
         let url = self.url(path, &[]);
         let encoded = body.map(|value| value.to_string()).unwrap_or_default();
-        let (status, response, response_headers) = self.fetch(
+        // Before any installation lookup or token mint the write would cause.
+        let key = self.budget_key(Some(path))?;
+        let blocked = with_budget(|state| {
+            let reset = state.budget.blocked_until(&key)?;
+            Some((state.budget.floor, reset))
+        });
+        if let Some((floor, reset_at)) = blocked {
+            return Err(budget_refusal(
+                format!("GitHub rate budget below {floor}; not sending {path}"),
+                reset_at,
+            ));
+        }
+        let (status, response, response_headers) = self.authed_fetch(
+            path,
             &url,
-            &self.headers(true),
+            self.headers(true),
             encoded.as_bytes(),
             method.as_str(),
         )?;
-        let key = token_key(self.token.as_deref());
+        let key = self.budget_key(Some(path))?;
         with_budget(|state| state.budget.observe(&key, &response_headers));
         if status == 404 {
             return Ok(Value::Null);
@@ -394,7 +483,8 @@ impl GitHubClient {
     /// place a token is validated rather than merely used.
     pub fn identity(&self) -> Result<Option<GitHubIdentity>, VogtError> {
         let url = self.url("/user", &[]);
-        let (status, body, headers) = self.fetch(&url, &self.headers(false), b"", "GET")?;
+        let (status, body, headers) =
+            self.authed_fetch("/user", &url, self.headers(false), b"", "GET")?;
         if matches!(status, 401 | 403 | 404) {
             return Ok(None);
         }
@@ -449,6 +539,8 @@ impl GitHubClient {
             })
     }
 
+    /// The headers every request carries, without the credential, which
+    /// [`Self::authed_fetch`] attaches.
     fn headers(&self, with_body: bool) -> BTreeMap<String, String> {
         let mut headers = BTreeMap::new();
         headers.insert(
@@ -459,9 +551,6 @@ impl GitHubClient {
         headers.insert("User-Agent".to_string(), USER_AGENT.to_string());
         if with_body {
             headers.insert("Content-Type".to_string(), "application/json".to_string());
-        }
-        if let Some(token) = &self.token {
-            headers.insert("Authorization".to_string(), format!("Bearer {token}"));
         }
         headers
     }
@@ -481,8 +570,41 @@ impl GitHubClient {
         url
     }
 
+    /// `fetch` with the bearer token attached, refreshing once on a 401.
+    ///
+    /// A fixed token that gets a 401 is simply wrong; a provided one may have
+    /// been revoked or expired early, so it is minted again once. A fallback
+    /// personal token is not refreshable, so a 401 on it is not retried with
+    /// the same value.
     #[allow(clippy::type_complexity)]
-    fn fetch(
+    fn authed_fetch(
+        &self,
+        path: &str,
+        url: &str,
+        mut headers: BTreeMap<String, String>,
+        body: &[u8],
+        method: &str,
+    ) -> Result<(u16, Vec<u8>, BTreeMap<String, String>), VogtError> {
+        let bearer = self.bearer(Some(path))?;
+        if let Some(token) = bearer.as_deref().filter(|token| !token.is_empty()) {
+            headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+        }
+        let mut answer = self.fetch(url, &headers, body, method)?;
+        if let (401, Some(provider)) = (answer.0, &self.token_provider) {
+            provider.invalidate(Some(path))?;
+            let fresh = provider.token(Some(path))?;
+            if let Some(fresh) = fresh.filter(|fresh| !fresh.is_empty()) {
+                if Some(&fresh) != bearer.as_ref() {
+                    headers.insert("Authorization".to_string(), format!("Bearer {fresh}"));
+                    answer = self.fetch(url, &headers, body, method)?;
+                }
+            }
+        }
+        Ok(answer)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn fetch(
         &self,
         url: &str,
         headers: &BTreeMap<String, String>,
@@ -514,6 +636,14 @@ impl ForgeTransport for GitHubClient {
 
     fn token(&self) -> Option<&str> {
         self.token()
+    }
+
+    fn bearer(&self, path: Option<&str>) -> Result<Option<String>, VogtError> {
+        GitHubClient::bearer(self, path)
+    }
+
+    fn default_owner(&self) -> Result<Option<serde_json::Map<String, Value>>, VogtError> {
+        GitHubClient::default_owner(self)
     }
 
     fn get(&self, path: &str, query: &[(&str, String)]) -> Result<ForgeResponse, VogtError> {
@@ -563,7 +693,7 @@ fn quote(text: &str) -> String {
 /// `Ok(None)` is the ordinary case: no path, a missing path, a path that is not
 /// a file, or an empty file. A file that exists but cannot be read, or is not
 /// valid UTF-8, is an error rather than a silent "not configured".
-fn read_token_file(path: Option<&Path>) -> Result<Option<String>, VogtError> {
+pub(crate) fn read_token_file(path: Option<&Path>) -> Result<Option<String>, VogtError> {
     let Some(path) = path else {
         return Ok(None);
     };
@@ -583,7 +713,7 @@ fn read_token_file(path: Option<&Path>) -> Result<Option<String>, VogtError> {
 
 /// `~/x` to `{home}/x`; anything else unchanged. A missing home leaves the
 /// tilde in place, so the later read fails honestly rather than guessing.
-fn expand_user(path: &Path) -> std::path::PathBuf {
+pub(crate) fn expand_user(path: &Path) -> std::path::PathBuf {
     let text = path.to_string_lossy();
     if let Some(rest) = text.strip_prefix("~/") {
         if let Some(home) = std::env::var_os("HOME") {

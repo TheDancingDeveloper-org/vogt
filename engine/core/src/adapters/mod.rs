@@ -11,6 +11,7 @@ pub mod forge;
 pub mod forgejo;
 pub mod git;
 pub mod github;
+pub mod github_app;
 pub mod http;
 pub mod mcp;
 pub mod peer;

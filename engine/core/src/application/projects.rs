@@ -576,7 +576,10 @@ pub(crate) fn import_repository<C: Clock + 'static, I: IdFactory + 'static>(
     let outcome = (ctx.cloner)(&CloneRequest {
         remote: remote.clone(),
         destination: destination.clone(),
-        token: provider.as_ref().and_then(|forge| forge.clone_token()),
+        token: match provider.as_ref() {
+            None => None,
+            Some(forge) => forge.clone_token(Some(repo))?,
+        },
         helper_dir: Some(config.resolved_data_dir().join("tmp")),
     })?;
 

@@ -158,8 +158,12 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         )
     }
 
-    fn clone_token(&self) -> Option<String> {
-        self.transport.token().map(str::to_owned)
+    /// The token a clone of `repo` should authenticate with, if any. `repo`
+    /// routes a GitHub App to the installation on that repository's owner; a
+    /// personal token ignores it.
+    fn clone_token(&self, repo: Option<&RepoRef>) -> Result<Option<String>, VogtError> {
+        let path = repo.map(|repo| format!("/repos/{}/{}", repo.owner, repo.repo));
+        self.transport.bearer(path.as_deref())
     }
 
     fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
@@ -564,10 +568,11 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         if let Some(description) = description.filter(|text| !text.is_empty()) {
             payload["description"] = serde_json::Value::String(description.to_owned());
         }
-        let response = match self
-            .transport
-            .send(WriteMethod::Post, "/user/repos", Some(&payload))
-        {
+        let sent = self.create_repo_path().and_then(|path| {
+            self.transport
+                .send(WriteMethod::Post, &path, Some(&payload))
+        });
+        let response = match sent {
             Err(error) if error.message().contains("422") => {
                 return Err(VogtError::RemoteRepoExists(format!(
                     "github.com already has a repository named {} reachable by this \
@@ -652,6 +657,19 @@ impl<T: ForgeTransport> GitHubProvider<T> {
         })
     }
 
+    /// `POST /user/repos` for a user token, or `POST /orgs/{owner}/repos` when
+    /// the credential is a GitHub App installation on an organisation — an
+    /// installation token has no user, so `/user/repos` would refuse it.
+    fn create_repo_path(&self) -> Result<String, VogtError> {
+        let account = self.transport.default_owner()?.unwrap_or_default();
+        if let Some(login) = text(account.get("login")) {
+            if account.get("type").and_then(serde_json::Value::as_str) == Some("Organization") {
+                return Ok(format!("/orgs/{login}/repos"));
+            }
+        }
+        Ok("/user/repos".to_owned())
+    }
+
     /// Which update-automation config exists, read from the git tree.
     ///
     /// One `git/trees/HEAD` read lists the root, and only when the root holds
@@ -662,7 +680,7 @@ impl<T: ForgeTransport> GitHubProvider<T> {
     /// retries next sweep.
     fn version_update_config(&self, repo: &RepoRef) -> Result<Option<String>, VogtError> {
         let base = format!("/repos/{}/{}/git/trees", repo.owner, repo.repo);
-        let read = || -> Result<(Vec<(String, String)>, Vec<(String, String)>), VogtError> {
+        let read = || -> Result<(TreeEntries, TreeEntries), VogtError> {
             let root = tree_entries(&self.transport.get(&format!("{base}/HEAD"), &[])?);
             let github_dir = root
                 .iter()
@@ -719,16 +737,19 @@ impl ForgeResponse {
     }
 }
 
+/// One level of a git tree: `(path, sha)` in payload order.
+type TreeEntries = Vec<(String, String)>;
+
 /// `path → sha` for one level of a git tree payload, in payload order; empty
 /// when absent. Ports `_tree_entries`.
-fn tree_entries(response: &ForgeResponse) -> Vec<(String, String)> {
+fn tree_entries(response: &ForgeResponse) -> TreeEntries {
     let ForgeResponse::Json(serde_json::Value::Object(payload)) = response else {
         return Vec::new();
     };
     let Some(serde_json::Value::Array(items)) = payload.get("tree") else {
         return Vec::new();
     };
-    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut entries: TreeEntries = Vec::new();
     for item in items.iter().filter_map(serde_json::Value::as_object) {
         let path = json_text(item.get("path"));
         if !truthy(item.get("path")) {

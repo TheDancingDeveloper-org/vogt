@@ -126,8 +126,9 @@ impl<T: ForgeTransport> ForgeProvider for ForgejoProvider<T> {
         )
     }
 
-    fn clone_token(&self) -> Option<String> {
-        self.transport.token().map(str::to_owned)
+    fn clone_token(&self, repo: Option<&RepoRef>) -> Result<Option<String>, VogtError> {
+        let _ = repo; // one token per Forgejo host
+        Ok(self.transport.token().map(str::to_owned))
     }
 
     fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
@@ -1156,7 +1157,7 @@ mod tests {
             "https://forge.example/acme/Widgets"
         );
         assert_eq!(
-            provider.clone_token().as_deref(),
+            provider.clone_token(None).unwrap().as_deref(),
             Some("x"),
             "the clone authenticates as the token"
         );
