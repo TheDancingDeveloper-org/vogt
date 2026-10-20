@@ -4618,6 +4618,82 @@ class SessionAnswerResult(Result):
     )
 
 
+WatchKind = Literal["pr", "ci", "work_item", "session"]
+WatchStateView = Literal["active", "fired", "failed", "cancelled", "expired"]
+
+
+class WatchTriggerModel(Params):
+    """What a watch waits for (WI-2036). `kind` picks the fields that apply:
+
+    - `pr`: `project` + `number`; fires when the PR reads one of `on`
+      (default merged or closed).
+    - `ci`: `project` + `sha` or `pr`; fires when every run on that revision
+      (a PR's head) has concluded. `checks` names the required checks: only
+      they count, and each must be observed.
+    - `work_item`: `work_item`; fires when it is in one of `states` (default
+      a terminal state).
+    - `session`: `session`; fires when it ends (`until=ended`: exited,
+      hibernated or stopped) or also when it declares itself done
+      (`until=done`).
+
+    Forge triggers read what the collectors observed, so they fire within a
+    sweep interval of the event; Vogt triggers within the watch interval.
+    """
+
+    kind: WatchKind
+    project: str | None = Field(default=None, description="Project slug (pr, ci).")
+    number: int | None = Field(default=None, ge=1, description="PR number (pr).")
+    on: list[Literal["merged", "closed"]] = Field(
+        default_factory=lambda: ["merged", "closed"],
+        description="PR states that fire the watch (pr).",
+    )
+    sha: str | None = Field(
+        default=None, min_length=7, max_length=64, description="Revision (ci)."
+    )
+    pr: int | None = Field(
+        default=None, ge=1, description="PR whose head revision to watch (ci)."
+    )
+    checks: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description="Required check names (ci); empty means every observed run.",
+    )
+    work_item: str | None = Field(default=None, description="WI ref (work_item).")
+    states: list[str] = Field(
+        default_factory=list,
+        description="States that fire the watch (work_item); default terminal.",
+    )
+    session: str | None = Field(
+        default=None, description="Session to watch, ses_… or engine UUID (session)."
+    )
+    until: Literal["ended", "done"] = Field(
+        default="ended", description="What counts as finished (session)."
+    )
+
+    @model_validator(mode="after")
+    def _fields_for_kind(self) -> WatchTriggerModel:
+        missing: str | None = None
+        if self.kind == "pr" and (self.project is None or self.number is None):
+            missing = "a pr watch needs project and number"
+        elif self.kind == "ci" and (
+            self.project is None or (self.sha is None) == (self.pr is None)
+        ):
+            missing = "a ci watch needs project and exactly one of sha or pr"
+        elif self.kind == "work_item" and not self.work_item:
+            missing = "a work_item watch needs work_item"
+        elif self.kind == "session" and not self.session:
+            missing = "a session watch needs session"
+        if missing is not None:
+            raise ValueError(missing)
+        return self
+
+
+WATCH_TTL_DESCRIPTION = (
+    "How long the watch stays armed: default 24 h, at most 14 d. Past it the "
+    "watch reads `expired` and wakes nobody."
+)
+
+
 class HibernateSessionParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     allow_shell: bool = Field(
@@ -4634,6 +4710,16 @@ class HibernateSessionParams(Params):
             "UUID). Recorded on the hibernation, and a later wake is refused "
             "unless forced — so the work stays with one session."
         ),
+    )
+    wake_on: WatchTriggerModel | None = Field(
+        default=None,
+        description=(
+            "Arm a watch before hibernating: the session is woken, and told "
+            "the outcome, when this trigger fires (see watch_create)."
+        ),
+    )
+    wake_on_ttl_seconds: int = Field(
+        default=86_400, ge=60, le=1_209_600, description=WATCH_TTL_DESCRIPTION
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
@@ -4989,6 +5075,72 @@ class ListDecisionsParams(Params):
 
 class ListDecisionsResult(Result):
     decisions: list[DecisionView] = []
+
+
+class CreateWatchParams(Params):
+    """Arm a watch: wake a session with the outcome when the trigger fires."""
+
+    trigger: WatchTriggerModel
+    session: str | None = Field(
+        default=None,
+        description=(
+            "The session to wake (ses_… or engine UUID). Default: your own "
+            "session, from your token."
+        ),
+    )
+    note: str = Field(
+        default="",
+        max_length=400,
+        description="Appended to the wake message, e.g. what to do next.",
+    )
+    ttl_seconds: int = Field(
+        default=86_400, ge=60, le=1_209_600, description=WATCH_TTL_DESCRIPTION
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class CancelWatchParams(Params):
+    id: str = Field(description="The watch id (wat_…).")
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ListWatchesParams(Params):
+    state: WatchStateView | None = None
+    session: str | None = Field(
+        default=None, description="Only watches that wake this session."
+    )
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class WatchView(Result):
+    """A watch as callers read it."""
+
+    id: str
+    owner: str = Field(description="identity_ref of who armed it.")
+    session: str = Field(description="Engine id of the session it wakes.")
+    kind: WatchKind
+    trigger: dict[str, Any]
+    waits_for: str = Field(description="The trigger in a few words.")
+    note: str = ""
+    state: WatchStateView
+    created_at: datetime
+    expires_at: datetime
+    fired_at: datetime | None = None
+    outcome: dict[str, Any] | None = None
+    delivered: bool | None = Field(
+        default=None, description="Whether the wake message reached the session."
+    )
+    attempts: int = 0
+    last_error: str | None = None
+    reason: str
+
+
+class WatchResult(Result):
+    watch: WatchView
+
+
+class ListWatchesResult(Result):
+    watches: list[WatchView] = []
 
 
 class ListSessionsParams(Params):

@@ -165,6 +165,11 @@ from vogt.application.services.taxonomy import (
     update_initiative,
 )
 from vogt.application.services.views import backlog, bugs, why
+from vogt.application.services.watches import (
+    cancel_watch,
+    create_watch,
+    list_watches,
+)
 from vogt.application.services.work import (
     bind_branch,
     comment_work,
@@ -197,6 +202,7 @@ __all__ = [
     "bind_session_work",
     "brief_project",
     "bugs",
+    "cancel_watch",
     "chat_archive",
     "chat_create",
     "chat_decide",
@@ -223,6 +229,7 @@ __all__ = [
     "create_label",
     "create_project",
     "create_user",
+    "create_watch",
     "create_work",
     "decide_grant",
     "deployed_versions",
@@ -270,6 +277,7 @@ __all__ = [
     "list_suppressions",
     "list_tokens",
     "list_users",
+    "list_watches",
     "list_work",
     "list_workflows",
     "list_write_backs",
