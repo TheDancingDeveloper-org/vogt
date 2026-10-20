@@ -159,20 +159,19 @@ by where the pipeline runs. What the tree _does_ enforce:
   are gated on `github.event_name != 'pull_request'`, and no workflow uses
   `pull_request_target`.
 - Release images are not built at release time: `release.yml` promotes, by
-  digest, the images `build.yml` built on `main` (see *Release signing*
-  below). Pull-request jobs never publish or sign an image.
+  digest, the images `build.yml` built on `main` (see *Image trust*
+  below). Pull-request jobs never publish an image.
 
 If the approval setting is ever found disabled, treat every self-hosted runner
 as potentially compromised by fork-submitted code and rotate the credentials
 those runners can reach.
 
-### Release signing: build once, promote by digest
+### Image trust: build once, promote by digest
 
-`build.yml` still signs each image it builds, keylessly with cosign, by digest,
-under its own GitHub OIDC identity (`…/.github/workflows/build.yml@refs/heads/main`).
-The release no longer adds a signature of its own: `release.yml` does not
-install cosign, does not sign, and holds no `id-token` permission. Dropping the
-build-time signature is tracked as a follow-up.
+No image is signed. Signing was dropped (operator decision, 2026-10-20):
+`build.yml` and `release.yml` neither install cosign nor sign, and no job
+requests an `id-token`. A digest is trusted by its registry name and its SBOM
+and provenance attestations.
 
 `release.yml` never builds. It requires a `build.yml` run on `main` for the
 tagged commit whose image jobs succeeded, finds each image by its `sha-`
@@ -181,9 +180,8 @@ attestations. It retags by digest (`imagetools create --prefer-index=false`)
 and asserts every semver tag resolves to the promoted digest. The attestations
 are the ones BuildKit recorded in the image index at build time; they travel
 with the digest. If any of this is missing the release fails; there is no
-rebuild fallback. Because the release no longer verifies a signature, a
-deployment pins a digest and trusts it by the registry name and the
-attestations, not by a signature.
+rebuild fallback. A deployment pins the digest, which a tag cannot silently
+move.
 
 **Accepted trade-off.** `build.yml` imports its BuildKit layer cache from the
 operator's plaintext, unauthenticated LAN registry (`VOGT_BUILDKIT_CACHE_REGISTRY`)

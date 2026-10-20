@@ -403,7 +403,7 @@ it adds, never in the mechanism. CI builds and boots the example with no
 private integrations, so the contract stays honest.
 
 **Derive from the published digest.** An extending image starts `FROM` the
-signed release, by digest, not by tag:
+release, by digest, not by tag:
 
 ```dockerfile
 FROM ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>

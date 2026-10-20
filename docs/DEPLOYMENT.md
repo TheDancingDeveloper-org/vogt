@@ -606,8 +606,8 @@ docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.
   | grep -m 1 Digest
 ```
 
-Release images are not signed by the release workflow: it no longer runs
-cosign, so there is no release-identity signature to verify. Pin the digest
+Images are not signed (signing was dropped), so there is no signature to
+verify. Pin the digest
 itself, which a registry tag cannot silently move. Check that the digest
 matches the release manifest (`vogt-release-manifest.json`) and the dev
 receipt it was promoted from (§9). Then, in `deploy/.env`:
@@ -684,8 +684,8 @@ docker build -f engine/Dockerfile --target demo-runtime \
   --build-arg VOGT_SOURCE_SHA="$(git rev-parse HEAD)" .
 ```
 
-The demo image is published by builds on `main` (§9), scanned and signed;
-verify it with the `build.yml` workflow identity rather than the release one.
+The demo image is published by builds on `main` (§9) and scanned; pin it by
+the digest that `build.yml` reports.
 
 ## 9. Releases
 
@@ -696,8 +696,8 @@ from it. A release publishes, for each of the core image (`vogt`), the stack
 - tags `X.Y.Z`, `X.Y` and `latest` — `latest` moves on a release and on
   nothing else (a pre-release tag such as `v1.0.0-rc.1` gets only its exact
   version);
-- a keyless **cosign signature** over the digest, made by `build.yml` at build
-  time; the release adds no signature of its own (§6);
+- no image signature (signing was dropped); the digest is the pin, and the
+  SBOM and provenance attestations are the record of what was built;
 - an **SBOM** and **provenance** attestation attached to the digest.
 
 ### Release process: build once, promote by digest
@@ -712,8 +712,7 @@ existed:
 2. **Build once.** `build.yml` builds the three images for that commit, runs
    each before pushing it — the stack must start both halves and both agent
    CLIs, the sidecar must synthesise and transcribe with its baked models —
-   then publishes them as `sha-<7-char commit>` with SBOM and provenance and
-   signs each digest under `build.yml@refs/heads/main`.
+   then publishes them as `sha-<7-char commit>` with SBOM and provenance.
 3. **Validate.** A development deployment pins those digests and runs its
    smoke test against them.
 4. **Tag** `vX.Y.Z` on that same commit. `release.yml` then:
@@ -748,12 +747,11 @@ refuse anything else.
 | `build.yml never ran for <sha> on main` | the tagged commit only touched docs (`build.yml` ignores `docs/**` and `*.md`), or a newer push cancelled its build before it started | tag the commit `build.yml` built (normally the bump), or dispatch `build.yml` on `main` while that commit is its head; then re-run the release |
 | `did not publish every image` | an image job of that `build.yml` run failed or was cancelled | `gh run rerun <id> --failed`, then re-run the failed release jobs |
 | `<repo>:sha-<short> is not in the registry` | the tag was never pushed or has been pruned | as above |
-| `carries no build.yml signature for <sha>` | the `sha-` tag now names a digest some other commit's build pushed (a 7-character collision), or the image is unsigned | investigate before releasing; never re-sign by hand |
 | `has no SBOM / Provenance attestation` | the digest was not pushed by `build.yml` | as above |
 | `<repo>:<tag> resolves to <x>, not the promoted <y>` | the retag did not preserve the digest | do not deploy the tag; pin `@<digest>` from the manifest |
 
 The tag-time `release.yml` run is idempotent: re-running it re-resolves the
-same digests, re-points the same tags and adds another release signature.
+same digests and re-points the same tags.
 
 The shell is a remote WebView onto whichever deployed stack the user picks
 on-device at first launch, so a server or PWA release reaches installed
@@ -768,7 +766,7 @@ deployment already running the `sha-` build of the tagged commit is already
 running the release; only its pin's spelling changes.
 
 Pushes to `main` are **builds, not releases**. `build.yml` publishes the same
-three images tagged `sha-<commit>` (signed, with SBOM and provenance) and the
+three images tagged `sha-<commit>` (with SBOM and provenance) and the
 demo image as `main` and `main-<commit>`. No semver tag is created and
 `latest` does not move, so "which build is that?" stays answerable. Pin the
 release family for a deployment; a `sha-` image is a way to run a specific

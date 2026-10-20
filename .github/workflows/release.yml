@@ -9,7 +9,7 @@ name: release
 #
 # ── Build once, promote by digest ─────────────────────────────────────────
 #
-# A release does NOT build images. `build.yml` builds, smoke-tests, signs and
+# A release does NOT build images. `build.yml` builds, smoke-tests and
 # publishes `vogt`, `vogt-stack`, `vogt-stack-workbench` and `vogt-voice`
 # once, for the commit on
 # `main`, tagged `sha-<7-char commit>`, with the product version already baked
@@ -268,7 +268,7 @@ jobs:
               esac
             done
             echo "${name}=${digest}" >> "$GITHUB_OUTPUT"
-            echo "${name}: ${ref} -> ${repo}@${digest} (build.yml-signed for ${TAG_SHA})"
+            echo "${name}: ${ref} -> ${repo}@${digest} (built by build.yml for ${TAG_SHA})"
           done
           if [ -n "$fail" ]; then
             echo "the build for ${TAG_SHA} cannot be promoted — see the errors above" >&2

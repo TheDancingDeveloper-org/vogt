@@ -27,8 +27,9 @@ name: build
 #   * merging still cannot deploy anything — a deployment pins a digest this
 #     workflow reports, in a separate, operator-approved step
 #
-# Images are signed here as they are in a release. A build that reaches
-# production unsigned would be a worse hole than the one this closes.
+# Images are not signed, here or in a release: signing was dropped (operator
+# decision, 2026-10-20). A digest is trusted by its registry name and its
+# SBOM and provenance attestations.
 #
 # One branch builds: `main` → `sha-<commit>`. Every rule below is an explicit
 # equality on the ref, never a negation, so adding a branch must mean adding a
@@ -132,7 +133,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
     # The merged image derives its core from this one by digest, so the
     # digest has to leave this job rather than being re-derived from a tag.
     outputs:
@@ -198,7 +198,7 @@ jobs:
       # that digest, so what is tested is what was pushed. A failed smoke
       # leaves an untagged orphan; ghcr-retention.yml prunes untagged
       # versions after the pinned policy's grace period (7 days). Nothing is
-      # tagged or signed until the smoke passes, and the layer cache is
+      # tagged until the smoke passes, and the layer cache is
       # written once, here.
       #
       # v0.1.0 shipped an image whose entrypoint did not exist and v0.1.1 one
@@ -253,17 +253,6 @@ jobs:
           docker buildx imagetools create --prefer-index=false \
             -t "${IMAGE}:sha-${GITHUB_SHA:0:7}" "${IMAGE}@${DIGEST}"
 
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
-
-      - name: sign the image
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          set -euo pipefail
-          # The digest, never a tag: a tag can be moved after signing, so a
-          # signature over a tag says nothing about what gets pulled.
-          cosign sign --yes "${IMAGE}@${DIGEST}"
-
       - name: report what to pin
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
@@ -291,7 +280,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -384,15 +372,6 @@ jobs:
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }}
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }},mode=max
 
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
-
-      - name: sign the image
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          set -euo pipefail
-          cosign sign --yes "${VOICE_IMAGE}@${DIGEST}"
-
   demo-image:
     name: build, smoke, and publish the static public demo
     # The normal stack runs first and exports its web-build layer. This target
@@ -405,7 +384,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -505,7 +483,7 @@ jobs:
               .catch((e) => { console.error(e.message); process.exit(1); });
           '
 
-          # A dedicated mobile hostname runs the same signed image with only
+          # A dedicated mobile hostname runs the same image with only
           # its root document changed. Prove that mode independently: `/`
           # must be the showcase while `/index.html` stays the PWA embedded by
           # its frame (rather than recursively loading the showcase).
@@ -568,13 +546,6 @@ jobs:
             type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main,mode=max
 
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
-
-      - name: sign the static demo image
-        env:
-          DIGEST: ${{ steps.demo-push.outputs.digest }}
-        run: cosign sign --yes "${DEMO_IMAGE}@${DIGEST}"
-
       - name: report the demo digest to pin
         env:
           DIGEST: ${{ steps.demo-push.outputs.digest }}
@@ -582,7 +553,7 @@ jobs:
           {
             echo "### Static public demo from \`${GITHUB_SHA:0:7}\`"
             echo
-            echo "Pin this signed digest in the demo deployment:"
+            echo "Pin this digest in the demo deployment:"
             echo
             echo '```yaml'
             echo "image: ${DEMO_IMAGE}@${DIGEST}"
@@ -624,7 +595,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -798,13 +768,6 @@ jobs:
           docker buildx imagetools create --prefer-index=false \
             -t "${STACK_IMAGE}:sha-${GITHUB_SHA:0:7}" "${STACK_IMAGE}@${DIGEST}"
 
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
-
-      - name: sign the image
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: cosign sign --yes "${STACK_IMAGE}@${DIGEST}"
-
       - name: report what to pin
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
@@ -845,7 +808,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -946,13 +908,6 @@ jobs:
           docker buildx imagetools create --prefer-index=false \
             -t "${STACK_WORKBENCH_IMAGE}:sha-${GITHUB_SHA:0:7}" \
             "${STACK_WORKBENCH_IMAGE}@${DIGEST}"
-
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
-
-      - name: sign the image
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: cosign sign --yes "${STACK_WORKBENCH_IMAGE}@${DIGEST}"
 
       - name: report what to pin
         env:
