@@ -58,6 +58,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `install_bootstrap_enabled` | `VOGT_INSTALL_BOOTSTRAP_ENABLED` | boolean | `True` | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
+| `watch_interval_seconds` | `VOGT_WATCH_INTERVAL_SECONDS` | integer | `60` | behaviour |
 | `forge_posture_interval_seconds` | `VOGT_FORGE_POSTURE_INTERVAL_SECONDS` | integer | `86400` | behaviour |
 | `github_rate_limit_floor` | `VOGT_GITHUB_RATE_LIMIT_FLOOR` | integer | `500` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
@@ -254,6 +255,10 @@ How hard SQLite works to survive a power cut. `normal` is the standard pairing f
 ### `sweep_interval_seconds`
 
 How often `serve` runs collectors in the background. Zero disables the schedule, leaving sweeps on-demand only. A default rather than a required value because an instance that never looks is the failure this product exists to prevent: stale evidence and no evidence are indistinguishable from the outside, so the safe default is to keep looking.
+
+### `watch_interval_seconds`
+
+How often `serve` evaluates armed watches (WI-2036) and wakes the sessions whose trigger fired. Zero disables the loop: watches are stored but nothing wakes. Vogt-side triggers (a work item's state, a session ending) fire within this interval; forge triggers read what the sweep observed, so they also wait on `sweep_interval_seconds`.
 
 ### `forge_posture_interval_seconds`
 
