@@ -1525,6 +1525,9 @@ where
         writes_in_order.push((String::new(), true));
     }
     let person = answers_as_person(ctx)?;
+    // An oversight session is relayed by its engine id: the engine lets it
+    // answer a worker's permission prompt and audits it (WI-2028).
+    let overseer = relayed_overseer(ctx, engine, person)?;
     let confirming = submitted && params.confirm;
     let mut before = if confirming {
         engine
@@ -1536,7 +1539,14 @@ where
         None
     };
     let mut woke = false;
-    if let Err(refused) = send_all(engine, &engine_id, &params.id, &writes_in_order, person) {
+    if let Err(refused) = send_all(
+        engine,
+        &engine_id,
+        &params.id,
+        &writes_in_order,
+        person,
+        overseer.as_deref(),
+    ) {
         // The engine refuses input to a hibernated session. Typing into one is
         // asking for it back: wake it, wait until it is at its prompt, then
         // type. Anything else the engine refused stays refused.
@@ -1574,7 +1584,14 @@ where
         }
         // Freshly woken and at its prompt: nothing was running.
         before = Some("waiting-for-input".to_string());
-        send_all(engine, &engine_id, &params.id, &writes_in_order, person)?;
+        send_all(
+            engine,
+            &engine_id,
+            &params.id,
+            &writes_in_order,
+            person,
+            overseer.as_deref(),
+        )?;
     }
     let verdict = if confirming {
         confirm_delivery(engine, &engine_id, before.as_deref())
@@ -1596,6 +1613,7 @@ where
         "delivery": verdict.delivery.as_str(),
         "woke": woke,
         "person": person,
+        "oversight": overseer.is_some(),
     });
     let mut writing = write_of(ctx);
     audited_action(
@@ -1847,8 +1865,18 @@ where
     let found = resolve_target(ctx, &params.id)?;
     let engine_id = found.engine_session_id.clone();
     let person = answers_as_person(ctx)?;
+    // A person answers anything; an oversight session is relayed by its
+    // engine id and may answer a permission prompt (WI-2028).
+    let overseer = relayed_overseer(ctx, engine, person)?;
     let answered = engine
-        .answer_session(&engine_id, params.option, label, params.expect_question.as_deref(), person)?
+        .answer_session(
+            &engine_id,
+            params.option,
+            label,
+            params.expect_question.as_deref(),
+            person,
+            overseer.as_deref(),
+        )?
         .ok_or_else(|| {
             VogtError::NotFound(format!(
                 "the engine has no session {}, or predates answering (no POST /api/sessions/{{id}}/answer)",
@@ -1887,6 +1915,7 @@ where
         "label": chosen_label.chars().take(200).collect::<String>(),
         "dismissed": dismissed,
         "person": person,
+        "oversight": overseer.is_some(),
     });
     let mut writing = write_of(ctx);
     audited_action(
@@ -2996,6 +3025,31 @@ fn confirm_delivery(
     delivery::judge(true, before, &seen)
 }
 
+/// The engine id to relay as `overseer` when the caller is a session the
+/// engine marks `oversight` (WI-2028), so the engine lets it answer a worker's
+/// permission prompt. `None` for a person, who needs no relay, and for every
+/// other caller, which the engine still refuses with `PersonRequired`.
+pub(crate) fn relayed_overseer<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    person: bool,
+) -> Result<Option<String>, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    if person {
+        return Ok(None);
+    }
+    let Some(caller) = crate::application::session_commit::caller_engine_session_id(ctx)? else {
+        return Ok(None);
+    };
+    Ok(engine
+        .get_session(&caller)?
+        .filter(|found| found.role == "oversight")
+        .map(|_| caller))
+}
+
 /// One engine write per chunk. `Ok(false)` is the engine saying it has no live
 /// session by that id — said with the name the caller used.
 fn send_all(
@@ -3004,9 +3058,10 @@ fn send_all(
     named: &str,
     chunks: &[(String, bool)],
     person: bool,
+    overseer: Option<&str>,
 ) -> Result<(), VogtError> {
     for (text, submit) in chunks {
-        let sent = engine.send_input(engine_id, text, *submit, person)?;
+        let sent = engine.send_input(engine_id, text, *submit, person, overseer)?;
         if !sent {
             return Err(VogtError::NotFound(format!(
                 "the engine has no live session {}",
@@ -3653,8 +3708,8 @@ mod tests {
     use crate::with_ctx;
 
     use super::{
-        answers_as_person, hibernate, input, remove_session_op, rename_session_op,
-        session_token_op, wake, HibernateParams, InputParams, WakeParams,
+        answers_as_person, hibernate, input, relayed_overseer, remove_session_op,
+        rename_session_op, session_token_op, wake, HibernateParams, InputParams, WakeParams,
     };
 
     /// An engine that records every request and answers from `script`: each GET
@@ -3865,6 +3920,40 @@ mod tests {
             assert!(!answers_as_person(ctx).unwrap());
         });
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_an_oversight_session_is_relayed_as_overseer() {
+        let oversight = br#"{"id":"eng-boss","alive":true,"activity":"idle","role":"oversight"}"#;
+        let (_dir, built, _) = context(
+            "overseer",
+            agent("agent:engine:eng-boss"),
+            None,
+            |_| {},
+            vec![oversight.to_vec()],
+        );
+        with_ctx!(&built, |ctx| {
+            let engine = ctx.engine.as_ref().unwrap();
+            assert_eq!(
+                relayed_overseer(ctx, engine, false).unwrap().as_deref(),
+                Some("eng-boss")
+            );
+        });
+        drop(built);
+        // A plain worker is not relayed, so the engine still refuses it.
+        let (_dir, built, _) = context(
+            "not-overseer",
+            agent("agent:engine:eng-1"),
+            None,
+            |_| {},
+            vec![live("eng-1")],
+        );
+        with_ctx!(&built, |ctx| {
+            let engine = ctx.engine.as_ref().unwrap();
+            assert_eq!(relayed_overseer(ctx, engine, false).unwrap(), None);
+            // A person needs no relay and asks the engine nothing.
+            assert_eq!(relayed_overseer(ctx, engine, true).unwrap(), None);
+        });
     }
 
     #[test]
