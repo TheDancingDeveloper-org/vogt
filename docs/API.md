@@ -613,6 +613,14 @@ store. Without roots the collector is not registered, and both reads say so in
   `ci_watch_notify_sessions` is off, types a one-line notice plus Enter into
   each live session started for the item. Subscribe to the event feed to wake
   on it; nothing needs to poll a forge.
+- **`usage.board`** (`GET /api/usage-board`, `vogt usage board`, MCP
+  `usage_board`; `read`) — each `usage_accounts` entry's reported limit
+  windows (Codex `primary`/`secondary` with `used_percent` and `resets_at`;
+  a Claude limit-hit with its reset), `limited`, and Claude `tokens_5h`;
+  each `usage_litellm_keys` key's `/key/info` spend (never the key), and
+  `alerts` for keys with a one-day budget window at or over their day
+  threshold. Read on request; nothing is stored. An unreadable source says
+  why in `detail`.
 - **`deployed.versions`** (`GET /api/deployed-versions`, `vogt
   deployed-versions`, MCP `deployed_versions`; `read`) — one row per lane in
   `deploy_lanes`: `name` (the configured lane name; also echoed as `lane`),

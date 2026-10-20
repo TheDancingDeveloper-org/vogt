@@ -3954,6 +3954,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `events.list` | Voice-readable | Available: Read the cursor-based event feed. |
 | `notifications` | Operator-only | Unavailable: GitHub-only view; voice uses inbox.list for complete attention coverage. |
 | `deployed.versions` | Operator-only | Unavailable: Not yet in the curated voice set; deploy-lane failures already reach voice through inbox.list. |
+| `usage.board` | Operator-only | Unavailable: Not yet in the curated voice set; account limits and key spend are an operator view. |
 | `inbox.list` | Voice-readable | Available: List the normalized attention Inbox with coverage. |
 | `inbox.archive` | Confirmation-gated | Available after approval: Archive one normalized Inbox occurrence. |
 | `inbox.snooze` | Confirmation-gated | Available after approval: Snooze one normalized Inbox occurrence until a deadline. |
