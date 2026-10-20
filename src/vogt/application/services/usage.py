@@ -42,9 +42,8 @@ def usage_board_read(ctx: AppContext, params: UsageBoardParams) -> UsageBoardRes
             spend_usd=key.spend_usd,
             threshold_usd=key.alert_usd,
             message=(
-                f"{key.name} spent ${key.spend_usd:.2f}"
-                f"{' today' if key.daily else ''}, at or over its "
-                f"${key.alert_usd:.2f} alert"
+                f"{key.name} spent ${key.spend_usd:.2f} today, at or over "
+                f"its ${key.alert_usd:.2f} day alert"
             ),
         )
         for key in keys
