@@ -659,6 +659,22 @@ Two things worth knowing about that edge: it is **observed, never typed in** —
 `depends_on`, an open `implemented_by` PR does not block the item from completing;
 it feeds the item's phase and its ranking, nothing more.
 
+### Wait on CI and merges with a watch, not a poll
+
+Don't spend turns polling a PR or CI. Hibernate with a trigger and Vogt wakes
+you with the outcome:
+
+```text
+session_hibernate(id=<your ses_ id>, reason="wait for review and merge",
+                  wake_on={kind: "pr", project: "vogt", number: 42})
+session_hibernate(..., wake_on={kind: "ci", project: "vogt", pr: 42,
+                  checks: ["build", "test"]})
+```
+
+`watch_create` arms the same trigger without sleeping (an overseer can name
+the session to wake; `kind: "session"` waits for a worker to end),
+`watch_list` shows what is armed and what fired, `watch_cancel` disarms one.
+
 ### The git story that results
 
 From the branch tips and the PR edge, `work_get` derives a
