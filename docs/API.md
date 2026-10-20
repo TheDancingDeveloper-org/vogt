@@ -350,7 +350,32 @@ is ready (`wake_timeout_s`, default 120) and then types; the result says
 "hibernated"` and the kept screen. `session.keep_awake` pins a session
 against the engine's idle policy. A session hibernated by hand, or one whose
 work was handed on, is not brought back when the engine restarts; one the
-idle or shutdown policy hibernated still is. `session.set_role` (`work.write`, audited)
+idle or shutdown policy hibernated still is. `session.hibernate` also takes `wake_on`, a watch trigger (below): the watch
+is armed before the session sleeps, and cancelled if the hibernate fails.
+
+`watch.create` (`work.write`, audited) arms a **watch** (WI-2036): a stored
+trigger and the session to wake — the caller's own unless `session` names
+another. `trigger.kind` is `pr` (`project`, `number`; fires when the PR reads
+one of `on`, default `merged` and `closed`), `ci` (`project` and one of `sha`
+or `pr`; fires when every run on that revision has concluded, or — with
+`checks` — when each named required check has), `work_item` (fires when it
+is in one of `states`, default a terminal state) or `session` (fires when
+another session has exited, hibernated or stopped; `until: "done"` also when
+it declared itself done). The core's watch loop (`watch_interval_seconds`,
+default 60) evaluates active watches against what Vogt already holds — the
+forge observations the sweep collected, the item, the engine's session list
+— so a forge trigger fires within a sweep of the event. A fired watch is
+delivered through `session.input`: a hibernated session is woken (never
+forced) and a one-line `[vogt] watch fired: …` notice, with the watch's
+`note`, is typed. A refused delivery is retried up to five passes, then the
+watch reads `failed` with `last_error`. Watches live in the declared store,
+so they survive a restart; past `ttl_seconds` (default 24 h, at most 14 d)
+one reads `expired`. `watch.list` reads them by `state` or `session`, with
+each `outcome` and `delivered`; `watch.cancel` disarms one (a person, its
+owner, or the session it wakes). The merge queue is not observed, so a PR
+leaving the queue without merging is not a trigger yet.
+
+`session.set_role` (`work.write`, audited)
 nominates a session as `oversight` — the one supervising the others — or
 makes it a `worker` again; `session.start` takes the same `role`. **It is a
 person's nomination**: an agent principal gets `403 role_refused`, because
