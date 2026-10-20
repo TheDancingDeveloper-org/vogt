@@ -85,7 +85,10 @@ impl<T: ForgeTransport> GitHubProvider<T> {
             &[],
         ) {
             Ok(response) => response,
-            Err(VogtError::GitHubUnavailable(_)) => return Ok(pull),
+            // `GitHubRateLimited` is a `GitHubUnavailable` in Python, so it is caught too.
+            Err(VogtError::GitHubUnavailable(_) | VogtError::GitHubRateLimited { .. }) => {
+                return Ok(pull)
+            }
             Err(error) => return Err(error),
         };
         let login = match &response {
