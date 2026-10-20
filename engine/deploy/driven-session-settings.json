@@ -71,7 +71,8 @@
       "Bash(gh run list *)",
       "mcp__vogt__work_comment",
       "mcp__vogt__session_report_blocked",
-      "mcp__vogt__session_report_unblocked"
+      "mcp__vogt__session_report_unblocked",
+      "mcp__vogt__session_report"
     ],
     "deny": [
       "Bash(git * --upload-pack*)",
