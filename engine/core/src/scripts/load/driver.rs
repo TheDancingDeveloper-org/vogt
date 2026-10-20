@@ -164,7 +164,7 @@ impl Driver {
         plan: &DatasetPlan,
         seed: i64,
     ) -> Result<(), String> {
-        for (source, target, kind) in relation_triples(refs, plan.relations, seed as u64)? {
+        for (source, target, kind) in relation_triples(refs, plan.relations, seed)? {
             self.timed(
                 recorder,
                 "work.relate",

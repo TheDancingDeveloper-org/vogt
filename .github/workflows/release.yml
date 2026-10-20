@@ -93,7 +93,7 @@ jobs:
           fi
 
   # The version gate: the tag, the package, the PWA and mobile manifests, and
-  # the workflows all name one version. `check_product_version.py` also proves
+  # the workflows all name one version. `vogt-core check-product-version` also proves
   # build.yml at this commit baked this version (its VOGT_PRODUCT_VERSION) into
   # the images promoted below — the version is in the bytes, not in a tag.
   distribution:

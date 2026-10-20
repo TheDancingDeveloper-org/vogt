@@ -31,8 +31,8 @@ estate that needs its own tools inside sessions ends at the third, and
 
 Every setting lives in one schema, `src/vogt/config.py`.
 [`CONFIG.md`](CONFIG.md) and `config.example.toml` are *generated* from it —
-never hand-edit them; run `uv run python scripts/gen_config_docs.py` and
-commit the result.
+never hand-edit them; run `vogt-core gen-config-docs` (the Rust port of
+`scripts/gen_config_docs.py`, as CI runs it) and commit the result.
 
 Precedence, highest first:
 
