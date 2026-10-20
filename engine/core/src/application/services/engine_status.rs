@@ -391,7 +391,10 @@ mod tests {
         assert_eq!(out["disk"]["free_bytes"], json!(past));
         // Through the wire format too: the digits survive a parse and a dump.
         let wire = serde_json::to_string(&out["history"]).unwrap();
-        assert!(wire.contains("\"log_bytes\":18446744073709551615"), "{wire}");
+        assert!(
+            wire.contains("\"log_bytes\":18446744073709551615"),
+            "{wire}"
+        );
         assert!(wire.contains("\"db_bytes\":9223372036854775808"), "{wire}");
         let reparsed: Value = serde_json::from_str(
             r#"{"history":{"log_bytes":18446744073709551615},"agent_tasks":{},"event_lag":{}}"#,
