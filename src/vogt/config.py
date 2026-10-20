@@ -854,6 +854,19 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    watch_interval_seconds: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "How often `serve` evaluates armed watches (WI-2036) and wakes the "
+            "sessions whose trigger fired. Zero disables the loop: watches are "
+            "stored but nothing wakes. Vogt-side triggers (a work item's "
+            "state, a session ending) fire within this interval; forge "
+            "triggers read what the sweep observed, so they also wait on "
+            "`sweep_interval_seconds`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     forge_posture_interval_seconds: int = Field(
         default=86400,
         ge=0,

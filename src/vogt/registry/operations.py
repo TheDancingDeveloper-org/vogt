@@ -40,6 +40,7 @@ from vogt.application.models import (
     BoardListParams,
     BoardListResult,
     BugsParams,
+    CancelWatchParams,
     CharterGetParams,
     CharterGetResult,
     CharterSetParams,
@@ -85,6 +86,7 @@ from vogt.application.models import (
     CreateProjectParams,
     CreateProjectResult,
     CreateUserParams,
+    CreateWatchParams,
     CreateWorkParams,
     DecideGrantParams,
     DecisionResult,
@@ -157,6 +159,8 @@ from vogt.application.models import (
     ListSessionsParams,
     ListSuppressionsParams,
     ListTokensParams,
+    ListWatchesParams,
+    ListWatchesResult,
     ListWorkParams,
     LogoutParams,
     LogoutResult,
@@ -257,6 +261,7 @@ from vogt.application.models import (
     UserListResult,
     UserResult,
     WakeSessionParams,
+    WatchResult,
     WhoamiParams,
     WhoamiResult,
     WhyParams,
@@ -1142,7 +1147,10 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "(Claude Code started by Vogt, or any resume); a shell needs "
                 "allow_shell and wakes fresh. superseded_by names the session "
                 "taking over the work (ses_… or the engine UUID); a later wake "
-                "is then refused unless forced. Takes either id."
+                "is then refused unless forced. wake_on arms a watch first "
+                "(see watch_create), so the session is woken with the outcome "
+                "when it fires — hibernate until PR #N merges instead of "
+                "polling. Takes either id."
             ),
             scope="work.write",
             mutating=True,
@@ -1336,6 +1344,57 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.list_grants,
             route=HttpRoute("GET", "/sessions/grants"),
             cli=CliBinding(("session", "grants")),
+        ),
+        Operation(
+            name="watch.create",
+            summary=(
+                "Wait on an event instead of polling (WI-2036): arm a watch, "
+                "then hibernate, and Vogt wakes the session and types the "
+                "outcome when the trigger fires. Triggers: pr (project, "
+                "number; on merged/closed), ci (project, sha or pr; every "
+                "run, or only the named required checks, concluded), "
+                "work_item (reaches a state, default terminal), session "
+                "(another session ended, or also declared done). The watch "
+                "is stored, so it survives a restart. Wakes your own session "
+                "unless `session` names another. session_hibernate's wake_on "
+                "arms one in the same call."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=CreateWatchParams,
+            result_model=WatchResult,
+            handler=services.create_watch,
+            route=HttpRoute("POST", "/watches"),
+            cli=CliBinding(("watch", "create")),
+        ),
+        Operation(
+            name="watch.list",
+            summary=(
+                "Watches, newest first, by state (active, fired, failed, "
+                "cancelled, expired) or by the session they wake, with each "
+                "one's outcome and whether its wake message was delivered."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=ListWatchesParams,
+            result_model=ListWatchesResult,
+            handler=services.list_watches,
+            route=HttpRoute("GET", "/watches"),
+            cli=CliBinding(("watch", "list")),
+        ),
+        Operation(
+            name="watch.cancel",
+            summary=(
+                "Cancel an active watch. A person, the watch's owner or the "
+                "session it would wake may."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=CancelWatchParams,
+            result_model=WatchResult,
+            handler=services.cancel_watch,
+            route=HttpRoute("POST", "/watches/cancel"),
+            cli=CliBinding(("watch", "cancel")),
         ),
         Operation(
             name="decision.ask",

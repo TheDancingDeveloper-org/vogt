@@ -25,7 +25,7 @@ from vogt.adapters.http.app import API_PREFIX, build_app
 from vogt.adapters.http.auth import add_auth_routes
 from vogt.adapters.http.health import ServerInfo, add_health_routes
 from vogt.adapters.http.install import add_install_routes
-from vogt.adapters.http.scheduler import CollectorSchedule
+from vogt.adapters.http.scheduler import CollectorSchedule, WatchSchedule
 from vogt.adapters.mcp.http import MCP_PATH, add_mcp_route
 from vogt.application.context import AppContext, build_context
 from vogt.application.services.auth import Authenticated, authenticate, local
@@ -127,14 +127,22 @@ def build_server(
             resolved_config.sweep_interval_seconds if options.schedule_collectors else 0
         ),
     )
+    watch_schedule = WatchSchedule(
+        lambda: context(scheduler_principal),
+        interval_seconds=(
+            resolved_config.watch_interval_seconds if options.schedule_collectors else 0
+        ),
+    )
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         del app
         await schedule.start()
+        await watch_schedule.start()
         try:
             yield
         finally:
+            await watch_schedule.stop()
             await schedule.stop()
 
     def resolve(request: Request) -> tuple[AppContext, Authenticated]:
