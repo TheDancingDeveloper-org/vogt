@@ -139,7 +139,7 @@ from vogt.application.services.reports import latest_reports, one_line
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
 from vogt.collectors.base import CollectorError
-from vogt.core import delivery, oversight, runtime
+from vogt.core import cold_wake, delivery, oversight, runtime
 from vogt.core.auth import Scope, hash_token, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import (
@@ -409,6 +409,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             started_by_kind=started_by_kind,
             started_at=now,
             stopped_at=None,
+            cold_wake_opt_out=params.cold_wake_opt_out,
         )
         txn.insert_session(session)
         # The declared half of the branch binding: a session opened for
@@ -2414,6 +2415,7 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
         else hibernated.hibernation.resumable,
         "superseded_by": successor,
         "watch": None if watch is None else watch.id,
+        "cold_wake_opt_out": params.cold_wake_opt_out,
     }
     if target.session is None:
         audited_action(
@@ -2440,6 +2442,16 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
             for token in txn.tokens_for_actor(current.actor_id)
             if txn.revoke_token(token.id, reason=f"hibernated: {reason}", at=now)
         ]
+        if (
+            params.cold_wake_opt_out is not None
+            and params.cold_wake_opt_out != current.cold_wake_opt_out
+        ):
+            txn.set_session_cold_wake_opt_out(
+                current.id, opt_out=params.cold_wake_opt_out
+            )
+            current = current.model_copy(
+                update={"cold_wake_opt_out": params.cold_wake_opt_out}
+            )
         return WriteOutcome(
             result=SessionResult(
                 session=_summarize(txn, current, engine_session=hibernated)
@@ -2563,8 +2575,9 @@ def _wake_inner(
                 SessionResult(session=_summarize(view, session, engine_session=current))
             )
 
+    decision, fresh_prompt = _cold_wake(ctx, current, session)
     if session is None:
-        woken = engine.wake_session(engine_id, force=force)
+        woken = engine.wake_session(engine_id, force=force, fresh_prompt=fresh_prompt)
         if woken is None:
             msg = f"the engine has no session {engine_id!r}"
             raise NotFound(msg)
@@ -2578,6 +2591,7 @@ def _wake_inner(
                 "engine_session_id": engine_id,
                 "linked": False,
                 "forced": force,
+                "cold_wake": decision.audit(),
             },
             event_kind=SESSION_WOKEN_EVENT,
         )
@@ -2589,7 +2603,10 @@ def _wake_inner(
     scopes = _session_scopes(ctx)
     credential = issue(scopes)
     woken = engine.wake_session(
-        engine_id, env=_session_env(ctx, session.id, credential.secret), force=force
+        engine_id,
+        env=_session_env(ctx, session.id, credential.secret),
+        force=force,
+        fresh_prompt=fresh_prompt,
     )
     if woken is None:
         msg = f"the engine has no session {engine_id!r}"
@@ -2633,12 +2650,67 @@ def _wake_inner(
                 "conversation_id": current.conversation_id,
                 "tokens_revoked": len(revoked),
                 "forced": force,
+                "cold_wake": decision.audit(),
             },
         )
 
     return _as_digest(
         audited_write(ctx, operation=SESSION_WAKE, reason=reason, body=body)
     )
+
+
+def _cold_wake(
+    ctx: AppContext, current: EngineSession, session: CodingSession | None
+) -> tuple[cold_wake.Decision, str | None]:
+    """Whether this wake compacts (WI-2037), and the summary it starts from.
+
+    The decision is pure (`core.cold_wake`); this gathers its inputs — the
+    hibernation time, the engine's last context reading, the session's
+    opt-out — and, when it compacts, the session's last reply and its work
+    item's newest hand-off for the summary. A summary that cannot be read
+    falls back to a plain resume: compaction is a saving, never a gate.
+    """
+    config = ctx.config
+    economics = current.economics or {}
+    tokens = economics.get("context_tokens")
+    decision = cold_wake.decide(
+        enabled=config.cold_wake_compaction,
+        opted_out=session is not None and session.cold_wake_opt_out,
+        agent=current.conversation_agent,
+        model=None if session is None else session.model,
+        hibernated_at=(
+            None
+            if current.hibernation is None
+            else _parse_engine_timestamp(current.hibernation.at)
+        ),
+        now=ctx.clock(),
+        context_tokens=tokens if isinstance(tokens, int) and tokens > 0 else None,
+        ttl_seconds=config.cold_wake_ttl_seconds,
+        threshold_tokens=config.cold_wake_threshold_tokens,
+    )
+    if not decision.compact:
+        return decision, None
+    try:
+        reply = last_reply(ctx, SessionLastReplyParams(id=current.id, n=1)).messages
+    except (NotFound, EngineUnavailable, OSError):
+        reply = []
+    work_item = None
+    handoff = None
+    if session is not None and session.work_item_id is not None:
+        with ctx.declared.read() as view:
+            work_item = view.work_item_by_id(session.work_item_id)
+            comments = view.comments_for(session.work_item_id, limit=20, order="newest")
+        handoff = next((c for c in comments if c.kind == "handoff"), None)
+    summary = cold_wake.render_summary(
+        session_id=current.id if session is None else session.id,
+        work_item=None if work_item is None else work_item.ref,
+        work_item_title=None if work_item is None else work_item.title,
+        reason=None if session is None else session.reason,
+        last_reply=reply[-1].text if reply else None,
+        handoff=handoff,
+        decision=decision,
+    )
+    return decision, summary
 
 
 def keep_session_awake(

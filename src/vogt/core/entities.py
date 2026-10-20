@@ -525,6 +525,10 @@ class CodingSession(Entity):
     purpose: str | None = None
     started_by_session: str | None = None
     started_by_kind: Literal["person", "oversight", "worker"] | None = None
+    #: Never compact this session on a cold wake (WI-2037): a wake always
+    #: resumes its full transcript, whatever the deployment's setting. False
+    #: on a session from before migration 0028.
+    cold_wake_opt_out: bool = False
 
 
 class Token(Entity):
