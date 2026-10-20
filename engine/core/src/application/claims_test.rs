@@ -241,10 +241,8 @@ fn summary_of(built: &Built) -> crate::application::services::sessions::SessionS
         &ListSessionsParams {
             project: None,
             work_item: Some("WI-1".to_string()),
-            include_stopped: false,
-            limit: 50,
-            offset: 0,
-            order: "started".to_string(),
+            mode: "full".to_string(),
+            ..Default::default()
         },
     )
     .unwrap()
@@ -563,17 +561,20 @@ fn the_wi_1707_claim_is_flagged_on_the_done_row() {
     let checkout = repo(&base);
     let dir = wired(&base, &checkout);
     let built = context_with_done_engine(&dir, &checkout);
-    let params = crate::application::services::sessions::SweepSessionsParams {
-        project: None,
-        screen_lines: 0,
-        stall_after_minutes: 10,
-    };
+    // Python sweeps with `mode="digest"`: WI-1835 keeps `done` in the default
+    // digest states, so the done row is a digest row carrying the check.
+    let params = crate::application::services::sessions::SweepSessionsParams::default();
     let result = crate::with_ctx!(&built, |ctx| {
         crate::application::services::sessions::sweep_sessions(ctx, &params).unwrap()
     });
     assert_eq!(result.rows.len(), 1);
     let row = &result.rows[0];
     assert_eq!(row.attention, "done");
+    assert!(row.session.is_none());
+    assert_eq!(
+        row.digest.as_ref().unwrap().attention.as_deref(),
+        Some("done")
+    );
     let check = row.claim_check.as_ref().expect("a done row is checked");
     assert_eq!(check.new_commits, Some(0));
     assert!(check

@@ -43,6 +43,14 @@ struct Rows {
     specs: Vec<Value>,
     /// A sweep entry's screen tail, by engine id, in place of the default.
     tails: BTreeMap<String, Vec<String>>,
+    /// What the list says it hid (WI-1289).
+    hidden_count: u64,
+    /// The query string of every `GET /api/sessions`.
+    list_queries: Vec<String>,
+    /// The screen lines a wait answers with.
+    wait_lines: Vec<String>,
+    /// How many `GET /api/sessions/{id}` reads were made.
+    gets: usize,
 }
 
 impl Rows {
@@ -94,8 +102,9 @@ fn answer(rows: &Mutex<Rows>, url: &str, body: &[u8], method: &str) -> (u16, Vec
         return ok(&row);
     }
     if method == "GET" && path == "/api/sessions" {
+        rows.list_queries.push(query);
         let listed: Vec<Value> = rows.rows.iter().map(|(_, row)| row.clone()).collect();
-        return ok(&json!({"sessions": listed, "hidden_count": 0}));
+        return ok(&json!({"sessions": listed, "hidden_count": rows.hidden_count}));
     }
     if method == "GET" && path == "/api/sessions/sweep" {
         rows.sweep_queries.push(query);
@@ -126,7 +135,25 @@ fn answer(rows: &Mutex<Rows>, url: &str, body: &[u8], method: &str) -> (u16, Vec
             return (404, b"{}".to_vec());
         }
         if method == "GET" && tail.is_empty() {
+            rows.gets += 1;
             return ok(rows.row(&id));
+        }
+        if method == "GET" && tail == "wait" {
+            let row = rows.row(&id).clone();
+            return ok(&json!({
+                "outcome": "awaiting-approval",
+                "matched": false,
+                "waited_ms": 1234,
+                "screen": {
+                    "id": id,
+                    "cols": 80,
+                    "rows": 24,
+                    "lines": rows.wait_lines,
+                    "activity": row["activity"],
+                    "alive": true,
+                    "ready": false,
+                },
+            }));
         }
         if method == "POST" && tail == "blocked" {
             let asked: Value = serde_json::from_slice(body).unwrap();
@@ -220,10 +247,11 @@ fn start(built: &Built) -> (String, String) {
 fn sweep(built: &Built, screen_lines: i64) -> SessionSweepResult {
     sweep_sessions(
         ctx(built),
+        // Python's sweep tests read `row.session`, so they sweep `mode="full"`.
         &SweepSessionsParams {
-            project: None,
+            mode: "full".to_string(),
             screen_lines,
-            stall_after_minutes: 10,
+            ..SweepSessionsParams::default()
         },
     )
     .unwrap()
@@ -236,8 +264,15 @@ fn row_of<'a>(
     result
         .rows
         .iter()
-        .find(|row| row.session.engine_session_id == engine_id)
+        .find(|row| session_of(row).engine_session_id == engine_id)
         .expect("a row for the session")
+}
+
+/// A full-mode row's summary.
+fn session_of(row: &super::sessions::SessionSweepRow) -> &super::sessions::SessionSummary {
+    row.session
+        .as_ref()
+        .expect("a full-mode row carries the summary")
 }
 
 fn needs_you(result: &SessionSweepResult) -> i64 {
@@ -428,7 +463,7 @@ fn a_done_declaration_after_the_report_makes_it_stale() {
     assert!(result.rows[0].blocked_stale);
     assert_ne!(result.rows[0].attention, "blocked");
     assert_eq!(
-        result.rows[0].session.done_at.as_deref(),
+        session_of(&result.rows[0]).done_at.as_deref(),
         Some("2026-10-18T09:30:00Z")
     );
 }
@@ -512,7 +547,7 @@ fn a_question_menu_is_needs_you() {
     let row = &result.rows[0];
     assert_eq!(row.attention, "approval");
     assert!(row.attention_reason.starts_with("asking a question"));
-    let approval = row.session.approval.as_ref().unwrap();
+    let approval = session_of(row).approval.as_ref().unwrap();
     assert_eq!(approval.kind, "question");
     let labels: Vec<&str> = approval.options.iter().map(|o| o.label.as_str()).collect();
     assert_eq!(labels, ["Narrow fix", "Full rewrite"]);
@@ -945,4 +980,535 @@ fn what_the_follow_up_cannot_absorb_is_an_error_it_logs() {
     let client = EngineClient::new("http://engine", None, Some(transport));
     let error = super::sessions::tests_submit_queued(&client, QUEUED_ID, "x", "text").unwrap_err();
     assert_eq!(error.code(), "grant_refused");
+}
+
+// -- digest rows (design C1): tests/test_session_sweep.py and test_sessions.py
+
+use super::sessions::{list_sessions, wait, ListSessionsParams, SessionDigest, WaitParams};
+
+fn swept(built: &Built, params: SweepSessionsParams) -> SessionSweepResult {
+    sweep_sessions(ctx(built), &params).unwrap()
+}
+
+fn listed(built: &Built, params: ListSessionsParams) -> super::sessions::SessionListResult {
+    list_sessions(ctx(built), &params).unwrap()
+}
+
+fn full(limit: i64, offset: i64) -> ListSessionsParams {
+    ListSessionsParams {
+        mode: "full".to_string(),
+        limit,
+        offset,
+        ..ListSessionsParams::default()
+    }
+}
+
+/// Pydantic's `model_dump_json(exclude_none=True)`: compact, nulls dropped.
+fn without_nulls(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(key, value)| (key, without_nulls(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(without_nulls).collect()),
+        other => other,
+    }
+}
+
+/// `SessionDigest.over_budget`: its JSON, nulls dropped, over 300 characters.
+fn over_budget(digest: &SessionDigest) -> bool {
+    let text = without_nulls(serde_json::to_value(digest).unwrap()).to_string();
+    text.chars().count() > 300
+}
+
+fn digest_of_row(row: &super::sessions::SessionSweepRow) -> &SessionDigest {
+    row.digest.as_ref().expect("a digest row")
+}
+
+/// An engine session Vogt never linked.
+fn unlinked(rows: &Mutex<Rows>, id: &str, activity: &str) {
+    rows.lock().unwrap().rows.push((
+        id.to_string(),
+        json!({"id": id, "name": id, "activity": activity, "alive": true, "cwd": "/work/tree"}),
+    ));
+}
+
+fn hibernated(rows: &Mutex<Rows>, engine_id: &str) {
+    rows.lock()
+        .unwrap()
+        .update(engine_id, json!({"activity": "hibernated", "alive": false}));
+}
+
+#[test]
+fn the_default_sweep_is_a_digest_that_drops_hibernated_and_keeps_counts() {
+    // C1: the default sweep is a digest. Counts include the rows the filter drops.
+    let (built, rows) = wired();
+    let started: Vec<(String, String)> = (0..3).map(|_| start(&built)).collect();
+    let (_, asleep) = start(&built);
+    hibernated(&rows, &asleep);
+
+    let result = swept(&built, SweepSessionsParams::default());
+
+    assert_eq!(result.counts["total"], json!(4));
+    assert_eq!(result.counts["hibernated"], json!(1));
+    assert_eq!(result.rows.len(), 3);
+    let mut ids: Vec<&str> = result
+        .rows
+        .iter()
+        .map(|row| digest_of_row(row).id.as_str())
+        .collect();
+    ids.sort_unstable();
+    let mut live: Vec<&str> = started.iter().map(|(id, _)| id.as_str()).collect();
+    live.sort_unstable();
+    assert_eq!(ids, live);
+    assert!(result.rows.iter().all(|row| row.session.is_none()));
+    assert!(result.rows.iter().all(|row| row.screen_tail.is_empty()));
+    let payload = without_nulls(serde_json::to_value(&result).unwrap()).to_string();
+    assert!(payload.len() < 15_000);
+    for row in &result.rows {
+        assert!(!over_budget(digest_of_row(row)), "{:?}", row.digest);
+        // No economics reported yet, so the digest carries no budget line.
+        assert_eq!(digest_of_row(row).budget, None);
+    }
+
+    let (metered, metered_engine) = &started[0];
+    rows.lock().unwrap().update(
+        metered_engine,
+        json!({"economics": {"turns": 7, "compactions": 2}}),
+    );
+    let again = swept(&built, SweepSessionsParams::default());
+    for row in &again.rows {
+        let digest = digest_of_row(row);
+        if &digest.id == metered {
+            assert_eq!(digest.budget.as_deref(), Some("7 turns, 2 compactions"));
+        } else {
+            assert_eq!(digest.budget, None);
+        }
+    }
+}
+
+#[test]
+fn a_digest_keeps_the_full_blocked_reason() {
+    // WI-1670: the head stays, and the guard's full reason rides along.
+    let (built, rows) = wired();
+    let (blocked, blocked_engine) = start(&built);
+    let reason = format!("the commit guard refuses git add: {}", "x".repeat(200));
+    rows.lock().unwrap().update(
+        &blocked_engine,
+        json!({
+            "activity": "waiting-for-input",
+            "blocked": {"reason": reason, "items": [], "since": "2026-10-05T00:00:00Z"},
+        }),
+    );
+    let result = swept(&built, SweepSessionsParams::default());
+    let digest = result
+        .rows
+        .iter()
+        .map(digest_of_row)
+        .find(|digest| digest.id == blocked)
+        .unwrap();
+    assert_eq!(
+        digest.blocked_reason.as_deref(),
+        Some(&reason[..120]),
+        "the first 120 characters"
+    );
+    assert_eq!(digest.blocked_detail.as_deref(), Some(reason.as_str()));
+
+    let (short, short_engine) = start(&built);
+    rows.lock().unwrap().update(
+        &short_engine,
+        json!({
+            "activity": "waiting-for-input",
+            "blocked": {"reason": "short reason", "items": [], "since": "2026-10-05T00:00:00Z"},
+        }),
+    );
+    let again = swept(&built, SweepSessionsParams::default());
+    let digest = again
+        .rows
+        .iter()
+        .map(digest_of_row)
+        .find(|digest| digest.id == short)
+        .unwrap();
+    assert_eq!(digest.blocked_reason.as_deref(), Some("short reason"));
+    assert_eq!(digest.blocked_detail, None);
+}
+
+#[test]
+fn a_digest_clips_by_character_not_byte() {
+    // Python slices code points: a 200-character report of two-byte
+    // characters keeps 120 of them, not 120 bytes.
+    let (built, rows) = wired();
+    let (_, engine_id) = start(&built);
+    let reason = "é".repeat(200);
+    rows.lock().unwrap().update(
+        &engine_id,
+        json!({"activity": "idle", "blocked": {"reason": reason, "items": [], "since": null}}),
+    );
+    let result = swept(&built, SweepSessionsParams::default());
+    let digest = digest_of_row(&result.rows[0]);
+    assert_eq!(
+        digest.blocked_reason.as_deref(),
+        Some("é".repeat(120).as_str())
+    );
+    assert_eq!(digest.blocked_detail.as_deref(), Some(reason.as_str()));
+}
+
+#[test]
+fn the_digest_sweep_filters_by_attention_and_limit() {
+    let (built, rows) = wired();
+    let (asking, asking_engine) = start(&built);
+    start(&built);
+    rows.lock().unwrap().update(
+        &asking_engine,
+        json!({
+            "activity": "awaiting-approval",
+            "approval": {"question": "Proceed?", "detected_at": "2026-10-05T00:00:00Z"},
+        }),
+    );
+    let result = swept(
+        &built,
+        SweepSessionsParams {
+            attention: Some(vec!["needs_you".to_string()]),
+            limit: 1,
+            ..SweepSessionsParams::default()
+        },
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(digest_of_row(&result.rows[0]).id, asking);
+    assert_eq!(result.counts["total"], json!(2));
+    assert_eq!(result.counts["needs_you"], json!(1));
+}
+
+#[test]
+fn a_question_menu_digest_carries_its_question_and_options() {
+    // WI-1871: oversight answers from the digest with session_answer.
+    let (built, rows) = wired();
+    let (_asking, asking_engine) = start(&built);
+    rows.lock().unwrap().update(
+        &asking_engine,
+        json!({
+            "activity": "awaiting-approval",
+            "approval": {
+                "question": "Which approach should the sweep fix take?",
+                "command_excerpt": "☐ Approach\nWhich approach should the sweep fix take?",
+                "kind": "question",
+                "options": [
+                    {"number": 1, "label": "Narrow fix", "selected": true},
+                    {"number": 2, "label": "Full rewrite"},
+                ],
+                "detected_at": "2026-10-18T00:00:00Z",
+            },
+        }),
+    );
+    let result = swept(
+        &built,
+        SweepSessionsParams {
+            attention: Some(vec!["needs_you".to_string()]),
+            ..SweepSessionsParams::default()
+        },
+    );
+    assert_eq!(result.counts["needs_you"], json!(1));
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(row.attention, "approval");
+    assert!(row.attention_reason.starts_with("asking a question"));
+    let digest = digest_of_row(row);
+    assert_eq!(
+        digest.question.as_deref(),
+        Some("Which approach should the sweep fix take?")
+    );
+    assert_eq!(digest.question_kind.as_deref(), Some("question"));
+    assert_eq!(
+        digest.options.as_deref(),
+        Some(&["Narrow fix".to_string(), "Full rewrite".to_string()][..])
+    );
+}
+
+#[test]
+fn a_done_row_is_kept_by_the_default_digest_with_its_done_at() {
+    // WI-1835 keeps `done` in the default digest states; WI-1518's done_at
+    // rides on the digest row.
+    let (built, rows) = wired();
+    let (done, done_engine) = start(&built);
+    rows.lock().unwrap().update(
+        &done_engine,
+        json!({"activity": "waiting-for-input", "done_at": "2026-10-18T09:30:00Z"}),
+    );
+    let result = swept(&built, SweepSessionsParams::default());
+    let row = &result.rows[0];
+    assert_eq!(row.attention, "done");
+    let digest = digest_of_row(row);
+    assert_eq!(digest.id, done);
+    assert_eq!(digest.done_at.as_deref(), Some("2026-10-18T09:30:00Z"));
+    assert_eq!(digest.attention.as_deref(), Some("done"));
+    assert_eq!(digest.ready, Some(true));
+}
+
+#[test]
+fn an_empty_state_list_keeps_every_state() {
+    let (built, rows) = wired();
+    let (_, asleep) = start(&built);
+    hibernated(&rows, &asleep);
+    let named = |states: Option<Vec<String>>| {
+        swept(
+            &built,
+            SweepSessionsParams {
+                states,
+                ..SweepSessionsParams::default()
+            },
+        )
+        .rows
+        .len()
+    };
+    assert_eq!(named(None), 0);
+    assert_eq!(named(Some(Vec::new())), 1);
+    assert_eq!(named(Some(vec!["hibernated".to_string()])), 1);
+    assert_eq!(named(Some(vec!["running".to_string()])), 0);
+}
+
+#[test]
+fn unlinked_sessions_are_not_repeated_across_pages() {
+    let (built, rows) = wired();
+    unlinked(&rows, "eng-foreign", "running");
+    let first = listed(&built, full(50, 0));
+    let later = listed(&built, full(50, 50));
+    assert!(first.sessions.iter().any(|row| row.id == "eng-foreign"));
+    assert!(!later.sessions.iter().any(|row| row.id == "eng-foreign"));
+    assert_eq!((first.total, first.truncated), (1, false));
+    assert_eq!(later.total, 1);
+    assert!(later.sessions.is_empty());
+}
+
+#[test]
+fn a_page_of_hibernated_links_does_not_hide_a_live_unlinked_session() {
+    // WI-1266: filter, then page.
+    let (built, rows) = wired();
+    let mut first = None;
+    for _ in 0..51 {
+        let (id, engine_id) = start(&built);
+        first.get_or_insert(id);
+        hibernated(&rows, &engine_id);
+    }
+    unlinked(&rows, "eng-live", "running");
+
+    let digest = listed(&built, ListSessionsParams::default());
+    let ids: Vec<&str> = digest.digests.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(ids, ["eng-live"]);
+    assert_eq!((digest.total, digest.truncated), (1, false));
+    assert!(digest.sessions.is_empty());
+
+    // Full mode does not apply the digest state filter, so the hibernated
+    // links lead and the live unlinked session is on the next page.
+    let whole = listed(&built, full(50, 0));
+    assert!(!whole.sessions.iter().any(|row| row.id == "eng-live"));
+    assert_eq!((whole.total, whole.truncated), (52, true));
+    assert_eq!(whole.sessions.len(), 50);
+
+    let page = listed(&built, full(50, 50));
+    let ids: Vec<&str> = page.sessions.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(ids, [first.unwrap().as_str(), "eng-live"]);
+    assert_eq!((page.total, page.truncated), (52, false));
+}
+
+#[test]
+fn more_declared_links_than_the_read_cap_is_reported_truncated() {
+    // WI-1266 review: one past the 500 links that are read keeps `truncated`
+    // true and `total` a floor, on the last page and on an empty one past it.
+    let (built, _rows) = wired();
+    let mut oldest = None;
+    for _ in 0..501 {
+        let (_, engine_id) = start(&built);
+        oldest.get_or_insert(engine_id);
+    }
+    let every = |offset| ListSessionsParams {
+        states: Some(Vec::new()),
+        ..full(500, offset)
+    };
+    let last = listed(&built, every(0));
+    assert_eq!(last.sessions.len(), 500);
+    assert_eq!((last.truncated, last.total), (true, 501));
+    let beyond = listed(&built, every(500));
+    assert!(beyond.sessions.is_empty());
+    assert_eq!((beyond.truncated, beyond.total), (true, 501));
+    let oldest = oldest.unwrap();
+    assert!(!last
+        .sessions
+        .iter()
+        .any(|row| row.engine_session_id == oldest));
+}
+
+#[test]
+fn the_engines_hidden_count_is_reported_and_the_flag_is_forwarded() {
+    // WI-1289: the rail's "N older sessions hidden" reads the engine's count,
+    // and Show asks for the rows it left out.
+    let (built, rows) = wired();
+    rows.lock().unwrap().hidden_count = 4;
+    start(&built);
+    let plain = listed(&built, full(50, 0));
+    assert_eq!(plain.sessions.len(), 1);
+    assert_eq!(plain.hidden_count, 4);
+    assert!(rows
+        .lock()
+        .unwrap()
+        .list_queries
+        .iter()
+        .all(|query| !query.contains("include=hidden")));
+    let shown = listed(
+        &built,
+        ListSessionsParams {
+            include_hidden: true,
+            ..full(50, 0)
+        },
+    );
+    assert_eq!(shown.hidden_count, 4);
+    assert_eq!(
+        rows.lock().unwrap().list_queries.last().map(String::as_str),
+        Some("include=hidden")
+    );
+}
+
+#[test]
+fn the_list_filters_by_who_started_it() {
+    // WI-1672: by the starter's engine id or its `ses_…` id; unlinked engine
+    // sessions (no starter) never match.
+    let rows = Arc::new(Mutex::new(Rows::default()));
+    let pod = as_claimant(&rows, "agent:pod:vogt-prod", "not-a-claim");
+    let parent = start_session(ctx(&pod), &start_params(Some("beta"), None, WHY)).unwrap();
+    let parent_engine = parent.session.engine_session_id.clone();
+    rows.lock()
+        .unwrap()
+        .update(&parent_engine, json!({"role": "oversight"}));
+    unlinked(&rows, "eng-foreign", "running");
+    let pod = pod.with_claimed_engine_session(Some(&parent_engine));
+    let child = start_session(ctx(&pod), &start_params(Some("beta"), None, WHY)).unwrap();
+    assert_eq!(
+        child.session.started_by_session.as_deref(),
+        Some(parent_engine.as_str())
+    );
+    for named in [parent_engine.clone(), parent.session.id.clone()] {
+        let owned = listed(
+            &pod,
+            ListSessionsParams {
+                started_by_session: Some(named),
+                ..full(50, 0)
+            },
+        );
+        let ids: Vec<&str> = owned.sessions.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, [child.session.id.as_str()]);
+    }
+}
+
+#[test]
+fn a_digest_list_row_carries_attention_ready_budget_and_the_fields_asked_for() {
+    let (built, rows) = wired();
+    let (id, engine_id) = start(&built);
+    rows.lock().unwrap().update(
+        &engine_id,
+        json!({"activity": "waiting-for-input", "economics": {"turns": 3}}),
+    );
+    let result = listed(
+        &built,
+        ListSessionsParams {
+            fields: vec!["cwd".into(), "command".into(), "no_such_field".into()],
+            ..ListSessionsParams::default()
+        },
+    );
+    assert!(result.sessions.is_empty());
+    assert_eq!(result.total, 1);
+    let digest = &result.digests[0];
+    assert_eq!(digest.id, id);
+    assert_eq!(digest.attention.as_deref(), Some("waiting"));
+    assert_eq!(digest.ready, Some(true));
+    assert_eq!(digest.budget.as_deref(), Some("3 turns"));
+    // `command` stays off the digest; an unknown name is skipped.
+    assert_eq!(
+        serde_json::to_value(&digest.extra).unwrap(),
+        json!({"cwd": "/work/tree"})
+    );
+    // Without fields, `extra` is null rather than an empty object.
+    let plain = listed(&built, ListSessionsParams::default());
+    assert_eq!(plain.digests[0].extra, None);
+}
+
+#[test]
+fn start_hibernate_and_wake_carry_the_digest_row() {
+    // C1: the summary stays and the digest row rides beside it. The budget
+    // line is left to the economics tailer (WI-1245 A2), not built here.
+    let (built, _rows) = wired();
+    let started = start_session(ctx(&built), &start_params(Some("beta"), None, WHY)).unwrap();
+    let digest = started.digest.as_ref().expect("start carries the digest");
+    assert_eq!(digest.id, started.session.id);
+    assert_eq!(digest.activity.as_deref(), Some("running"));
+    assert_eq!(digest.attention, None);
+    assert_eq!(digest.ready, None);
+    assert_eq!(digest.budget, None);
+    let woken = wake(
+        ctx(&built),
+        &WakeParams {
+            id: started.session.id.clone(),
+            reason: WHY.to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(woken.digest.as_ref().unwrap().id, started.session.id);
+    let value = serde_json::to_value(&woken).unwrap();
+    let keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["session", "digest"]);
+}
+
+#[test]
+fn input_carries_the_digest_of_the_session_typed_into() {
+    let (built, rows) = wired();
+    let (id, _engine_id) = start(&built);
+    let before = rows.lock().unwrap().gets;
+    let sent = input(ctx(&built), &typed(&id, "half", false)).unwrap();
+    // A draft reads the session once more, for the digest row.
+    assert_eq!(rows.lock().unwrap().gets, before + 1);
+    assert_eq!(sent.digest.as_ref().unwrap().id, id);
+}
+
+#[test]
+fn wait_returns_the_digest_and_a_tail_unless_the_screen_is_asked_for() {
+    // WI-874 with C1: `screen=true` restores the full screen; the default is
+    // the digest row plus the last 8 non-blank lines.
+    let (built, rows) = wired();
+    let (id, engine_id) = start(&built);
+    rows.lock().unwrap().wait_lines = (1..=15)
+        .map(|n| {
+            if n % 3 == 0 {
+                String::new()
+            } else {
+                format!("line {n}")
+            }
+        })
+        .collect();
+    let asked = |screen| WaitParams {
+        id: id.clone(),
+        until: "any_change".to_string(),
+        timeout_s: 30,
+        screen,
+    };
+    let waited = wait(ctx(&built), &asked(true)).unwrap();
+    assert_eq!(waited.engine_session_id, engine_id);
+    assert_eq!(waited.outcome, "awaiting-approval");
+    assert!(!waited.matched);
+    assert_eq!(waited.waited_ms, 1234);
+    assert_eq!(waited.screen.as_ref().unwrap().ready, Some(false));
+    assert!(waited.digest.is_none());
+    assert!(waited.screen_tail.is_empty());
+
+    let digested = wait(ctx(&built), &asked(false)).unwrap();
+    assert!(digested.screen.is_none());
+    assert_eq!(digested.digest.as_ref().unwrap().id, id);
+    assert_eq!(
+        digested.screen_tail,
+        ["line 4", "line 5", "line 7", "line 8", "line 10", "line 11", "line 13", "line 14"]
+    );
 }

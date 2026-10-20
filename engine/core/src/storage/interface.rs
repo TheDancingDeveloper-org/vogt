@@ -459,6 +459,26 @@ pub trait ReadView {
         include_stopped: bool,
         limit: i64,
         offset: i64,
+    ) -> Result<Vec<CodingSession>, crate::errors::VogtError> {
+        self.list_sessions_started_by(
+            project_id,
+            work_item_id,
+            None,
+            include_stopped,
+            limit,
+            offset,
+        )
+    }
+    /// `list_sessions` with Python's `started_by_session` filter: the
+    /// starter's engine session id, matched exactly.
+    fn list_sessions_started_by(
+        &self,
+        project_id: Option<&str>,
+        work_item_id: Option<&str>,
+        started_by_session: Option<&str>,
+        include_stopped: bool,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<CodingSession>, crate::errors::VogtError>;
 
     fn list_events(
