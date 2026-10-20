@@ -46,7 +46,7 @@ pub fn sweep_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| sweep(ctx, &params))
 }
 
-fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
+pub(crate) fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     params: &Value,
 ) -> Result<Value, VogtError> {

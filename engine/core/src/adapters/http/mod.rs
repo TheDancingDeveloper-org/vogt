@@ -9,6 +9,10 @@ pub mod health;
 pub mod mcp;
 pub mod metrics;
 pub mod openapi;
+pub mod scheduler;
+
+#[cfg(test)]
+mod scheduler_test;
 
 #[cfg(test)]
 pub(crate) mod test_harness;
