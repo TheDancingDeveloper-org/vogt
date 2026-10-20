@@ -450,13 +450,33 @@ const PROFILE_FIELDS: [&str; 7] = [
 
 /// The limits a start carries (Python `SessionBudgetParams`). Each field is one
 /// limit; a field left out is not set.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBudget {
     pub turns: Option<i64>,
     pub context_tokens: Option<i64>,
     pub wall_clock_minutes: Option<i64>,
     pub session_wall_clock_minutes: Option<i64>,
+}
+
+/// Python's `_budget_params`: the engine's budget object as the summary
+/// carries it. Only positive whole-number limits survive — zero is not a
+/// limit — and a row that yields nothing is no budget, not an empty object.
+/// Python's `isinstance(value, int)` admits a bool and pydantic reads `true`
+/// as 1, so a `true` limit is 1 here too; `false` is 0 and dropped.
+pub(crate) fn budget_params(raw: Option<&serde_json::Map<String, Value>>) -> Option<SessionBudget> {
+    let raw = raw?;
+    let limit = |key: &str| match raw.get(key)? {
+        Value::Bool(true) => Some(1),
+        value => value.as_i64().filter(|value| *value > 0),
+    };
+    let budget = SessionBudget {
+        turns: limit("turns"),
+        context_tokens: limit("context_tokens"),
+        wall_clock_minutes: limit("wall_clock_minutes"),
+        session_wall_clock_minutes: limit("session_wall_clock_minutes"),
+    };
+    (budget != SessionBudget::default()).then_some(budget)
 }
 
 /// The engine's `budget` object: the fields that are set, and `{}` for a
@@ -871,8 +891,14 @@ pub struct SessionSummary {
     pub stopped_by: Option<String>,
     pub stop_reason: Option<String>,
     pub permission_mode: Option<String>,
+    /// Live from the engine: the named Claude Code account the session runs
+    /// under. Null is the engine's default account.
+    pub account: Option<String>,
     pub running: Option<SessionRuntime>,
     pub resources: Option<SessionResources>,
+    /// Live from the engine: the limits the session was started with (C7).
+    /// Null when it has none, or when the engine could not be asked.
+    pub budget: Option<SessionBudget>,
     pub conversation_id: Option<String>,
 }
 
@@ -3652,6 +3678,8 @@ where
         stopped_by: None,
         stop_reason: None,
         permission_mode: None,
+        account: None,
+        budget: None,
         running: None,
         resources: None,
         conversation_id: None,
@@ -3683,6 +3711,8 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.conversation_id = live.conversation_id.clone();
     summary.resources = live.resources.as_ref().map(resources_of);
     summary.permission_mode = live.permission_mode.clone();
+    summary.account = live.account.clone();
+    summary.budget = budget_params(live.budget.as_ref());
     summary.stopped_by = live.stopped_by.clone();
     summary.stop_reason = live.stop_reason.clone();
 }
@@ -3907,6 +3937,8 @@ fn unlinked_summary(
         stopped_by: None,
         stop_reason: None,
         permission_mode: None,
+        account: None,
+        budget: None,
         running: None,
         resources: None,
         conversation_id: None,

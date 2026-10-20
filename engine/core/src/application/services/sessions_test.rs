@@ -665,3 +665,159 @@ fn an_explicit_null_is_an_override_the_profile_does_not_fill() {
     assert_eq!(audit["worktree"], serde_json::Value::Null);
     assert_eq!(audit["repo_map"], true);
 }
+
+/// A linked session and an unlinked one, listed with `mode=full` against an
+/// engine whose rows carry (or lack) `account` and `budget`.
+fn listed_full(engine_rows: &str, fields: Vec<String>, mode: &str) -> serde_json::Value {
+    listed_with(200, engine_rows, fields, mode)
+}
+
+fn listed_with(
+    status: u16,
+    engine_rows: &str,
+    fields: Vec<String>,
+    mode: &str,
+) -> serde_json::Value {
+    let script = script_with(vec![
+        (status, engine_rows.to_string()),
+        (
+            200,
+            r#"{"id":"eng-1","name":"alpha","cwd":"/work/tree"}"#.to_string(),
+        ),
+    ]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "alpha");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    start_session(ctx, &start_params(Some("alpha"), None, "because")).unwrap();
+    let listed = list_sessions(
+        ctx,
+        &ListSessionsParams {
+            mode: mode.to_string(),
+            fields,
+            ..ListSessionsParams::default()
+        },
+    )
+    .unwrap();
+    serde_json::to_value(listed).unwrap()
+}
+
+fn summary_by_engine_id<'a>(listed: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["engine_session_id"] == id)
+        .unwrap_or_else(|| panic!("no {id} in {listed}"))
+}
+
+#[test]
+fn a_sessions_account_and_budget_come_back_from_the_engine() {
+    let listed = listed_full(
+        r#"{"sessions":[
+            {"id":"eng-1","name":"alpha","cwd":"/work/tree","alive":true,
+             "account":"acct2","budget":{"turns":120,"wall_clock_minutes":90}},
+            {"id":"eng-9","name":"stray","cwd":"/elsewhere","alive":true,
+             "account":"acct3","budget":{"context_tokens":200000}}
+        ]}"#,
+        Vec::new(),
+        "full",
+    );
+    let linked = summary_by_engine_id(&listed, "eng-1");
+    assert_eq!(linked["account"], "acct2");
+    assert_eq!(
+        linked["budget"],
+        json!({
+            "turns": 120,
+            "context_tokens": null,
+            "wall_clock_minutes": 90,
+            "session_wall_clock_minutes": null,
+        })
+    );
+    let unlinked = summary_by_engine_id(&listed, "eng-9");
+    assert_eq!(unlinked["linked"], false);
+    assert_eq!(unlinked["account"], "acct3");
+    assert_eq!(unlinked["budget"]["context_tokens"], 200000);
+    // Python's field order: account after permission_mode, budget after
+    // resources and before conversation_id.
+    let keys: Vec<&str> = linked
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let at = |key: &str| keys.iter().position(|have| *have == key).unwrap();
+    assert_eq!(at("account"), at("permission_mode") + 1);
+    assert_eq!(at("running"), at("account") + 1);
+    assert_eq!(at("budget"), at("resources") + 1);
+    assert_eq!(at("conversation_id"), at("budget") + 1);
+}
+
+#[test]
+fn no_account_is_the_default_account_and_no_positive_limit_is_no_budget() {
+    let listed = listed_full(
+        r#"{"sessions":[{"id":"eng-1","name":"alpha","cwd":"/work/tree","alive":true,
+            "account":null,"budget":{"turns":0,"context_tokens":-5,
+            "wall_clock_minutes":1.5,"session_wall_clock_minutes":false}}]}"#,
+        Vec::new(),
+        "full",
+    );
+    let linked = summary_by_engine_id(&listed, "eng-1");
+    assert!(linked["account"].is_null(), "{linked}");
+    assert!(linked["budget"].is_null(), "{linked}");
+    let listed = listed_full(
+        r#"{"sessions":[{"id":"eng-1","name":"alpha","cwd":"/work/tree","alive":true,
+            "account":"","budget":"lots"}]}"#,
+        Vec::new(),
+        "full",
+    );
+    let linked = summary_by_engine_id(&listed, "eng-1");
+    assert!(linked["account"].is_null(), "{linked}");
+    assert!(linked["budget"].is_null(), "{linked}");
+}
+
+#[test]
+fn a_budget_keeps_only_its_positive_whole_limits() {
+    // Python's `isinstance(value, int)` admits `true`, which pydantic reads
+    // as 1; `false`, zero, negatives and fractions are dropped.
+    let listed = listed_full(
+        r#"{"sessions":[{"id":"eng-1","name":"alpha","cwd":"/work/tree","alive":true,
+            "budget":{"turns":true,"context_tokens":0,"wall_clock_minutes":2.0,
+            "session_wall_clock_minutes":30,"other":7}}]}"#,
+        Vec::new(),
+        "full",
+    );
+    assert_eq!(
+        summary_by_engine_id(&listed, "eng-1")["budget"],
+        json!({
+            "turns": 1,
+            "context_tokens": null,
+            "wall_clock_minutes": null,
+            "session_wall_clock_minutes": 30,
+        })
+    );
+}
+
+#[test]
+fn a_dead_engine_reports_no_account_or_budget() {
+    let listed = listed_with(500, r#"{"error":"engine down"}"#, Vec::new(), "full");
+    assert!(!listed["engine"].is_null(), "{listed}");
+    let linked = summary_by_engine_id(&listed, "eng-1");
+    assert!(linked["alive"].is_null(), "{linked}");
+    assert!(linked["account"].is_null(), "{linked}");
+    assert!(linked["budget"].is_null(), "{linked}");
+}
+
+#[test]
+fn a_digest_row_carries_account_and_budget_when_fields_name_them() {
+    let listed = listed_full(
+        r#"{"sessions":[{"id":"eng-1","name":"alpha","cwd":"/work/tree","alive":true,
+            "account":"acct2","budget":{"turns":40}}]}"#,
+        vec!["account".to_string(), "budget".to_string()],
+        "digest",
+    );
+    let row = &listed["digests"][0];
+    assert_eq!(row["extra"]["account"], "acct2", "{row}");
+    assert_eq!(row["extra"]["budget"]["turns"], 40, "{row}");
+}
