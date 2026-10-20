@@ -14,7 +14,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -353,24 +353,209 @@ pub fn excerpt_cache_size() -> usize {
 
 // -- lookup --------------------------------------------------------------------
 
+/// The transcript file for one conversation id, via the shared index.
+///
+/// The index is built from one directory listing and reused across the
+/// concurrent `session.list` calls that each ask for every live session. A
+/// root stamp change, or `INDEX_TTL_SECONDS` since the last build, drops it;
+/// an id that was absent is remembered for `NEGATIVE_TTL_SECONDS` so a miss
+/// does not rescan.
 fn by_id(agent: &str, root: &Path, conversation_id: &str) -> Option<PathBuf> {
-    if CLAUDE_FORMAT.contains(&agent) {
-        let name = format!("{conversation_id}.jsonl");
-        for entry in entries(root) {
-            let candidate = entry.join(&name);
-            if candidate.is_file() {
-                return Some(candidate);
+    let key = (
+        if CLAUDE_FORMAT.contains(&agent) {
+            "claude"
+        } else {
+            "codex"
+        },
+        root.to_string_lossy().into_owned(),
+    );
+    let now = clock();
+    {
+        let mut indexes = INDEXES.lock().unwrap_or_else(|e| e.into_inner());
+        // No stat here. Inside the TTL a list of N sessions costs N map
+        // reads; a new file waits at most INDEX_TTL_SECONDS.
+        if let Some(current) = indexes.get_mut(&key) {
+            if now - current.built_at < INDEX_TTL_SECONDS {
+                return current.lookup(conversation_id);
             }
         }
-        return None;
     }
-    // Keyed as Python's index keys a rollout: the uuid tail of its stem, or
-    // the whole stem when it has none. Newest dates come first.
-    codex_files(root).find(|path| {
-        path.file_stem()
-            .and_then(|n| n.to_str())
-            .is_some_and(|stem| uuid_tail(stem).as_deref().unwrap_or(stem) == conversation_id)
-    })
+    // The TTL elapsed. One stat per directory down the tree: unchanged means
+    // the files are unchanged, so the previous index stands.
+    let stamp = tree_stamp(root);
+    {
+        let mut indexes = INDEXES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = indexes.get_mut(&key) {
+            if current.root_mtime == stamp {
+                current.built_at = clock();
+                return current.lookup(conversation_id);
+            }
+        }
+    }
+    let mut built = scan(agent, root, clock());
+    let found = built.lookup(conversation_id);
+    let mut indexes = INDEXES.lock().unwrap_or_else(|e| e.into_inner());
+    indexes.insert(key, built);
+    found
+}
+
+// -- conversation-id index (WI-1413) -------------------------------------------
+//
+// `session.list` resolves one transcript per live session, and several lists
+// run at once. Walking the transcript root once per session per call is the
+// slow part. One index per (agent format, root) is built from a single listing
+// and swapped in under a lock; lookups after that are map reads.
+
+/// How long a conversation-id index is reused without re-checking the root.
+pub const INDEX_TTL_SECONDS: f64 = 5.0;
+/// How long a conversation id that was not on disk stays a miss.
+pub const NEGATIVE_TTL_SECONDS: f64 = 2.0;
+
+/// One scan of a transcript root, plus ids known to be absent.
+struct Index {
+    built_at: f64,
+    /// The tree stamp when this index was built. A new child directory moves
+    /// it; a new file inside an existing directory does not, and that waits
+    /// for the TTL.
+    root_mtime: Duration,
+    by_id: HashMap<String, PathBuf>,
+    /// Conversation id → clock time it was found missing.
+    negative: HashMap<String, f64>,
+}
+
+impl Index {
+    fn lookup(&mut self, conversation_id: &str) -> Option<PathBuf> {
+        if let Some(path) = self.by_id.get(conversation_id) {
+            return Some(path.clone());
+        }
+        let now = clock();
+        if let Some(seen) = self.negative.get(conversation_id) {
+            if now - seen < NEGATIVE_TTL_SECONDS {
+                return None;
+            }
+        }
+        // Record the miss only. The id stays absent until the index is
+        // rebuilt, which happens when the stamp moves or the TTL expires.
+        self.negative.insert(conversation_id.to_string(), now);
+        None
+    }
+}
+
+type IndexKey = (&'static str, String);
+
+static INDEXES: LazyLock<Mutex<HashMap<IndexKey, Index>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static CLOCK_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: seconds added to this thread's clock.
+    static CLOCK_SKEW: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// Test seam: directory listings this thread made, per directory.
+    static LISTINGS: std::cell::RefCell<HashMap<PathBuf, usize>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Monotonic seconds; Python's `time.monotonic()`.
+fn clock() -> f64 {
+    let now = CLOCK_ORIGIN.elapsed().as_secs_f64();
+    #[cfg(test)]
+    let now = now + CLOCK_SKEW.with(|skew| skew.get());
+    now
+}
+
+/// Count one directory listing (test seam; no-op outside tests).
+fn listed(_path: &Path) {
+    #[cfg(test)]
+    LISTINGS.with(|counts| *counts.borrow_mut().entry(_path.to_path_buf()).or_default() += 1);
+}
+
+/// One pass over the root. The stamp is the newest mtime seen in it.
+fn scan(agent: &str, root: &Path, now: f64) -> Index {
+    let mut by_id: HashMap<String, PathBuf> = HashMap::new();
+    let mut stamp = mtime(root);
+    if CLAUDE_FORMAT.contains(&agent) {
+        for entry in entries(root) {
+            stamp = stamp.max(mtime(&entry));
+            let Ok(read) = fs::read_dir(&entry) else {
+                continue;
+            };
+            listed(&entry);
+            for (count, child) in read.filter_map(|c| c.ok()).enumerate() {
+                if count >= MAX_ENTRIES {
+                    break;
+                }
+                let Ok(name) = child.file_name().into_string() else {
+                    continue;
+                };
+                if let Some(stem) = name.strip_suffix(".jsonl") {
+                    // `is_file` follows a symlink, as Python's DirEntry does.
+                    let path = child.path();
+                    if path.is_file() {
+                        by_id.entry(stem.to_string()).or_insert(path);
+                    }
+                }
+            }
+        }
+    } else {
+        for day in codex_days(root) {
+            stamp = stamp.max(mtime(&day));
+        }
+        for path in codex_files(root) {
+            let stem = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let conversation = uuid_tail(&stem).unwrap_or(stem);
+            // Newest dates come first, so the first hit is the one a walk finds.
+            by_id.entry(conversation).or_insert(path);
+        }
+    }
+    Index {
+        built_at: now,
+        root_mtime: stamp,
+        by_id,
+        negative: HashMap::new(),
+    }
+}
+
+/// A stamp that moves when a transcript file appears.
+///
+/// Claude files a conversation directly under a child of the root, so the
+/// children's mtimes cover it. Codex files under `YYYY/MM/DD/`, and a new
+/// rollout in today's directory moves that day's mtime, not the year's, so
+/// the stamp follows the tree down to the day directories.
+fn tree_stamp(root: &Path) -> Duration {
+    let mut stamp = mtime(root);
+    for year in entries(root) {
+        stamp = stamp.max(mtime(&year));
+        for month in entries(&year) {
+            stamp = stamp.max(mtime(&month));
+            for day in entries(&month) {
+                stamp = stamp.max(mtime(&day));
+            }
+        }
+    }
+    stamp
+}
+
+/// The day directories under a Codex root, newest first.
+fn codex_days(root: &Path) -> Vec<PathBuf> {
+    let mut days = Vec::new();
+    for year in sorted_desc(entries(root)) {
+        for month in sorted_desc(entries(&year)) {
+            days.extend(sorted_desc(entries(&month)));
+        }
+    }
+    days
+}
+
+fn sorted_desc(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.sort();
+    paths.reverse();
+    paths
 }
 
 fn by_cwd(
@@ -424,6 +609,7 @@ fn entries(root: &Path) -> Vec<PathBuf> {
     let Ok(read) = fs::read_dir(root) else {
         return out;
     };
+    listed(root);
     for (count, entry) in read.filter_map(|e| e.ok()).enumerate() {
         if count >= MAX_ENTRIES {
             break;
@@ -451,6 +637,7 @@ fn codex_files(root: &Path) -> impl Iterator<Item = PathBuf> {
             days.sort();
             days.reverse();
             for day in days {
+                listed(&day);
                 let mut names: Vec<String> = fs::read_dir(&day)
                     .ok()
                     .into_iter()
@@ -1046,6 +1233,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(by_resume.basis, "resume-id");
+        // A second transcript written into the same directory, inside the
+        // index TTL. The index only notices it once the TTL has passed.
+        forget_index(&root);
         write_claude(&root, ENGINE_ID, &[claude_line("m", "pinned")]);
         let by_engine = find(
             &roots,
@@ -1292,10 +1482,33 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    // -- test_transcript_index.py (WI-1080) ----------------------------------
-    // The scan-count and TTL cases need Python's cached conversation-id index
-    // (WI-1413), which the Rust core does not have; only lookup results are
-    // ported here.
+    // -- test_transcript_index.py (WI-1080, WI-1074) --------------------------
+    // Every test uses its own root, so the shared index needs no clearing;
+    // the clock skew and the listing counter are per test thread.
+
+    /// Move this thread's clock past every TTL, as Python's tests patch
+    /// `_clock` to `monotonic() + 100`.
+    fn skew_clock(seconds: f64) {
+        CLOCK_SKEW.with(|skew| skew.set(seconds));
+    }
+
+    fn listings_of(path: &Path) -> usize {
+        LISTINGS.with(|counts| counts.borrow().get(path).copied().unwrap_or(0))
+    }
+
+    /// Python's `transcripts._indexes.clear()`, narrowed to one root so
+    /// concurrently running tests keep their own indexes.
+    fn forget_index(root: &Path) {
+        let root = root.to_string_lossy();
+        INDEXES
+            .lock()
+            .unwrap()
+            .retain(|(_, indexed), _| *indexed != root);
+    }
+
+    fn listings_total() -> usize {
+        LISTINGS.with(|counts| counts.borrow().values().sum())
+    }
 
     fn claude_root(base: &Path, sessions: usize, decoys: usize) -> PathBuf {
         let root = base.join("claude");
@@ -1311,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn many_lookups_each_find_their_transcript() {
+    fn many_lookups_scan_the_root_once() {
         let tmp = temp();
         let root = claude_root(tmp.as_path(), 70, 300);
         for n in 0..70 {
@@ -1321,29 +1534,36 @@ mod tests {
                 format!("conv-{n:05}.jsonl")
             );
         }
+        // One listing of the root builds the index. A second listing is the
+        // freshness stamp, taken once for the whole batch, not once per session.
+        assert!(listings_of(&root) <= 2, "{}", listings_of(&root));
     }
 
     #[test]
-    fn a_missing_claude_id_is_none() {
+    fn a_missing_id_does_not_rescan_within_the_ttl() {
         let tmp = temp();
         let root = claude_root(tmp.as_path(), 1, 50);
         for _ in 0..40 {
             assert!(by_id("claude", &root, "does-not-exist").is_none());
         }
+        assert!(listings_of(&root) <= 2, "{}", listings_of(&root));
     }
 
     #[test]
-    fn a_new_claude_file_is_found() {
+    fn a_new_claude_file_is_found_once_the_index_expires() {
         let tmp = temp();
         let root = claude_root(tmp.as_path(), 1, 2);
         assert!(by_id("claude", &root, "conv-00000").is_some());
         fs::write(root.join("dir-keep").join("conv-new.jsonl"), "{}\n").unwrap();
+        // Still inside the TTL: the index stands and the new file is invisible.
+        assert!(by_id("claude", &root, "conv-new").is_none());
+        skew_clock(100.0);
         let found = by_id("claude", &root, "conv-new").unwrap();
         assert_eq!(found.file_name().unwrap(), "conv-new.jsonl");
     }
 
     #[test]
-    fn codex_ids_resolve_repeatedly_and_a_new_file_in_the_same_day_is_found() {
+    fn codex_ids_share_one_scan_and_a_new_file_in_the_same_day_is_found_after_the_ttl() {
         let tmp = temp();
         let root = tmp.as_path().join("codex");
         let day = root.join("2026").join("10").join("14");
@@ -1357,12 +1577,21 @@ mod tests {
         for _ in 0..10 {
             assert!(by_id("codex", &root, first).is_some());
         }
+        let scans = listings_total();
+        for _ in 0..10 {
+            assert!(by_id("codex", &root, first).is_some());
+        }
+        assert_eq!(listings_total(), scans);
+        assert!(scans > 0);
+        // Written into the same day directory: no new month or year appears.
         let second = "11111111-2222-4333-8444-555555555555";
         fs::write(
             day.join(format!("rollout-2026-10-14T01-00-00-{second}.jsonl")),
             "{}\n",
         )
         .unwrap();
+        assert!(by_id("codex", &root, second).is_none());
+        skew_clock(100.0);
         let found = by_id("codex", &root, second).unwrap();
         assert_eq!(found.parent().unwrap(), day);
     }
