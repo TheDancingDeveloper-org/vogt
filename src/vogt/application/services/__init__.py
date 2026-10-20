@@ -25,6 +25,7 @@ from vogt.application.services.auth import (
     whoami,
 )
 from vogt.application.services.board import list_board
+from vogt.application.services.charters import get_charter, set_charter
 from vogt.application.services.chats import (
     chat_archive,
     chat_create,
@@ -232,6 +233,7 @@ __all__ = [
     "engine_session_token",
     "engine_status",
     "export_instance",
+    "get_charter",
     "get_many_work",
     "get_preferences",
     "get_project",
@@ -307,6 +309,7 @@ __all__ = [
     "session_screen",
     "session_wait",
     "session_wait_any",
+    "set_charter",
     "set_password",
     "set_preference",
     "set_session_role",

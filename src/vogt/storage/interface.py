@@ -20,6 +20,7 @@ from vogt.core.entities import (
     AgentPolicy,
     AuditRecord,
     AuthDecision,
+    Charter,
     CodingSession,
     Comment,
     ContractExemption,
@@ -496,6 +497,16 @@ class ReadView(Protocol):
 
     def inbox_triage_by_key(self, entry_key: str) -> InboxTriage | None: ...
 
+    def charter(self, *, scope_kind: str, scope_id: str) -> Charter | None:
+        """The newest version of a scope's charter, or `None` when never set."""
+        ...
+
+    def charter_history(
+        self, *, scope_kind: str, scope_id: str, limit: int = 50
+    ) -> list[Charter]:
+        """A scope's charter versions, newest first."""
+        ...
+
     def actor_preference(self, *, actor_id: str, key: str) -> ActorPreference | None:
         """One actor's setting under `key`, or `None` when never written."""
         ...
@@ -800,6 +811,10 @@ class WriteTxn(ReadView, Protocol):
     def insert_drift(self, proposal: DriftProposal) -> None: ...
 
     def upsert_inbox_triage(self, triage: InboxTriage) -> None: ...
+
+    def insert_charter(self, charter: Charter) -> None:
+        """Append one charter version; (scope, version) is unique."""
+        ...
 
     def upsert_actor_preference(self, preference: ActorPreference) -> None:
         """Insert or replace one (actor, key) setting, version and all."""

@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vogt.application.models import WhyResult
+from vogt.application.services.charters import charters_for
 from vogt.core.entities import Comment, HandoffFields, Project, WorkItem
 from vogt.storage.interface import ReadView
 
@@ -118,6 +119,33 @@ class ComposedBrief:
 
     text: str
     companion: str = ""
+    #: The charters section alone (WI-2038), for an agent CLI that takes
+    #: standing instructions apart from its first prompt (Codex
+    #: `developer_instructions`). Empty when no scope has a charter.
+    charter: str = ""
+
+
+def _charter_section(
+    view: ReadView, *, project_id: str | None, initiative_id: str | None
+) -> list[str]:
+    """The scope's charters, broadest first (WI-2038).
+
+    Recorded text, quoted as written: the workspace's, then the project's,
+    then the initiative's. Nothing when none is set, because an empty
+    section would read as a rule."""
+    found = charters_for(view, project_id=project_id, initiative_id=initiative_id)
+    if not found:
+        return []
+    lines = [
+        "## Charters",
+        "",
+        "Standing instructions for this scope, broadest first. A later one "
+        "refines an earlier one, and the rest of this brief refines them all.",
+        "",
+    ]
+    for heading, charter in found:
+        lines += [f"### {heading} (v{charter.version})", "", charter.body.strip(), ""]
+    return lines
 
 
 def _policy_section(project: Project | None) -> list[str]:
@@ -400,6 +428,10 @@ def review_brief_for_work_item(
     if item.project_slug:
         facts.append(f"**Project** {item.project_slug}")
     lines += [" · ".join(facts), "", _REVIEW]
+    charter = _charter_section(
+        view, project_id=item.project_id, initiative_id=item.initiative_id
+    )
+    lines += charter
 
     lines += ["## Done means", ""]
     if item.body.strip():
@@ -453,7 +485,9 @@ def review_brief_for_work_item(
     lines += ["## Deployment policy", "", _DEPLOYMENT_POLICY, ""]
     lines += _pointer(session_id, work_ref=item.ref)
     return ComposedBrief(
-        text="\n".join(lines), companion=_companion(session_id, work_ref=item.ref)
+        text="\n".join(lines),
+        companion=_companion(session_id, work_ref=item.ref),
+        charter="\n".join(charter),
     )
 
 
@@ -488,6 +522,10 @@ def brief_for_work_item(
     if item.labels:
         facts.append("**Labels** " + ", ".join(item.labels))
     lines += [" · ".join(facts), ""]
+    charter = _charter_section(
+        view, project_id=item.project_id, initiative_id=item.initiative_id
+    )
+    lines += charter
 
     if item.body.strip():
         lines += ["## Description", "", item.body.strip(), ""]
@@ -556,7 +594,9 @@ def brief_for_work_item(
     lines += ["## Deployment policy", "", _DEPLOYMENT_POLICY, ""]
     lines += _pointer(session_id, work_ref=item.ref)
     return ComposedBrief(
-        text="\n".join(lines), companion=_companion(session_id, work_ref=item.ref)
+        text="\n".join(lines),
+        companion=_companion(session_id, work_ref=item.ref),
+        charter="\n".join(charter),
     )
 
 
@@ -574,7 +614,11 @@ def brief_for_project(
     "have a look at the backlog" — would be Vogt deciding to start work,
     which is the half of the reversed non-goal that stayed refused.
     """
-    del view
+    charter = _charter_section(
+        view,
+        project_id=project.id if project is not None else None,
+        initiative_id=None,
+    )
     lines = [
         f"# {project_slug}",
         "",
@@ -583,6 +627,7 @@ def brief_for_project(
         "when you take one up, call `session_bind_work` with its ref (and no "
         "`id`), so the item shows who is on it.",
         "",
+        *charter,
         *_policy_section(project),
         "## Deployment policy",
         "",
@@ -591,7 +636,9 @@ def brief_for_project(
         *_pointer(session_id, work_ref=None),
     ]
     return ComposedBrief(
-        text="\n".join(lines), companion=_companion(session_id, work_ref=None)
+        text="\n".join(lines),
+        companion=_companion(session_id, work_ref=None),
+        charter="\n".join(charter),
     )
 
 

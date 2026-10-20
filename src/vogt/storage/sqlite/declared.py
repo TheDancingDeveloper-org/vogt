@@ -24,6 +24,7 @@ from vogt.core.entities import (
     ActorPreference,
     AuditRecord,
     AuthDecision,
+    Charter,
     CodingSession,
     Comment,
     ContractExemption,
@@ -1072,6 +1073,26 @@ class SqliteReadView:
             tuple(params),
         ).fetchall()
         return [_row_to_drift(row) for row in rows]
+
+    # -- charters (WI-2038) -------------------------------------------------
+
+    def charter(self, *, scope_kind: str, scope_id: str) -> Charter | None:
+        row = self._conn.execute(
+            "SELECT * FROM charters WHERE scope_kind = ? AND scope_id = ? "
+            "ORDER BY version DESC LIMIT 1",
+            (scope_kind, scope_id),
+        ).fetchone()
+        return None if row is None else _row_to_charter(row)
+
+    def charter_history(
+        self, *, scope_kind: str, scope_id: str, limit: int = 50
+    ) -> list[Charter]:
+        rows = self._conn.execute(
+            "SELECT * FROM charters WHERE scope_kind = ? AND scope_id = ? "
+            "ORDER BY version DESC LIMIT ?",
+            (scope_kind, scope_id, limit),
+        ).fetchall()
+        return [_row_to_charter(row) for row in rows]
 
     # -- actor preferences --------------------------------------------------
 
@@ -2194,6 +2215,21 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def insert_charter(self, charter: Charter) -> None:
+        self._conn.execute(
+            "INSERT INTO charters (scope_kind, scope_id, version, body, "
+            "author_actor_id, created_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                charter.scope_kind,
+                charter.scope_id,
+                charter.version,
+                charter.body,
+                charter.author_actor_id,
+                to_iso(charter.created_at),
+                charter.reason,
+            ),
+        )
+
     def upsert_actor_preference(self, preference: ActorPreference) -> None:
         values = (
             json.dumps(preference.value, sort_keys=True),
@@ -2873,6 +2909,18 @@ def _decision_answer_json(decision: Decision) -> str | None:
     if decision.answer is None:
         return None
     return json.dumps(decision.answer.model_dump(mode="json"))
+
+
+def _row_to_charter(row: sqlite3.Row) -> Charter:
+    return Charter(
+        scope_kind=row["scope_kind"],
+        scope_id=str(row["scope_id"]),
+        version=int(row["version"]),
+        body=str(row["body"]),
+        author_actor_id=str(row["author_actor_id"]),
+        created_at=from_iso(str(row["created_at"])),
+        reason=str(row["reason"]),
+    )
 
 
 def _row_to_decision(row: sqlite3.Row) -> Decision:

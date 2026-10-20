@@ -722,6 +722,26 @@ class ActorPreference(Entity):
     updated_at: datetime
 
 
+CharterScope = Literal["workspace", "project", "initiative"]
+
+
+class Charter(Entity):
+    """One version of a scope's standing instructions (WI-2038).
+
+    Append-only: setting a charter writes the next version, so the history is
+    the rows. An empty `body` is a cleared charter. The workspace charter has
+    `scope_id` "", a project's is its id, an initiative's is its id.
+    """
+
+    scope_kind: CharterScope
+    scope_id: str
+    version: int
+    body: str
+    author_actor_id: str
+    created_at: datetime
+    reason: str
+
+
 GrantKind = Literal["credential", "capability"]
 GrantUses = Literal["once", "ttl"]
 GrantState = Literal["pending", "approved", "denied", "revoked"]
