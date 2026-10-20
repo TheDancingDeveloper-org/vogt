@@ -895,6 +895,29 @@
       },
       "operation": "preference.set",
       "step": 158
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "invalid_request",
+        "status": 400
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "agent_cli.update",
+      "step": 161
+    },
+    {
+      "http": {
+        "error_code": null,
+        "status": 404
+      },
+      "operation": "connect",
+      "step": 162
     }
   ]
 }

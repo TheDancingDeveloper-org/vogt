@@ -4358,5 +4358,39 @@
     },
     "is_error": false,
     "operation": "preference.get"
+  },
+  {
+    "body": {
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "installer_present": false,
+      "tools": []
+    },
+    "is_error": false,
+    "operation": "agent_cli.list"
+  },
+  {
+    "body": {
+      "text": "invalid_request: no session engine is configured (VOGT_ENGINE_URL is unset)"
+    },
+    "error_code": "invalid_request",
+    "is_error": true,
+    "operation": "agent_cli.update"
+  },
+  {
+    "body": {
+      "api_path": "/api",
+      "client": "http",
+      "configuration": "{\n  \"mcpServers\": {\n    \"vogt\": {\n      \"type\": \"http\",\n      \"url\": \"<set public_url first>\",\n      \"headers\": {\n        \"Authorization\": \"Bearer ${VOGT_TOKEN}\"\n      }\n    }\n  }\n}",
+      "detail": "no public_url is configured, so this instance cannot say where to reach it. That is not something a server can work out: it binds a container port and is published somewhere else. Set VOGT_PUBLIC_URL (or public_url) to the address clients actually use \u2014 an exposure value, so it is never defaulted",
+      "mcp_path": "/mcp",
+      "requires_install": false,
+      "supported_mcp_protocol_versions": [
+        "2025-06-18",
+        "2025-03-26",
+        "2024-11-05"
+      ]
+    },
+    "is_error": false,
+    "operation": "connect"
   }
 ]

@@ -1857,6 +1857,32 @@
     "status": 400
   },
   {
+    "operation": "agent_cli.list",
+    "result": {
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "installer_present": false,
+      "tools": []
+    },
+    "status": 200
+  },
+  {
+    "operation": "agent_cli.update",
+    "result": {
+      "error": {
+        "code": "invalid_request",
+        "message": "no session engine is configured (VOGT_ENGINE_URL is unset)"
+      }
+    },
+    "status": 400
+  },
+  {
+    "operation": "connect",
+    "result": {
+      "detail": "Not Found"
+    },
+    "status": 404
+  },
+  {
     "operation": "dump",
     "result": {
       "actors": [
@@ -2861,6 +2887,32 @@
           "operation": "project.import",
           "reason_code": "token_valid",
           "scope": "project.write",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0061",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "agent_cli.list",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0003",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0004",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0062",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "agent_cli.update",
+          "reason_code": "token_valid",
+          "scope": "admin",
           "token_id": "tok_0003",
           "transport": "http"
         }
