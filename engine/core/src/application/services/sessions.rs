@@ -876,9 +876,7 @@ pub struct SessionSweepRow {
     /// counted in `needs_you`.
     pub blocked_stale: bool,
     /// On a `done` row bound to a work item: its AUTOPILOT: DONE claim checked
-    /// against git and the forge (WI-1835). Always null here until the sweep
-    /// classifies `done` rows (WI-1518); `claims::check_claim` and
-    /// `claims::record_claim_check` with a once key are what that row calls.
+    /// against git and the forge (WI-1835), noted on the item once per DONE.
     pub claim_check: Option<crate::application::models::ClaimCheck>,
 }
 
@@ -1528,16 +1526,44 @@ where
             tail[tail.len().saturating_sub(shown)..].to_vec()
         };
         let (blocked_since, blocked_age_s) = block_age(&summary, swept_at);
+        let mut reason = verdict.reason.clone();
+        let mut claim_check = None;
+        if matches!(verdict.attention, decisions::Attention::Done) && summary.work_item.is_some() {
+            // WI-1835: a DONE claim is checked against git and the forge, and a
+            // mismatch is said in the row's reason so the digest carries it.
+            let text = std::iter::once(summary.last_reply_excerpt.clone().unwrap_or_default())
+                .chain(entry.screen_tail.iter().cloned())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let check = crate::application::claims::check_claim(
+                ctx,
+                &summary,
+                crate::application::models::ClaimCheckClaim::AutopilotDone,
+                Some(&text),
+            )?;
+            // Once per DONE: the key is the session and the moment it said so.
+            if let Some(done_at) = moment_of(summary.done_at.as_deref()) {
+                crate::application::claims::record_claim_check(
+                    ctx,
+                    &check,
+                    Some(&format!("{}@{}", summary.id, done_at.to_iso())),
+                )?;
+            }
+            if !check.mismatches.is_empty() {
+                reason = format!("{reason}; claim check: {}", check.mismatches.join("; "));
+            }
+            claim_check = Some(check);
+        }
         rows.push(SessionSweepRow {
             attention: verdict.attention.as_str().to_string(),
-            attention_reason: verdict.reason.clone(),
+            attention_reason: reason,
             screen_tail,
             ready: Some(entry.ready),
             session: summary,
             blocked_since,
             blocked_age_s,
             blocked_stale: stale,
-            claim_check: None,
+            claim_check,
         });
     }
     rows.sort_by(|left, right| {

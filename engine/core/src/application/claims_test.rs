@@ -1,9 +1,8 @@
 //! Ports `tests/test_claim_check.py`'s cases that stand on git and the
 //! service: a rebase's commits are not the session's, a session's move to
 //! review is checked and noted, a person's move is not a claim, and a flagged
-//! DONE check is noted once per key. The sweep's `done` row case waits on the
-//! sweep classifying `done` rows (WI-1518); its noting half is the once-key
-//! case here.
+//! DONE check is noted once per key, and the sweep flags a DONE claim on its
+//! `done` row and notes it once.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -501,4 +500,97 @@ fn the_note_names_the_mismatches_and_the_facts() {
     assert!(
         comment_body(&bare).ends_with("Facts: branch None, head ?, pushed None, new commits 0.")
     );
+}
+
+/// `wired`, with an engine that holds the session at its prompt after it said
+/// AUTOPILOT: DONE and claimed PR #193.
+fn context_with_done_engine(dir: &Path, checkout: &Path) -> Built {
+    let row = json!({
+        "id": ENGINE_ID,
+        "name": ENGINE_ID,
+        "activity": "waiting-for-input",
+        "alive": true,
+        "cwd": checkout.display().to_string(),
+        "created_at": started().to_iso(),
+        "last_output_at": started().to_iso(),
+        "done_at": started().to_iso(),
+        "last_reply_excerpt": "PR #193 was opened and merged.\nAUTOPILOT: DONE",
+    });
+    let transport: crate::adapters::engine::Transport =
+        std::sync::Arc::new(move |url: &str, _headers, _body, method: &str| {
+            let path = url
+                .trim_start_matches("http://engine")
+                .split('?')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let body = match (method, path.as_str()) {
+                ("GET", "/api/sessions") => json!({"sessions": [row.clone()], "hidden_count": 0}),
+                ("GET", "/api/sessions/sweep") => {
+                    json!([{"summary": row.clone(), "screen_tail": [], "ready": true}])
+                }
+                _ => return (404, b"{}".to_vec()),
+            };
+            (200, body.to_string().into_bytes())
+        });
+    let config = crate::config::VogtConfig {
+        data_dir: dir.to_path_buf(),
+        ..crate::config::VogtConfig::default()
+    };
+    build_context(
+        config,
+        Some(person()),
+        Some(StepClock::new(started())),
+        None,
+        None,
+        Some(crate::adapters::engine::EngineClient::new(
+            "http://engine",
+            None,
+            Some(transport),
+        )),
+        None,
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_wi_1707_claim_is_flagged_on_the_done_row() {
+    // `test_the_wi_1707_claim_is_flagged_on_the_done_row`: the sweep checks a
+    // DONE claim, says the mismatch in the row's reason, and notes it on the
+    // item once however often it is swept.
+    let base = temp("sweep-done");
+    let checkout = repo(&base);
+    let dir = wired(&base, &checkout);
+    let built = context_with_done_engine(&dir, &checkout);
+    let params = crate::application::services::sessions::SweepSessionsParams {
+        project: None,
+        screen_lines: 0,
+        stall_after_minutes: 10,
+    };
+    let result = crate::with_ctx!(&built, |ctx| {
+        crate::application::services::sessions::sweep_sessions(ctx, &params).unwrap()
+    });
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(row.attention, "done");
+    let check = row.claim_check.as_ref().expect("a done row is checked");
+    assert_eq!(check.new_commits, Some(0));
+    assert!(check
+        .mismatches
+        .iter()
+        .any(|line| line.contains("before this session started")));
+    assert!(
+        row.attention_reason.contains("claim check:"),
+        "{}",
+        row.attention_reason
+    );
+    crate::with_ctx!(&built, |ctx| {
+        crate::application::services::sessions::sweep_sessions(ctx, &params).unwrap()
+    });
+    let notes = comments(&built)
+        .into_iter()
+        .filter(|body| body.contains("Claim check (autopilot-done)"))
+        .count();
+    assert_eq!(notes, 1);
 }
