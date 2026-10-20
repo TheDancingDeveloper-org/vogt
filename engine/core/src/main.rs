@@ -83,8 +83,8 @@ enum Command {
         /// Refuse every write. The same switch as `VOGT_READ_ONLY`.
         #[arg(long)]
         read_only: bool,
-        /// Do not run the background sweep. There is no scheduler yet, so this
-        /// changes nothing.
+        /// Do not run the background collector schedule (the scheduled sweep
+        /// and budget settlement). `sweep_interval_seconds = 0` does the same.
         #[arg(long)]
         no_schedule: bool,
         /// PEM file with the TLS certificate. Given with `--tls-key` or not at all.
@@ -261,7 +261,7 @@ fn main() -> ExitCode {
             port,
             no_auth,
             read_only,
-            no_schedule: _,
+            no_schedule,
             tls_cert,
             tls_key,
             no_read_only: _,
@@ -272,6 +272,7 @@ fn main() -> ExitCode {
             json: cli.json,
             no_auth,
             read_only,
+            no_schedule,
             tls_cert: tls_cert.as_deref(),
             tls_key: tls_key.as_deref(),
         }),
@@ -670,6 +671,7 @@ struct ServeArgs<'a> {
     json: bool,
     no_auth: bool,
     read_only: bool,
+    no_schedule: bool,
     tls_cert: Option<&'a Path>,
     tls_key: Option<&'a Path>,
 }
@@ -728,6 +730,7 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
         json,
         no_auth,
         read_only,
+        no_schedule,
         tls_cert,
         tls_key,
     } = args;
@@ -797,6 +800,25 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
         },
     ));
     let router = health.merge(core_router(&built, &data_dir, no_auth, writes_enabled));
+    // The collector schedule (Python's `CollectorSchedule` in `build_server`):
+    // a scheduled sweep then budget settlement every `sweep_interval_seconds`,
+    // as the service principal, over the clock and id factory the routes share.
+    // `--no-schedule` passes zero, which is a disabled schedule.
+    let mut schedule = {
+        let mut scheduled_config = config.clone();
+        scheduled_config.data_dir = data_dir.clone();
+        let tick = crate::with_ctx!(&built, |ctx| adapters::http::scheduler::serve_tick(
+            scheduled_config,
+            std::sync::Arc::clone(&ctx.clock),
+            std::sync::Arc::clone(&ctx.id_factory),
+        ));
+        let interval = if no_schedule {
+            0
+        } else {
+            config.sweep_interval_seconds
+        };
+        adapters::http::scheduler::CollectorSchedule::new(tick, interval)
+    };
     // Outermost last: the line covers routing, authentication and the error
     // handlers, as Python's middleware does. The listener's scheme and bind
     // address travel with every request, for redirects and a missing Host.
@@ -844,30 +866,39 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
         if let Some(addr) = metrics_addr {
             adapters::http::metrics::start(addr).await?;
         }
-        match tls_cert {
-            Some(pem) => {
-                let tls = load_tls(pem, tls_key)?;
-                let handle = axum_server::Handle::new();
-                let signal = handle.clone();
-                tokio::spawn(async move {
-                    shutdown().await;
-                    signal.graceful_shutdown(None);
-                });
-                axum_server::bind_rustls(addr, tls)
-                    .handle(handle)
-                    .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+        // Started with the server and stopped after it, as Python's lifespan
+        // does: the schedule never outlives the listener, and stop waits for
+        // the sweep in flight.
+        schedule.start();
+        let served: std::io::Result<()> = async {
+            match tls_cert {
+                Some(pem) => {
+                    let tls = load_tls(pem, tls_key)?;
+                    let handle = axum_server::Handle::new();
+                    let signal = handle.clone();
+                    tokio::spawn(async move {
+                        shutdown().await;
+                        signal.graceful_shutdown(None);
+                    });
+                    axum_server::bind_rustls(addr, tls)
+                        .handle(handle)
+                        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                        .await
+                }
+                None => {
+                    let listener = tokio::net::TcpListener::bind(addr).await?;
+                    axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(shutdown())
                     .await
-            }
-            None => {
-                let listener = tokio::net::TcpListener::bind(addr).await?;
-                axum::serve(
-                    listener,
-                    router.into_make_service_with_connect_info::<SocketAddr>(),
-                )
-                .with_graceful_shutdown(shutdown())
-                .await
+                }
             }
         }
+        .await;
+        schedule.stop().await;
+        served
     });
     match result {
         Ok(()) => ExitCode::SUCCESS,

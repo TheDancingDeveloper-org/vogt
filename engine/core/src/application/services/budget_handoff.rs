@@ -19,9 +19,8 @@
 //!    the notes are the count the cap is read against.
 //!
 //! Idempotent by construction: a second pass finds the hand-off, and either the
-//! restart note or the newer session, and does nothing. Python runs it after
-//! every scheduled sweep; the Rust core has no in-process schedule yet, so it
-//! is not called from a loop here (see `main.rs`'s `--no-schedule`).
+//! restart note or the newer session, and does nothing. It runs after every
+//! scheduled sweep (`adapters/http/scheduler.rs`), as in Python.
 
 use std::io::Read;
 use std::path::Path;
