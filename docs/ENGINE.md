@@ -3926,6 +3926,9 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `decision.answer` | Operator-only | Unavailable: A person's answer, made deliberately in the Inbox, never by voice. |
 | `decision.list` | Operator-only | Unavailable: Lists decisions; for the GUI and for agents over MCP/CLI/REST. |
 | `decision.withdraw` | Operator-only | Unavailable: Withdrawing a decision; for the GUI and for agents over MCP/CLI/REST. |
+| `watch.create` | Operator-only | Unavailable: A session arming its own wake trigger; for agents over MCP/CLI/REST. |
+| `watch.list` | Operator-only | Unavailable: Lists armed and fired watches; for agents over MCP/CLI/REST. |
+| `watch.cancel` | Operator-only | Unavailable: Disarming a watch; for agents over MCP/CLI/REST. |
 | `token.issue` | Operator-only | Unavailable: Issues credentials that must never enter model context. |
 | `token.list` | Operator-only | Unavailable: Admin credential inventory. |
 | `token.revoke` | Operator-only | Unavailable: Admin credential revocation. |

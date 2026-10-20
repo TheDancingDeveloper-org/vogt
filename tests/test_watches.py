@@ -375,9 +375,8 @@ def test_cancel_expiry_and_a_refused_delivery(
     for attempt in range(1, MAX_ATTEMPTS):
         # Past each doubling delay (1, 2, 4, 8 min after the hour).
         offset = timedelta(hours=1, minutes=2**attempt * 2)
-        evaluate_watches(
-            dataclasses.replace(wired, clock=lambda o=offset: wired.clock() + o)
-        )
+        moment = wired.clock() + offset
+        evaluate_watches(dataclasses.replace(wired, clock=StepClock(moment)))
 
     by_id = {w.id: w for w in list_watches(wired, ListWatchesParams()).watches}
     assert by_id[cancelled.id].state == "cancelled"
