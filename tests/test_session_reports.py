@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import timedelta
 
 import pytest
 
@@ -16,6 +17,7 @@ from vogt.application.models import (
     SessionDigestParams,
     SessionReportParams,
     StartSessionParams,
+    StopSessionParams,
     SweepSessionsParams,
 )
 from vogt.application.services import (
@@ -26,6 +28,7 @@ from vogt.application.services import (
     register_project,
     report_session,
     start_session,
+    stop_session,
     sweep_sessions,
 )
 from vogt.core.oversight import DONE_WITHOUT_REPORT, result_reported
@@ -210,3 +213,44 @@ def test_a_result_this_turn_satisfies_the_gate_and_an_older_one_does_not() -> No
         report_kind="progress", report_at=after, turn_started_at=turn
     )
     assert result_reported(report_kind="result", report_at=after, turn_started_at=None)
+
+
+def test_credentials_in_a_report_are_redacted_everywhere(wired: AppContext) -> None:
+    session_id, _ = _start(wired)
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    result = report_session(
+        _as_session(wired, session_id),
+        _result(
+            summary=f"pushed with {token}",
+            blockers=[f"GITHUB_TOKEN={token} was denied"],
+        ),
+    )
+
+    stored = result.report.model_dump_json()
+    assert token not in stored
+    assert result.report.sha == "0123456789abcdef0123"
+    item = get_work(wired, GetWorkParams(ref="WI-1"))
+    assert all(token not in comment.body for comment in item.comments)
+    inbox = list_inbox(wired, InboxListParams()).entries
+    assert all(token not in entry.model_dump_json() for entry in inbox)
+
+
+def test_a_stopped_or_old_sessions_report_leaves_the_inbox(
+    wired: AppContext,
+) -> None:
+    session_id, _ = _start(wired)
+    report_session(_as_session(wired, session_id), _result())
+
+    def kinds(ctx: AppContext) -> list[str]:
+        return [
+            e.kind
+            for e in list_inbox(ctx, InboxListParams()).entries
+            if e.kind.startswith("session.report.")
+        ]
+
+    assert kinds(wired) == ["session.report.result"]
+    later = dataclasses.replace(wired, clock=lambda: wired.clock() + timedelta(days=8))
+    assert kinds(later) == []
+
+    stop_session(wired, StopSessionParams(id=session_id, reason=WHY))
+    assert kinds(wired) == []
