@@ -337,8 +337,8 @@ fn nudge(
         // The text, then the Enter that submits it. The Enter is sent only when
         // the text was taken.
         let delivered = || -> Result<bool, VogtError> {
-            Ok(engine.send_input(engine_id, &text, false, false)?
-                && engine.send_input(engine_id, "", true, false)?)
+            Ok(engine.send_input(engine_id, &text, false, false, None)?
+                && engine.send_input(engine_id, "", true, false, None)?)
         };
         match delivered() {
             Ok(true) => sent += 1,

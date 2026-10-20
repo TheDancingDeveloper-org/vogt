@@ -349,19 +349,26 @@ impl EngineClient {
     /// Write `text` to a session's PTY. `submit` appends a carriage return.
     /// `person` says whether the principal behind the input is a person: the
     /// engine refuses anyone else's input while a permission prompt is showing
-    /// (WI-983), raised here as `PersonRequired`. `Ok(false)` when the engine
-    /// has no such session.
+    /// (WI-983), raised here as `PersonRequired`. `overseer` is the engine id
+    /// of the oversight session relayed, which the engine lets answer a
+    /// permission prompt (WI-2028). `Ok(false)` when the engine has no such
+    /// session.
     pub fn send_input(
         &self,
         session_id: &str,
         text: &str,
         submit: bool,
         person: bool,
+        overseer: Option<&str>,
     ) -> Result<bool, VogtError> {
+        let mut body = serde_json::json!({"text": text, "submit": submit, "person": person});
+        if let Some(overseer) = overseer {
+            body["overseer"] = Value::String(overseer.to_string());
+        }
         let payload = self.call(
             &session_path(session_id, "/input"),
             "POST",
-            Some(&serde_json::json!({"text": text, "submit": submit, "person": person})),
+            Some(&body),
             true,
             None,
         )?;
@@ -557,7 +564,9 @@ impl EngineClient {
 
     /// Choose an option of the dialog on screen. A dialog that is gone, changed,
     /// or lacks the option is a `Conflict` naming why; a permission prompt
-    /// answered without `person` is `PersonRequired` (WI-983).
+    /// answered without `person` is `PersonRequired` (WI-983), unless
+    /// `overseer` names the oversight session answering, which the engine lets
+    /// answer a permission prompt (WI-2028).
     pub fn answer_session(
         &self,
         session_id: &str,
@@ -565,9 +574,13 @@ impl EngineClient {
         label: Option<&str>,
         expect_question: Option<&str>,
         person: bool,
+        overseer: Option<&str>,
     ) -> Result<Option<Value>, VogtError> {
         let mut body = Map::new();
         body.insert("person".to_string(), Value::Bool(person));
+        if let Some(overseer) = overseer {
+            body.insert("overseer".to_string(), Value::String(overseer.to_string()));
+        }
         if let Some(option) = option {
             body.insert("option".to_string(), Value::from(option));
         }
@@ -2567,7 +2580,7 @@ mod tests {
             r#"{"error":"forbidden: person required: session is showing a permission prompt"}"#,
         );
         let error = client(transport)
-            .send_input("s", "y", false, false)
+            .send_input("s", "y", false, false, None)
             .unwrap_err();
         assert_eq!(error.code(), "person_required");
         assert_eq!(
@@ -2597,9 +2610,11 @@ mod tests {
         // token, so both writes must send it explicitly.
         let (seen, transport) = scripted(200, r#"{"ok":true}"#);
         let client = client(transport);
-        assert!(client.send_input("s", "yes", true, false).unwrap());
+        assert!(client
+            .send_input("s", "yes", true, false, Some("eng-boss"))
+            .unwrap());
         client
-            .answer_session("s", Some(1), None, Some("allow?"), true)
+            .answer_session("s", Some(1), None, Some("allow?"), true, None)
             .unwrap();
         let sent = seen.lock().unwrap();
         assert!(sent[0].contains(r#""text":"yes","submit":true,"person":false"#));
@@ -2607,6 +2622,9 @@ mod tests {
         assert!(sent[1].contains(r#""option":1"#));
         assert!(sent[1].contains(r#""expect_question":"allow?""#));
         assert!(!sent[1].contains("label"));
+        // WI-2028: the oversight session relayed rides along when named.
+        assert!(sent[0].contains(r#""overseer":"eng-boss""#));
+        assert!(!sent[1].contains("overseer"));
     }
 
     #[test]
