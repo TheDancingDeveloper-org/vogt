@@ -520,6 +520,8 @@ fn pull_finding(
     payload.insert("implements".into(), implements(provider, repo, item));
     payload.insert("updated_at".into(), option_string(item.updated_at.clone()));
     payload.insert("closed_at".into(), option_string(item.closed_at.clone()));
+    payload.insert("merged_at".into(), option_string(item.merged_at.clone()));
+    payload.insert("merged_by".into(), option_string(item.merged_by.clone()));
     payload.insert("repo".into(), Value::String(repo.slug()));
     finding(
         KIND_PULL_REQUEST,
@@ -971,6 +973,8 @@ mod tests {
             updated_at: None,
             closed_at: None,
             source_url: None,
+            merged_at: Some("2026-10-17T09:00:00Z".into()),
+            merged_by: Some("sprooty".into()),
         };
         let _ = &mut pull;
         let directory = Directory {
@@ -988,6 +992,9 @@ mod tests {
             .find(|finding| finding.kind == KIND_PULL_REQUEST)
             .unwrap();
         assert_eq!(pr.payload["state"], Value::String("merged".into()));
+        // WI-1835: when and by whom it merged ride on the observation.
+        assert_eq!(pr.payload["merged_at"], "2026-10-17T09:00:00Z");
+        assert_eq!(pr.payload["merged_by"], "sprooty");
         let edges = pr.payload["implements"].as_array().unwrap();
         assert!(
             edges

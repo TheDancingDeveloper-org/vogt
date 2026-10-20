@@ -60,6 +60,84 @@ impl<T: ForgeTransport> GitHubProvider<T> {
             capabilities: capabilities(),
         }
     }
+
+    /// Fill `merged_by` on a merged PR from the single-PR read (WI-1835).
+    ///
+    /// The list page omits `merged_by`; `GET /pulls/{n}` carries it. Who merged
+    /// a PR never changes once it has merged, so the answer is cached per PR
+    /// for the life of the process and each merged PR costs one read, once.
+    /// A read that fails leaves `merged_by` empty rather than failing the sync.
+    fn with_merger(&self, repo: &RepoRef, mut pull: ForgePull) -> Result<ForgePull, VogtError> {
+        if !pull.merged || pull.merged_by.is_some() {
+            return Ok(pull);
+        }
+        let key = (
+            self.transport.api_root().to_owned(),
+            repo.slug(),
+            pull.number,
+        );
+        if let Some(cached) = merged_by_cache().lock().unwrap().get(&key) {
+            pull.merged_by = cached;
+            return Ok(pull);
+        }
+        let response = match self.transport.get(
+            &format!("/repos/{}/{}/pulls/{}", repo.owner, repo.repo, pull.number),
+            &[],
+        ) {
+            Ok(response) => response,
+            Err(VogtError::GitHubUnavailable(_)) => return Ok(pull),
+            Err(error) => return Err(error),
+        };
+        let login = match &response {
+            ForgeResponse::Json(serde_json::Value::Object(payload)) => payload
+                .get("merged_by")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|merger| merger.get("login"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        };
+        merged_by_cache().lock().unwrap().put(key, login.clone());
+        pull.merged_by = login;
+        Ok(pull)
+    }
+}
+
+/// Who merged each merged PR, keyed by API root, repository and number
+/// (WI-1835). Bounded, oldest entry first out. Python's `_MERGED_BY`.
+const MERGED_BY_CAP: usize = 4096;
+
+type MergedByKey = (String, String, i64);
+
+#[derive(Default)]
+struct MergedBy {
+    order: std::collections::VecDeque<MergedByKey>,
+    logins: std::collections::HashMap<MergedByKey, Option<String>>,
+}
+
+impl MergedBy {
+    fn get(&self, key: &MergedByKey) -> Option<Option<String>> {
+        self.logins.get(key).cloned()
+    }
+
+    /// Python only fills a key it does not hold, so a held key is left as is.
+    fn put(&mut self, key: MergedByKey, login: Option<String>) {
+        if self.logins.contains_key(&key) {
+            return;
+        }
+        if self.logins.len() >= MERGED_BY_CAP {
+            if let Some(oldest) = self.order.pop_front() {
+                self.logins.remove(&oldest);
+            }
+        }
+        self.order.push_back(key.clone());
+        self.logins.entry(key).or_insert(login);
+    }
+}
+
+fn merged_by_cache() -> &'static std::sync::Mutex<MergedBy> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<MergedBy>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(MergedBy::default()))
 }
 
 impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
@@ -230,7 +308,10 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
             pulls.retain(|pull| pull.updated_at.as_deref().is_none_or(|at| at >= since));
         }
         pulls.reverse();
-        Ok(pulls)
+        pulls
+            .into_iter()
+            .map(|pull| self.with_merger(repo, pull))
+            .collect()
     }
 
     fn releases(&self, repo: &RepoRef) -> Result<Vec<ForgeRelease>, VogtError> {
@@ -878,6 +959,12 @@ fn to_pull(repo: &RepoRef, item: &serde_json::Map<String, serde_json::Value>) ->
         updated_at: text(item.get("updated_at")).map(str::to_owned),
         closed_at: text(item.get("closed_at")).map(str::to_owned),
         source_url: text(item.get("html_url")).map(str::to_owned),
+        merged_at: text(item.get("merged_at")).map(str::to_owned),
+        merged_by: item
+            .get("merged_by")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|merger| text(merger.get("login")))
+            .map(str::to_owned),
     }
 }
 
@@ -1455,6 +1542,133 @@ mod tests {
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].name, "bug");
         assert_eq!(labels[0].color.as_deref(), Some("d73a4a"));
+    }
+
+    #[test]
+    fn a_merged_pull_gets_its_merger_from_the_single_pr_read_once() {
+        // WI-1835: GitHub's list page has `merged_at` but no `merged_by`, so a
+        // merged PR is read once on its own for it, and the answer is cached.
+        // The cache is process-wide, so this test owns its repository name.
+        let provider = GitHubProvider::new(Fixture::new(vec![
+            (
+                "/repos/acme/merger-cache/pulls/193",
+                serde_json::json!({
+                    "number": 193, "state": "closed", "merged": true,
+                    "merged_at": "2026-10-17T09:00:00Z",
+                    "merged_by": {"login": "sprooty", "type": "User"}
+                }),
+            ),
+            (
+                "/repos/acme/merger-cache/pulls",
+                serde_json::json!([
+                    {"number": 193, "title": "header button", "state": "closed",
+                     "merged_at": "2026-10-17T09:00:00Z",
+                     "head": {"ref": "wi-1707-x", "sha": "abc"},
+                     "user": {"login": "worker", "type": "Bot"}},
+                    {"number": 194, "title": "open", "state": "open"},
+                    {"number": 195, "title": "abandoned", "state": "closed", "merged_at": null}
+                ]),
+            ),
+        ]));
+        let repo = RepoRef {
+            host: HOST.to_owned(),
+            owner: "acme".to_owned(),
+            repo: "merger-cache".to_owned(),
+        };
+        let by_number = |pulls: Vec<ForgePull>| {
+            pulls
+                .into_iter()
+                .map(|pull| (pull.number, pull))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let pulls = by_number(provider.pulls_updated_since(&repo, None).unwrap());
+        let again = by_number(provider.pulls_updated_since(&repo, None).unwrap());
+
+        assert_eq!(pulls[&193].merged_by.as_deref(), Some("sprooty"));
+        assert_eq!(
+            pulls[&193].merged_at.as_deref(),
+            Some("2026-10-17T09:00:00Z")
+        );
+        assert_eq!(again[&193].merged_by.as_deref(), Some("sprooty"));
+        assert!(pulls[&194].merged_by.is_none() && pulls[&195].merged_by.is_none());
+        let single = provider
+            .transport
+            .seen
+            .borrow()
+            .iter()
+            .filter(|path| path.contains("/pulls/"))
+            .count();
+        assert_eq!(
+            single, 1,
+            "one single-PR read, for the merged PR, cached after"
+        );
+    }
+
+    #[test]
+    fn the_merger_cache_is_bounded_oldest_first_out() {
+        let mut cache = MergedBy::default();
+        let key = |number: i64| ("root".to_owned(), "o/r".to_owned(), number);
+        for number in 0..=MERGED_BY_CAP as i64 {
+            cache.put(key(number), Some(format!("m{number}")));
+        }
+        assert_eq!(cache.logins.len(), MERGED_BY_CAP);
+        assert_eq!(cache.get(&key(0)), None, "the oldest went first");
+        assert_eq!(cache.get(&key(1)), Some(Some("m1".to_owned())));
+        cache.put(key(1), None);
+        assert_eq!(
+            cache.get(&key(1)),
+            Some(Some("m1".to_owned())),
+            "a held key stays"
+        );
+    }
+
+    #[test]
+    fn a_failed_merger_read_leaves_merged_by_empty() {
+        let fixture = Fixture::new(vec![(
+            "/repos/acme/merger-fails/pulls",
+            serde_json::json!([
+                {"number": 5, "title": "landed", "state": "closed", "merged_at": "2026-10-17T09:00:00Z"}
+            ]),
+        )]);
+        struct Failing(Fixture);
+        impl ForgeTransport for Failing {
+            fn api_root(&self) -> &str {
+                self.0.api_root()
+            }
+            fn token(&self) -> Option<&str> {
+                self.0.token()
+            }
+            fn get(
+                &self,
+                path: &str,
+                query: &[(&str, String)],
+            ) -> Result<ForgeResponse, VogtError> {
+                if path.contains("/pulls/") {
+                    return Err(VogtError::GitHubUnavailable("GitHub returned 500".into()));
+                }
+                self.0.get(path, query)
+            }
+            fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
+                self.0.identity()
+            }
+            fn send(
+                &self,
+                method: WriteMethod,
+                path: &str,
+                body: Option<&serde_json::Value>,
+            ) -> Result<serde_json::Value, VogtError> {
+                self.0.send(method, path, body)
+            }
+        }
+        let provider = GitHubProvider::new(Failing(fixture));
+        let repo = RepoRef {
+            host: HOST.to_owned(),
+            owner: "acme".to_owned(),
+            repo: "merger-fails".to_owned(),
+        };
+        let pulls = provider.pulls_updated_since(&repo, None).unwrap();
+        assert!(pulls[0].merged);
+        assert_eq!(pulls[0].merged_by, None);
     }
 
     fn repo() -> RepoRef {
