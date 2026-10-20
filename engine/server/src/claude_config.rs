@@ -1277,6 +1277,7 @@ mod driven_policy_tests {
             "mcp__vogt__work_comment",
             "mcp__vogt__session_report_blocked",
             "mcp__vogt__session_report_unblocked",
+            "mcp__vogt__session_report",
         ] {
             assert!(allow.contains(&tool), "{tool} is always permitted");
         }

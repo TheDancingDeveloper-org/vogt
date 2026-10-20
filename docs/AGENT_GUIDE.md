@@ -486,6 +486,19 @@ Rules:
   they work, so `running` with a recent `last_output_at` is a long turn; a
   `last_output_at` many minutes old is worth a look.
 
+#### Reporting progress and results
+
+Post a short typed report with `session_report` instead of leaving your
+driver to read your transcript: `kind` (`progress`, `result`, `question` or
+`blocker`), a one- or two-sentence `summary`, and what applies of `branch`,
+`sha`, `pr`, `checks` (one per entry, with the outcome), `blockers` and
+`next_step`, plus a `reason`. Omit `id` from inside a session Vogt started.
+The report shows as `latest_report` on your `session_list` and
+`session_sweep` row, raises an Inbox entry and is left as a note on your work
+item. Post a `result` when the deliverable is done — a pushed branch, a
+review verdict — before you print `AUTOPILOT: DONE`; a deployment may require
+one before it takes DONE as done.
+
 #### When you, or a session you drive, need a person
 
 If you cannot go on without a person — a decision, a credential, an action
