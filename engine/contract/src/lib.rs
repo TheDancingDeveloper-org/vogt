@@ -810,10 +810,10 @@ pub struct AnswerRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person: Option<bool>,
     /// The engine id of the oversight session vogt-core is relaying, when
-    /// the answer comes from one (WI-1831). Read only from vogt-core's own
-    /// credential. The engine checks the role itself and lets that session
-    /// choose "Yes" only on an allow-listed command in the target's own
-    /// worktree (`oversight_answer`); everything else stays a person's.
+    /// the answer comes from one (WI-1831, WI-2028). Read only from
+    /// vogt-core's own credential. The engine checks the role itself and lets
+    /// that session answer a `permission` prompt (`oversight_answer`); other
+    /// kinds stay a person's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overseer: Option<String>,
 }

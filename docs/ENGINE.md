@@ -461,7 +461,8 @@ higher cap is not lowered, and a server nobody registered is not created. The
 rewrite is the same flock and atomic rename, and a config that does not parse
 is left alone.
 
-A driven Codex runs `-a on-request`, so every MCP tool call would otherwise
+A driven Codex on a stack that sets `ENGINE_CODEX_APPROVAL_POLICY=on-request`
+(the default is `never` since WI-2028) would have every MCP tool call
 stop at a permission prompt only a person may answer (WI-1634). The bundle
 therefore gives the estate's trusted servers `default_tools_approval_mode =
 "approve"`, the fork's per-server key that skips the prompt for that server
@@ -786,16 +787,15 @@ than these routes.
   a label matches several options. Requires `sessions` (WI-917). A
   permission prompt (`kind` `permission` or `read-outside-cwd`) is answered
   only by a person: anyone else gets `403 person required` and nothing is
-  typed (WI-983, below). One exception (WI-1831, `oversight_answer`):
-  vogt-core may name an `overseer` (the engine id of the oversight session it
-  relays). The engine checks that session's role itself, and then lets it
-  choose the plain `Yes` only on a one-line Bash command in an allow-listed
-  class (read-only git and `gh`, `git fetch`, a checkout of a ref, rebase
-  and push — `--force-with-lease` at most — of the checked-out, unprotected
-  branch, cargo/pnpm/uv build and test). No `cd`, `-C`, substitution,
-  redirection, pipes, absolute or `..` paths are allowed, and the target's
-  working directory must be a linked git worktree. Answers and refusals are
-  both audited (`vogt::audit`, `via=oversight`).
+  typed (WI-983, below). One exception (WI-1831, widened by WI-2028,
+  `oversight_answer`): vogt-core may name an `overseer` (the engine id of the
+  oversight session it relays) on `/answer` and on `/input`. The engine
+  checks that session's role itself (role `oversight`, live, not the target)
+  and then lets it answer a `permission` prompt with any option or keys; a
+  `read-outside-cwd` prompt stays a person's. `overseer` is read only from
+  vogt-core's own credential. Answers and refusals are both audited
+  (`vogt::audit`, `event=session.permission_answer`, `via=answer|input`,
+  with the overseer, question and command excerpt).
 - `GET /api/sessions/changes[?since=N&ids=&limit=]` and
   `GET /api/sessions/wait-any[?ids=&until=&cursor=&timeout_s=]` — the overseer
   delta (WI-1246, WI-1672). `cursor` is a sequence number, or `now` to skip
@@ -1622,14 +1622,19 @@ checks decide what it can finish on its own (WI-926; the design is
 - **Codex** (WI-1143) does not take Claude's `--settings` or
   `--permission-mode`. The engine maps the same three postures onto Codex
   flags, and unknown values are `400`:
-  - **default** (and a missing posture): `-a on-request -s danger-full-access`.
-    A `codex exec` launch omits `-a` (that subcommand rejects it) and keeps
-    the sandbox.
-  - **accept-edits** (`accept-edits` or `accept_edits`): `-a on-request -c
-    approvals_reviewer="auto_review" -s danger-full-access`. The `-a` pin is
-    what stops a user's `~/.codex/config.toml` `approval_policy = "never"`
-    from turning approvals off while the sandbox is `danger-full-access`;
-    the reviewer then answers the asks that pin produces. A `codex exec`
+  - **default** (and a missing posture): `-a <policy> -s danger-full-access`,
+    where `<policy>` is `ENGINE_CODEX_APPROVAL_POLICY` (config key
+    `codex_approval_policy`; one of `untrusted`, `on-failure`, `on-request`,
+    `never`; default **`never`**, WI-2028). With `never` a driven Codex
+    worker runs its commands without prompting, as the bypassed Claude Code
+    workers do; a stack sets `on-request` to restore per-command prompts
+    (which an oversight session may then answer). Any other value fails
+    engine startup. A `codex exec` launch omits `-a` (that subcommand
+    rejects it) and keeps the sandbox.
+  - **accept-edits** (`accept-edits` or `accept_edits`): `-a <policy> -c
+    approvals_reviewer="auto_review" -s danger-full-access`. The `-a` pin
+    stops a user's `~/.codex/config.toml` from choosing the approval policy;
+    under `on-request` the reviewer answers the asks that pin produces. A `codex exec`
     launch omits `-a` (that subcommand rejects it) and keeps the reviewer
     and the sandbox.
   - **bypass**: `--dangerously-bypass-approvals-and-sandbox` and nothing

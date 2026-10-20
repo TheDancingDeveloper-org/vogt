@@ -178,8 +178,8 @@ class Engine:
                 and verb in ("answer", "input")
                 and self.permission_prompt
                 and payload.get("person") is not True
-                # The fake engine finds an overseer's command allow-listed;
-                # the real decision is the engine's (`oversight_answer`).
+                # The fake engine lets an overseer answer; the real check of
+                # its role is the engine's (`oversight_answer`, WI-2028).
                 and not payload.get("overseer")
             ):
                 if verb == "answer":
@@ -1051,8 +1051,8 @@ def test_an_oversight_session_answers_a_permission_prompt_and_is_audited(
 ) -> None:
     """An autonomous fleet has no person at the prompt: the session the engine
     marks `oversight` answers for its workers, audited as oversight. It is
-    relayed by its engine id, not as a person, so the engine can hold it to
-    allow-listed commands in the worker's own worktree (WI-1831)."""
+    relayed by its engine id, not as a person, so the engine checks its role
+    and audits it with the command (WI-1831, WI-2028)."""
     from vogt.application.models import AnswerSessionParams
     from vogt.application.services import answer_session
 
@@ -1074,6 +1074,33 @@ def test_an_oversight_session_answers_a_permission_prompt_and_is_audited(
         )
     assert event.summary["person"] is False
     assert event.summary["oversight"] is True
+
+
+def test_an_oversight_session_answers_a_permission_prompt_with_keys(
+    wired: AppContext, engine: Engine
+) -> None:
+    """Keys typed into a worker's permission prompt are an answer too: an
+    oversight session's are relayed with its engine id and audited as
+    oversight (WI-2028); the same keys from a plain worker are refused
+    above."""
+    ses_id, _ = _started(wired)
+    engine.permission_prompt = True
+    engine.extra = {"role": "oversight"}
+    overseer = _as(wired, f"agent:engine:{UNLINKED}")
+    session_input(
+        overseer, SessionInputParams(id=ses_id, keys=["enter"], reason=WHY)
+    )
+    assert [
+        row["body"].get("overseer")
+        for row in engine.sent
+        if row["method"] == "POST" and row["path"].endswith("/input")
+    ] == [UNLINKED]
+    assert engine.persons() == [False]
+    with wired.declared.read() as view:
+        row = next(
+            r for r in view.list_audit(limit=50) if r.operation == "session.input"
+        )
+    assert row.actor_identity_ref == f"agent:engine:{UNLINKED}"
 
 
 def test_a_person_answers_a_permission_prompt_and_is_audited(

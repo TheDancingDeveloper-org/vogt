@@ -285,6 +285,13 @@ pub struct Config {
     /// Set `VOGT_CODEX_SESSION_ID=false` when the binary is stock npm Codex,
     /// which refuses an unknown flag and would not start.
     pub codex_session_id: bool,
+    /// Codex's `approval_policy` for a driven session's default and
+    /// accept-edits postures (`ENGINE_CODEX_APPROVAL_POLICY`, WI-2028): one of
+    /// `untrusted`, `on-failure`, `on-request`, `never`. `never` unless the
+    /// deployment says otherwise, so a worker runs the commands its task
+    /// needs instead of stopping for a person to approve each one; set
+    /// `on-request` to restore per-command prompts.
+    pub codex_approval_policy: String,
     /// `ENGINE_AGENT_AUTH_SECRETS`, parsed: what a deployment declared for
     /// sessions, and therefore the policy the on-demand secret broker
     /// enforces. Empty when nothing is declared, which turns the
@@ -544,6 +551,7 @@ struct FileConfig {
     auto_agent_auth: Option<bool>,
     agent_auth_helper: Option<String>,
     codex_session_id: Option<bool>,
+    codex_approval_policy: Option<String>,
     session_templates: Option<Vec<SessionTemplate>>,
     assistant_api_key: Option<String>,
     assistant_base_url: Option<String>,
@@ -716,6 +724,13 @@ pub fn load(
     .or(from_file.codex_session_id)
     .unwrap_or(true);
 
+    let codex_approval_policy = crate::agent_cli::parse_codex_approval_policy(
+        engine_env("ENGINE_CODEX_APPROVAL_POLICY")
+            .ok()
+            .as_deref()
+            .or(from_file.codex_approval_policy.as_deref()),
+    )?;
+
     let auto_agent_auth = match engine_env("ENGINE_AUTO_AGENT_AUTH") {
         Ok(v) => Some(parse_bool_env("ENGINE_AUTO_AGENT_AUTH", &v)?),
         Err(std::env::VarError::NotPresent) => None,
@@ -879,6 +894,7 @@ pub fn load(
         auto_agent_auth,
         agent_auth_helper,
         codex_session_id,
+        codex_approval_policy,
         agent_auth_secrets,
         agent_grant_projects: engine_env("ENGINE_AGENT_GRANT_PROJECTS")
             .map(|text| {
@@ -2194,6 +2210,7 @@ mod prefix_tests {
             std::env::remove_var("ENGINE_TOKEN");
             std::env::remove_var("ENGINE_BIND");
             std::env::remove_var("VOGT_CODEX_SESSION_ID");
+            std::env::remove_var("ENGINE_CODEX_APPROVAL_POLICY");
         };
         clear();
 
@@ -2228,6 +2245,16 @@ mod prefix_tests {
         unsafe { std::env::set_var("VOGT_CODEX_SESSION_ID", "false") };
         let cfg = load(Some(&cfg_path), None, None).unwrap();
         assert!(!cfg.codex_session_id, "stock npm Codex opts out explicitly");
+
+        // WI-2028: driven Codex workers do not stop for approval unless the
+        // deployment asks for the per-command prompts back. A value Codex does
+        // not accept is a startup error, never handed to the CLI.
+        assert_eq!(cfg.codex_approval_policy, "never");
+        unsafe { std::env::set_var("ENGINE_CODEX_APPROVAL_POLICY", "on-request") };
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert_eq!(cfg.codex_approval_policy, "on-request");
+        unsafe { std::env::set_var("ENGINE_CODEX_APPROVAL_POLICY", "sometimes") };
+        assert!(load(Some(&cfg_path), None, None).is_err());
 
         clear();
     }

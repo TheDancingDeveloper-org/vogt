@@ -217,6 +217,14 @@ refusals. Before this change the core relayed any oversight answer as a
 person's, so nothing limited what an overseer could approve. `session_input`
 stays person-only while a permission prompt shows.
 
+**Superseded by WI-2028 (2026-10-20).** The operator removed the allow-list
+limit on oversight answers: an oversight session may answer any `permission`
+prompt, through `session_answer` or `session_input` keys, audited as the
+oversight session with the command excerpt. Non-oversight callers still get
+`person_required`, and `read-outside-cwd` stays a person's. Driven Codex
+workers now launch with `-a never` by default (`ENGINE_CODEX_APPROVAL_POLICY`
+restores `on-request` per stack), so they stop prompting at all.
+
 Deployments that replace this file (the ops overlay's
 `/run/vogt/driven-session-settings.json`) must copy the new `permissions`
 block to get the worker-loop allow list.
