@@ -1637,7 +1637,8 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
 
     While the session shows a permission prompt, every keystroke answers it,
     so the engine refuses input from anyone but a person (`PersonRequired`,
-    WI-983); this says which the caller is (`_answers_as_person`).
+    WI-983) or an oversight session (WI-2028); this says which the caller is
+    (`_answers_as_person`, `_is_oversight_caller`).
     """
     reason = writes.validate_reason(params.reason)
     text = params.text or ""
@@ -1668,6 +1669,14 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
     person = _answers_as_person(ctx)
+    # An oversight session is relayed by its engine id: the engine lets it
+    # answer a worker's permission prompt and audits it as that session
+    # (WI-2028). Anyone else still gets `PersonRequired`.
+    overseer = (
+        _caller_engine_session_id(ctx)
+        if not person and _is_oversight_caller(ctx, engine)
+        else None
+    )
 
     writes_in_order: list[tuple[str, bool]] = []
     if text:
@@ -1704,7 +1713,14 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
                 engine, engine_id, params.id, text, before=before, person=person
             )
         else:
-            _send_all(engine, engine_id, params.id, writes_in_order, person=person)
+            _send_all(
+                engine,
+                engine_id,
+                params.id,
+                writes_in_order,
+                person=person,
+                overseer=overseer,
+            )
     except Conflict:
         # The engine refuses input to a hibernated session. Typing into one
         # is asking for it back: wake it — resuming its conversation, with a
@@ -1741,7 +1757,14 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
                 engine, engine_id, params.id, text, before=before, person=person
             )
         else:
-            _send_all(engine, engine_id, params.id, writes_in_order, person=person)
+            _send_all(
+                engine,
+                engine_id,
+                params.id,
+                writes_in_order,
+                person=person,
+                overseer=overseer,
+            )
 
     if woken_verdict is not None or confirming:
         verdict = woken_verdict or _confirm_delivery(
@@ -1774,6 +1797,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             "delivery": verdict.delivery,
             "woke": woke,
             "person": person,
+            "oversight": overseer is not None,
         },
         event_kind=SESSION_INPUT_EVENT,
     )
@@ -2068,9 +2092,12 @@ def _send_all(
     chunks: list[tuple[str, bool]],
     *,
     person: bool,
+    overseer: str | None = None,
 ) -> None:
     for chunk, submit in chunks:
-        if not engine.send_input(engine_id, chunk, submit=submit, person=person):
+        if not engine.send_input(
+            engine_id, chunk, submit=submit, person=person, overseer=overseer
+        ):
             msg = f"the engine has no live session {named!r}"
             raise NotFound(msg)
 
@@ -2983,10 +3010,9 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
 
     A permission prompt (not a startup gate) is a person's to answer: the
     engine refuses it for anyone else with `PersonRequired` (WI-983), and
-    this decides which the caller is (`_answers_as_person`). The one
-    exception is an oversight session choosing "Yes" on an allow-listed
-    command in the worker's own worktree, which the engine decides and
-    audits (WI-1831).
+    this decides which the caller is (`_answers_as_person`). The exception
+    is an oversight session, which may answer a worker's permission prompt;
+    the engine checks its role and audits it with the command (WI-2028).
     """
     reason = writes.validate_reason(params.reason)
     if (params.option is None) == (params.label is None or not params.label.strip()):
@@ -2996,9 +3022,8 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
     # A person answers anything. An oversight session is relayed by its
-    # engine id, not as a person: the engine lets it choose "Yes" only on an
-    # allow-listed command in the worker's own worktree and refuses the rest
-    # with `PersonRequired` (WI-1831). The audit line records which answered.
+    # engine id, not as a person: the engine lets it answer a permission
+    # prompt and refuses other kinds with `PersonRequired` (WI-2028). The audit line records which answered.
     by_person = _answers_as_person(ctx)
     by_oversight = not by_person and _is_oversight_caller(ctx, engine)
     answered = engine.answer_session(

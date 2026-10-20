@@ -215,6 +215,7 @@ fn test_config(stub: &str) -> Config {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
         codex_session_id: false,
+        codex_approval_policy: "never".to_string(),
         agent_auth_secrets: vec![],
         agent_grant_projects: vec![],
         session_templates: vec![],

@@ -476,6 +476,7 @@ impl SessionRegistry {
                 ),
                 add_dirs: recorded.map(|r| r.add_dirs.as_slice()).unwrap_or(&[]),
                 opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
+                codex_approval_policy: self.cfg.codex_approval_policy.as_str(),
             },
         )?;
         if let Some(rewritten) = launch.command {

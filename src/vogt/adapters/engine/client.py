@@ -1061,7 +1061,13 @@ class EngineClient:
         return EngineSessionLog.from_payload(payload)
 
     def send_input(
-        self, session_id: str, text: str, *, submit: bool = False, person: bool = False
+        self,
+        session_id: str,
+        text: str,
+        *,
+        submit: bool = False,
+        person: bool = False,
+        overseer: str | None = None,
     ) -> bool:
         """Write `text` to a session's PTY (`submit` appends a carriage return).
 
@@ -1070,12 +1076,17 @@ class EngineClient:
         the limit rather than an HTTP status. `person` says whether the
         principal behind the input is a person: the engine refuses anyone
         else's input while a permission prompt is showing (WI-983), raised
-        here as `PersonRequired`.
+        here as `PersonRequired`. `overseer` is the engine id of the oversight
+        session relayed, which the engine lets answer a permission prompt
+        (WI-2028).
         """
+        body: dict[str, Any] = {"text": text, "submit": submit, "person": person}
+        if overseer is not None:
+            body["overseer"] = overseer
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/input",
             method="POST",
-            payload={"text": text, "submit": submit, "person": person},
+            payload=body,
             allow_missing=True,
         )
         return payload is not None
@@ -1226,8 +1237,8 @@ class EngineClient:
         `AnswerResult`, or `None` on a 404. A dialog that is gone, changed,
         or lacks the option is a `Conflict` naming why; a permission prompt
         answered without `person` is `PersonRequired` (WI-983), unless
-        `overseer` names the oversight session answering and the engine
-        finds the command allow-listed (WI-1831)."""
+        `overseer` names the oversight session answering, which the engine
+        lets answer a permission prompt (WI-2028)."""
         body: dict[str, Any] = {"person": person}
         if overseer is not None:
             body["overseer"] = overseer

@@ -43,6 +43,7 @@ fn test_config() -> Config {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
         codex_session_id: false,
+        codex_approval_policy: "never".to_string(),
         agent_auth_secrets: vec![],
         agent_grant_projects: vec![],
         // The synthetic agent CLI is registered as a session preset in the
@@ -13738,6 +13739,101 @@ async fn only_a_person_answers_a_permission_prompt() {
         .unwrap();
     assert_eq!(answered.status(), StatusCode::OK);
     live_output_containing(&operator, &base, &relayed, &["chose 1"]).await;
+}
+
+/// WI-2028: vogt-core relaying an oversight session (`overseer`) answers a
+/// worker's permission prompt, by `/answer` and by `/input` keys. The same
+/// relay naming a plain worker, or the worker itself, is still refused.
+#[tokio::test]
+async fn an_oversight_session_answers_a_workers_permission_prompt() {
+    let (base, tmp, _guard) = wi983_front_door().await;
+    let operator = client_for(TEST_TOKEN);
+    let core = client_for(WI983_STACK);
+    let script = dialog_script(tmp.path(), "ask.py", "Do you want to proceed?");
+    let new_shell = |name: &'static str| {
+        let operator = operator.clone();
+        let base = base.clone();
+        async move {
+            let made: Value = operator
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({ "name": name, "command": ["/bin/sh"] }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            made["id"].as_str().unwrap().to_string()
+        }
+    };
+    let overseer = new_shell("overseer").await;
+    let promoted = operator
+        .post(format!("{base}/api/sessions/{overseer}/role"))
+        .json(&json!({ "role": "oversight" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promoted.status(), StatusCode::OK);
+    let plain = new_shell("plain worker").await;
+
+    let (id, approval) = session_showing_dialog(&operator, &base, "asking", &script).await;
+    assert_eq!(approval["kind"], "permission", "{approval}");
+    // A worker that is not oversight, and the asking session itself, are not
+    // overseers: refused, nothing typed.
+    for named in [plain.as_str(), id.as_str()] {
+        for (route, body) in [
+            (
+                "answer",
+                json!({ "option": 1, "person": false, "overseer": named }),
+            ),
+            (
+                "input",
+                json!({ "text": "1", "person": false, "overseer": named }),
+            ),
+        ] {
+            let refused = core
+                .post(format!("{base}/api/sessions/{id}/{route}"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{route} {named}");
+            let said: Value = refused.json().await.unwrap();
+            assert!(
+                said["error"].as_str().unwrap().contains("person required"),
+                "{said}"
+            );
+        }
+    }
+    // `overseer` from anyone but vogt-core is ignored.
+    let forged = client_for(WI983_SESSION)
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "option": 1, "overseer": overseer }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+
+    // The oversight session answers by option.
+    let answered = core
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "option": 1, "person": false, "overseer": overseer }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &id, &["chose 1"]).await;
+
+    // And by keys.
+    let (keyed, _) = session_showing_dialog(&operator, &base, "keyed", &script).await;
+    let typed = core
+        .post(format!("{base}/api/sessions/{keyed}/input"))
+        .json(&json!({ "text": "\r", "person": false, "overseer": overseer }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(typed.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &keyed, &["chose 1"]).await;
 }
 
 /// WI-983 stops at permission prompts. An overseer still drives: it types
