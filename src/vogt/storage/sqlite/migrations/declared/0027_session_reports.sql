@@ -1,4 +1,4 @@
--- 0025_session_reports — a session's own typed report of where it is (WI-2039).
+-- 0026_session_reports — a session's own typed report of where it is (WI-2039).
 --
 -- A worker posts a short structured message — progress, result, question or
 -- blocker — instead of leaving oversight to scrape its transcript. Keyed by
