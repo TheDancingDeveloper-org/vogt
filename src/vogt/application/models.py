@@ -4622,6 +4622,13 @@ WatchKind = Literal["pr", "ci", "work_item", "session"]
 WatchStateView = Literal["active", "fired", "failed", "cancelled", "expired"]
 
 
+PrWatchEvent = Literal["merged", "closed"]
+
+
+def _both_pr_events() -> list[PrWatchEvent]:
+    return ["merged", "closed"]
+
+
 class WatchTriggerModel(Params):
     """What a watch waits for (WI-2036). `kind` picks the fields that apply:
 
@@ -4643,8 +4650,8 @@ class WatchTriggerModel(Params):
     kind: WatchKind
     project: str | None = Field(default=None, description="Project slug (pr, ci).")
     number: int | None = Field(default=None, ge=1, description="PR number (pr).")
-    on: list[Literal["merged", "closed"]] = Field(
-        default_factory=lambda: ["merged", "closed"],
+    on: list[PrWatchEvent] = Field(
+        default_factory=_both_pr_events,
         description="PR states that fire the watch (pr).",
     )
     sha: str | None = Field(
