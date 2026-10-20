@@ -1865,6 +1865,21 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   credentials: vogt-core's `session.wake` mints a new `VOGT_HTTP_TOKEN`. The
   engine mints a new broker grant. The history row and log continue.
   Waking a live session returns it unchanged.
+- **Cold-wake compaction (WI-2037).** A wake with `fresh_prompt` (at most
+  64 KiB) does not resume. The agent starts a new conversation, pinned to a
+  new conversation id so it does not collide with the old one. Its first
+  prompt is the summary, then the git facts of the session directory, then
+  the original brief (capped at 32 KiB), all written to the brief file.
+  After that, the record resumes the new conversation. vogt-core decides
+  when to send it: `cold_wake_compaction` is on (it is off by default), the
+  session has not set `cold_wake_opt_out`, its agent is Claude, Klaudia or
+  Codex, the session was hibernated longer than its provider's
+  `cold_wake_ttl_seconds`, and the last `economics.context_tokens` reading
+  is at least `cold_wake_threshold_tokens`. vogt-core builds the summary
+  from the last reply and the work item's newest hand-off, without a model
+  call. Every `session.wake` audit record carries the decision under
+  `cold_wake`. A hibernated session's summary carries its last
+  `economics` reading so that vogt-core can make this check.
 - **Restarts.** On `SIGTERM` the engine hibernates every session it can
   (`trigger: "shutdown"`) before the history drain, and an oversight session
   even when it is a plain shell. At boot, every record without a process
