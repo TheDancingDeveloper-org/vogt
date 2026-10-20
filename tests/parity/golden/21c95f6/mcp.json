@@ -4400,5 +4400,651 @@
     },
     "is_error": false,
     "operation": "engine.status"
+  },
+  {
+    "body": {
+      "adopted": true,
+      "adopted_at": "2026-01-02T03:04:11Z",
+      "detail": "parity already had that posture; nothing changed",
+      "project": "parity",
+      "status": "not_checked"
+    },
+    "is_error": false,
+    "operation": "contract.adopt"
+  },
+  {
+    "body": {
+      "declared": true,
+      "detail": "README.md is recorded as unmeetable by parity; it is reported, and not counted as a failure",
+      "exemptions": [
+        {
+          "declared_at": "2026-01-02T03:04:47Z",
+          "declared_by": "local:parity",
+          "reason": "parity harness exemption",
+          "rule": "required_file",
+          "target": "README.md"
+        }
+      ],
+      "project": "parity"
+    },
+    "is_error": false,
+    "operation": "contract.inapplicable"
+  },
+  {
+    "body": {
+      "adopted": true,
+      "adopted_at": "2026-01-02T03:04:11Z",
+      "contract_version": "v1",
+      "detail": "nobody has checked this project's contract; run `contract check`",
+      "failing": [],
+      "inapplicable": [
+        {
+          "applicable": false,
+          "detail": "declared inapplicable to this project: parity harness exemption",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "README.md"
+        }
+      ],
+      "project": "parity",
+      "status": "not_checked"
+    },
+    "is_error": false,
+    "operation": "compliance"
+  },
+  {
+    "body": {
+      "checked_at": "2026-01-02T03:04:49Z",
+      "contract_version": "v1",
+      "criteria": [
+        {
+          "applicable": true,
+          "detail": "directory exists",
+          "rule": "path.exists",
+          "satisfied": true,
+          "target": "<root>/proj"
+        },
+        {
+          "applicable": true,
+          "detail": "present",
+          "rule": "required_file",
+          "satisfied": true,
+          "target": "AGENTS.md"
+        },
+        {
+          "applicable": true,
+          "detail": "present",
+          "rule": "required_file",
+          "satisfied": true,
+          "target": "README.md"
+        },
+        {
+          "applicable": true,
+          "detail": "present",
+          "rule": "required_file",
+          "satisfied": true,
+          "target": "LICENSE"
+        },
+        {
+          "applicable": true,
+          "detail": "present",
+          "rule": "required_dir",
+          "satisfied": true,
+          "target": "docs"
+        },
+        {
+          "applicable": true,
+          "detail": "present",
+          "rule": "required_dir",
+          "satisfied": true,
+          "target": "design"
+        },
+        {
+          "applicable": true,
+          "detail": "present",
+          "rule": "required_dir",
+          "satisfied": true,
+          "target": "src"
+        }
+      ],
+      "failing": [],
+      "inapplicable": [],
+      "path": "<root>/proj",
+      "project": "parity",
+      "recommendations": [],
+      "recorded": true,
+      "status": "compliant"
+    },
+    "is_error": false,
+    "operation": "contract.check"
+  },
+  {
+    "body": {
+      "declared": false,
+      "detail": "README.md applies to parity again",
+      "exemptions": [],
+      "project": "parity"
+    },
+    "is_error": false,
+    "operation": "contract.applicable"
+  },
+  {
+    "body": {
+      "adopted": false,
+      "detail": "this project has not adopted the contract, so there is nothing for it to comply with \u2014 this is not a fault. `contract adopt` opts in.",
+      "project": "parity",
+      "status": "not_applicable"
+    },
+    "is_error": false,
+    "operation": "contract.decline"
+  },
+  {
+    "body": {
+      "adopted": true,
+      "adopted_at": "2026-01-02T03:04:55Z",
+      "detail": "the contract applies to this project from now on; `contract check` evaluates it",
+      "project": "parity",
+      "status": "not_checked"
+    },
+    "is_error": false,
+    "operation": "contract.adopt"
+  },
+  {
+    "body": {
+      "observations": [
+        {
+          "collector": "git-local",
+          "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+          "id": "obs_0004",
+          "kind": "git.checkout",
+          "observed_at": "2026-01-02T03:05:09Z",
+          "payload": {
+            "detail": "no .git directory; this project is a plain folder",
+            "is_git_repository": false
+          },
+          "project_id": "prj_0001",
+          "promoted": false,
+          "subject_key": "git:parity",
+          "sweep_id": ""
+        },
+        {
+          "collector": "git-local",
+          "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+          "id": "obs_0005",
+          "kind": "git.checkout",
+          "observed_at": "2026-01-02T03:05:09Z",
+          "payload": {
+            "detail": "no .git directory; this project is a plain folder",
+            "is_git_repository": false
+          },
+          "project_id": "prj_0002",
+          "promoted": false,
+          "subject_key": "git:second",
+          "sweep_id": ""
+        },
+        {
+          "collector": "dep-refs",
+          "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+          "id": "obs_0001",
+          "kind": "dep_scan",
+          "observed_at": "2026-01-02T03:05:06Z",
+          "payload": {
+            "manifests_read": 0,
+            "references": 0,
+            "root_exists": true,
+            "unreadable_manifests": [],
+            "unsupported_manifests": []
+          },
+          "project_id": "prj_0003",
+          "promoted": false,
+          "subject_key": "depscan:broken",
+          "sweep_id": ""
+        },
+        {
+          "collector": "dep-refs",
+          "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+          "id": "obs_0002",
+          "kind": "dep_scan",
+          "observed_at": "2026-01-02T03:05:06Z",
+          "payload": {
+            "manifests_read": 0,
+            "references": 0,
+            "root_exists": true,
+            "unreadable_manifests": [],
+            "unsupported_manifests": []
+          },
+          "project_id": "prj_0001",
+          "promoted": false,
+          "subject_key": "depscan:parity",
+          "sweep_id": ""
+        },
+        {
+          "collector": "dep-refs",
+          "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
+          "id": "obs_0003",
+          "kind": "dep_scan",
+          "observed_at": "2026-01-02T03:05:06Z",
+          "payload": {
+            "manifests_read": 0,
+            "references": 0,
+            "root_exists": false,
+            "unreadable_manifests": [],
+            "unsupported_manifests": []
+          },
+          "project_id": "prj_0002",
+          "promoted": false,
+          "subject_key": "depscan:second",
+          "sweep_id": ""
+        },
+        {
+          "collector": "contract-checker",
+          "content_digest": "<path-bearing>",
+          "id": "obs_0006",
+          "kind": "contract.check",
+          "observed_at": "2026-01-02T03:04:49Z",
+          "payload": {
+            "contract_version": "v1",
+            "evaluated": [
+              {
+                "rule": "path.exists",
+                "satisfied": true,
+                "target": "<root>/proj"
+              },
+              {
+                "rule": "required_file",
+                "satisfied": true,
+                "target": "AGENTS.md"
+              },
+              {
+                "rule": "required_file",
+                "satisfied": true,
+                "target": "README.md"
+              },
+              {
+                "rule": "required_file",
+                "satisfied": true,
+                "target": "LICENSE"
+              },
+              {
+                "rule": "required_dir",
+                "satisfied": true,
+                "target": "docs"
+              },
+              {
+                "rule": "required_dir",
+                "satisfied": true,
+                "target": "design"
+              },
+              {
+                "rule": "required_dir",
+                "satisfied": true,
+                "target": "src"
+              }
+            ],
+            "failing": [],
+            "status": "compliant"
+          },
+          "project_id": "prj_0001",
+          "promoted": false,
+          "subject_key": "contract:parity",
+          "sweep_id": ""
+        }
+      ],
+      "total": 6
+    },
+    "is_error": false,
+    "operation": "observations.list"
+  },
+  {
+    "body": {
+      "suppression": "<volatile>"
+    },
+    "is_error": false,
+    "operation": "suppress"
+  },
+  {
+    "body": {
+      "suppressions": [
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "created_at": "2026-01-02T03:04:57Z",
+          "id": "sup_0001",
+          "match_kind": "exact",
+          "reason": "parity harness",
+          "subject_key_or_pattern": "git:parity"
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "suppression.list"
+  },
+  {
+    "body": {
+      "suppression": "<volatile>"
+    },
+    "is_error": false,
+    "operation": "suppression.revoke"
+  },
+  {
+    "body": {
+      "suppressions": [
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "created_at": "2026-01-02T03:04:57Z",
+          "id": "sup_0001",
+          "match_kind": "exact",
+          "reason": "parity harness",
+          "revoked_at": "2026-01-02T03:04:59Z",
+          "revoked_reason": "parity harness",
+          "subject_key_or_pattern": "git:parity"
+        }
+      ]
+    },
+    "is_error": false,
+    "operation": "suppression.list"
+  },
+  {
+    "body": {
+      "horizon_days": 180,
+      "kept_latest": 0,
+      "kept_referenced": 0,
+      "removed": 0
+    },
+    "is_error": false,
+    "operation": "observations.prune"
+  },
+  {
+    "body": {
+      "already_open": 0,
+      "auto_acceptable_kinds": [
+        "forge_state_mismatch",
+        "version_mismatch"
+      ],
+      "auto_accepted": [],
+      "not_collected": [],
+      "raised": [],
+      "superseded": []
+    },
+    "is_error": false,
+    "operation": "drift.detect"
+  },
+  {
+    "body": {
+      "freshness": {
+        "age_seconds": 13,
+        "collectors": {
+          "contract-checker": "13s ago (ok)",
+          "dep-refs": "-4s ago (ok)",
+          "git-local": "-20s ago (partial)",
+          "mirrored-source": "-10s ago (ok)",
+          "source-markers": "-13s ago (ok)"
+        },
+        "detail": "at least one collector reported a partial or failed sweep",
+        "oldest_relevant_sweep": "2026-01-02T03:04:50Z",
+        "status": "partial"
+      },
+      "human_gated": {
+        "broken_path_dependency": "the target is inside this project and is not there; only somebody who knows whether it moved or was deleted can say what to do",
+        "ci_red_vs_healthy": "a red build is a fact about the build, not a decision about the project's lifecycle state \u2014 somebody has to say which is wrong",
+        "initiative_checkbox_drift": "a checkbox was ticked upstream and the member's workflow state was not; only somebody who knows which is right can say whether to move the item or let the next re-render restore the box",
+        "initiative_tracking_close": "the initiative is closed here; whether its tracking issue should be closed upstream is a person's call \u2014 Vogt proposes it, never writes it",
+        "referenced_issue_state_mismatch": "the reference was read out of the item's own text rather than adopted as a link, and only somebody who knows which register is right can say whether to close the issue or reopen the item",
+        "unresolved_dependency": "accepting this asserts the target is not a project; usually it is a project nobody has registered yet",
+        "update_automation_gap": "turning on a security toggle is a change to the repository's settings, not to Vogt's data; accepting only records the judgement",
+        "vanished_upstream": "accepting this asserts an upstream object is gone for good; a repo transfer or a permissions change looks identical from here"
+      },
+      "proposals": []
+    },
+    "is_error": false,
+    "operation": "drift.list"
+  },
+  {
+    "body": {
+      "text": "not_found: no drift proposal 'dft_0001'"
+    },
+    "error_code": "not_found",
+    "is_error": true,
+    "operation": "drift.resolve"
+  },
+  {
+    "body": {
+      "declared": {
+        "suppressions": [
+          {
+            "actor_id": "act_0001",
+            "created_at": "2026-01-02T03:04:57+00:00",
+            "id": "sup_0001",
+            "match_kind": "exact",
+            "reason": "parity harness",
+            "revoked_at": "2026-01-02T03:04:59+00:00",
+            "revoked_by_actor_id": "act_0001",
+            "revoked_reason": "parity harness",
+            "scope_project_id": null,
+            "subject_key_or_pattern": "git:parity"
+          }
+        ]
+      },
+      "observed": {
+        "latest_observations": [
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+            "kind": "dep_scan",
+            "observation_id": "obs_0001",
+            "observed_at": "2026-01-02T03:05:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0003",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:broken"
+          },
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+            "kind": "dep_scan",
+            "observation_id": "obs_0002",
+            "observed_at": "2026-01-02T03:05:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:parity"
+          },
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
+            "kind": "dep_scan",
+            "observation_id": "obs_0003",
+            "observed_at": "2026-01-02T03:05:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0002",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:second"
+          },
+          {
+            "collector": "git-local",
+            "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+            "kind": "git.checkout",
+            "observation_id": "obs_0004",
+            "observed_at": "2026-01-02T03:05:09+00:00",
+            "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "git:parity"
+          },
+          {
+            "collector": "git-local",
+            "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+            "kind": "git.checkout",
+            "observation_id": "obs_0005",
+            "observed_at": "2026-01-02T03:05:09+00:00",
+            "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
+            "project_id": "prj_0002",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "git:second"
+          },
+          {
+            "collector": "contract-checker",
+            "content_digest": "<path-bearing>",
+            "kind": "contract.check",
+            "observation_id": "obs_0006",
+            "observed_at": "2026-01-02T03:04:49+00:00",
+            "payload": "{\"contract_version\": \"v1\", \"evaluated\": [{\"rule\": \"path.exists\", \"satisfied\": true, \"target\": \"<root>/proj\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"AGENTS.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"README.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"LICENSE\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"docs\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"design\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"src\", \"tracked\": null}], \"failing\": [], \"status\": \"compliant\"}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "contract:parity"
+          }
+        ],
+        "observations": [
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+            "id": "obs_0001",
+            "kind": "dep_scan",
+            "observed_at": "2026-01-02T03:05:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0003",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:broken",
+            "sweep_id": "swp_0001"
+          },
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
+            "id": "obs_0002",
+            "kind": "dep_scan",
+            "observed_at": "2026-01-02T03:05:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:parity",
+            "sweep_id": "swp_0001"
+          },
+          {
+            "collector": "dep-refs",
+            "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
+            "id": "obs_0003",
+            "kind": "dep_scan",
+            "observed_at": "2026-01-02T03:05:06+00:00",
+            "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
+            "project_id": "prj_0002",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "depscan:second",
+            "sweep_id": "swp_0001"
+          },
+          {
+            "collector": "git-local",
+            "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+            "id": "obs_0004",
+            "kind": "git.checkout",
+            "observed_at": "2026-01-02T03:05:09+00:00",
+            "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "git:parity",
+            "sweep_id": "swp_0002"
+          },
+          {
+            "collector": "git-local",
+            "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
+            "id": "obs_0005",
+            "kind": "git.checkout",
+            "observed_at": "2026-01-02T03:05:09+00:00",
+            "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
+            "project_id": "prj_0002",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "git:second",
+            "sweep_id": "swp_0002"
+          },
+          {
+            "collector": "contract-checker",
+            "content_digest": "<path-bearing>",
+            "id": "obs_0006",
+            "kind": "contract.check",
+            "observed_at": "2026-01-02T03:04:49+00:00",
+            "payload": "{\"contract_version\": \"v1\", \"evaluated\": [{\"rule\": \"path.exists\", \"satisfied\": true, \"target\": \"<root>/proj\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"AGENTS.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"README.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"LICENSE\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"docs\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"design\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"src\", \"tracked\": null}], \"failing\": [], \"status\": \"compliant\"}",
+            "project_id": "prj_0001",
+            "promoted": 0,
+            "source_url": null,
+            "subject_key": "contract:parity",
+            "sweep_id": "swp_0006"
+          }
+        ],
+        "sweeps": [
+          {
+            "collector": "dep-refs",
+            "detail": null,
+            "finished_at": "2026-01-02T03:05:07+00:00",
+            "id": "swp_0001",
+            "outcome": "ok",
+            "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
+            "started_at": "2026-01-02T03:05:05+00:00",
+            "stats": "{\"projects\": 3, \"new\": 3, \"unchanged\": 0, \"failed_projects\": 0}"
+          },
+          {
+            "collector": "git-local",
+            "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
+            "finished_at": "2026-01-02T03:05:10+00:00",
+            "id": "swp_0002",
+            "outcome": "partial",
+            "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
+            "started_at": "2026-01-02T03:05:08+00:00",
+            "stats": "{\"projects\": 3, \"new\": 2, \"unchanged\": 0, \"failed_projects\": 1}"
+          },
+          {
+            "collector": "mirrored-source",
+            "detail": null,
+            "finished_at": "2026-01-02T03:05:13+00:00",
+            "id": "swp_0003",
+            "outcome": "ok",
+            "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
+            "started_at": "2026-01-02T03:05:11+00:00",
+            "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
+          },
+          {
+            "collector": "source-markers",
+            "detail": null,
+            "finished_at": "2026-01-02T03:05:16+00:00",
+            "id": "swp_0004",
+            "outcome": "ok",
+            "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
+            "started_at": "2026-01-02T03:05:14+00:00",
+            "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
+          },
+          {
+            "collector": "git-local",
+            "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
+            "finished_at": "2026-01-02T03:05:23+00:00",
+            "id": "swp_0005",
+            "outcome": "partial",
+            "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
+            "started_at": "2026-01-02T03:05:21+00:00",
+            "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 2, \"failed_projects\": 1}"
+          },
+          {
+            "collector": "contract-checker",
+            "detail": null,
+            "finished_at": "2026-01-02T03:04:50+00:00",
+            "id": "swp_0006",
+            "outcome": "ok",
+            "scope": "[\"prj_0001\"]",
+            "started_at": "2026-01-02T03:04:49+00:00",
+            "stats": "{\"projects\": 1, \"new\": 1, \"unchanged\": 0}"
+          }
+        ]
+      }
+    },
+    "operation": "dump.s5"
   }
 ]

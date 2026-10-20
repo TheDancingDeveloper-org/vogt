@@ -508,7 +508,7 @@ def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     recorded.append(
                         {
                             "operation": step["operation"],
-                            "body": _dump(data, _dump_names(step)),
+                            "body": _dump(data, _dump_names(step), step.get("tables")),
                         }
                     )
                     continue
@@ -698,7 +698,7 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             # later step cannot hide a change an earlier one wrote. `true`
             # dumps both stores; a store name dumps just that one.
             if step.get("dump"):
-                body = _dump(data, _dump_names(step))
+                body = _dump(data, _dump_names(step), step.get("tables"))
                 _blank_payload_digests(body)
                 answers.append(
                     {"operation": step["operation"], "exit": 0, "body": body}
@@ -792,9 +792,14 @@ def _blank_payload_digests(dumped: dict[str, Any]) -> None:
 
 
 def _dump(
-    data: Path, names: tuple[str, ...] = ("declared", "observed")
+    data: Path,
+    names: tuple[str, ...] = ("declared", "observed"),
+    only: list[str] | None = None,
 ) -> dict[str, Any]:
     """Every non-empty table in the named stores.
+
+    A dump step's `tables` list keeps the dump to the tables that step is
+    about, so a late dump does not drag in rows other steps already pin.
 
     Both stores after init by default. A dump step names the one it wants:
     the observed store after a sweep holds the findings and the coverage rows
@@ -821,6 +826,8 @@ def _dump(
         ]
         dumped: dict[str, Any] = {}
         for table in tables:
+            if only is not None and table not in only:
+                continue
             rows = [
                 _normalise(dict(row), data.parent, data)
                 for row in conn.execute(f"SELECT * FROM {table}")
@@ -931,7 +938,9 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         {
                             "operation": step["operation"],
                             "result": _normalise(
-                                _dump(data, _dump_names(step)), Path(scratch), data
+                                _dump(data, _dump_names(step), step.get("tables")),
+                                Path(scratch),
+                                data,
                             ),
                         }
                     )
@@ -1100,6 +1109,7 @@ def _walk(
         accepted = _product_versions() if blank_version else set()
         digests = rules.get("digests", {})
         path_bearing = set(digests.get("path_bearing_operations", []))
+        path_bearing_kinds = set(digests.get("path_bearing_observation_kinds", []))
         walked = {
             key: (
                 "<version>"
@@ -1113,6 +1123,8 @@ def _walk(
         }
         if walked.get("operation") in path_bearing and "payload_digest" in walked:
             walked["payload_digest"] = "<path-bearing>"
+        if walked.get("kind") in path_bearing_kinds and "content_digest" in walked:
+            walked["content_digest"] = "<path-bearing>"
         if (
             in_schema
             and schema["sort_any_of"]

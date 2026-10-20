@@ -65,7 +65,13 @@ tokens = [{ needle_kind = "root", token = "<root>" }, { needle_kind = "data", to
 # what the answer and the declared tables say about it, which is everything
 # the payload held.
 why = "a digest over a payload that carries the run's temporary root is not comparable across runs"
-path_bearing_operations = ["project.register", "project.create", "project.import"]
+# contract.check names the checked project's root in its audit payload too (over
+# HTTP the checked project is `second`, under the run's temporary root).
+path_bearing_operations = ["project.register", "project.create", "project.import", "contract.check"]
+# A contract.check observation's payload names the checked project's root, so
+# its content_digest moves with the temporary root too (two Python runs
+# disagree on it). Its payload is still compared verbatim.
+path_bearing_observation_kinds = ["contract.check"]
 
 [version]
 # The product version is stamped at build time, and only the answers that
