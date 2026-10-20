@@ -529,6 +529,17 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     (
+        "session.report",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "kind": "result",
+            "summary": "pushed the branch",
+            "branch": "wi-1-thing",
+            "checks": ["pytest: green"],
+            "reason": WHY,
+        },
+    ),
+    (
         "session.report_unblocked",
         lambda seen: {"id": seen["session.start"]["session"]["id"], "reason": WHY},
     ),

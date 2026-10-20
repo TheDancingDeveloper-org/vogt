@@ -134,6 +134,7 @@ from vogt.application.services._policy_conflicts import (
 )
 from vogt.application.services.claims import check_claim, record_claim_check
 from vogt.application.services.preferences import dispatch_settings
+from vogt.application.services.reports import latest_reports, one_line
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
 from vogt.collectors.base import CollectorError
@@ -584,6 +585,7 @@ def _digest_of(
         extra[name] = value
     blocked = None if summary.blocked is None else summary.blocked.blocker
     approval = summary.approval
+    report = summary.latest_report
     return SessionDigest(
         id=summary.id,
         name=summary.name,
@@ -597,7 +599,12 @@ def _digest_of(
         ),
         turn_started_at=summary.turn_started_at,
         done_at=summary.done_at,
-        last_reply_excerpt=_clip(summary.last_reply_excerpt),
+        # A session's own report says what it did better than a clipped
+        # reply does, and in fewer tokens (WI-2039): it replaces the excerpt.
+        last_reply_excerpt=None
+        if report is not None
+        else _clip(summary.last_reply_excerpt),
+        report=None if report is None else one_line(report),
         template=summary.template,
         question=None if approval is None else approval.question,
         question_kind=None if approval is None else approval.kind,
@@ -853,6 +860,22 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             delivery.codex_error_wedge(tuple(entry.screen_tail)) is not None
         ):
             verdict = oversight.Verdict("waiting", oversight.WEDGED)
+        if (
+            verdict.attention == "done"
+            and ctx.config.autopilot_done_requires_result_report
+            and not oversight.result_reported(
+                report_kind=None
+                if summary.latest_report is None
+                else summary.latest_report.kind,
+                report_at=None
+                if summary.latest_report is None
+                else summary.latest_report.created_at,
+                turn_started_at=summary.turn_started_at,
+            )
+        ):
+            # WI-2039: a DONE line without a result report is not taken as
+            # done; oversight asks for the report instead.
+            verdict = oversight.Verdict("waiting", oversight.DONE_WITHOUT_REPORT)
         reason = verdict.reason
         claim_check = None
         if verdict.attention == "done" and summary.work_item is not None:
@@ -1062,6 +1085,16 @@ def _rows(
         templates = {
             summary.engine_session_id: summary.template for summary in summaries
         }
+        # Each row's newest report (WI-2039): one indexed read for the page.
+        reports = latest_reports(
+            view, [summary.engine_session_id for summary in summaries]
+        )
+        summaries = [
+            summary
+            if (reported := reports.get(summary.engine_session_id)) is None
+            else summary.model_copy(update={"latest_report": reported})
+            for summary in summaries
+        ]
 
     # Outside the read transaction: this is file I/O, and an excerpt that
     # cannot be had is a null, never an error.
@@ -1491,6 +1524,8 @@ def digest(ctx: AppContext, params: SessionDigestParams) -> SessionDigestResult:
         engine_session,
         None if target.session is None else target.session.template,
     )
+    with ctx.declared.read() as view:
+        report = latest_reports(view, [engine_session.id]).get(engine_session.id)
     return SessionDigestResult(
         id=params.id,
         name=engine_session.name or None,
@@ -1498,6 +1533,7 @@ def digest(ctx: AppContext, params: SessionDigestParams) -> SessionDigestResult:
         activity=engine_session.activity,
         blocked=_blocked(engine_session.blocked),
         last_reply_excerpt=excerpt,
+        latest_report=report,
         turns=turns,
         context_tokens=context,
         peak_context_tokens=peak,

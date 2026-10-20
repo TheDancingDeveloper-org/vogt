@@ -76,6 +76,10 @@
 # default policy: behaviour
 # ci_watch_notify_sessions = true
 
+# When true, the session sweep treats an `AUTOPILOT: DONE` as done only if the session posted a `result` report (`session.report`) since its turn began; otherwise the row reads `waiting` with the reason `done without a result report`, so oversight asks for one instead of trusting the line. Off by default.
+# default policy: behaviour
+# autopilot_done_requires_result_report = false
+
 # Deployment lanes `deployed_versions` reports on, each a table with `name`, `project` (a registered slug), `branch` (default `main`), and a source: `receipt_repo` + `receipt_path` (a JSON receipt a deploy pipeline commits, read through the configured forge) and/or `version_url` (a running instance's public JSON version endpoint, e.g. Vogt's `/api/config`). Empty means the `deploy-lanes` collector is not registered and deployed versions are reported as not configured. A receipt whose status says the deploy or its smoke test failed raises an Inbox alert.
 # default policy: behaviour
 # deploy_lanes = [{ name = "dev", project = "my-app", version_url = "https://dev.example.com/api/config" }]

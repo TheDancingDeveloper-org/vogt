@@ -352,6 +352,17 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    autopilot_done_requires_result_report: bool = Field(
+        default=False,
+        description=(
+            "When true, the session sweep treats an `AUTOPILOT: DONE` as done "
+            "only if the session posted a `result` report (`session.report`) "
+            "since its turn began; otherwise the row reads `waiting` with the "
+            "reason `done without a result report`, so oversight asks for one "
+            "instead of trusting the line. Off by default."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     deploy_lanes: tuple[DeployLane, ...] = Field(
         default=(),
         description=(
