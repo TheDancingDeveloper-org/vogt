@@ -1304,11 +1304,16 @@ class EngineClient:
         *,
         env: dict[str, str] | None = None,
         force: bool = False,
+        fresh_prompt: str | None = None,
     ) -> EngineSession | None:
         """Start a hibernated session again under its own id, resuming its
         conversation, with `env` set on top of what the engine recorded (which
         never holds a secret). A live session comes back as it is. `None` on
         a 404.
+
+        With `fresh_prompt` (a cold-wake compaction, WI-2037) the engine does
+        not resume: it starts a new conversation whose first prompt is this
+        summary, followed by the session's git facts and original brief.
         """
         body: dict[str, Any] = {}
         if env:
@@ -1317,6 +1322,8 @@ class EngineClient:
         # when it changes what the wake does.
         if force:
             body["force"] = True
+        if fresh_prompt:
+            body["fresh_prompt"] = fresh_prompt
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/wake",
             method="POST",
