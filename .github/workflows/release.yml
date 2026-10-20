@@ -1,9 +1,11 @@
 name: release
 
 # Tag-triggered only: a push to main can never publish a release. And
-# publishing is not deploying: this workflow promotes signed images; a
+# publishing is not deploying: this workflow promotes built images; a
 # deployment moves only when its operator pins the published digest
-# (docs/DEPLOYMENT.md).
+# (docs/DEPLOYMENT.md). Nothing here signs: image signing was dropped
+# (operator decision, 2026-10-20), so a digest is trusted by its registry
+# name and attestations, not by a signature.
 #
 # ── Build once, promote by digest ─────────────────────────────────────────
 #
@@ -17,18 +19,15 @@ name: release
 #   1. prove the tag is on main and names the version the source carries;
 #   2. prove `build.yml` ran for this commit on main and its four image jobs
 #      succeeded, resolve each `sha-<commit>` tag to its digest, and verify
-#      the digest carries build.yml's own signature for this exact commit plus
-#      its SBOM and provenance attestations — anything missing FAILS the
-#      release; nothing is ever rebuilt as a fallback;
+#      the digest carries its SBOM and provenance attestations — anything
+#      missing FAILS the release; nothing is ever rebuilt as a fallback;
 #   3. retag those digests `X.Y.Z`, `X.Y` and `latest` with
 #      `docker buildx imagetools create --prefer-index=false` (a registry-side
 #      copy of the original manifest bytes: no pull, no rebuild, no new index,
 #      so the digest is unchanged — and every new tag is asserted to resolve
 #      to it);
-#   4. sign the same digests keylessly under THIS workflow's identity
-#      (`release.yml@refs/tags/v*`), which is what deployments verify;
-#   5. build and sign the Android shell (the app is not a container image, so
-#      it is still built at tag time) and write the GitHub Release with a
+#   4. build the Android shell (the app is not a container image, so it is
+#      still built at tag time) and write the GitHub Release with a
 #      machine-readable `vogt-release-manifest.json` naming the source sha and
 #      every digest, so a deployment can match it against its dev receipt.
 #
@@ -48,7 +47,7 @@ permissions:
 env:
   # The core alone — the verifiable build input of the product (the stack
   # image copies `/opt/vogt` out of it by digest), not the product. Promoted
-  # and release-signed with the pair so the manifest records all four.
+  # and promoted with the pair so the manifest records all four.
   # Nothing tells an operator to deploy it (DEPLOYMENT.md).
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
   # The product: core plus session engine, PWA and agent CLIs in one
@@ -202,10 +201,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # Keyless signing: the workflow's own OIDC identity is the signer, so
-      # there is no key to store or rotate and the signature binds to this
-      # repository, this workflow and this tag.
-      id-token: write
     outputs:
       core: ${{ steps.resolve.outputs.core }}
       stack: ${{ steps.resolve.outputs.stack }}
@@ -218,8 +213,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
       - id: tags
         name: the semver tags this release moves
@@ -241,17 +234,15 @@ jobs:
           echo "will tag: ${tags}"
 
       - id: resolve
-        name: resolve and verify build.yml's digests for this commit
+        name: resolve and check build.yml's digests for this commit
         env:
           TAG_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           build_tag="${BUILD_TAG_PREFIX}${TAG_SHA:0:${BUILD_TAG_SHA_LENGTH}}"
-          # Only build.yml, on main, at exactly this commit, may have signed
-          # what is promoted. The workflow-sha extension in the Fulcio
-          # certificate is what ties the digest to the full commit, not the
-          # short tag it was found by.
-          build_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/build.yml@refs/heads/main"
+          # The digest is found by build.yml's sha- tag for this commit, and the
+          # build-run gate above proved build.yml published it. There is no
+          # signature check: image signing was dropped.
           fail=""
           for pair in "core=${IMAGE}" "stack=${STACK_IMAGE}" "workbench=${STACK_WORKBENCH_IMAGE}" "voice=${VOICE_IMAGE}"; do
             name="${pair%%=*}"; repo="${pair#*=}"
@@ -266,14 +257,6 @@ jobs:
               sha256:*) ;;
               *) echo "::error::${name}: could not read a digest for ${ref}"; fail=1; continue ;;
             esac
-            if ! cosign verify \
-                --certificate-identity "$build_identity" \
-                --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-                --certificate-github-workflow-sha "$TAG_SHA" \
-                "${repo}@${digest}" >/dev/null; then
-              echo "::error::${name}: ${repo}@${digest} carries no build.yml signature for ${TAG_SHA}; refusing to promote it."
-              fail=1; continue
-            fi
             # build.yml pushes with `provenance: true` and `sbom: true`, so the
             # attestations live in the image index beside the image and travel
             # with the digest. A release has always carried both; a digest
@@ -325,23 +308,6 @@ jobs:
             echo "${repo}: ${TAGS} -> ${digest}"
           done
 
-      - name: sign the same digests as the release
-        env:
-          CORE_DIGEST: ${{ steps.resolve.outputs.core }}
-          STACK_DIGEST: ${{ steps.resolve.outputs.stack }}
-          WORKBENCH_DIGEST: ${{ steps.resolve.outputs.workbench }}
-          VOICE_DIGEST: ${{ steps.resolve.outputs.voice }}
-        run: |
-          set -euo pipefail
-          # The digest, never a tag: a tag can be moved after signing, and a
-          # signature over a movable reference proves nothing. This adds the
-          # release.yml@refs/tags/v* signature beside build.yml's; deployments
-          # verify the release identity (DEPLOYMENT.md §6).
-          cosign sign --yes "${IMAGE}@${CORE_DIGEST}"
-          cosign sign --yes "${STACK_IMAGE}@${STACK_DIGEST}"
-          cosign sign --yes "${STACK_WORKBENCH_IMAGE}@${WORKBENCH_DIGEST}"
-          cosign sign --yes "${VOICE_IMAGE}@${VOICE_DIGEST}"
-
       - name: report what to pin
         env:
           TAGS: ${{ steps.tags.outputs.tags }}
@@ -354,7 +320,7 @@ jobs:
           {
             echo "## Promoted (built once by build.yml, not rebuilt)"
             echo
-            echo "Built by ${BUILD_RUN}; tagged \`${TAGS}\` and release-signed:"
+            echo "Built by ${BUILD_RUN}; tagged \`${TAGS}\`:"
             echo
             echo '```'
             echo "VOGT_STACK_IMAGE=${STACK_IMAGE}@${STACK_DIGEST}"
@@ -610,7 +576,6 @@ jobs:
             --arg build_run_id "$BUILD_RUN_ID" \
             --arg build_run_url "$BUILD_RUN_URL" \
             --arg release_run_url "$RELEASE_RUN_URL" \
-            --arg repository "$GITHUB_REPOSITORY" \
             --arg guide "https://github.com/TheDancingDeveloper-org/vogt/blob/main/docs/DEPLOYMENT.md" \
             '{
               schema: $schema,
@@ -638,12 +603,6 @@ jobs:
                 release_run_url: $release_run_url
               },
               provenance: {
-                cosign: "keyless signatures over the same digests from .github/workflows/release.yml (at release) and .github/workflows/build.yml (at build)",
-                cosign_identities: {
-                  release: "https://github.com/\($repository)/.github/workflows/release.yml@refs/tags/\($tag)",
-                  build: "https://github.com/\($repository)/.github/workflows/build.yml@refs/heads/main"
-                },
-                cosign_issuer: "https://token.actions.githubusercontent.com",
                 sbom: "BuildKit SBOM and provenance attestations recorded in each image index by build.yml, carried by the digest"
               },
               deployment_guide: $guide,
