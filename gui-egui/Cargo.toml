@@ -1,0 +1,18 @@
+# The Vogt GUI on egui and fluent2-egui (WI-1806). A workspace of its own so the
+# engine's lockfile and Rust floor stay untouched: fluent2-egui needs Rust 1.95.
+[workspace]
+resolver = "3"
+members = ["vogt-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+rust-version = "1.95"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+unwrap_used = "warn"

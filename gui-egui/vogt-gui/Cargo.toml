@@ -1,0 +1,36 @@
+[package]
+name = "vogt-gui"
+description = "Vogt GUI proof of concept on egui and fluent2-egui (desktop and wasm)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Pinned to the v0.2.0 tag (bfb14ff): the first release with MarkdownView and the List.
+fluent2-egui = { git = "https://github.com/TheDancingDeveloper-org/fluent2-egui.git", tag = "v0.2.0", features = ["markdown"] }
+egui = "0.36"
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
+ehttp = { version = "0.7", features = ["streaming"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+web-time = "1"
+log = "0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = { version = "0.11", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Location", "Document", "HtmlCanvasElement"] }
+
+[dev-dependencies]
+egui_kittest = "0.36"
