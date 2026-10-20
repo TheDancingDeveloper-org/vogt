@@ -2234,7 +2234,10 @@ async fn session_child_receives_its_own_session_id() {
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
-    let detail: SessionDetail = loop {
+    // The exit can be recorded before the last of the child's output is read
+    // off the PTY, so keep reading until the id shows or the deadline passes.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let printed = loop {
         let detail: SessionDetail = client
             .get(format!("{base}/api/sessions/{id}"))
             .send()
@@ -2243,16 +2246,17 @@ async fn session_child_receives_its_own_session_id() {
             .json()
             .await
             .unwrap();
-        if detail.summary.exit_code.is_some() {
-            break detail;
+        let snapshot = base64::engine::general_purpose::STANDARD
+            .decode(detail.scrollback_base64.as_bytes())
+            .unwrap();
+        let printed = String::from_utf8_lossy(&snapshot).into_owned();
+        if printed.contains(&id)
+            || (detail.summary.exit_code.is_some() && std::time::Instant::now() > deadline)
+        {
+            break printed;
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     };
-
-    let snapshot = base64::engine::general_purpose::STANDARD
-        .decode(detail.scrollback_base64.as_bytes())
-        .unwrap();
-    let printed = String::from_utf8_lossy(&snapshot);
     assert!(
         printed.contains(&id),
         "child should see its own session id; got {printed:?}"
