@@ -450,6 +450,12 @@ pub struct LandingPolicy {
     pub linear_history: bool,
     #[serde(default = "operator_default")]
     pub deploy_by: String,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub initiative_bases: BTreeMap<String, String>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub long_lived_branches: Vec<String>,
 }
 
 /// How a review of this project's work is run. Guidance until enforced.

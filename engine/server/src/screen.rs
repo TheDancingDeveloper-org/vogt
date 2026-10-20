@@ -77,6 +77,11 @@ impl Terminal {
         }
     }
 
+    /// Whether the program has turned bracketed paste on (`CSI ? 2004 h`).
+    pub fn bracketed_paste(&self) -> bool {
+        self.parser.screen().bracketed_paste()
+    }
+
     /// The visible screen and up to `scrollback_lines` lines above it.
     pub fn render(&mut self, scrollback_lines: usize) -> (Rendered, Vec<String>) {
         read_parser(&mut self.parser, scrollback_lines)
@@ -165,6 +170,35 @@ pub struct Rendered {
     pub lines: Vec<String>,
     pub cursor: ScreenCursor,
     pub title: Option<String>,
+}
+
+/// The bytes `/input` writes for `text`, then Enter when `submit`.
+///
+/// Multi-line text typed raw into Claude Code lands as soft line breaks in
+/// its input box, and the Enter after it does not submit (WI-1870, seen
+/// live). When the program has bracketed paste on, multi-line text goes as
+/// one paste — newlines normalised to `\n`, and any paste-end marker inside
+/// it dropped so the text cannot close the paste early — and the Enter
+/// after it submits. Single-line text, and any text to a program without
+/// bracketed paste, is written as typed.
+pub fn input_bytes(text: &str, bracketed_paste: bool, submit: bool) -> Vec<u8> {
+    const START: &str = "\x1b[200~";
+    const END: &str = "\x1b[201~";
+    let multi_line = text.contains(['\n', '\r']);
+    let mut out = if bracketed_paste && multi_line {
+        let body = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace(END, "")
+            .replace(START, "");
+        format!("{START}{body}{END}").into_bytes()
+    } else {
+        text.as_bytes().to_vec()
+    };
+    if submit {
+        out.push(b'\r');
+    }
+    out
 }
 
 /// Replay `bytes` into a fresh `rows` x `cols` terminal and read it back.
@@ -793,6 +827,36 @@ mod tests {
             }
             assert_eq!(r.lines[1], "~ tick29", "limit {limit}: {r:?}");
         }
+    }
+
+    #[test]
+    fn multi_line_input_is_one_paste_when_the_program_asked_for_it() {
+        // WI-1870: raw newlines are soft breaks in Claude Code's box.
+        assert_eq!(
+            input_bytes("one\r\ntwo\nthree", true, true),
+            b"\x1b[200~one\ntwo\nthree\x1b[201~\r".to_vec()
+        );
+        assert_eq!(
+            input_bytes("a\n\x1b[201~b", true, false),
+            b"\x1b[200~a\nb\x1b[201~".to_vec(),
+            "a paste-end inside the text cannot end the paste early"
+        );
+        assert_eq!(input_bytes("one line", true, true), b"one line\r".to_vec());
+        assert_eq!(
+            input_bytes("a\nb", false, true),
+            b"a\nb\r".to_vec(),
+            "no bracketed paste: written as typed"
+        );
+    }
+
+    #[test]
+    fn the_grid_tracks_bracketed_paste() {
+        let mut terminal = Terminal::new(24, 80);
+        assert!(!terminal.bracketed_paste());
+        terminal.process(b"\x1b[?2004h");
+        assert!(terminal.bracketed_paste());
+        terminal.process(b"\x1b[?2004l");
+        assert!(!terminal.bracketed_paste());
     }
 
     #[test]

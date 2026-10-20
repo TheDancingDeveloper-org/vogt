@@ -64,7 +64,7 @@ pub(super) fn opened(script: Option<Arc<Script>>) -> Built {
     )
 }
 
-fn opened_as(script: Option<Arc<Script>>, principal: Principal) -> Built {
+pub(super) fn opened_as(script: Option<Arc<Script>>, principal: Principal) -> Built {
     let dir = std::env::temp_dir().join(format!("vogt-ses-{}-{}", std::process::id(), unique()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

@@ -514,13 +514,15 @@ describe("a lost stream is indicated and reconciles on reconnect", () => {
     // believing it was connected forever, with every surface quiet and
     // nothing on screen saying so.
     vogt.stream.drop();
-    await waitFor(() => expect(isConnected()).toBe(false));
-
+    // The reopen lands inside the grace period (DISCONNECT_GRACE_MS), so the
+    // header is never shown as disconnected; a loss that outlasts the grace
+    // is covered by the store's own tests.
     await waitFor(() => expect(vogt.stream.opens()).toBeGreaterThan(1), {
       timeout: 5_000,
     });
     await vogt.stream.opened();
     await settle();
+    expect(isConnected()).toBe(true);
 
     vogt.route("GET /work", {
       body: { items: [workItem({ state: "in_progress" })], total: 1 },

@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use super::dispatch::{
-    resolve, validate, DispatchSettings, ESCALATE_KEY, MAX_WORKERS_KEY, PROFILES_KEY, PURPOSES,
-    REVIEW_BY_OVERSIGHT_KEY,
+    resolve, validate, DispatchSettings, BUDGET_RESTARTS_KEY, ESCALATE_KEY, MAX_WORKERS_KEY,
+    PROFILES_KEY, PURPOSES, REVIEW_BY_OVERSIGHT_KEY,
 };
 
 fn table(entries: &[(&str, Value)]) -> DispatchSettings {
@@ -178,5 +178,45 @@ fn each_key_is_validated_by_its_own_shape() {
     assert_eq!(
         validate("dispatch.profiles", &json!({})).unwrap(),
         json!({})
+    );
+}
+
+#[test]
+fn the_turn_budget_is_sized_by_the_model_it_runs() {
+    let t = table(&[]);
+    let implement = &t.profiles["implement"];
+    assert_eq!(implement.turns_for(Some("haiku")), Some(200));
+    assert_eq!(
+        implement.turns_for(Some("claude-haiku-4-5-20251001")),
+        Some(200)
+    );
+    assert_eq!(implement.turns_for(Some("sonnet-haikuish")), Some(120));
+    assert_eq!(implement.turns_for(Some("grok-4.7")), Some(120));
+    assert_eq!(implement.turns_for(None), Some(120));
+}
+
+#[test]
+fn a_model_turn_override_merges_and_is_validated() {
+    let t = table(&[(
+        PROFILES_KEY,
+        json!({"review": {"budget_turns_by_model": {"haiku": 30}}}),
+    )]);
+    assert_eq!(t.profiles["review"].turns_for(Some("haiku")), Some(30));
+    assert_eq!(t.profiles["review"].turns_for(Some("opus")), Some(40));
+    assert!(validate(
+        PROFILES_KEY,
+        &json!({"review": {"budget_turns_by_model": {"haiku": 0}}})
+    )
+    .is_err());
+}
+
+#[test]
+fn the_budget_restart_cap_defaults_to_one_and_can_be_off() {
+    assert_eq!(table(&[]).budget_restarts_per_item, 1);
+    let off = table(&[(BUDGET_RESTARTS_KEY, json!({"value": 0}))]);
+    assert_eq!(off.budget_restarts_per_item, 0);
+    assert_eq!(
+        validate(BUDGET_RESTARTS_KEY, &json!({"value": 0})).unwrap(),
+        json!({"value": 0})
     );
 }

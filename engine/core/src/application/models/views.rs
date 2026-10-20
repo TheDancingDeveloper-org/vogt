@@ -672,7 +672,7 @@ pub struct HandoffFields {
 pub struct SessionApproval {
     pub question: String,
     pub command_excerpt: String,
-    /// permission (a tool call) / folder-trust / external-imports (a CLAUDE.md importing files from outside) / read-outside-cwd.
+    /// permission (a tool call) / folder-trust / external-imports (a CLAUDE.md importing files from outside) / read-outside-cwd / question (the agent asks a question with a menu of answers).
     #[serde(default = "default_session_approval_kind")]
     pub kind: String,
     /// The menu, in order; `selected` is where the highlight is.
@@ -938,6 +938,10 @@ pub struct SessionSummary {
     #[serde(default)]
     #[schemars(schema_with = "optional_date_time")]
     pub last_output_at: Option<String>,
+    /// Live from the engine: when an autopilot session declared itself done (`AUTOPILOT: DONE`) this turn. Cleared when the next turn starts; null otherwise.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub done_at: Option<String>,
     /// The permission dialog on screen while activity is awaiting-approval; null otherwise.
     #[serde(default)]
     pub approval: Option<SessionApproval>,
@@ -1084,6 +1088,82 @@ pub struct WorkItemGitStory {
     /// Whether the task-run conclusion fed the phase. False today: it is an engine-side record not surfaced through the work item, so the phase is derived from branches and the PR edge alone.
     #[serde(default)]
     pub task_conclusion_available: bool,
+}
+
+/// A pull request a completion claim was checked against (WI-1835).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimPull {
+    pub number: i64,
+    pub state: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub merged_at: Option<String>,
+    /// Who merged it, when the forge observation says.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub merged_by: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub checks: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub head_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum ClaimCheckClaim {
+    #[serde(rename = "autopilot-done")]
+    AutopilotDone,
+    #[serde(rename = "review")]
+    Review,
+    #[serde(rename = "done")]
+    Done,
+}
+
+/// A session's completion claim checked against git and the forge (WI-1835).
+///
+/// Recorded when a session says `AUTOPILOT: DONE` or moves its item to
+/// review or done. `mismatches` lists, in words, where the claim and the
+/// facts disagree; `unchecked` lists the facts that could not be read, so
+/// an empty `mismatches` is never mistaken for verified.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimCheck {
+    pub claim: ClaimCheckClaim,
+    /// The session's Vogt id.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub session: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub work_item: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub session_started_at: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub branch: Option<String>,
+    /// The worktree's HEAD commit.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub head: Option<String>,
+    /// Whether HEAD is on the branch's upstream.
+    #[serde(default)]
+    pub pushed: Option<bool>,
+    /// Commits on HEAD committed since the session started.
+    #[serde(default)]
+    pub new_commits: Option<i64>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub pulls: Vec<ClaimPull>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub mismatches: Vec<String>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub unchecked: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -1581,6 +1661,10 @@ pub struct SessionDigest {
     #[serde(default)]
     #[schemars(schema_with = "optional_date_time")]
     pub turn_started_at: Option<String>,
+    /// When an autopilot session declared itself done this turn.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub done_at: Option<String>,
     /// First 120 characters of the last reply.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
@@ -1591,6 +1675,17 @@ pub struct SessionDigest {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub brief_file: Option<String>,
+    /// The question or dialog the session is showing, when it waits on one (WI-1871). Untrusted terminal text.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub question: Option<String>,
+    /// `question` (an agent's question menu) or a dialog kind.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub question_kind: Option<String>,
+    /// The menu's choices in order, numbered from 1; answer with `session_answer` by number or label. Untrusted terminal text.
+    #[serde(default)]
+    pub options: Option<Vec<String>>,
     /// The engine's economics line for the session, e.g. `96 turns, 2 compactions`; null when the engine has not metered it.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
@@ -1609,7 +1704,7 @@ pub struct SessionDigest {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSweepRow {
-    /// approval / blocked / waiting (at its prompt, wants the next instruction) / stalled (running, silent too long) / running / idle / hibernated / exited / unknown. The table is ordered by it.
+    /// approval (a permission dialog, startup gate or question menu) / blocked / waiting (at its prompt, wants the next instruction) / stalled (running, silent too long) / running / idle / hibernated / exited / unknown. The table is ordered by it.
     pub attention: String,
     /// Why, in words.
     pub attention_reason: String,
@@ -1623,6 +1718,19 @@ pub struct SessionSweepRow {
     pub screen_tail: Vec<String>,
     #[serde(default)]
     pub ready: Option<bool>,
+    /// When the session's blocked report was made, if it has one.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub blocked_since: Option<String>,
+    /// How old the blocked report is, in seconds.
+    #[serde(default)]
+    pub blocked_age_s: Option<i64>,
+    /// The blocked report predates the session's current turn: it went back to work after reporting, so the report no longer says what it waits on and the row is not counted in `needs_you` (WI-1834).
+    #[serde(default)]
+    pub blocked_stale: bool,
+    /// On a `done` row bound to a work item: its AUTOPILOT: DONE claim checked against git and the forge (WI-1835).
+    #[serde(default)]
+    pub claim_check: Option<ClaimCheck>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]

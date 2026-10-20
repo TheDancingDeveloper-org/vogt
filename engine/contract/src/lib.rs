@@ -256,6 +256,13 @@ pub struct SessionSummary {
     /// byte, and from older engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<String>,
+    /// When the agent declared itself done under autopilot (the
+    /// `AUTOPILOT: DONE` marker, WI-1518). RFC 3339. Set once per turn, cleared
+    /// when the next turn starts, and kept across a hibernation and a wake.
+    /// Absent when it has not declared itself done this turn, and from older
+    /// engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<String>,
     /// The latest of the clocks the list sorts and hides by (WI-1289):
     /// activity change, last output, last person input, a blocked or
     /// approval change, and an exit or hibernation. RFC 3339. The engine
@@ -463,6 +470,17 @@ pub enum HibernateTrigger {
     Recovered,
     /// A budget reached its hard limit (WI-1245 / C7).
     Budget,
+}
+
+/// What an agent's done declaration came from (WI-1518).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DoneSource {
+    /// The `AUTOPILOT: DONE` line among the last lines of its screen.
+    Marker,
+    /// A done declaration made through the engine's own report route. Named
+    /// here so the wire shape is settled; nothing emits it yet.
+    Report,
 }
 
 /// A hibernated session's record of when and why.
@@ -791,6 +809,13 @@ pub struct AnswerRequest {
     /// other caller is a person or not by its own actor's kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person: Option<bool>,
+    /// The engine id of the oversight session vogt-core is relaying, when
+    /// the answer comes from one (WI-1831). Read only from vogt-core's own
+    /// credential. The engine checks the role itself and lets that session
+    /// choose "Yes" only on an allow-listed command in the target's own
+    /// worktree (`oversight_answer`); everything else stays a person's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overseer: Option<String>,
 }
 
 /// What `POST /api/sessions/{id}/answer` did.
@@ -1010,6 +1035,15 @@ pub enum ServerEvent {
     /// once per turn when the screen render says the prompt is waiting.
     SessionReady {
         id: Uuid,
+    },
+    /// An autopilot session's agent declared itself done (WI-1518): its
+    /// autopilot went off on the `AUTOPILOT: DONE` marker. Published once per
+    /// turn, so a re-render of the same screen announces nothing new.
+    SessionDone {
+        id: Uuid,
+        /// When it was declared. RFC 3339.
+        at: String,
+        source: DoneSource,
     },
     /// A session was hibernated: its process tree is gone, the session is
     /// still listed (`activity: hibernated`) and can be woken.

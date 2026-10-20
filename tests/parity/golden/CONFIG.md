@@ -35,6 +35,9 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `branch_binding_template` | `VOGT_BRANCH_BINDING_TEMPLATE` | string | `wi-{number}` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
+| `github_app_id` | `VOGT_GITHUB_APP_ID` | string, optional | *(no default — must be set)* | behaviour |
+| `github_app_installation_id` | `VOGT_GITHUB_APP_INSTALLATION_ID` | integer, optional | *(no default — must be set)* | behaviour |
+| `github_app_private_key_file` | `VOGT_GITHUB_APP_PRIVATE_KEY_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_account_key_file` | `VOGT_FORGE_ACCOUNT_KEY_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_token_files` | `VOGT_FORGE_TOKEN_FILES` | map of string to path | *(empty)* | behaviour |
 | `agent_activity_roots` | `VOGT_AGENT_ACTIVITY_ROOTS` | map of string to path | *(empty)* | behaviour |
@@ -55,6 +58,8 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `install_bootstrap_enabled` | `VOGT_INSTALL_BOOTSTRAP_ENABLED` | boolean | `True` | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
+| `forge_posture_interval_seconds` | `VOGT_FORGE_POSTURE_INTERVAL_SECONDS` | integer | `86400` | behaviour |
+| `github_rate_limit_floor` | `VOGT_GITHUB_RATE_LIMIT_FLOOR` | integer | `500` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
 | `image_digest` | `VOGT_IMAGE_DIGEST` | string, optional | *(no default — must be set)* | behaviour |
 | `diagnostics_peer_url` | `VOGT_DIAGNOSTICS_PEER_URL` | string, optional | *(no default — must be set)* | exposure |
@@ -158,6 +163,18 @@ How long observation *history* is kept. The newest observation per subject is ke
 
 Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing.
 
+### `github_app_id`
+
+The ID or the client ID of a GitHub App for the forge adapter to authenticate as; GitHub accepts either as the JWT issuer. With `github_app_private_key_file` also set, GitHub reads and writes use short-lived installation tokens, which have their own rate limit, instead of `github_token_file`. The notifications collector stays on `github_token_file`, because notifications belong to a user and an App cannot read them. Not a secret, so plain config is fine. Setup, including the permissions the App needs, is in docs/GITHUB_APP.md.
+
+### `github_app_installation_id`
+
+Pin every GitHub request to one installation of `github_app_id`. Unset, the installation is discovered per repository owner (`GET /repos/{owner}/{repo}/installation`, then `/orgs/{owner}/installation` or `/users/{owner}/installation`) and remembered, so one App installed on several accounts or organisations covers them all; an owner without the App is read with `github_token_file`. Publishing a new repository needs an owner to create it under: this installation's account or, unset, the App's only installation. An App with several installations must set this to publish.
+
+### `github_app_private_key_file`
+
+Path to the GitHub App's PEM private key, which signs the short-lived JWT exchanged for installation tokens. A file for the same reason as `github_token_file`: the key never appears in the environment or a process listing. When this and `github_app_id` are set, the App takes precedence over `github_token_file` for every GitHub read and write except notifications. Unset, or unreadable, the personal token is used as before.
+
 ### `forge_account_key_file`
 
 Path to a file holding a urlsafe-base64 Fernet key, used to encrypt per-actor forge Personal Access Tokens at rest. A linked PAT must be *recoverable* to call the upstream API on the actor's behalf, which is the deliberate opposite of the vogt-issued tokens in `0005_tokens` — those store only a hash because they never need recovery. Its absence is what switches account linking off: with no key there is nowhere safe to keep a token, so the feature is disabled rather than insecure, and the file-token fallback (`github_token_file`) keeps working for sweeps and unlinked actors. A file rather than an environment variable, so the key never appears in a process listing.
@@ -237,6 +254,14 @@ How hard SQLite works to survive a power cut. `normal` is the standard pairing f
 ### `sweep_interval_seconds`
 
 How often `serve` runs collectors in the background. Zero disables the schedule, leaving sweeps on-demand only. A default rather than a required value because an instance that never looks is the failure this product exists to prevent: stale evidence and no evidence are indistinguishable from the outside, so the safe default is to keep looking.
+
+### `forge_posture_interval_seconds`
+
+How often the forge posture collector re-reads a repository's update-automation settings (version-update config, vulnerability alerts, automated security fixes). Posture changes rarely and cost several API calls per repository, so the default is daily; sweeps in between skip it. Zero reads it on every sweep.
+
+### `github_rate_limit_floor`
+
+When GitHub reports fewer core API requests than this left in the hour, forge reads stop until the limit resets instead of spending the rest. The limit is per GitHub user and shared with every other tool on that account. Zero never pauses early.
 
 ### `verify_horizon_hours`
 

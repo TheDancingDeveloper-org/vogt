@@ -166,6 +166,10 @@ pub struct ForgePull {
     pub updated_at: Option<String>,
     pub closed_at: Option<String>,
     pub source_url: Option<String>,
+    /// When and by whom a merged PR merged (WI-1835). `None` when the forge's
+    /// payload does not carry them; GitHub's list page omits `merged_by`.
+    pub merged_at: Option<String>,
+    pub merged_by: Option<String>,
 }
 
 impl ForgePull {
@@ -196,6 +200,8 @@ impl ForgePull {
             updated_at: None,
             closed_at: None,
             source_url: None,
+            merged_at: None,
+            merged_by: None,
         }
     }
 }

@@ -22,6 +22,9 @@ pub enum VogtError {
     GrantRefused(String),
     /// An engine session names no person, and one is required (WI-983).
     PersonRequired(String),
+    /// A start's model is one the project, or the template, will not run
+    /// (WI-1590, WI-1852). 422.
+    PolicyRefused(String),
     EngineOnly(String),
     InvalidRequest(String),
     InstallClosed(String),
@@ -62,6 +65,15 @@ pub enum VogtError {
     GitCommandFailed(String),
     /// GitHub did not answer or refused the credential (`adapters/github/client.py`).
     GitHubUnavailable(String),
+    /// The token's core budget is below the floor, so reads wait for the reset
+    /// (`GitHubRateLimited` in `adapters/github/client.py`, WI-1838). A
+    /// subclass of `GitHubUnavailable` in Python, so every place that treats
+    /// GitHub as unavailable treats this the same unless it says otherwise.
+    /// `reset_at` is the epoch second the budget resets, when known.
+    GitHubRateLimited {
+        message: String,
+        reset_at: Option<i64>,
+    },
     /// A peer instance could not be reached, refused, or answered nonsense
     /// (`adapters/peer.py`). `status` is `unreachable`, `refused` or
     /// `invalid_response`.
@@ -97,6 +109,7 @@ impl VogtError {
             | Self::RoleRefused(m)
             | Self::GrantRefused(m)
             | Self::PersonRequired(m)
+            | Self::PolicyRefused(m)
             | Self::EngineOnly(m)
             | Self::InvalidRequest(m)
             | Self::InstallClosed(m)
@@ -130,6 +143,7 @@ impl VogtError {
             | Self::GitHubUnavailable(m)
             | Self::ForgejoUnavailable(m) => m,
             Self::PeerUnavailable { message, .. }
+            | Self::GitHubRateLimited { message, .. }
             | Self::TransitionRejected { message, .. }
             | Self::Unauthenticated(message)
             | Self::Forbidden(message)
@@ -148,6 +162,7 @@ impl VogtError {
             Self::RoleRefused(_) => "role_refused",
             Self::GrantRefused(_) => "grant_refused",
             Self::PersonRequired(_) => "person_required",
+            Self::PolicyRefused(_) => "policy_refused",
             Self::EngineOnly(_) => "engine_only",
             Self::InvalidRequest(_) => "invalid_request",
             Self::InstallClosed(_) => "install_closed",
@@ -178,6 +193,7 @@ impl VogtError {
             Self::EngineUnavailable(_) => "engine_unavailable",
             Self::GitUnavailable(_) | Self::GitCommandFailed(_) => "git_unavailable",
             Self::GitHubUnavailable(_) => "github_unavailable",
+            Self::GitHubRateLimited { .. } => "github_rate_limited",
             Self::PeerUnavailable { .. } => "peer_unavailable",
             Self::ForgejoUnavailable(_) => "forgejo_unavailable",
             Self::TransitionRejected { .. } => "transition_rejected",
@@ -227,9 +243,9 @@ impl VogtError {
             | Self::GitHubUnavailable(_)
             | Self::PeerUnavailable { .. }
             | Self::ForgejoUnavailable(_) => 502,
-            Self::InvalidParams(_) => 422,
+            Self::InvalidParams(_) | Self::PolicyRefused(_) => 422,
             Self::MigrationError(_) => 500,
-            Self::MigrationLocked(_) => 503,
+            Self::MigrationLocked(_) | Self::GitHubRateLimited { .. } => 503,
             Self::TransitionRejected { .. } => 409,
             Self::Unauthenticated(_) => 401,
             Self::Forbidden(_) => 403,
@@ -354,6 +370,7 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
         ("role_refused", 403),
         ("grant_refused", 403),
         ("person_required", 403),
+        ("policy_refused", 422),
         ("engine_only", 403),
         ("invalid_request", 400),
         ("install_closed", 409),
@@ -408,6 +425,7 @@ mod tests {
             "role_refused" => VogtError::RoleRefused(message),
             "grant_refused" => VogtError::GrantRefused(message),
             "person_required" => VogtError::PersonRequired(message),
+            "policy_refused" => VogtError::PolicyRefused(message),
             "engine_only" => VogtError::EngineOnly(message),
             "invalid_request" => VogtError::InvalidRequest(message),
             "install_closed" => VogtError::InstallClosed(message),
@@ -471,7 +489,7 @@ mod tests {
 
     #[test]
     fn every_code_round_trips_with_its_status() {
-        assert_eq!(error_table().len(), 44);
+        assert_eq!(error_table().len(), 45);
         let mut seen = std::collections::BTreeSet::new();
         for (code, status) in error_table() {
             assert!(seen.insert(*code), "duplicate code {code}");

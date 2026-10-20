@@ -34,7 +34,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::app::AppState;
@@ -150,6 +150,31 @@ pub fn record_first_output(session: &Session, after: Duration) {
             "session first output"
         );
     }
+}
+
+/// A launch the wrapper reported as `degraded` (WI-1812): the session
+/// started, but without the brokered credentials, because the secrets manager
+/// could not be reached. Kept on the session for as long as it lives, and
+/// summarised in `/api/status` so the gap is visible beyond the session's own
+/// warning.
+#[derive(Clone, Debug, Serialize)]
+pub struct DegradedLaunch {
+    pub session_id: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: time::OffsetDateTime,
+    pub reason: String,
+}
+
+/// The live sessions that started without their credentials: how many, and
+/// the most recent one.
+pub fn degraded_summary(sessions: &[Arc<Session>]) -> (usize, Option<DegradedLaunch>) {
+    let degraded: Vec<DegradedLaunch> = sessions
+        .iter()
+        .filter(|s| s.is_alive())
+        .filter_map(|s| s.agent_auth_degraded())
+        .collect();
+    let latest = degraded.iter().max_by_key(|d| d.at).cloned();
+    (degraded.len(), latest)
 }
 
 /// What the launch wrapper reports at handover (or at its failure).
@@ -274,7 +299,7 @@ pub async fn report(State(state): State<Arc<AppState>>, request: Request<Body>) 
 
 /// Log, audit and measure one accepted report.
 pub fn record_report(session: &Session, report: &LaunchReport, request_id: &str) {
-    let outcome = one_of(&report.outcome, &["ok", "failed"]);
+    let outcome = one_of(&report.outcome, &["ok", "degraded", "failed"]);
     let command = one_of(&report.command, &["run", "shell"]);
     let total = Duration::from_millis(report.total_ms);
     metrics()
@@ -310,7 +335,10 @@ pub fn record_report(session: &Session, report: &LaunchReport, request_id: &str)
         if name == "secrets" {
             metrics().launch_vault_read_count.inc(&[
                 ("mode", if mode.is_empty() { "other" } else { mode }),
-                ("outcome", one_of(&stage.outcome, &["ok", "bulk-failed"])),
+                (
+                    "outcome",
+                    one_of(&stage.outcome, &["ok", "bulk-failed", "unreachable"]),
+                ),
             ]);
             // Which secrets this session was handed at launch, by name — the
             // launch half of the broker's per-fetch audit. Never a value.
@@ -353,6 +381,13 @@ pub fn record_report(session: &Session, report: &LaunchReport, request_id: &str)
                 .collect::<String>()
         })
         .unwrap_or_default();
+    if outcome == "degraded" {
+        session.set_agent_auth_degraded(DegradedLaunch {
+            session_id: session.id.to_string(),
+            at: time::OffsetDateTime::now_utc(),
+            reason: error.clone(),
+        });
+    }
     if outcome != "ok" || total >= SLOW_LAUNCH {
         tracing::warn!(
             target: "vogt::launch",

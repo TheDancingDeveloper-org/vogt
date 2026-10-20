@@ -51,6 +51,9 @@ ureq = { version = "2", features = ["tls"], default-features = false }
 # and is unmaintained (RUSTSEC-2025-0134).
 rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
+# RS256 for the GitHub App JWT (WI-1838). Already in the tree through rustls's
+# ring provider, so no new crate: one PKCS#1 v1.5 signature over two segments.
+ring = "=0.17.14"
 openssl-probe = "0.1.6"
 portable-pty = "0.9"
 

@@ -1733,6 +1733,14 @@ const Settings: Component<Props> = (props) => {
                       {status().auth_broker.auto_agent_auth ? "Auto" : "Manual"}
                     </div>
                     <div style={opsMetaStyle}>{status().auth_broker.helper}</div>
+                    <Show when={status().auth_broker.degraded}>
+                      {(degraded) => (
+                        <div style={{ ...opsMetaStyle, color: "var(--danger, #c0392b)" }}>
+                          Agent auth unavailable in {status().auth_broker.degraded_session_count ?? 1} live
+                          session(s): {degraded().reason}
+                        </div>
+                      )}
+                    </Show>
                   </div>
                   <div style={opsCardStyle}>
                     <div style={opsLabelStyle}>Server storage</div>

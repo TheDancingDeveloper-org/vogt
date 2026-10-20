@@ -88,7 +88,7 @@
           "title": "Url"
         },
         "version": {
-          "default": "0.7.17",
+          "default": "0.7.20",
           "title": "Version",
           "type": "string"
         },
@@ -246,7 +246,7 @@
           "type": "string"
         },
         "version": {
-          "default": "0.7.17",
+          "default": "0.7.20",
           "title": "Version",
           "type": "string"
         }
@@ -517,7 +517,7 @@
           "type": "string"
         },
         "version": {
-          "default": "0.7.17",
+          "default": "0.7.20",
           "title": "Version",
           "type": "string"
         }

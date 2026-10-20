@@ -668,7 +668,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.answer",
-            "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's \u{2014} an agent is refused (403 person_required) and should leave it for the Inbox. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
+            "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's \u{2014} an agent is refused (403 person_required) and should leave it for the Inbox. One exception: an oversight session may choose \"Yes\" on a one-line Bash command in an allow-listed class (read-only git/gh, fetch, checkout of a ref, rebase and --force-with-lease push of the worker's own branch, cargo/pnpm/uv build and test) run in the worker's own git worktree; the engine decides and audits it. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/sessions/answer"),

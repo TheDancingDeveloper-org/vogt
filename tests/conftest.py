@@ -348,3 +348,24 @@ def _instant_input_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
     from vogt.application.services import sessions
 
     monkeypatch.setattr(sessions, "_pause", lambda _seconds: None)
+    # The follow-up on a queued input runs in a thread in production; inline
+    # here so a test sees what it did (WI-1870).
+    monkeypatch.setattr(sessions, "_follow_queued", sessions._submit_queued)
+
+
+@pytest.fixture(autouse=True)
+def _reset_forge_budget_state() -> Iterator[None]:
+    """The GitHub ETag cache, rate budget and posture schedule are
+    process-wide (WI-1838); one test's reads must not shape the next's."""
+    from vogt.adapters.forge.collectors import POSTURE_SCHEDULE
+    from vogt.adapters.github.client import (
+        DEFAULT_RATE_LIMIT_FLOOR,
+        ETAGS,
+        RATE_BUDGET,
+    )
+
+    yield
+    ETAGS.clear()
+    RATE_BUDGET.clear()
+    RATE_BUDGET.floor = DEFAULT_RATE_LIMIT_FLOOR
+    POSTURE_SCHEDULE.clear()

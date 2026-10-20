@@ -359,7 +359,7 @@
       "observed_schema_version": 6,
       "principal": "local:parity",
       "revision": 2,
-      "vogt_version": "0.7.17"
+      "vogt_version": "0.7.20"
     },
     "exit": 0,
     "operation": "status"
@@ -2019,6 +2019,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2053,6 +2054,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2087,6 +2089,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2164,6 +2167,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2215,6 +2219,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2249,6 +2254,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2291,6 +2297,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {

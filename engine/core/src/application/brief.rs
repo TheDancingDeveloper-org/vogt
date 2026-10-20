@@ -8,7 +8,7 @@
 //! record, how to say you are blocked, how to drive another session) is
 //! written beside it as a companion, and the brief points at that file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::{Comment, Project, Relation, WorkItem};
 use crate::errors::VogtError;
@@ -191,18 +191,47 @@ fn landing_section(project: &Project, reference: &str) -> Result<Vec<String>, Vo
 /// Python `LandingPolicy` the project write validates.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LandingFields {
-    base_branch: String,
+pub(crate) struct LandingFields {
+    pub(crate) base_branch: String,
     #[serde(default = "default_branch_pattern")]
-    branch_pattern: String,
-    worker_lands_by: String,
-    merge_by: String,
-    merge_mode: String,
+    pub(crate) branch_pattern: String,
+    pub(crate) worker_lands_by: String,
+    pub(crate) merge_by: String,
+    pub(crate) merge_mode: String,
     #[serde(default = "default_linear_history")]
     #[allow(dead_code)]
-    linear_history: bool,
+    pub(crate) linear_history: bool,
     #[serde(default = "default_deploy_by")]
-    deploy_by: String,
+    pub(crate) deploy_by: String,
+    /// An initiative whose items cut from and land onto another long-lived
+    /// branch, keyed by initiative id or slug (WI-1841): the Rust port lands
+    /// on `rust-core`, not on `base_branch`.
+    #[serde(default)]
+    pub(crate) initiative_bases: BTreeMap<String, String>,
+    /// Other long-lived branches a task may name as its base. A task that
+    /// names one is taken at its word rather than overridden (WI-1841).
+    #[serde(default)]
+    pub(crate) long_lived_branches: Vec<String>,
+}
+
+impl LandingFields {
+    /// Read a project's stored landing rule; `None` when it records none or
+    /// what it records does not read as one.
+    pub(crate) fn of(policy: &crate::core::AgentPolicy) -> Option<Self> {
+        policy
+            .landing
+            .as_ref()
+            .and_then(|landing| serde_json::from_value(landing.clone()).ok())
+    }
+
+    /// Every branch a worker on this project may cut from and land onto.
+    pub(crate) fn known_bases(&self) -> BTreeSet<String> {
+        let mut known = BTreeSet::new();
+        known.insert(self.base_branch.clone());
+        known.extend(self.initiative_bases.values().cloned());
+        known.extend(self.long_lived_branches.iter().cloned());
+        known
+    }
 }
 
 fn default_branch_pattern() -> String {

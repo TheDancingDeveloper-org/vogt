@@ -178,6 +178,9 @@ class Engine:
                 and verb in ("answer", "input")
                 and self.permission_prompt
                 and payload.get("person") is not True
+                # The fake engine finds an overseer's command allow-listed;
+                # the real decision is the engine's (`oversight_answer`).
+                and not payload.get("overseer")
             ):
                 if verb == "answer":
                     self.answers.append(payload)
@@ -1047,7 +1050,9 @@ def test_an_oversight_session_answers_a_permission_prompt_and_is_audited(
     wired: AppContext, engine: Engine
 ) -> None:
     """An autonomous fleet has no person at the prompt: the session the engine
-    marks `oversight` answers for its workers, audited as oversight."""
+    marks `oversight` answers for its workers, audited as oversight. It is
+    relayed by its engine id, not as a person, so the engine can hold it to
+    allow-listed commands in the worker's own worktree (WI-1831)."""
     from vogt.application.models import AnswerSessionParams
     from vogt.application.services import answer_session
 
@@ -1059,7 +1064,8 @@ def test_an_oversight_session_answers_a_permission_prompt_and_is_audited(
         overseer, AnswerSessionParams(id=ses_id, option=1, reason=WHY)
     )
     assert result.kind == "permission"
-    assert engine.answers[-1]["person"] is True
+    assert engine.answers[-1]["person"] is False
+    assert engine.answers[-1]["overseer"] == UNLINKED
     with wired.declared.read() as view:
         event = next(
             e

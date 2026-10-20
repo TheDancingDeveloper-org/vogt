@@ -162,7 +162,7 @@ def import_from_ref(
         CloneRequest(
             remote=remote,
             destination=destination,
-            token=None if provider is None else provider.clone_token(),
+            token=None if provider is None else provider.clone_token(ref),
             # On the data volume, not the default temp dir: the hardened
             # deployment's /tmp is a noexec tmpfs, and the askpass helper
             # must be executable (see `_AskPass`).

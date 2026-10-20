@@ -783,14 +783,27 @@ than these routes.
   a label matches several options. Requires `sessions` (WI-917). A
   permission prompt (`kind` `permission` or `read-outside-cwd`) is answered
   only by a person: anyone else gets `403 person required` and nothing is
-  typed (WI-983, below).
+  typed (WI-983, below). One exception (WI-1831, `oversight_answer`):
+  vogt-core may name an `overseer` (the engine id of the oversight session it
+  relays). The engine checks that session's role itself, and then lets it
+  choose the plain `Yes` only on a one-line Bash command in an allow-listed
+  class (read-only git and `gh`, `git fetch`, a checkout of a ref, rebase
+  and push — `--force-with-lease` at most — of the checked-out, unprotected
+  branch, cargo/pnpm/uv build and test). No `cd`, `-C`, substitution,
+  redirection, pipes, absolute or `..` paths are allowed, and the target's
+  working directory must be a linked git worktree. Answers and refusals are
+  both audited (`vogt::audit`, `via=oversight`).
 - `GET /api/sessions/changes[?since=N&ids=&limit=]` and
   `GET /api/sessions/wait-any[?ids=&until=&cursor=&timeout_s=]` — the overseer
   delta (WI-1246, WI-1672). `cursor` is a sequence number, or `now` to skip
   every event already in the ring and wait only for one published after the
   call starts. A timeout then returns that head as `next_cursor`. A numeric
   cursor past the head is treated as the start of the ring (the sequence
-  restarts when the engine does). Requires `sessions`.
+  restarts when the engine does). The change kinds are `ready`, `approval`,
+  `exited`, `errored`, `blocked`, `unblocked`, `hibernated`, `woken`, `budget`
+  and `done` (an autopilot agent declared itself done, WI-1518); the default
+  `until` is `ready`, `blocked`, `approval`, `exited`, `errored` and `done`.
+  Requires `sessions`.
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
   only when asked) with the last N (default 8, at most 40) non-blank lines
@@ -1918,6 +1931,14 @@ agent may stop to announce its next step. So the engine re-drives it
 The summary's `autopilot` reads `false` once it is off. A nudge is input, so
 it restarts the quiet clock and nudges cannot stack up.
 
+Declaring itself done is a change an overseer reads (WI-1518). The first time
+the marker is seen in a turn, the engine publishes a `session-done` event
+(`source`: `marker`), which `GET /api/sessions/changes` and `wait-any` report
+as kind `done`, and the summary carries `done_at` (RFC 3339). A screen that
+still shows the marker does not declare it again; `done_at` is cleared when
+the next turn starts, and kept across a hibernation and a wake through the
+hibernation record.
+
 **When opencode is `ready`.** opencode draws no prompt glyph, so `ready`
 recognises its composer separately: the `┃` bar closed by a `╹▀` footer near
 the bottom of the screen, with no `esc interrupt` (which it shows only while a
@@ -1942,8 +1963,10 @@ nothing) and acts at two levels:
 - **soft**, once, at `ENGINE_BUDGET_SOFT_PCT` (default 80) of a turn, context
   or whole-session clock limit: a `budget` change, and — only while the session is at its prompt — one
   typed line: `[vogt] budget: {what} ({n} of {limit}). Commit your work in
-  progress on your branch, write a hand-off comment (work_comment
-  kind=handoff), then stop.` Mid-turn, the line waits for the next tick that
+  progress on your branch and push it, write a hand-off comment (work_comment
+  kind=handoff: branch, head_sha, done, remaining, gates_run, blockers), then
+  stop.` A session that stops without one gets a minimal hand-off from the
+  core, built from its git state (WI-1833). Mid-turn, the line waits for the next tick that
   finds it ready. The prompt is read the way autopilot reads it: the session
   must not be blocked, its agent must be one the engine re-drives, and the
   prompt must have been quiet for the nudge settle time. A turn or context
@@ -2019,9 +2042,14 @@ sets `resources.over_threshold` on any session at or over it. The core's
 #### Worktree build output
 
 A finished worker's build output is what fills the host disk: `target/`,
-`node_modules` and `.venv` in a worktree nobody is using. With
-`ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` set, hibernating or stopping a session
-whose directory is a linked git worktree removes those directories. A repo's
+`node_modules` and `.venv` in a worktree nobody is using. Stopping or
+removing a session whose directory is a linked git worktree removes those
+directories, and so does removing a hibernated one. This is on by default
+(WI-1750); set `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE=0` to keep them. A
+hibernation keeps them unless the variable is `true`: a hibernated session is
+woken to carry on, and every engine shutdown hibernates every live session. A
+session that exits on its own, without a stop, is not cleaned until it is
+removed. A repo's
 main checkout is never touched — only a directory `git worktree add` created —
 and neither is a symlink or a file git tracks. A `target` directory counts only
 when a `Cargo.toml` sits beside it, so a directory of notes named `target` is
@@ -2043,6 +2071,43 @@ what is free, the percent used, and `needs_attention` once that passes
 `ENGINE_DISK_WARN_PERCENT` (`85`). A deployment with no engine reports no row,
 which is a different fact from a volume that is fine.
 
+
+#### Session scratch, background processes and free space
+
+Claude Code keeps each session's scratchpad at
+`<tmp>/claude-<uid>/<cwd slug>/<session id>/`, outside the worktree, and
+nothing used to delete it: on 2026-10-18 scratch worktrees with their own Cargo
+`target` (10–16 GB each) and load-test downloads held 292 GB and filled the
+host (WI-1810). Unless `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` is false:
+
+- stopping or removing a session deletes its scratch directories;
+- hibernating one keeps them but removes every Cargo `target` there (beside a
+  `Cargo.toml`, or holding `CACHEDIR.TAG`) and any top-level entry larger
+  than `ENGINE_SCRATCH_PRUNE_GB` (2).
+
+On hibernate, stop and remove the engine also `SIGKILL`s every process of its
+user still carrying the session's `VOGT_ENGINE_SESSION_ID` — a `setsid` or
+`nohup` job that left the process tree.
+
+A new session is refused with `507 Insufficient Storage` while the workspace
+or temp volume has less than `ENGINE_MIN_FREE_PERCENT` (10) free; `0` turns
+the guard off. A wake is let through.
+
+Cargo builds inside a session's scratch directory share one target per
+repository: at start the engine writes
+`<tmp>/claude-<uid>/<cwd slug>/.cargo/config.toml` with `build.target-dir =
+<ENGINE_SHARED_CARGO_TARGET_DIR>/<repo>` (default
+`<tmp>/claude-<uid>/cargo-target`; `off` disables). Cargo reads that file only
+for builds under the scratch directory, so a session's own worktree keeps its
+own target and workers never queue on one lock; concurrent scratch builds of
+one repository do share its lock, which is the price of not building a fresh
+10–16 GB target each time. A repository's own `.cargo/config.toml` or a
+`CARGO_TARGET_DIR` wins. A repository's shared target over
+`ENGINE_SHARED_CARGO_TARGET_MAX_GB` (40) is removed when a session stops.
+Deleting a scratch directory also runs `git worktree prune` in the main
+repository of each scratch worktree it held. Hibernation pruning weighs the
+entries inside `scratchpad/` one by one, never `scratchpad/` as a whole.
+
 #### Launch timing, logs and metrics
 
 A session's launch explains itself in the engine log and on `/metrics`
@@ -2056,7 +2121,7 @@ fields are logged quoted: `event="launch.report"`).
 | `launch.first_output` | info, or warn at 10 s or more | the session's first byte of output | `session_id`, `name`, `launcher`, `first_output_ms` |
 | `launch.stage` | info | each stage the launch wrapper reports | `session_id`, `stage` (`login`, `secrets`, `bootstrap`), `ms`, `outcome`, and for `secrets` the `project` and `mode` |
 | `launch.secrets` | info (audit) | each secret project the launch read | `session_id`, `project`, `mode`, `ms`, `count`, `missing`, `secrets` (`VAR=SECRET_NAME` pairs, never a value) |
-| `launch.report` | info, or warn when failed or 10 s or more | the wrapper hands over, or fails | `session_id`, `name`, `command`, `outcome`, `total_ms`, `error` |
+| `launch.report` | info, or warn when degraded, failed or 10 s or more | the wrapper hands over, or fails | `session_id`, `name`, `command`, `outcome` (`ok`, `degraded`, `failed`), `total_ms`, `error` |
 
 `launcher` is `agent-auth` when the launch wrapper runs first, and `direct`
 otherwise. The wrapper (`vogt-agent-auth run`/`shell`) times its own stages
@@ -4248,6 +4313,46 @@ shares the engine's uid can already reach the identity off the host, so in
 such a deployment the manifest is cost without a boundary. **Default is
 off**: the brokered model stays the norm, and a deployment opts in per stack.
 Enabling it is an operator decision, not the engine's default.
+
+**The engine does not depend on the secrets manager (WI-1812).** Agent auth is
+never on the engine's start path. The engine binds its port and passes
+`/readyz` whether or not the secrets manager (or anything behind it) is
+reachable; what the engine itself needs — `ENGINE_TOKEN`, the stack secret,
+the database location, the assistant keys — comes from the stack environment
+or a mounted file, never from a live secrets-manager call. Credentials are
+resolved per session, when the launch wrapper runs:
+
+- Each secrets-manager call in a launch (the login, each project read) is
+  bounded by `ENGINE_AGENT_AUTH_TIMEOUT` (seconds, default 10) and tried
+  once, and all of a launch's calls share `ENGINE_AGENT_AUTH_LAUNCH_BUDGET`
+  (seconds, default 20). A project read that times out or cannot connect is
+  not retried one secret at a time; the per-secret CLI fallback is only for a
+  read the API answered with an error. There is no retry loop.
+- If the secrets manager cannot be reached — no identity, the login failed or
+  timed out, a required secret could not be read — the session **still
+  starts**, without the credentials it could not get. It prints an
+  "agent auth unavailable" warning in the terminal, exports the reason as
+  `AGENT_AUTH_UNAVAILABLE` (unset on a full launch), and `AGENT_AUTH_GRANTED`
+  names only what it actually holds. The identity is still dropped.
+- The launch reports `outcome=degraded` (a `launch.report` warn line and the
+  launch metric). The engine keeps that on the session: `GET /api/status`
+  counts the live degraded sessions in `auth_broker.degraded_session_count`
+  and names the latest under `auth_broker.degraded` (`session_id`, `at`,
+  `reason`). Settings shows it on the auth-broker card. A degraded session
+  stops counting when it exits.
+- Nothing is cached between launches, so once the secrets manager recovers
+  the next session gets its credentials with no engine restart. A degraded
+  session gets them by being restarted.
+- Only a malformed manifest still fails a launch. `check`, `get` and `set`
+  keep failing loudly: they are explicit requests.
+- `ENGINE_AGENT_AUTH_REQUIRED=1` no longer stops the container. The
+  entrypoint runs a bounded check in the background
+  (`ENGINE_AGENT_AUTH_BOOT_CHECK_TIMEOUT`, default 60 s) and logs
+  `agent service auth check passed` or `... FAILED`; the engine starts either
+  way.
+- Deployment hooks: `vogt-lifecycle` starts the engine before it runs
+  `post-start.d`, so a hook that calls `vogt-agent-auth run` cannot hold the
+  engine back, and that call is itself bounded and degrades as above.
 
 **Getting a secret after launch: the on-demand broker.** The one
 sanctioned late path is a *manifest-constrained fetch*, and it keeps the

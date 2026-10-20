@@ -114,6 +114,9 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
             .map_err(VogtError::InvalidRequest)?;
     }
     let forge = crate::adapters::forge::has_configured_forge(&ctx.config)?;
+    if forge {
+        crate::adapters::github::configure_rate_limit_floor(ctx.config.github_rate_limit_floor);
+    }
     if forge || !ctx.config.deploy_lanes.is_empty() {
         // One directory serves the forge reads and the lanes' receipts, opened
         // once for the sweep, as Python's `forge_read_collectors` shares one.
@@ -415,7 +418,7 @@ impl<C: Clock + 'static, I: IdFactory + 'static> crate::collectors::Collector
         &mut self,
         ctx: &mut CollectorContext<'_>,
         project: &crate::core::Project,
-        _now: &mut dyn FnMut() -> crate::core::Moment,
+        now: &mut dyn FnMut() -> crate::core::Moment,
     ) -> crate::collectors::Collection {
         use crate::adapters::forge::{
             ForgeChecksCollector, ForgeLabelsCollector, ForgeNotificationsCollector,
@@ -429,7 +432,9 @@ impl<C: Clock + 'static, I: IdFactory + 'static> crate::collectors::Collector
             }
             ForgeReadKind::Releases => ForgeReleasesCollector::new(directory).collect(project),
             ForgeReadKind::Labels => ForgeLabelsCollector::new(directory).collect(project),
-            ForgeReadKind::Posture => ForgePostureCollector::new(directory).collect(project),
+            ForgeReadKind::Posture => {
+                ForgePostureCollector::new(directory).collect(ctx.config, project, now())
+            }
             ForgeReadKind::Notifications => {
                 ForgeNotificationsCollector::new(directory, Some(&prior), &self.actors)
                     .collect(project)
@@ -899,6 +904,7 @@ impl ErrorName for VogtError {
             Self::RoleRefused(_) => "RoleRefused",
             Self::GrantRefused(_) => "GrantRefused",
             Self::PersonRequired(_) => "PersonRequired",
+            Self::PolicyRefused(_) => "PolicyRefused",
             Self::EngineOnly(_) => "EngineOnly",
             Self::InvalidRequest(_) => "InvalidRequest",
             Self::InstallClosed(_) => "InstallClosed",
@@ -930,6 +936,7 @@ impl ErrorName for VogtError {
             Self::GitUnavailable(_) => "GitUnavailable",
             Self::GitCommandFailed(_) => "GitCommandFailed",
             Self::GitHubUnavailable(_) => "GitHubUnavailable",
+            Self::GitHubRateLimited { .. } => "GitHubRateLimited",
             Self::PeerUnavailable { .. } => "PeerUnavailable",
             Self::ForgejoUnavailable(_) => "ForgejoUnavailable",
             Self::TransitionRejected { .. } => "TransitionRejected",

@@ -27,6 +27,11 @@ const TOKEN_FILE_ENV: &str = "VOGT_TOKEN_FILE";
 /// Set by a coding session for the agent it starts, and by the container's
 /// auth broker for everything else. See [`resolve_token`] for which wins.
 const HTTP_TOKEN_ENV: &str = "VOGT_HTTP_TOKEN";
+/// Set by the engine on every session's process (`pty.rs`).
+pub const ENGINE_SESSION_ENV: &str = "VOGT_ENGINE_SESSION_ID";
+/// `application::context::HEADER_ENGINE_SESSION`, spelled the way Python's
+/// bridge sends it.
+const ENGINE_SESSION_HEADER: &str = "X-Vogt-Engine-Session";
 
 /// The budget for the optional banner read. Discovery is a courtesy, and a
 /// client gives the whole handshake about 30 s, so a pre-flight that may take
@@ -59,6 +64,8 @@ pub struct BridgeReport {
 pub struct Bridge<'a, T: BridgeTransport> {
     url: String,
     token: Option<String>,
+    /// The engine session this bridge runs in (WI-1852), when it runs in one.
+    engine_session: Option<String>,
     transport: &'a T,
     version: &'a str,
     discovered: bool,
@@ -71,12 +78,23 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
         Self {
             url: url.trim_end_matches('/').to_owned(),
             token,
+            engine_session: None,
             transport,
             version,
             discovered: false,
             announced: false,
             report: BridgeReport::default(),
         }
+    }
+
+    /// Name the engine session this bridge runs in (`$VOGT_ENGINE_SESSION_ID`).
+    /// Blank is none.
+    pub fn with_engine_session(mut self, engine_session: Option<&str>) -> Self {
+        self.engine_session = engine_session
+            .map(str::trim)
+            .filter(|session| !session.is_empty())
+            .map(str::to_owned);
+        self
     }
 
     /// One line, recorded and never fatal.
@@ -265,6 +283,12 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
         ];
         if let Some(token) = &self.token {
             headers.push(("Authorization", format!("Bearer {token}")));
+        }
+        if let Some(session) = &self.engine_session {
+            // Which engine session this bridge runs in (WI-1852). Advisory:
+            // the core uses it only to attribute a pod-token caller's
+            // session.start, after the engine vouches for the session.
+            headers.push((ENGINE_SESSION_HEADER, session.clone()));
         }
         headers
     }
@@ -605,5 +629,58 @@ mod tests {
         env.insert(HTTP_TOKEN_ENV.into(), "  ".into());
         assert!(resolve_token(&env).is_none());
         assert!(configured_url(&HashMap::new()).is_none());
+    }
+
+    /// Records every header block it is sent.
+    struct Headers {
+        seen: RefCell<Vec<Vec<(String, String)>>>,
+    }
+
+    impl BridgeTransport for Headers {
+        fn exchange(
+            &self,
+            _url: &str,
+            headers: &[(&str, String)],
+            _body: &[u8],
+        ) -> Result<(u16, Vec<u8>), String> {
+            self.seen.borrow_mut().push(
+                headers
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), value.clone()))
+                    .collect(),
+            );
+            Ok((200, br#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_vec()))
+        }
+    }
+
+    fn engine_session_sent(session: Option<&str>) -> Option<String> {
+        let transport = Headers {
+            seen: RefCell::new(Vec::new()),
+        };
+        let mut bridge = Bridge::new(
+            "https://vogt.example",
+            Some("vogt_abc".into()),
+            &transport,
+            "0.1.0",
+        )
+        .with_engine_session(session);
+        let mut output = String::new();
+        bridge.serve(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#, &mut output);
+        let seen = transport.seen.borrow();
+        seen[0]
+            .iter()
+            .find(|(name, _)| name == "X-Vogt-Engine-Session")
+            .map(|(_, value)| value.clone())
+    }
+
+    #[test]
+    fn the_engine_session_it_runs_in_is_sent_as_a_header() {
+        // WI-1852: lets the core attribute a resumed oversight's starts.
+        assert_eq!(
+            engine_session_sent(Some(" 0cc46582-ed57-4327-9a28-624a7ae2474a ")).as_deref(),
+            Some("0cc46582-ed57-4327-9a28-624a7ae2474a")
+        );
+        assert_eq!(engine_session_sent(None), None);
+        assert_eq!(engine_session_sent(Some("  ")), None);
     }
 }

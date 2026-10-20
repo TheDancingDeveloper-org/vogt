@@ -22,7 +22,7 @@ use super::models::{ForgeCheck, ForgeNotification, RepoRef};
 use super::provider::ForgeProvider;
 use super::sync::{finding, ForgeDirectory};
 use crate::config::VogtConfig;
-use crate::core::{Observation, Project};
+use crate::core::{Moment, Observation, Project};
 use crate::errors::VogtError;
 use crate::storage::observed_types::PendingObservation;
 
@@ -521,7 +521,36 @@ impl<'a> ForgeLabelsCollector<'a> {
     }
 }
 
+/// When each repository's posture was last read, in this process.
+///
+/// Posture changes when someone edits repository settings — days apart, not
+/// minutes — yet it cost three to eight calls per repository per sweep, the
+/// largest share of the estate's GitHub budget (WI-1838). The store cannot
+/// answer "when did we last look": it skips unchanged findings, so the newest
+/// row's time is when posture last *changed*. Process-wide because the
+/// collectors are rebuilt per sweep; a restart reads everything once.
+#[derive(Default)]
+pub(crate) struct PostureSchedule {
+    last: std::collections::HashMap<String, Moment>,
+}
+
+impl PostureSchedule {
+    fn due(&self, slug: &str, now: Moment, interval_seconds: i64) -> bool {
+        self.last
+            .get(slug)
+            .is_none_or(|last| now.seconds_since(*last) >= interval_seconds as f64)
+    }
+}
+
+crate::adapters::github::process_state!(
+    /// Run `f` against the process-wide posture schedule.
+    pub(crate) fn with_posture_schedule(PostureSchedule)
+);
+
 /// Update-automation posture, three facts.
+///
+/// Read at most once per `forge_posture_interval_seconds` per repository; a
+/// sweep in between yields only the receipt, saying it was not due.
 pub struct ForgePostureCollector<'a> {
     directory: &'a dyn ForgeDirectory,
 }
@@ -531,7 +560,12 @@ impl<'a> ForgePostureCollector<'a> {
         Self { directory }
     }
 
-    pub fn collect(&self, project: &Project) -> Result<Vec<PendingObservation>, VogtError> {
+    pub fn collect(
+        &self,
+        config: &VogtConfig,
+        project: &Project,
+        now: Moment,
+    ) -> Result<Vec<PendingObservation>, VogtError> {
         const MISSING: &str = "this forge does not expose repository update-automation \
 posture, so it is not collected here — not that automation is off";
         read_all(
@@ -541,6 +575,11 @@ posture, so it is not collected here — not that automation is off";
             Some("supports_posture"),
             Some(MISSING),
             |provider, repo| {
+                let slug = repo.slug();
+                let interval = config.forge_posture_interval_seconds;
+                if !with_posture_schedule(|schedule| schedule.due(&slug, now, interval)) {
+                    return Ok(Vec::new());
+                }
                 let posture = provider.posture(repo)?;
                 let mut payload = Map::new();
                 payload.insert(
@@ -566,14 +605,18 @@ posture, so it is not collected here — not that automation is off";
                         .unwrap_or(Value::Null),
                 );
                 payload.insert("repo".into(), Value::String(repo.slug()));
-                Ok(vec![finding(
+                let found = vec![finding(
                     KIND_POSTURE,
                     format!("posture:{}", repo.slug()),
                     Value::Object(payload),
                     Some(&project.id),
                     None,
                     false,
-                )])
+                )];
+                // Marked only after a read that did not raise, so a failed read
+                // (rate limit, outage) is retried next sweep rather than in a day.
+                with_posture_schedule(|schedule| schedule.last.insert(slug, now));
+                Ok(found)
             },
         )
     }
@@ -872,7 +915,11 @@ mod tests {
         project.repo_url = Some("https://forge.example/acme/Widgets.git".into());
 
         let found = ForgePostureCollector::new(&directory)
-            .collect(&project)
+            .collect(
+                &VogtConfig::default(),
+                &project,
+                crate::core::Moment::from_unix(0, 0),
+            )
             .unwrap();
         assert_eq!(found.len(), 1, "one receipt, no posture observation");
         assert_eq!(found[0].kind, KIND_SYNC);

@@ -202,9 +202,18 @@ The table is the deployment's, not yours. A person overrides fields with
 `preference_set` on `dispatch.profiles` (for example
 `{"implement": {"model": "grok-4.8"}}` changes only that one field). The same
 store holds `dispatch.max_workers_per_overseer` (`{"value": 5}`),
-`dispatch.escalate_after_failed_reviews` (`{"value": 2}`) and
-`dispatch.review_by_oversight_only` (`{"value": true}`). An agent cannot set
+`dispatch.escalate_after_failed_reviews` (`{"value": 2}`),
+`dispatch.review_by_oversight_only` (`{"value": true}`) and
+`dispatch.budget_restarts_per_item` (`{"value": 1}`). An agent cannot set
 any `dispatch.*` key.
+
+A session the engine stops at its budget always leaves a hand-off (WI-1833).
+If the agent wrote none after the soft warning, the scheduled sweep writes a
+minimal one from its git state (branch, head, uncommitted paths). Then, up to
+`dispatch.budget_restarts_per_item` times per item and only when nothing else
+has started on the item since, it starts a fresh worker with
+`from_handoff`, using the stopped session's purpose. Each restart leaves a
+`[vogt] budget restart:` note on the item.
 
 Every session records `purpose`, `started_by_session` (the engine id of the
 session that started it) and `started_by_kind` (`person`, or the starter's
@@ -516,6 +525,18 @@ cap (`autopilot` and `autopilot_nudges` on `session_list`). A driver need not
 re-prompt an autopilot session — wait for it to be blocked or done. The flag
 is recorded on the start's audit row.
 
+**Done claims are checked.** A `done` row on `session_sweep` for a session
+bound to a work item carries `claim_check`: the worktree's branch and HEAD,
+whether HEAD is pushed, how many commits it gained since the session started,
+and the observed pull requests the reply names or that come from that branch
+(state, merge time, CI). `mismatches` names each disagreement in words, for
+example a claimed PR that merged before the session started, or no new
+commits. The row's `attention_reason` repeats them, so the digest shows them.
+When a session moves its own item to `review` or `done`, `work_transition`
+returns the same check and records any mismatch as a note on the item. The
+check never refuses anything. Facts it could not read are listed under
+`unchecked`, so an empty `mismatches` does not mean the claim was verified.
+
 **Klaudia owns its own loop.** `session_start(template="klaudia")` runs
 Klaudia in its TUI like the other agents (model, resume, permission posture
 and the brief work the same way). Klaudia iterates by itself toward a goal
@@ -540,7 +561,13 @@ the Inbox as "asking for approval".
 an agent's `session_answer` to one is refused with `403 person_required`,
 and so is any `session_input` while it shows — on a modal dialog every
 keystroke, `esc` included, is an answer. Nothing is typed (WI-983). If you
-are an overseer and a worker is waiting on one, do not try to get round it:
+are an oversight session, you may answer `Yes` with `session_answer` (never
+`session_input`) when the prompt is a one-line, allow-listed worker-loop
+command (read-only git/gh, fetch, checkout of a ref, rebase or
+`--force-with-lease` push of the worker's own branch, build and test) in the
+worker's own worktree. The engine decides and audits that (WI-1831), and
+refuses anything else with `person_required`. Otherwise, as an overseer, if a
+worker is waiting on one, do not try to get round it:
 it is already in the Inbox as "asking for approval"; if you cannot go on
 until it is answered, report that with `session_report_blocked`, naming the
 session and the command. A person answers it from the Inbox or with

@@ -132,6 +132,10 @@
   403
  ],
  [
+  "policy_refused",
+  422
+ ],
+ [
   "preference_version_conflict",
   409
  ],

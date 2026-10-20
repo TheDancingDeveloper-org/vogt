@@ -175,6 +175,9 @@ mod system;
 mod views;
 mod work;
 
+/// The claim-check models the services fill (WI-1835).
+pub(crate) use views::{ClaimCheck, ClaimCheckClaim, ClaimPull};
+
 /// `(operation name, params schema, result schema)` for every name in
 /// [`DERIVED`], as `registry::dump()` emits them.
 pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Value)> {

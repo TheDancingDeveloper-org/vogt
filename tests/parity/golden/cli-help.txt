@@ -1286,8 +1286,14 @@ positional arguments:
                    take anyone's answer; a permission prompt (approval.kind
                    permission or read-outside-cwd) only a person's — an agent
                    is refused (403 person_required) and should leave it for
-                   the Inbox. Pass expect_question = approval.question so a
-                   stale answer is refused. Audited. Takes either id.
+                   the Inbox. One exception: an oversight session may choose
+                   "Yes" on a one-line Bash command in an allow-listed class
+                   (read-only git/gh, fetch, checkout of a ref, rebase and
+                   --force-with-lease push of the worker's own branch,
+                   cargo/pnpm/uv build and test) run in the worker's own git
+                   worktree; the engine decides and audits it. Pass
+                   expect_question = approval.question so a stale answer is
+                   refused. Audited. Takes either id.
     screen         Read what a session's terminal shows right now: visible
                    lines, cursor, title, activity and readiness. `ready` true
                    means the program is waiting for input — wait for it before
@@ -1389,7 +1395,9 @@ options:
                         checking them. A plain shell only gets the brief's
                         path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a
                         task with `template` when it is something to carry
-                        out.
+                        out. Omitted on an agent start, the task is taken from
+                        `reason` (a leading `Task:` dropped); a `review`
+                        purpose gets a default review task.
   --files FILES         Files the task touches, each `path` or `path:start-
                         end`. Rendered under Touch points; a line range is a
                         hint, not a slice of the file.

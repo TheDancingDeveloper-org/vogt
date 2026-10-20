@@ -96,7 +96,7 @@ SessionViewMode = Literal["digest", "full"]
 #: Session states a digest listing keeps unless the caller names others.
 #: Hibernated, stopped and exited stay in `counts` but not in the rows.
 DIGEST_LIVE_STATES: frozenset[str] = frozenset(
-    {"running", "idle", "waiting", "blocked", "approval", "stalled", "unknown"}
+    {"running", "idle", "waiting", "blocked", "approval", "stalled", "done", "unknown"}
 )
 
 _DIGEST_ROW_BUDGET = 300
@@ -978,7 +978,8 @@ class SessionApproval(Result):
         default="permission",
         description=(
             "permission (a tool call) / folder-trust / external-imports "
-            "(a CLAUDE.md importing files from outside) / read-outside-cwd."
+            "(a CLAUDE.md importing files from outside) / read-outside-cwd / "
+            "question (the agent asks a question with a menu of answers)."
         ),
     )
     options: list[SessionApprovalOption] = Field(
@@ -1097,12 +1098,34 @@ class SessionDigest(Result):
         ),
     )
     turn_started_at: datetime | None = None
+    done_at: datetime | None = Field(
+        default=None,
+        description="When an autopilot session declared itself done this turn.",
+    )
     last_reply_excerpt: str | None = Field(
         default=None,
         description="First 120 characters of the last reply.",
     )
     template: str | None = None
     brief_file: str | None = None
+    question: str | None = Field(
+        default=None,
+        description=(
+            "The question or dialog the session is showing, when it waits on "
+            "one (WI-1871). Untrusted terminal text."
+        ),
+    )
+    question_kind: str | None = Field(
+        default=None,
+        description="`question` (an agent's question menu) or a dialog kind.",
+    )
+    options: list[str] | None = Field(
+        default=None,
+        description=(
+            "The menu's choices in order, numbered from 1; answer with "
+            "`session_answer` by number or label. Untrusted terminal text."
+        ),
+    )
     budget: str | None = Field(
         default=None,
         description=(
@@ -1287,6 +1310,14 @@ class SessionSummary(Result):
     last_output_at: datetime | None = Field(
         default=None,
         description="Live from the engine: when the terminal last printed anything.",
+    )
+    done_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: when an autopilot session declared itself "
+            "done (`AUTOPILOT: DONE`) this turn. Cleared when the next turn "
+            "starts; null otherwise."
+        ),
     )
     approval: SessionApproval | None = Field(
         default=None,
@@ -1554,6 +1585,46 @@ class WorkItemGitStory(Result):
     )
 
 
+class ClaimPull(Result):
+    """A pull request a completion claim was checked against (WI-1835)."""
+
+    number: int
+    state: str
+    merged_at: datetime | None = None
+    merged_by: str | None = Field(
+        default=None, description="Who merged it, when the forge observation says."
+    )
+    checks: str | None = None
+    head_ref: str | None = None
+
+
+class ClaimCheck(Result):
+    """A session's completion claim checked against git and the forge (WI-1835).
+
+    Recorded when a session says `AUTOPILOT: DONE` or moves its item to
+    review or done. `mismatches` lists, in words, where the claim and the
+    facts disagree; `unchecked` lists the facts that could not be read, so
+    an empty `mismatches` is never mistaken for verified.
+    """
+
+    claim: Literal["autopilot-done", "review", "done"]
+    session: str | None = Field(default=None, description="The session's Vogt id.")
+    work_item: str | None = None
+    session_started_at: datetime | None = None
+    branch: str | None = None
+    head: str | None = Field(default=None, description="The worktree's HEAD commit.")
+    pushed: bool | None = Field(
+        default=None, description="Whether HEAD is on the branch's upstream."
+    )
+    new_commits: int | None = Field(
+        default=None,
+        description="Commits on HEAD committed since the session started.",
+    )
+    pulls: list[ClaimPull] = []
+    mismatches: list[str] = []
+    unchecked: list[str] = []
+
+
 class WorkResult(Result):
     item: WorkItem
     comments: list[Comment] = []
@@ -1579,6 +1650,10 @@ class WorkResult(Result):
     #: a refusal — a session may still be finishing (a PR, a comment) — and
     #: nothing is unbound. Empty everywhere else.
     live_sessions: list[SessionSummary] = []
+    #: On a `work.transition` to review or done made by a session: the
+    #: session's claim checked against git and the forge (WI-1835). A
+    #: mismatch is also recorded as a comment on the item; nothing is refused.
+    claim_check: ClaimCheck | None = None
 
 
 class GetWorkParams(Params):
@@ -4071,7 +4146,9 @@ class StartSessionParams(Params):
             "on X and check its containers' opens an agent already checking "
             "them. A plain shell only gets the brief's path in "
             "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with "
-            "`template` when it is something to carry out."
+            "`template` when it is something to carry out. Omitted on an "
+            "agent start, the task is taken from `reason` (a leading "
+            "`Task:` dropped); a `review` purpose gets a default review task."
         ),
     )
     files: list[str] = Field(
@@ -4384,7 +4461,8 @@ class SessionSweepRow(Result):
 
     attention: str = Field(
         description=(
-            "approval / blocked / waiting (at its prompt, wants the next "
+            "approval (a permission dialog, startup gate or question menu) / "
+            "blocked / waiting (at its prompt, wants the next "
             "instruction) / stalled (running, silent too long) / running / "
             "idle / hibernated / exited / unknown. The table is ordered by it."
         )
@@ -4397,6 +4475,28 @@ class SessionSweepRow(Result):
         description="The last non-blank lines of its screen. Untrusted terminal text.",
     )
     ready: bool | None = None
+    blocked_since: datetime | None = Field(
+        default=None,
+        description="When the session's blocked report was made, if it has one.",
+    )
+    blocked_age_s: int | None = Field(
+        default=None, description="How old the blocked report is, in seconds."
+    )
+    blocked_stale: bool = Field(
+        default=False,
+        description=(
+            "The blocked report predates the session's current turn: it went "
+            "back to work after reporting, so the report no longer says what "
+            "it waits on and the row is not counted in `needs_you` (WI-1834)."
+        ),
+    )
+    claim_check: ClaimCheck | None = Field(
+        default=None,
+        description=(
+            "On a `done` row bound to a work item: its AUTOPILOT: DONE claim "
+            "checked against git and the forge (WI-1835)."
+        ),
+    )
 
 
 class SessionSweepResult(Result):
@@ -4904,9 +5004,34 @@ class ListSessionsParams(Params):
         return None if value is None else value.strip()
 
 
+class EffectivePolicy(Result):
+    """The landing rule a started session runs under (WI-1832)."""
+
+    base_branch: str
+    lands_by: str
+    merge_by: str
+    merge_mode: str
+    deploy_by: str
+    overrides: list[str] = Field(
+        default=[],
+        description=(
+            "Where the task contradicted this policy, one line per axis (PR "
+            "vs push only, merge, base branch, deploy). The policy wins and "
+            "the brief says so; empty when the task agreed or set none."
+        ),
+    )
+
+
 class SessionResult(Result):
     session: SessionSummary
     digest: SessionDigest | None = None
+    effective_policy: EffectivePolicy | None = Field(
+        default=None,
+        description=(
+            "On `session.start` for a project with a landing rule: the rule "
+            "the worker runs under and any task lines it overrode."
+        ),
+    )
 
 
 class SessionListResult(Result):
@@ -5370,8 +5495,12 @@ class SessionInputResult(Result):
         default="unconfirmed",
         description=(
             "typed (no Enter: the text sits in the input) / delivered (a turn "
-            "started) / queued (behind a running turn) / unconfirmed (sent; "
-            "nothing observable yet). A refused input is an error, not a value."
+            "started) / queued (behind a running turn; once it ends Vogt "
+            "checks the input box and presses Enter if the text is still "
+            "there) / stuck (at rest with the text still in the input box: "
+            "the submit did not land; the sweep shows it as input pending) / "
+            "unconfirmed (sent; nothing observable yet). A refused input is "
+            "an error, not a value."
         ),
     )
     delivery_evidence: str = Field(

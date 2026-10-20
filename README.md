@@ -110,6 +110,8 @@ terminates TLS in front of it, and read [SECURITY.md](SECURITY.md) first.
 - [Agent guide](docs/AGENT_GUIDE.md) — for an agent working through Vogt.
 - [Configuration reference](docs/CONFIG.md) — every setting, generated from
   the schema.
+- [GitHub App](docs/GITHUB_APP.md) — connecting to GitHub as an App instead
+  of a personal token: permissions, installation, config.
 - [Customisation](docs/CUSTOMISATION.md) — the supported extension points.
 - [Engine](docs/ENGINE.md) — the session engine and web app: what it owns, its
   wire contract, the assistant, agent tasks.
