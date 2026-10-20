@@ -71,6 +71,42 @@ def default_data_dir() -> Path:
     return base / "vogt"
 
 
+class UsageAccount(BaseModel):
+    """One provider account the usage board reads (`usage_accounts`, WI-2040).
+
+    `agent` names the transcript shape: a Claude Code config directory (its
+    `projects/` holds the transcripts) or a Codex home (its `sessions/`).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, description="The account's name, e.g. `acct2`.")
+    agent: Literal["claude", "codex"]
+    dir: Path = Field(
+        description="The account's config directory (`CLAUDE_CONFIG_DIR` or "
+        "`CODEX_HOME`)."
+    )
+
+
+class UsageKey(BaseModel):
+    """One LiteLLM virtual key whose spend the usage board reads."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, description="The key's name, e.g. `deepseek`.")
+    key_env: str = Field(
+        min_length=1,
+        description="Environment variable holding the key. Its value is sent "
+        "to LiteLLM's `/key/info` and never stored or returned.",
+    )
+    daily_alert_usd: float | None = Field(
+        default=None,
+        ge=0,
+        description="Alert when the key's day spend reaches this; overrides "
+        "`usage_daily_spend_alert_usd`.",
+    )
+
+
 class DeployLane(BaseModel):
     """One deployment lane whose deployed revision Vogt reads (`deploy_lanes`).
 
@@ -365,6 +401,43 @@ class VogtConfig(BaseSettings):
             "versions are reported as not configured. A receipt whose "
             "status says the deploy or its smoke test failed raises an "
             "Inbox alert."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_accounts: tuple[UsageAccount, ...] = Field(
+        default=(),
+        description=(
+            "Provider accounts `usage.board` reports on, each a table with "
+            "`name`, `agent` (`claude` or `codex`) and `dir` (that account's "
+            "config directory). Read on request only: the newest limit and "
+            "reset the account's own transcripts recorded. Empty, no account "
+            "is reported."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_litellm_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL of a LiteLLM proxy whose keys' spend `usage.board` "
+            "reads through `/key/info`. Unset, no key spend is read."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_litellm_keys: tuple[UsageKey, ...] = Field(
+        default=(),
+        description=(
+            "LiteLLM keys `usage.board` reports spend for: `name`, `key_env` "
+            "(the environment variable holding the key) and an optional "
+            "`daily_alert_usd`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_daily_spend_alert_usd: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Default day-spend alert threshold, in USD, for every LiteLLM key "
+            "without its own `daily_alert_usd`. Unset, no alert is raised."
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )

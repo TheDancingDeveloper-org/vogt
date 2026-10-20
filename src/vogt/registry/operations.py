@@ -247,6 +247,8 @@ from vogt.application.models import (
     UpdateInitiativeParams,
     UpdateProjectParams,
     UpdateWorkParams,
+    UsageBoardParams,
+    UsageBoardResult,
     UserListParams,
     UserListResult,
     UserResult,
@@ -2075,6 +2077,21 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.deployed_versions,
             route=HttpRoute("GET", "/deployed-versions"),
             cli=CliBinding(("deployed-versions",)),
+        ),
+        Operation(
+            name="usage.board",
+            summary="Usage board: each configured provider account's reported "
+            "rate-limit windows, limit hits and reset times (Claude, Codex), "
+            "each LiteLLM key's spend, and the keys at or over their day-spend "
+            "alert. Read now from the accounts' transcripts and LiteLLM "
+            "/key/info; nothing is stored.",
+            scope="read",
+            mutating=False,
+            params_model=UsageBoardParams,
+            result_model=UsageBoardResult,
+            handler=services.usage_board_read,
+            route=HttpRoute("GET", "/usage-board"),
+            cli=CliBinding(("usage", "board")),
         ),
         Operation(
             name="inbox.list",
