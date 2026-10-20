@@ -85,6 +85,8 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_front_door.py | retired | Engine front door (the `/api/vogt` proxy, PTYs, files). `engine/server`, not the core. |
 | test_git_story.py | ported | `git_story.rs` and `application/git_story.rs`. |
 | test_github.py | ported | `adapters/github.rs`. |
+| test_github_app_auth.py | ported | `adapters/github_app_test.rs`; the two `github_collectors` notification tests are retired, that legacy collector set has no Rust counterpart. |
+| test_github_rate_budget.py | ported | `adapters/forge/rate_budget_test.rs`. |
 | test_grants.py | ported | `application/grants.rs`. |
 | test_handoff.py | ported | Ported in `engine/core/src/application/services/handoff_test.rs` (16 tests, WI-1080): hand-off round-trip, comment order, the worker brief leading with the latest hand-off, every review-brief case, `review_of` start and refusal, and the three `from_handoff` cases (opens on the item's latest hand-off, refuses a different `work_item`, refuses an item with no hand-off). The upstream refusal is `a_handoff_comment_on_an_upstream_item_is_refused` in `upstream_truth_test.rs`. The validation case is split: fields on a note are refused by the service (`fields_on_a_note_are_refused`), and a hand-off kind without fields is refused by WI-1060's registry validator (`a_handoff_comment_without_fields_is_refused` in `engine/core/src/registry/validate.rs`). |
 | test_http.py | ported | `adapters/http/app.rs` (status, etag, validation, openapi). |
