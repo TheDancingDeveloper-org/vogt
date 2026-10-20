@@ -9,8 +9,8 @@
 //! attaching to an existing repository is a link, a separate explicit act.
 
 use super::models::{
-    ForgeActor, ForgeCapabilities, ForgeCheck, ForgeComparison, ForgeIssue, ForgeJob, ForgeLabel,
-    ForgeNotification, ForgePosture, ForgePull, ForgeRelease, ForgeRepo, RepoRef,
+    ForgeActor, ForgeCapabilities, ForgeCheck, ForgeComparison, ForgeJob, ForgeLabel,
+    ForgeNotification, ForgePosture, ForgePull, ForgeRelease, ForgeRepo, IssuesItem, RepoRef,
 };
 use super::writeback::WriteBackResult;
 use crate::errors::VogtError;
@@ -66,11 +66,15 @@ pub trait ForgeProvider {
 
     /// Issues touched since `since` (all states), or all when `since` is
     /// `None`. `since` is honoured only when `capabilities.supports_since`.
+    ///
+    /// Pull requests that share the issues endpoint are yielded too, as
+    /// [`IssuesItem::Pull`], so the page's `updated_at` moves the watermark
+    /// past them; the caller must skip them as issues (WI-1752).
     fn issues_updated_since(
         &self,
         repo: &RepoRef,
         since: Option<&str>,
-    ) -> Result<Vec<ForgeIssue>, VogtError>;
+    ) -> Result<Vec<IssuesItem>, VogtError>;
 
     /// Pull/merge requests touched since `since` (all states).
     fn pulls_updated_since(

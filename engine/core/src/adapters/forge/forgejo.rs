@@ -9,7 +9,7 @@
 
 use super::models::{
     ForgeActor, ForgeCapabilities, ForgeCheck, ForgeComparison, ForgeIssue, ForgeJob, ForgeLabel,
-    ForgeNotification, ForgePosture, ForgePull, ForgeRelease, ForgeRepo, RepoRef,
+    ForgeNotification, ForgePosture, ForgePull, ForgeRelease, ForgeRepo, IssuesItem, RepoRef,
 };
 use super::payloads::{comparison, decoded_content, quote_path};
 use super::provider::ForgeProvider;
@@ -144,7 +144,7 @@ impl<T: ForgeTransport> ForgeProvider for ForgejoProvider<T> {
         &self,
         repo: &RepoRef,
         since: Option<&str>,
-    ) -> Result<Vec<ForgeIssue>, VogtError> {
+    ) -> Result<Vec<IssuesItem>, VogtError> {
         // `type=issues` keeps pull requests out server-side; the null check
         // below guards older installs that ignore the parameter. Gitea carries
         // `pull_request` on *every* issue, null for the real ones, so only a
@@ -169,7 +169,10 @@ impl<T: ForgeTransport> ForgeProvider for ForgejoProvider<T> {
             })
             .collect();
         items.sort_by_key(|item| text(item.get("updated_at")).unwrap_or("").to_owned());
-        Ok(items.into_iter().map(|item| to_issue(repo, item)).collect())
+        Ok(items
+            .into_iter()
+            .map(|item| IssuesItem::Issue(to_issue(repo, item)))
+            .collect())
     }
 
     fn pulls_updated_since(
@@ -695,6 +698,8 @@ fn to_issue(repo: &RepoRef, item: &serde_json::Map<String, serde_json::Value>) -
             .map(str::to_owned),
         updated_at: text(item.get("updated_at")).map(str::to_owned),
         closed_at: text(item.get("closed_at")).map(str::to_owned),
+        // Gitea/Forgejo do not say why an issue closed; a close reads `done`.
+        state_reason: None,
         source_url: text(item.get("html_url")).map(str::to_owned),
     }
 }
@@ -902,7 +907,12 @@ mod tests {
                 {"number": 9, "title": "A PR", "pull_request": {"merged": false}}
             ]),
         )]);
-        let issues = provider.issues_updated_since(&repo(), None).unwrap();
+        let issues = provider
+            .issues_updated_since(&repo(), None)
+            .unwrap()
+            .into_iter()
+            .filter_map(IssuesItem::into_issue)
+            .collect::<Vec<_>>();
         assert_eq!(
             issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
             vec![3, 4]
@@ -1166,7 +1176,12 @@ mod tests {
                 {"number": 8, "title": "a PR in disguise", "pull_request": {}}
             ]),
         )]);
-        let issues = provider.issues_updated_since(&widgets(), None).unwrap();
+        let issues = provider
+            .issues_updated_since(&widgets(), None)
+            .unwrap()
+            .into_iter()
+            .filter_map(IssuesItem::into_issue)
+            .collect::<Vec<_>>();
         assert_eq!(
             issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
             vec![7, 9],

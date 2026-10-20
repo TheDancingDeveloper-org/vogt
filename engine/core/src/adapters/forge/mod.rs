@@ -42,7 +42,7 @@ pub use kinds::{
     KIND_NOTIFICATION, KIND_PULL_REQUEST, KIND_RELEASE,
 };
 pub use lanes::{DeployLanesCollector, HttpVersionFetch};
-pub use models::RepoRef;
+pub use models::{IssuesItem, RepoRef};
 pub use provider::ForgeProvider;
 pub use registry::has_configured_forge;
 pub use sync::{commit_sync, ForgeDirectory, ForgeSyncCollector, PendingSync};
