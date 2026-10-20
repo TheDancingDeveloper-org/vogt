@@ -29,7 +29,14 @@ use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 
 /// Pairs of stores remembered per memo. A server has one; a test suite builds
 /// thousands of throwaway instances, and they must not accumulate.
+#[cfg(not(test))]
 pub const MEMO_STORES_MAX: usize = 4;
+/// The test suite runs hundreds of instances in parallel threads of one
+/// process, and the shared badge memos are process-wide: with room for only
+/// four, another test's badge read evicts this one's answer between two reads.
+/// Tests of the limit itself build a memo `with_limit`.
+#[cfg(test)]
+pub const MEMO_STORES_MAX: usize = 4096;
 
 /// Everything a memoised answer's validity depends on.
 #[derive(Debug, Clone, PartialEq, Eq)]
