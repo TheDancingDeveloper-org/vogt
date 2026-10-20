@@ -3931,6 +3931,8 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.grant_list` | Operator-only | Unavailable: Lists grants to sessions; for the GUI and for agents over MCP/CLI/REST. |
 | `decision.ask` | Operator-only | Unavailable: An agent's question for a person; for agents over MCP/CLI/REST. |
 | `decision.answer` | Operator-only | Unavailable: A person's answer, made deliberately in the Inbox, never by voice. |
+| `charter.get` | Operator-only | Unavailable: Standing instructions for agent sessions; for the GUI and agents over MCP/CLI/REST. |
+| `charter.set` | Operator-only | Unavailable: Changes what every session brief on a scope carries; set it from the GUI or MCP, not by voice. |
 | `decision.list` | Operator-only | Unavailable: Lists decisions; for the GUI and for agents over MCP/CLI/REST. |
 | `decision.withdraw` | Operator-only | Unavailable: Withdrawing a decision; for the GUI and for agents over MCP/CLI/REST. |
 | `token.issue` | Operator-only | Unavailable: Issues credentials that must never enter model context. |
