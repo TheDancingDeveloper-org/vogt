@@ -2327,6 +2327,24 @@
     "path": "/connect",
     "status": 404
    }
+  },
+  {
+   "why": "WI-1080: with no engine configured, engine.status answers and says why in `engine`, never an error or an idle engine",
+   "operation": "engine.status",
+   "cli": [
+    "engine",
+    "status"
+   ],
+   "params": {},
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/engine/status",
+    "auth": "admin",
+    "status": 200
+   }
   }
  ]
 }

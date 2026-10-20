@@ -1,8 +1,9 @@
 //! Ports `tests/test_workspace_disk.py`: the workspace-volume row (WI-1304)
 //! that `status` and `sweep` carry as `disk` when the session engine answers
 //! `GET /api/status`, and leave absent when there is no engine or it cannot
-//! say. The `engine.status` cases are not ported: that operation is not yet
-//! ported to the Rust core.
+//! say; and `engine.status`, which carries the same row beside the rest of
+//! the engine's report. A row pydantic's `EngineDiskStatus` would refuse
+//! (`{"used_percent": "x"}`) is no row on every surface.
 
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use crate::adapters::engine::{EngineClient, Transport};
 use crate::application::collect::sweep_op;
 use crate::application::context::{build_context, Built};
 use crate::application::instance::status_op;
+use crate::application::services::engine_status::engine_status_op;
 use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
 use crate::storage::interface::{DeclaredStore, ObservedStore};
 
@@ -118,4 +120,142 @@ fn a_status_without_a_disk_object_has_no_row() {
         let built = opened(Some(engine((200, answer.to_string()))));
         assert_eq!(surface(&built, "status"), Value::Null, "{answer}");
     }
+}
+
+fn engine_status(built: &Built) -> Value {
+    engine_status_op(built, json!({})).unwrap()
+}
+
+#[test]
+fn engine_status_carries_the_disk_row() {
+    let built = opened(Some(engine((
+        200,
+        json!({"version": "1", "disk": disk()}).to_string(),
+    ))));
+    let out = engine_status(&built);
+    assert_eq!(out["engine"], Value::Null);
+    assert_eq!(out["version"], json!("1"));
+    let row = &out["disk"];
+    assert_eq!(row["used_percent"], json!(90));
+    assert_eq!(row["threshold_percent"], json!(85));
+    assert_eq!(row["needs_attention"], json!(true));
+}
+
+#[test]
+fn engine_status_without_a_disk_row_says_none() {
+    let built = opened(Some(engine((200, json!({"version": "1"}).to_string()))));
+    assert_eq!(engine_status(&built)["disk"], Value::Null);
+    let malformed = opened(Some(engine((
+        200,
+        json!({"version": "1", "disk": {"used_percent": "x"}}).to_string(),
+    ))));
+    let out = engine_status(&malformed);
+    assert_eq!(out["disk"], Value::Null);
+    assert_eq!(out["version"], json!("1"));
+}
+
+#[test]
+fn a_malformed_disk_row_is_no_row_on_status_and_sweep() {
+    for which in ["status", "sweep"] {
+        for row in [
+            json!({"used_percent": "x"}),
+            json!({"needs_attention": null}),
+            json!({"path": 1}),
+            json!({"used_percent": 90, "unknown": 1}),
+        ] {
+            let built = opened(Some(engine((200, json!({"disk": row}).to_string()))));
+            assert_eq!(surface(&built, which), Value::Null, "{which} {row}");
+        }
+    }
+}
+
+#[test]
+fn a_disk_row_is_read_as_pydantic_reads_it() {
+    // Lax coercion and defaults: "90" is 90, a missing field takes its default,
+    // and the row always carries every field.
+    let built = opened(Some(engine((
+        200,
+        json!({"disk": {"used_percent": "90", "free_bytes": 100.0}}).to_string(),
+    ))));
+    let want = json!({
+        "path": null, "total_bytes": null, "free_bytes": 100,
+        "used_percent": 90, "threshold_percent": null, "needs_attention": false,
+    });
+    assert_eq!(surface(&built, "status"), want);
+    assert_eq!(engine_status(&built)["disk"], want);
+}
+
+#[test]
+fn engine_status_says_why_when_the_engine_cannot_be_asked() {
+    let none = engine_status(&opened(None));
+    assert_eq!(
+        none["engine"],
+        json!("no session engine is configured (VOGT_ENGINE_URL is unset)")
+    );
+    for (id, answer) in [
+        ("engine-unavailable", (503, "{}".to_string())),
+        ("engine-garbage", (200, "[]".to_string())),
+    ] {
+        let out = engine_status(&opened(Some(engine(answer))));
+        assert!(
+            out["engine"].as_str().is_some_and(|s| !s.is_empty()),
+            "{id} {out}"
+        );
+        assert_eq!(out["version"], Value::Null, "{id}");
+        assert_eq!(out["disk"], Value::Null, "{id}");
+        assert_eq!(out["event_lag"], json!({}), "{id}");
+    }
+}
+
+#[test]
+fn engine_status_reads_the_report_as_python_does() {
+    let built = opened(Some(engine((
+        200,
+        json!({
+            "product_version": "",
+            "version": "0.7.20",
+            "source_sha": "abc",
+            "release_url": 5,
+            "session_count": 3,
+            "push_subscription_count": true,
+            "gui_process_count": 2.0,
+            "fcm_enabled": false,
+            "gui_stream_configured": "yes",
+            "auth_broker": {"auto_agent_auth": true},
+            "storage": {"state_dir": "/s", "workspace_root": ""},
+            "history": {"enabled": "true", "log_bytes": "12"},
+            "agent_tasks": {"task_count": 4},
+            "event_lag": {"sse": {"episodes": 1, "events_skipped": 9}, "skip": 3},
+        })
+        .to_string(),
+    ))));
+    assert_eq!(
+        engine_status(&built),
+        json!({
+            "engine": null,
+            "version": "0.7.20",
+            "source_ref": null,
+            "source_sha": "abc",
+            "release_url": null,
+            "session_count": 3,
+            "push_subscription_count": null,
+            "gui_process_count": null,
+            "gui_stream_configured": null,
+            "fcm_enabled": false,
+            "auto_agent_auth": true,
+            "state_dir": "/s",
+            "workspace_root": null,
+            "history": {
+                "enabled": true, "archived_session_count": null,
+                "log_file_count": null, "log_bytes": 12, "db_bytes": null,
+            },
+            "agent_tasks": {
+                "task_count": 4, "prompt_task_dir_count": 0, "prompt_file_count": 0,
+                "context_file_count": 0, "session_prompt_file_count": 0,
+                "prompt_bytes": 0, "orphan_task_dir_count": 0,
+            },
+            "event_lag": {"sse": {"episodes": 1, "events_skipped": 9}},
+            "disk": null,
+        })
+    );
 }

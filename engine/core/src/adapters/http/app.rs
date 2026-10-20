@@ -2027,14 +2027,14 @@ mod tests {
     #[test]
     fn no_auth_reaches_the_operation_and_an_unported_one_says_so() {
         let running = serve(true);
-        let (status, body) = request(running.addr, "GET", "/api/engine/status", None);
+        let (status, body) = request(running.addr, "GET", "/api/instance/diagnostics", None);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(status, 501, "{body}");
         assert_eq!(json["error"]["code"], "not_implemented");
         assert!(json["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("engine.status"));
+            .contains("instance.diagnostics"));
     }
 
     #[test]
@@ -2165,7 +2165,7 @@ mod tests {
         let (status, head, _) = request_head_extra(
             running.addr,
             "GET",
-            "/api/engine/status",
+            "/api/instance/diagnostics",
             "If-None-Match: W/\"0\"\r\n",
         );
         assert_ne!(status, 304, "{head}");
