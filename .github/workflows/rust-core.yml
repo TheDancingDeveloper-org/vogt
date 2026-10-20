@@ -21,6 +21,12 @@ concurrency:
 permissions:
   contents: read
 
+# The goldens (CLI help wrapping above all) are recorded under the Python the
+# image ships (Dockerfile pins UV_PYTHON=3.13); left unset, uv picks whatever
+# the runner has.
+env:
+  UV_PYTHON: "3.13"
+
 jobs:
   rust:
     name: fmt, clippy, test

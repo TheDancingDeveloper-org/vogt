@@ -1138,7 +1138,7 @@ fn format_group(registry: &OperationRegistry, path: &[String]) -> String {
     out.push_str(&command_usage(
         &format!("vogt {joined}"),
         &["[-h]".to_string()],
-        &["<subcommand>".to_string(), "...".to_string()],
+        &["<subcommand> ...".to_string()],
     ));
     out.push_str("\npositional arguments:\n  <subcommand>\n");
     let rows = group_rows(registry, path);
@@ -1453,20 +1453,11 @@ fn usage_flags(schema: &Value) -> Vec<String> {
     parts
 }
 
-/// argparse's `part_regexp`: a parenthesised or bracketed group is one part,
-/// however many words it holds. Everything else splits on whitespace.
+/// argparse 3.13's usage parts: one part per action, however many words it
+/// holds, so a required `--reason REASON` never breaks across lines. (3.12 split
+/// unbracketed actions on whitespace; the image runs 3.13.)
 fn usage_parts(flags: &[String]) -> Vec<String> {
-    let mut parts = Vec::new();
-    for flag in flags {
-        let bracketed = (flag.starts_with('[') && flag.ends_with(']'))
-            || (flag.starts_with('(') && flag.ends_with(')'));
-        if bracketed {
-            parts.push(flag.clone());
-        } else {
-            parts.extend(flag.split_whitespace().map(str::to_string));
-        }
-    }
-    parts
+    flags.to_vec()
 }
 
 /// Fields argparse treats as required flags: listed in `required`, and not

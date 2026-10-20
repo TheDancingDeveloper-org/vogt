@@ -359,8 +359,8 @@ options:
 
 $ vogt project transition --help
 [exit 0]
-usage: vogt project transition [-h] --slug SLUG --to-state
-                               {incubating,active,maintenance,archived}
+usage: vogt project transition [-h] --slug SLUG
+                               --to-state {incubating,active,maintenance,archived}
                                --reason REASON
 
 options:
@@ -555,8 +555,8 @@ options:
 
 $ vogt work relate --help
 [exit 0]
-usage: vogt work relate [-h] --ref REF --kind
-                        {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
+usage: vogt work relate [-h] --ref REF
+                        --kind {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
                         --target TARGET --reason REASON
 
 options:
@@ -571,8 +571,8 @@ options:
 
 $ vogt work unrelate --help
 [exit 0]
-usage: vogt work unrelate [-h] --ref REF --kind
-                          {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
+usage: vogt work unrelate [-h] --ref REF
+                          --kind {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
                           --target TARGET --reason REASON
 
 options:
@@ -1063,8 +1063,8 @@ options:
 
 $ vogt contract inapplicable --help
 [exit 0]
-usage: vogt contract inapplicable [-h] --project PROJECT --rule RULE --target
-                                  TARGET --reason REASON
+usage: vogt contract inapplicable [-h] --project PROJECT --rule RULE
+                                  --target TARGET --reason REASON
 
 options:
   -h, --help         show this help message and exit
@@ -1077,8 +1077,8 @@ options:
 
 $ vogt contract applicable --help
 [exit 0]
-usage: vogt contract applicable [-h] --project PROJECT --rule RULE --target
-                                TARGET --reason REASON
+usage: vogt contract applicable [-h] --project PROJECT --rule RULE
+                                --target TARGET --reason REASON
 
 options:
   -h, --help         show this help message and exit
@@ -1110,8 +1110,8 @@ options:
 
 $ vogt drift detect --help
 [exit 0]
-usage: vogt drift detect [-h] [--auto-accept | --no-auto-accept] --reason
-                         REASON
+usage: vogt drift detect [-h] [--auto-accept | --no-auto-accept]
+                         --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -1135,8 +1135,9 @@ options:
 
 $ vogt drift resolve --help
 [exit 0]
-usage: vogt drift resolve [-h] --id ID --resolution
-                          {accepted,rejected,contested} --reason REASON
+usage: vogt drift resolve [-h] --id ID
+                          --resolution {accepted,rejected,contested}
+                          --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -1362,8 +1363,8 @@ usage: vogt session start [-h] [--work-item WORK_ITEM] [--project PROJECT]
                           [--role {worker,oversight}]
                           [--from-handoff FROM_HANDOFF]
                           [--review-of REVIEW_OF] [--budget BUDGET]
-                          [--worktree | --no-worktree] [--cwd CWD] --reason
-                          REASON
+                          [--worktree | --no-worktree] [--cwd CWD]
+                          --reason REASON
                           [--purpose {implement,implement-careful,review,mechanical,investigate,design}]
 
 options:
@@ -1768,8 +1769,8 @@ options:
 
 $ vogt session set-role --help
 [exit 0]
-usage: vogt session set-role [-h] --id ID --role {worker,oversight} --reason
-                             REASON
+usage: vogt session set-role [-h] --id ID --role {worker,oversight}
+                             --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -1785,8 +1786,8 @@ options:
 
 $ vogt session bind --help
 [exit 0]
-usage: vogt session bind [-h] [--id ID] [--work-item WORK_ITEM] --reason
-                         REASON
+usage: vogt session bind [-h] [--id ID] [--work-item WORK_ITEM]
+                         --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2111,8 +2112,8 @@ options:
 
 $ vogt decision answer --help
 [exit 0]
-usage: vogt decision answer [-h] --id ID --label LABEL [--note NOTE] --reason
-                            REASON
+usage: vogt decision answer [-h] --id ID --label LABEL [--note NOTE]
+                            --reason REASON
 
 options:
   -h, --help       show this help message and exit
@@ -2170,8 +2171,8 @@ options:
 
 $ vogt agent-cli update --help
 [exit 0]
-usage: vogt agent-cli update [-h] --tool TOOL --version VERSION --reason
-                             REASON
+usage: vogt agent-cli update [-h] --tool TOOL --version VERSION
+                             --reason REASON
 
 options:
   -h, --help         show this help message and exit
@@ -2378,8 +2379,8 @@ $ vogt user passwd --help
 usage: vogt user passwd [-h] --username USERNAME
                         [--password-file PASSWORD__FILE | --password-stdin]
                         [--scopes SCOPES]
-                        [--revoke-sessions | --no-revoke-sessions] --reason
-                        REASON
+                        [--revoke-sessions | --no-revoke-sessions]
+                        --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2404,8 +2405,8 @@ options:
 
 $ vogt backup --help
 [exit 0]
-usage: vogt backup [-h] [--destination DESTINATION] [--label LABEL] --reason
-                   REASON
+usage: vogt backup [-h] [--destination DESTINATION] [--label LABEL]
+                   --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2416,8 +2417,8 @@ options:
 
 $ vogt restore --help
 [exit 0]
-usage: vogt restore [-h] --source SOURCE [--confirm | --no-confirm] --reason
-                    REASON
+usage: vogt restore [-h] --source SOURCE [--confirm | --no-confirm]
+                    --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2446,8 +2447,8 @@ options:
 
 $ vogt export --help
 [exit 0]
-usage: vogt export [-h] --destination DESTINATION [--project PROJECT] --reason
-                   REASON
+usage: vogt export [-h] --destination DESTINATION [--project PROJECT]
+                   --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2522,8 +2523,8 @@ options:
 
 $ vogt forge writeback --help
 [exit 0]
-usage: vogt forge writeback [-h] --project PROJECT --policy
-                            {none,comment_only,full} --reason REASON
+usage: vogt forge writeback [-h] --project PROJECT
+                            --policy {none,comment_only,full} --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2581,8 +2582,8 @@ options:
 
 $ vogt forge account link --help
 [exit 0]
-usage: vogt forge account link [-h] [--host HOST] --token TOKEN --reason
-                               REASON
+usage: vogt forge account link [-h] [--host HOST] --token TOKEN
+                               --reason REASON
 
 options:
   -h, --help       show this help message and exit
@@ -2757,8 +2758,8 @@ options:
 
 $ vogt inbox snooze --help
 [exit 0]
-usage: vogt inbox snooze [-h] --entry-key ENTRY_KEY --until UNTIL --reason
-                         REASON
+usage: vogt inbox snooze [-h] --entry-key ENTRY_KEY --until UNTIL
+                         --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2800,8 +2801,8 @@ options:
 $ vogt preference set --help
 [exit 0]
 usage: vogt preference set [-h] --key KEY --value VALUE
-                           [--expected-version EXPECTED_VERSION] --reason
-                           REASON
+                           [--expected-version EXPECTED_VERSION]
+                           --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2888,8 +2889,8 @@ options:
 
 $ vogt chat send --help
 [exit 0]
-usage: vogt chat send [-h] --id ID --text TEXT [--wait-s WAIT_S] --reason
-                      REASON
+usage: vogt chat send [-h] --id ID --text TEXT [--wait-s WAIT_S]
+                      --reason REASON
 
 options:
   -h, --help       show this help message and exit
@@ -2902,8 +2903,8 @@ options:
 $ vogt chat decide --help
 [exit 0]
 usage: vogt chat decide [-h] --id ID --approval-id APPROVAL_ID
-                        [--allow | --no-allow] [--message MESSAGE] --reason
-                        REASON
+                        [--allow | --no-allow] [--message MESSAGE]
+                        --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2935,8 +2936,8 @@ options:
 
 $ vogt chat archive --help
 [exit 0]
-usage: vogt chat archive [-h] --id ID [--archived | --no-archived] --reason
-                         REASON
+usage: vogt chat archive [-h] --id ID [--archived | --no-archived]
+                         --reason REASON
 
 options:
   -h, --help            show this help message and exit
