@@ -36,6 +36,7 @@ from vogt.core.entities import (
     Project,
     RelationKind,
     SessionGrant,
+    SessionReport,
     Suppression,
     Sweep,
     SweepOutcome,
@@ -542,6 +543,26 @@ class ReadView(Protocol):
         """Decisions, newest first, optionally of one state, item or asker."""
         ...
 
+    def latest_session_reports(
+        self, engine_session_ids: list[str]
+    ) -> dict[str, SessionReport]:
+        """The newest report each of these engine sessions made, by its id.
+
+        A session that never reported is absent from the result.
+        """
+        ...
+
+    def list_session_reports(
+        self,
+        *,
+        engine_session_id: str | None = None,
+        work_item_id: str | None = None,
+        kind: str | None = None,
+        limit: int = 200,
+    ) -> list[SessionReport]:
+        """Session reports, newest first, optionally of one session, item or kind."""
+        ...
+
     def list_session_grants(
         self,
         *,
@@ -770,6 +791,8 @@ class WriteTxn(ReadView, Protocol):
     def insert_session_grant(self, grant: SessionGrant) -> None: ...
 
     def insert_decision(self, decision: Decision) -> None: ...
+
+    def insert_session_report(self, report: SessionReport) -> None: ...
 
     def update_decision(self, decision: Decision) -> None:
         """Replace a decision's state and answer fields."""

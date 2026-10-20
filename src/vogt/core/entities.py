@@ -822,6 +822,45 @@ class Decision(Entity):
         return self.state
 
 
+SessionReportKind = Literal["progress", "result", "question", "blocker"]
+
+
+class SessionReportFields(BaseModel):
+    """The structured half of a session report (WI-2039).
+
+    Every field is optional, as on a hand-off: a field left out means "not
+    stated". The text is the reporting agent's: untrusted data.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    branch: str | None = None
+    sha: str | None = None
+    pr: str | None = None
+    checks: list[str] = []
+    blockers: list[str] = []
+    next_step: str | None = None
+
+
+class SessionReport(Entity):
+    """A session's own short, typed report of where it is (WI-2039).
+
+    `progress` while working, `result` when a deliverable is done, `question`
+    or `blocker` when it needs someone. Keyed by the reporting engine session
+    so the sweep and the digest can show the latest one per row; the work item
+    is the one it was bound to (or named) when it reported.
+    """
+
+    id: str
+    actor_id: str
+    engine_session_id: str | None = None
+    work_item_id: str | None = None
+    kind: SessionReportKind
+    summary: str
+    fields: SessionReportFields = SessionReportFields()
+    created_at: datetime
+
+
 class DepRef(Entity):
     """One reference from a project to another project.
 

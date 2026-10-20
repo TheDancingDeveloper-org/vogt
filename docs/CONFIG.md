@@ -29,6 +29,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `ci_alert_branches` | `VOGT_CI_ALERT_BRANCHES` | list of strings | `main`, `master`, `prod` | behaviour |
 | `ci_alert_tags` | `VOGT_CI_ALERT_TAGS` | list of strings | `v*` | behaviour |
 | `ci_watch_notify_sessions` | `VOGT_CI_WATCH_NOTIFY_SESSIONS` | boolean | `True` | behaviour |
+| `autopilot_done_requires_result_report` | `VOGT_AUTOPILOT_DONE_REQUIRES_RESULT_REPORT` | boolean | `False` | behaviour |
 | `deploy_lanes` | `VOGT_DEPLOY_LANES` | list of `DeployLane` tables | *(empty)* | behaviour |
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `branch_binding_patterns` | `VOGT_BRANCH_BINDING_PATTERNS` | list of strings | `(?i)\bwi-?(?P<n>\d+)\b`, `(?i)\bgh-(?P<forge>\d+)\b` | behaviour |
@@ -138,6 +139,10 @@ Tags (glob patterns) whose failed CI runs raise an Inbox alert — the release w
 ### `ci_watch_notify_sessions`
 
 When CI finishes on a branch bound to a work item (`work.bind_branch`), type a one-line pass/fail notice into each live session started for that item, so an agent wakes on the result instead of polling. Sent once per run conclusion, by the sweep that observed it. The Inbox entry is raised either way; this only turns the session nudge off.
+
+### `autopilot_done_requires_result_report`
+
+When true, the session sweep treats an `AUTOPILOT: DONE` as done only if the session posted a `result` report (`session.report`) since its turn began; otherwise the row reads `waiting` with the reason `done without a result report`, so oversight asks for one instead of trusting the line. Off by default.
 
 ### `deploy_lanes`
 

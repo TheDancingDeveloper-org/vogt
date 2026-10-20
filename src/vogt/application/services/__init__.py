@@ -123,6 +123,7 @@ from vogt.application.services.projects import (
     transition_project,
     update_project,
 )
+from vogt.application.services.reports import report as report_session
 from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
     answer_session,
@@ -288,6 +289,7 @@ __all__ = [
     "remove_user",
     "rename_session",
     "report_blocked",
+    "report_session",
     "report_unblocked",
     "reproject_initiative",
     "request_grant",
