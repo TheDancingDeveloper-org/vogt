@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vogt (egui)</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #fafafa; }
+    canvas { width: 100%; height: 100%; display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="vogt"></canvas>
+  <script type="module">
+    // Built by `wasm-bindgen --target web --out-dir dist` (see README.md).
+    import init, { start } from "./vogt_gui.js";
+    await init();
+    await start("vogt");
+  </script>
+</body>
+</html>

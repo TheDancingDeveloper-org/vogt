@@ -30,7 +30,7 @@ pub enum Reply {
     /// The session list.
     Sessions(Result<Vec<Session>, ApiError>),
     /// A work item, by the reference it was asked for under.
-    WorkItem(String, Result<WorkDetail, ApiError>),
+    WorkItem(String, Result<Box<WorkDetail>, ApiError>),
     /// The event stream with this generation opened.
     StreamOpened(u64),
     /// An event arrived on stream `generation`.
@@ -63,7 +63,11 @@ pub(crate) fn login_reply(base: &str, result: Result<LoginResult, ApiError>) -> 
         Ok(login) => Reply::LoggedIn {
             base: base.to_owned(),
             token: login.secret,
-            actor: if login.actor.display_name.is_empty() { login.actor.id } else { login.actor.display_name },
+            actor: if login.actor.display_name.is_empty() {
+                login.actor.id
+            } else {
+                login.actor.display_name
+            },
         },
         Err(error) => Reply::LoginFailed(error),
     }

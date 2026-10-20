@@ -74,7 +74,10 @@ impl FixtureBackend {
     /// End the open stream as a dropped connection would.
     pub fn drop_stream(&mut self) {
         if let Some(generation) = self.stream.take() {
-            self.queue.push_back(Reply::StreamClosed(generation, ApiError::transport("the event stream ended")));
+            self.queue.push_back(Reply::StreamClosed(
+                generation,
+                ApiError::transport("the event stream ended"),
+            ));
         }
     }
 
@@ -82,7 +85,10 @@ impl FixtureBackend {
         if auth.token == self.token {
             Ok(())
         } else {
-            Err(ApiError { status: Some(401), message: "unknown token".into() })
+            Err(ApiError {
+                status: Some(401),
+                message: "unknown token".into(),
+            })
         }
     }
 }
@@ -103,9 +109,16 @@ impl Backend for FixtureBackend {
     fn login(&mut self, base: &str, username: &str, password: &str) {
         self.calls.push(format!("login {username}"));
         let reply = if (username, password) == (self.credentials.0.as_str(), self.credentials.1.as_str()) {
-            Reply::LoggedIn { base: base.to_owned(), token: self.token.clone(), actor: username.to_owned() }
+            Reply::LoggedIn {
+                base: base.to_owned(),
+                token: self.token.clone(),
+                actor: username.to_owned(),
+            }
         } else {
-            Reply::LoginFailed(ApiError { status: Some(401), message: "wrong username or password".into() })
+            Reply::LoginFailed(ApiError {
+                status: Some(401),
+                message: "wrong username or password".into(),
+            })
         };
         self.queue.push_back(reply);
     }
@@ -119,12 +132,13 @@ impl Backend for FixtureBackend {
     fn fetch_work_item(&mut self, auth: &Auth, reference: &str) {
         self.calls.push(format!("work {reference}"));
         let reply = self.authorised(auth).and_then(|()| {
-            self.work_items
-                .get(reference)
-                .cloned()
-                .ok_or_else(|| ApiError { status: Some(404), message: format!("{reference} not found") })
+            self.work_items.get(reference).cloned().ok_or_else(|| ApiError {
+                status: Some(404),
+                message: format!("{reference} not found"),
+            })
         });
-        self.queue.push_back(Reply::WorkItem(reference.to_owned(), reply));
+        self.queue
+            .push_back(Reply::WorkItem(reference.to_owned(), reply.map(Box::new)));
     }
 
     fn open_events(&mut self, auth: &Auth, generation: u64) {
@@ -148,5 +162,28 @@ impl Backend for FixtureBackend {
 
     fn poll(&mut self) -> Vec<Reply> {
         self.queue.drain(..).collect()
+    }
+}
+
+/// A shared fixture, so a test can hand the app a backend and still reach in
+/// to emit events or read the calls.
+impl Backend for std::rc::Rc<std::cell::RefCell<FixtureBackend>> {
+    fn login(&mut self, base: &str, username: &str, password: &str) {
+        self.borrow_mut().login(base, username, password);
+    }
+    fn fetch_sessions(&mut self, auth: &Auth) {
+        self.borrow_mut().fetch_sessions(auth);
+    }
+    fn fetch_work_item(&mut self, auth: &Auth, reference: &str) {
+        self.borrow_mut().fetch_work_item(auth, reference);
+    }
+    fn open_events(&mut self, auth: &Auth, generation: u64) {
+        self.borrow_mut().open_events(auth, generation);
+    }
+    fn close_events(&mut self) {
+        self.borrow_mut().close_events();
+    }
+    fn poll(&mut self) -> Vec<Reply> {
+        self.borrow_mut().poll()
     }
 }

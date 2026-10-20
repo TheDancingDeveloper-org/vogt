@@ -128,7 +128,10 @@ impl Model {
     pub fn new(base: impl Into<String>) -> Self {
         Self {
             screen: Screen::Login,
-            login: LoginForm { base: base.into(), ..LoginForm::default() },
+            login: LoginForm {
+                base: base.into(),
+                ..LoginForm::default()
+            },
             auth: None,
             actor: String::new(),
             sessions: Vec::new(),
@@ -158,7 +161,11 @@ impl Model {
         self.login.busy = true;
         self.login.error = None;
         let password = std::mem::take(&mut self.login.password);
-        vec![Command::Login { base, username: self.login.username.trim().to_owned(), password }]
+        vec![Command::Login {
+            base,
+            username: self.login.username.trim().to_owned(),
+            password,
+        }]
     }
 
     /// The user pasted a bearer token instead. It is checked by the first read:
@@ -237,7 +244,9 @@ impl Model {
 
     /// Any 401 means the credential is dead: sign out rather than retry it.
     fn refused(&mut self, error: &ApiError) -> Option<Vec<Command>> {
-        error.is_unauthorized().then(|| self.sign_out(Some("Your sign-in expired. Sign in again.".into())))
+        error
+            .is_unauthorized()
+            .then(|| self.sign_out(Some("Your sign-in expired. Sign in again.".into())))
     }
 
     /// Fold one backend reply in.
@@ -277,7 +286,7 @@ impl Model {
                 }
                 match result {
                     Ok(detail) => {
-                        self.work = WorkView::Loaded(Box::new(detail));
+                        self.work = WorkView::Loaded(detail);
                         Vec::new()
                     }
                     Err(error) => self.refused(&error).unwrap_or_else(|| {
@@ -327,7 +336,12 @@ impl Model {
         match event {
             ServerEvent::SessionCreated { id, name } => {
                 if !self.sessions.iter().any(|s| s.id == id) {
-                    self.sessions.push(Session { id, name, activity: "starting".into(), ..Session::default() });
+                    self.sessions.push(Session {
+                        id,
+                        name,
+                        activity: "starting".into(),
+                        ..Session::default()
+                    });
                     sort_sessions(&mut self.sessions);
                 }
                 // The event is thin; read the full row.
@@ -347,7 +361,11 @@ impl Model {
                 }
                 Vec::new()
             }
-            ServerEvent::Activity { id, state, activity_changed_at } => {
+            ServerEvent::Activity {
+                id,
+                state,
+                activity_changed_at,
+            } => {
                 if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
                     s.activity = state;
                     if activity_changed_at.is_some() {
@@ -377,7 +395,11 @@ fn sort_sessions(sessions: &mut [Session]) {
 pub fn run(commands: Vec<Command>, model: &Model, backend: &mut dyn Backend) {
     for command in commands {
         match command {
-            Command::Login { base, username, password } => backend.login(&base, &username, &password),
+            Command::Login {
+                base,
+                username,
+                password,
+            } => backend.login(&base, &username, &password),
             Command::FetchSessions => {
                 if let Some(auth) = &model.auth {
                     backend.fetch_sessions(auth);
@@ -458,11 +480,25 @@ mod tests {
     #[test]
     fn events_update_the_list_in_place() {
         let (mut model, mut backend, now) = signed_in();
-        backend.emit(ServerEvent::Activity { id: "s1".into(), state: "awaiting-approval".into(), activity_changed_at: None });
-        backend.emit(ServerEvent::SessionRenamed { id: "s2".into(), name: "alpha".into() });
-        backend.emit(ServerEvent::SessionKilled { id: "s1".into(), exit_code: Some(0) });
+        backend.emit(ServerEvent::Activity {
+            id: "s1".into(),
+            state: "awaiting-approval".into(),
+            activity_changed_at: None,
+        });
+        backend.emit(ServerEvent::SessionRenamed {
+            id: "s2".into(),
+            name: "alpha".into(),
+        });
+        backend.emit(ServerEvent::SessionKilled {
+            id: "s1".into(),
+            exit_code: Some(0),
+        });
         settle(&mut model, &mut backend, now);
-        let names: Vec<_> = model.sessions.iter().map(|s| (s.name.as_str(), s.activity.as_str())).collect();
+        let names: Vec<_> = model
+            .sessions
+            .iter()
+            .map(|s| (s.name.as_str(), s.activity.as_str()))
+            .collect();
         assert_eq!(names, vec![("alpha", "idle"), ("oversight", "exited")]);
     }
 
@@ -471,7 +507,10 @@ mod tests {
         let (mut model, mut backend, now) = signed_in();
         backend.sessions.push(session("s3", "new", "running"));
         let before = backend.calls.len();
-        backend.emit(ServerEvent::SessionCreated { id: "s3".into(), name: "new".into() });
+        backend.emit(ServerEvent::SessionCreated {
+            id: "s3".into(),
+            name: "new".into(),
+        });
         settle(&mut model, &mut backend, now);
         assert_eq!(backend.calls[before..], ["sessions"]);
         assert!(model.sessions.iter().any(|s| s.id == "s3" && s.activity == "running"));
@@ -483,7 +522,9 @@ mod tests {
         backend.sessions.push(session("s9", "missed", "running"));
         backend.drop_stream();
         settle(&mut model, &mut backend, now);
-        let StreamState::Waiting { retry_at, attempt } = model.stream else { panic!("not waiting: {:?}", model.stream) };
+        let StreamState::Waiting { retry_at, attempt } = model.stream else {
+            panic!("not waiting: {:?}", model.stream)
+        };
         assert_eq!(attempt, 1);
         assert_eq!(model.next_wake(now), Some(Duration::from_millis(500)));
         // Too early: nothing happens.
@@ -526,7 +567,13 @@ mod tests {
     #[test]
     fn unauthorised_anything_signs_out() {
         let (mut model, _backend, now) = signed_in();
-        let commands = model.apply(Reply::Sessions(Err(ApiError { status: Some(401), message: "no".into() })), now);
+        let commands = model.apply(
+            Reply::Sessions(Err(ApiError {
+                status: Some(401),
+                message: "no".into(),
+            })),
+            now,
+        );
         assert_eq!(commands, vec![Command::CloseEvents]);
         assert_eq!(model.screen, Screen::Login);
         assert!(model.auth.is_none());
@@ -551,11 +598,17 @@ mod tests {
         let commands = model.open_work_item(" WI-1806 ");
         run(commands, &model, &mut backend);
         settle(&mut model, &mut backend, now);
-        let WorkView::Loaded(detail) = &model.work else { panic!("{:?}", model.work) };
+        let WorkView::Loaded(detail) = &model.work else {
+            panic!("{:?}", model.work)
+        };
         assert_eq!(detail.item.title, "Vogt-on-fluent2 POC");
 
         let before = backend.calls.len();
-        backend.emit(ServerEvent::VogtChanged { kind: "work.updated".into(), entity_kind: "work_item".into(), entity_id: "wrk_demo".into() });
+        backend.emit(ServerEvent::VogtChanged {
+            kind: "work.updated".into(),
+            entity_kind: "work_item".into(),
+            entity_id: "wrk_demo".into(),
+        });
         settle(&mut model, &mut backend, now);
         assert_eq!(backend.calls[before..], ["work WI-1806"]);
 
@@ -569,7 +622,7 @@ mod tests {
     fn late_work_item_reply_for_an_old_ref_is_dropped() {
         let (mut model, _backend, now) = signed_in();
         let _ = model.open_work_item("WI-2");
-        model.apply(Reply::WorkItem("WI-1".into(), Ok(WorkDetail::default())), now);
+        model.apply(Reply::WorkItem("WI-1".into(), Ok(Box::default())), now);
         assert_eq!(model.work, WorkView::Loading("WI-2".into()));
     }
 }

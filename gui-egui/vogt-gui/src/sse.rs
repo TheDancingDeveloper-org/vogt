@@ -29,7 +29,10 @@ impl SseParser {
 
     /// Feed the next chunk.
     pub fn feed(&mut self, chunk: &[u8]) -> Fed {
-        let mut fed = Fed { heartbeat: !chunk.is_empty(), ..Fed::default() };
+        let mut fed = Fed {
+            heartbeat: !chunk.is_empty(),
+            ..Fed::default()
+        };
         for &byte in chunk {
             if byte == b'\n' {
                 let mut line = std::mem::take(&mut self.line);
