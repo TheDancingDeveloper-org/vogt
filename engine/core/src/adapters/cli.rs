@@ -1817,12 +1817,7 @@ mod tests {
     #[test]
     fn a_domain_error_exits_one() {
         let registry = default_registry();
-        let result = at_eighty(
-            &argv(&["engine", "status"]),
-            &registry,
-            "test",
-            &mut no_dispatch,
-        );
+        let result = at_eighty(&argv(&["diagnostics"]), &registry, "test", &mut no_dispatch);
         assert_eq!(result.exit_code, EXIT_ERROR);
         assert!(
             result.stderr.contains("invalid_request"),

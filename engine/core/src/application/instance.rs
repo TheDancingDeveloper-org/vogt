@@ -434,14 +434,16 @@ fn status<C: Clock, I: IdFactory>(
 }
 
 /// The engine's report of the workspace volume, or nothing when it cannot be
-/// asked. A failure to answer is logged and read as absent, never as an error
+/// asked or the row is malformed. A failure to answer is logged and read as absent, never as an error
 /// in status.
 pub(crate) fn workspace_disk<C: Clock, I: IdFactory>(
     ctx: &crate::application::context::AppContext<C, I>,
 ) -> Option<serde_json::Value> {
     let engine = ctx.engine.as_ref()?;
     match engine.operational_status() {
-        Ok(payload) => payload.get("disk").filter(|disk| disk.is_object()).cloned(),
+        // Read as Python's `EngineDiskStatus` reads it: a row with a field of
+        // the wrong type, or one it does not know, is no row.
+        Ok(payload) => crate::application::services::engine_status::disk(payload.get("disk")),
         Err(error) => {
             tracing::info!(
                 error = %error,

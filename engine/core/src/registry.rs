@@ -233,6 +233,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "project.transition" => Some(crate::application::projects::transition_op),
         "project.brief" => Some(crate::application::projects::brief_op),
         "place.metrics" => Some(crate::application::place::place_metrics_op),
+        "engine.status" => Some(crate::application::services::engine_status::engine_status_op),
         "label.create" => Some(crate::application::taxonomy::create_label_op),
         "label.list" => Some(crate::application::taxonomy::list_labels_op),
         "actor.create" => Some(crate::application::taxonomy::create_actor_op),
@@ -1040,7 +1041,7 @@ mod tests {
     #[test]
     fn not_ported_is_a_failure() {
         let registry = registry();
-        let operation = registry.get("engine.status").unwrap();
+        let operation = registry.get("instance.diagnostics").unwrap();
         let error = operation.run(None, serde_json::json!({})).unwrap_err();
         assert!(
             error.message().contains("not been ported"),
