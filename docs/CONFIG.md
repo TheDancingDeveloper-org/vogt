@@ -29,6 +29,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `ci_alert_branches` | `VOGT_CI_ALERT_BRANCHES` | list of strings | `main`, `master`, `prod` | behaviour |
 | `ci_alert_tags` | `VOGT_CI_ALERT_TAGS` | list of strings | `v*` | behaviour |
 | `ci_watch_notify_sessions` | `VOGT_CI_WATCH_NOTIFY_SESSIONS` | boolean | `True` | behaviour |
+| `autopilot_done_requires_result_report` | `VOGT_AUTOPILOT_DONE_REQUIRES_RESULT_REPORT` | boolean | `False` | behaviour |
 | `deploy_lanes` | `VOGT_DEPLOY_LANES` | list of `DeployLane` tables | *(empty)* | behaviour |
 | `usage_accounts` | `VOGT_USAGE_ACCOUNTS` | list of `UsageAccount` tables | *(empty)* | behaviour |
 | `usage_litellm_url` | `VOGT_USAGE_LITELLM_URL` | string, optional | *(no default — must be set)* | behaviour |
@@ -143,6 +144,10 @@ Tags (glob patterns) whose failed CI runs raise an Inbox alert — the release w
 ### `ci_watch_notify_sessions`
 
 When CI finishes on a branch bound to a work item (`work.bind_branch`), type a one-line pass/fail notice into each live session started for that item, so an agent wakes on the result instead of polling. Sent once per run conclusion, by the sweep that observed it. The Inbox entry is raised either way; this only turns the session nudge off.
+
+### `autopilot_done_requires_result_report`
+
+When true, the session sweep treats an `AUTOPILOT: DONE` as done only if the session posted a `result` report (`session.report`) since its turn began; otherwise the row reads `waiting` with the reason `done without a result report`, so oversight asks for one instead of trusting the line. Off by default.
 
 ### `deploy_lanes`
 

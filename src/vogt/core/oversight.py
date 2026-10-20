@@ -83,6 +83,31 @@ WEDGED = (
 )
 
 
+#: The reason an `AUTOPILOT: DONE` with no result report is shown with, when
+#: `autopilot_done_requires_result_report` is on (WI-2039).
+DONE_WITHOUT_REPORT = (
+    "done without a result report: it printed AUTOPILOT: DONE but posted no "
+    "session_report kind=result this turn; ask it for one"
+)
+
+
+def result_reported(
+    *,
+    report_kind: str | None,
+    report_at: datetime | None,
+    turn_started_at: datetime | None,
+) -> bool:
+    """Whether the session's latest report is a result made this turn.
+
+    A result from an earlier turn says what that turn did, not this one, so
+    it does not count once a later turn has begun. With no turn start known,
+    any result report counts.
+    """
+    if report_kind != "result" or report_at is None:
+        return False
+    return turn_started_at is None or report_at >= turn_started_at
+
+
 @dataclass(frozen=True)
 class Verdict:
     attention: Attention
