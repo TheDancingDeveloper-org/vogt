@@ -1087,9 +1087,7 @@ def test_an_oversight_session_answers_a_permission_prompt_with_keys(
     engine.permission_prompt = True
     engine.extra = {"role": "oversight"}
     overseer = _as(wired, f"agent:engine:{UNLINKED}")
-    session_input(
-        overseer, SessionInputParams(id=ses_id, keys=["enter"], reason=WHY)
-    )
+    session_input(overseer, SessionInputParams(id=ses_id, keys=["enter"], reason=WHY))
     assert [
         row["body"].get("overseer")
         for row in engine.sent
