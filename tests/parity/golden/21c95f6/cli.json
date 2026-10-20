@@ -4757,5 +4757,28 @@
     },
     "exit": 0,
     "operation": "connect"
+  },
+  {
+    "body": {
+      "agent_tasks": null,
+      "auto_agent_auth": null,
+      "disk": null,
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "event_lag": {},
+      "fcm_enabled": null,
+      "gui_process_count": null,
+      "gui_stream_configured": null,
+      "history": null,
+      "push_subscription_count": null,
+      "release_url": null,
+      "session_count": null,
+      "source_ref": null,
+      "source_sha": null,
+      "state_dir": null,
+      "version": null,
+      "workspace_root": null
+    },
+    "exit": 0,
+    "operation": "engine.status"
   }
 ]
