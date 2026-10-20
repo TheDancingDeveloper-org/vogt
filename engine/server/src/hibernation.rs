@@ -153,6 +153,11 @@ pub struct Record {
     /// Absent on a record written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<vogt_engine_contract::BlockedReport>,
+    /// Set only for the length of a compacting wake (WI-2037): the id the
+    /// new conversation is pinned to, so it does not collide with the one
+    /// it replaces. Never written.
+    #[serde(skip)]
+    pub fresh_conversation: Option<Uuid>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -194,6 +199,7 @@ impl Record {
             rows: None,
             cols: None,
             blocked: None,
+            fresh_conversation: None,
         }
     }
 }

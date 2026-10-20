@@ -216,6 +216,15 @@ pub async fn wake_session(
             ));
         }
     }
+    if req
+        .fresh_prompt
+        .as_ref()
+        .is_some_and(|p| p.len() > crate::sessions::FRESH_PROMPT_MAX)
+    {
+        return Err(crate::error::ApiError::BadRequest(
+            "a wake's fresh_prompt is at most 64 KiB".into(),
+        ));
+    }
     let session = state.sessions.wake(id, req).await?;
     Ok(Json(session.summary()))
 }
