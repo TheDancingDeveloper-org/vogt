@@ -1079,7 +1079,9 @@ def _cold_wake_session(
 
 
 def _last_wake(engine: Engine) -> dict[str, Any]:
-    return [r for r in engine.sent if r["path"].endswith("/wake")][-1]["body"]
+    wakes = [r for r in engine.sent if r["path"].endswith("/wake")]
+    body: dict[str, Any] = wakes[-1]["body"]
+    return body
 
 
 def _woken_summary(ctx: AppContext) -> dict[str, Any]:
