@@ -44,6 +44,7 @@ from vogt.core.entities import (
     SessionGrant,
     Suppression,
     Token,
+    Watch,
     WorkItem,
     WorkKind,
     WorkLink,
@@ -1240,6 +1241,37 @@ class SqliteReadView:
         ).fetchone()
         return None if row is None else _row_to_session_grant(row)
 
+    def watch(self, watch_id: str) -> Watch | None:
+        row = self._conn.execute(
+            "SELECT * FROM watches WHERE id = ?", (watch_id,)
+        ).fetchone()
+        return None if row is None else _row_to_watch(row)
+
+    def list_watches(
+        self,
+        *,
+        state: str | None = None,
+        target_session: str | None = None,
+        owner_actor_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Watch]:
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("state", state),
+            ("target_session", target_session),
+            ("owner_actor_id", owner_actor_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM watches {where}ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [_row_to_watch(row) for row in rows]
+
     def decision(self, decision_id: str) -> Decision | None:
         row = self._conn.execute(
             "SELECT * FROM decisions WHERE id = ?", (decision_id,)
@@ -2118,6 +2150,44 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def insert_watch(self, watch: Watch) -> None:
+        self._conn.execute(
+            "INSERT INTO watches (id, owner_actor_id, target_session, kind, "
+            "trigger_json, note, state, created_at, expires_at, fired_at, "
+            "outcome_json, attempts, last_error, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                watch.id,
+                watch.owner_actor_id,
+                watch.target_session,
+                watch.kind,
+                json.dumps(watch.trigger, sort_keys=True),
+                watch.note,
+                watch.state,
+                to_iso(watch.created_at),
+                to_iso(watch.expires_at),
+                _iso_or_none(watch.fired_at),
+                None if watch.outcome is None else json.dumps(watch.outcome),
+                watch.attempts,
+                watch.last_error,
+                watch.reason,
+            ),
+        )
+
+    def update_watch(self, watch: Watch) -> None:
+        self._conn.execute(
+            "UPDATE watches SET state = ?, fired_at = ?, outcome_json = ?, "
+            "attempts = ?, last_error = ? WHERE id = ?",
+            (
+                watch.state,
+                _iso_or_none(watch.fired_at),
+                None if watch.outcome is None else json.dumps(watch.outcome),
+                watch.attempts,
+                watch.last_error,
+                watch.id,
+            ),
+        )
+
     def update_session_grant(self, grant: SessionGrant) -> None:
         self._conn.execute(
             "UPDATE session_grants SET state = ?, decided_by = ?, decided_at = ?, "
@@ -2873,6 +2943,26 @@ def _decision_answer_json(decision: Decision) -> str | None:
     if decision.answer is None:
         return None
     return json.dumps(decision.answer.model_dump(mode="json"))
+
+
+def _row_to_watch(row: sqlite3.Row) -> Watch:
+    outcome = row["outcome_json"]
+    return Watch(
+        id=str(row["id"]),
+        owner_actor_id=str(row["owner_actor_id"]),
+        target_session=str(row["target_session"]),
+        kind=str(row["kind"]),
+        trigger=json.loads(str(row["trigger_json"])),
+        note=str(row["note"]),
+        state=row["state"],
+        created_at=from_iso(str(row["created_at"])),
+        expires_at=from_iso(str(row["expires_at"])),
+        fired_at=_opt_time(row, "fired_at"),
+        outcome=None if outcome is None else json.loads(str(outcome)),
+        attempts=int(row["attempts"]),
+        last_error=_opt(row, "last_error"),
+        reason=str(row["reason"]),
+    )
 
 
 def _row_to_decision(row: sqlite3.Row) -> Decision:

@@ -56,6 +56,7 @@ from vogt.application.models import (
     AnswerSessionParams,
     BindSessionWorkParams,
     BindSessionWorkResult,
+    CancelWatchParams,
     CommitForSessionParams,
     CommitForSessionResult,
     EffectivePolicy,
@@ -2331,12 +2332,36 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
     if target.session is not None and target.session.stopped_at is not None:
         msg = f"session {params.id!r} was stopped; there is nothing to hibernate"
         raise Conflict(msg)
-    hibernated = engine.hibernate_session(
-        engine_id,
-        reason=reason,
-        allow_shell=params.allow_shell,
-        superseded_by=successor,
+    # Imported here: `watches` reaches this module through `grants`.
+    from vogt.application.services.watches import arm as arm_watch
+
+    # The watch is armed before the session sleeps: a session hibernating
+    # itself is gone once the engine acts, and must not sleep unwatched.
+    watch = (
+        None
+        if params.wake_on is None
+        else arm_watch(
+            ctx,
+            params.wake_on,
+            target_session=engine_id,
+            note="",
+            ttl_seconds=params.wake_on_ttl_seconds,
+            reason=reason,
+        )
     )
+    try:
+        hibernated = engine.hibernate_session(
+            engine_id,
+            reason=reason,
+            allow_shell=params.allow_shell,
+            superseded_by=successor,
+        )
+    except Exception:
+        if watch is not None:
+            _disarm(ctx, watch.id, reason)
+        raise
+    if hibernated is None and watch is not None:
+        _disarm(ctx, watch.id, reason)
     if hibernated is None:
         msg = (
             f"the engine has no session {params.id!r}, or predates hibernation "
@@ -2351,6 +2376,7 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
         if hibernated.hibernation is None
         else hibernated.hibernation.resumable,
         "superseded_by": successor,
+        "watch": None if watch is None else watch.id,
     }
     if target.session is None:
         audited_action(
@@ -2390,6 +2416,15 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
 
     return _as_digest(
         audited_write(ctx, operation=SESSION_HIBERNATE, reason=reason, body=body)
+    )
+
+
+def _disarm(ctx: AppContext, watch_id: str, reason: str) -> None:
+    """Cancel the watch a failed hibernate armed."""
+    from vogt.application.services.watches import cancel_watch
+
+    cancel_watch(
+        ctx, CancelWatchParams(id=watch_id, reason=f"hibernate failed: {reason}")
     )
 
 

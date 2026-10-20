@@ -40,6 +40,7 @@ from vogt.core.entities import (
     Sweep,
     SweepOutcome,
     Token,
+    Watch,
     WorkItem,
     WorkLink,
     WorkOverlay,
@@ -531,6 +532,19 @@ class ReadView(Protocol):
 
     def decision(self, decision_id: str) -> Decision | None: ...
 
+    def watch(self, watch_id: str) -> Watch | None: ...
+
+    def list_watches(
+        self,
+        *,
+        state: str | None = None,
+        target_session: str | None = None,
+        owner_actor_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Watch]:
+        """Watches, newest first, optionally of one state, session or owner."""
+        ...
+
     def list_decisions(
         self,
         *,
@@ -773,6 +787,12 @@ class WriteTxn(ReadView, Protocol):
 
     def update_decision(self, decision: Decision) -> None:
         """Replace a decision's state and answer fields."""
+        ...
+
+    def insert_watch(self, watch: Watch) -> None: ...
+
+    def update_watch(self, watch: Watch) -> None:
+        """Replace a watch's state, outcome, attempts and error."""
         ...
 
     def update_session_grant(self, grant: SessionGrant) -> None:

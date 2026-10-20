@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 
@@ -818,6 +818,41 @@ class Decision(Entity):
     ) -> Literal["pending", "answered", "withdrawn", "expired"]:
         """`expired` for a pending decision past its expiry, else the state."""
         if self.state == "pending" and self.expires_at <= now:
+            return "expired"
+        return self.state
+
+
+WatchState = Literal["active", "fired", "failed", "cancelled", "expired"]
+
+
+class Watch(Entity):
+    """A session waiting on an event instead of polling for it (WI-2036).
+
+    `trigger` is the validated trigger as JSON (`core.watches`); `kind` is
+    its kind. The core's watch loop evaluates every active watch each pass
+    and, when one fires, types a one-line notice into `target_session` —
+    waking it first if it is hibernated. `expired` is stored once the loop
+    sees an active watch past `expires_at`; `effective_state` also computes
+    it on read so a listing never shows a lapsed watch as active.
+    """
+
+    id: str
+    owner_actor_id: str
+    target_session: str
+    kind: str
+    trigger: dict[str, Any]
+    note: str = ""
+    state: WatchState = "active"
+    created_at: datetime
+    expires_at: datetime
+    fired_at: datetime | None = None
+    outcome: dict[str, Any] | None = None
+    attempts: int = 0
+    last_error: str | None = None
+    reason: str
+
+    def effective_state(self, now: datetime) -> WatchState:
+        if self.state == "active" and self.expires_at <= now:
             return "expired"
         return self.state
 
