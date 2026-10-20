@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import pytest
 
@@ -11,6 +12,7 @@ from vogt.application.context import AppContext
 from vogt.application.models import (
     CharterGetParams,
     CharterSetParams,
+    CharterSetResult,
     CreateInitiativeParams,
     ListAuditParams,
     RegisterProjectParams,
