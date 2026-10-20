@@ -497,7 +497,9 @@ The report shows as `latest_report` on your `session_list` and
 `session_sweep` row, raises an Inbox entry and is left as a note on your work
 item. Post a `result` when the deliverable is done — a pushed branch, a
 review verdict — before you print `AUTOPILOT: DONE`; a deployment may require
-one before it takes DONE as done.
+one before it takes DONE as done. Never paste a credential or raw command
+output into a report: credential-shaped text is redacted before it is
+stored, but that is a safety net, not a licence.
 
 #### When you, or a session you drive, need a person
 

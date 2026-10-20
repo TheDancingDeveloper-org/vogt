@@ -12,7 +12,7 @@ import binascii
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
 from vogt.adapters.engine import EngineUnavailable
@@ -94,6 +94,8 @@ DEPLOY_FAILED_KIND = "deploy.failed"
 MAX_SCAN = 10_000
 #: Reports read for the Inbox; the newest per session is kept.
 _REPORT_SCAN = 500
+#: How long a session's latest report stays an Inbox entry.
+_REPORT_HORIZON = timedelta(days=7)
 Cursor = tuple[str, str]
 
 
@@ -562,12 +564,26 @@ def _collect_live(
     # Sessions' own reports (WI-2039): the newest one per session, so a
     # worker's result, question or blocker reaches oversight without a read
     # of its transcript. A later report replaces the entry (a new key).
+    # A report stops being an entry once its session is stopped or the
+    # report is older than `_REPORT_HORIZON`: a finished worker's last
+    # `result` is history on its work item, not something to act on. Each
+    # entry can also be archived or snoozed like any other.
     seen_sessions: set[str] = set()
+    oldest = ctx.clock() - _REPORT_HORIZON
     for row in view.list_session_reports(limit=_REPORT_SCAN):
         key = row.engine_session_id or row.id
         if key in seen_sessions:
             continue
         seen_sessions.add(key)
+        if row.created_at < oldest:
+            continue
+        declared = (
+            None
+            if row.engine_session_id is None
+            else view.session_by_engine_id(row.engine_session_id)
+        )
+        if declared is not None and declared.stopped_at is not None:
+            continue
         entries.append(_report_entry(view, row, projects))
 
     if ctx.engine is not None:
