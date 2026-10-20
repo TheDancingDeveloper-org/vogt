@@ -847,6 +847,10 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             delivery.input_pending(tuple(entry.screen_tail)) is not None
         ):
             verdict = oversight.Verdict("waiting", oversight.INPUT_PENDING)
+        if verdict.attention in {"waiting", "done", "idle"} and (
+            delivery.codex_error_wedge(tuple(entry.screen_tail)) is not None
+        ):
+            verdict = oversight.Verdict("waiting", oversight.WEDGED)
         reason = verdict.reason
         claim_check = None
         if verdict.attention == "done" and summary.work_item is not None:

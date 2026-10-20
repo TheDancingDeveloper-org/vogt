@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Delivery = Literal["typed", "delivered", "queued", "stuck", "unconfirmed"]
+Delivery = Literal["typed", "delivered", "queued", "stuck", "wedged", "unconfirmed"]
 
 #: Claude Code's hint under its input box while messages wait behind a turn
 #: ("Press up to edit queued messages"), and Codex's queued-message line.
@@ -36,6 +36,19 @@ _CODEX_FOOTER = re.compile(r"^\s{2}\S.* \u00b7 \S")
 _COMPOSER_MATCH = 40
 
 
+def _footer_index(rows: list[str]) -> int | None:
+    """Codex's footer row: the upper of the last two lines, as the hint
+    line under it can carry a " · " too ("⚠ 1 warning · f2 to view")."""
+    return next(
+        (
+            i
+            for i in range(max(len(rows) - 2, 0), len(rows))
+            if _CODEX_FOOTER.match(rows[i])
+        ),
+        None,
+    )
+
+
 def codex_composer(lines: tuple[str, ...]) -> str | None:
     """The text in Codex's composer, or None when no composer is drawn.
 
@@ -48,16 +61,7 @@ def codex_composer(lines: tuple[str, ...]) -> str | None:
     rows = list(lines)
     while rows and not rows[-1].strip():
         rows.pop()
-    # The upper of the last two lines: the hint line under it can carry a
-    # " · " too ("⚠ 1 warning · f2 to view").
-    footer = next(
-        (
-            i
-            for i in range(max(len(rows) - 2, 0), len(rows))
-            if _CODEX_FOOTER.match(rows[i])
-        ),
-        None,
-    )
+    footer = _footer_index(rows)
     if footer is None:
         return None
     i = footer - 1
@@ -139,6 +143,65 @@ def composer_holds(lines: tuple[str, ...], text: str) -> bool:
     return " ".join(shown.split())[:n] == wanted[:n]
 
 
+#: Codex's marker for an error it shows in its transcript
+#: (`■ unexpected status 422 Unprocessable Entity: Budget has been
+#: exceeded! ...`), captured live on 2026-10-20 (WI-2027).
+CODEX_ERROR = "\u25a0"
+
+#: How a wedged session is recovered without losing its worktree or its
+#: conversation: hibernation stops the CLI and waking resumes it.
+RESTART_HINT = (
+    "restart it keeping its worktree and conversation: session_hibernate, "
+    "then session_wake (or send the input again, which wakes it)"
+)
+
+
+def codex_error_wedge(lines: tuple[str, ...], text: str | None = None) -> str | None:
+    """The API error a Codex session is wedged behind, or None (WI-2027).
+
+    After a turn ends in a model-API error (a 422 for an exceeded budget),
+    Codex can echo each new message into its transcript as `› text` and
+    then start no turn: no `•` working line ever follows. The sign is the
+    last `■` error line with only message echoes after it, above the
+    composer. With `text`, one of those echoes has to be it.
+    """
+    rows = list(lines)
+    while rows and not rows[-1].strip():
+        rows.pop()
+    footer = _footer_index(rows)
+    if footer is None:
+        return None
+    # Drop the composer: the prompt line above the footer and its wrap.
+    i = footer - 1
+    while i >= 0 and not rows[i].strip():
+        i -= 1
+    while i >= 0 and rows[i].startswith("  ") and rows[i].strip():
+        i -= 1
+    if i < 0 or not rows[i].startswith(CODEX_PROMPT):
+        return None
+    body = rows[:i]
+    errors = [n for n, row in enumerate(body) if row.startswith(CODEX_ERROR)]
+    if not errors:
+        return None
+    error = errors[-1]
+    echoes: list[str] = []
+    for row in body[error + 1 :]:
+        if row.startswith(CODEX_PROMPT):
+            echoes.append(row.removeprefix(CODEX_PROMPT).strip())
+        elif row.strip() and not row.startswith("  "):
+            # Anything else Codex drew (a `•` step, a new error): it moved.
+            return None
+        elif echoes and row.startswith("  "):
+            echoes[-1] = f"{echoes[-1]} {row.strip()}"
+    if not echoes:
+        return None
+    if text is not None:
+        wanted = " ".join(text.split())[:_COMPOSER_MATCH]
+        if not any(" ".join(e.split())[: len(wanted)] == wanted for e in echoes):
+            return None
+    return body[error].removeprefix(CODEX_ERROR).strip()
+
+
 def safe_to_resubmit(seen: Observation, text: str) -> bool:
     """Whether one more Enter can only submit `text` (WI-1669).
 
@@ -203,6 +266,15 @@ def judge(
             "the text is still in the input box and no turn is running: the "
             "submit did not land; read session_screen",
         )
+    if after and after[-1].activity not in {"running", "awaiting-approval"}:
+        error = codex_error_wedge(after[-1].lines, pending)
+        if error is not None:
+            return Verdict(
+                "wedged",
+                "Codex echoed the input but started no turn after an API "
+                f"error ({error[:120]}); it will not take input again — "
+                + RESTART_HINT,
+            )
     if before == "running":
         return Verdict(
             "queued",

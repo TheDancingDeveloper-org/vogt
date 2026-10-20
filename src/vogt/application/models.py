@@ -5498,7 +5498,11 @@ class SessionInputResult(Result):
             "checks the input box and presses Enter if the text is still "
             "there) / stuck (at rest with the text still in the input box: "
             "the submit did not land; the sweep shows it as input pending) / "
-            "unconfirmed (sent; nothing observable yet). A refused input is "
+            "wedged (Codex echoed the text after a model-API error but started "
+            "no turn; restart with session_hibernate then session_wake, which "
+            "keeps the worktree and conversation) / unconfirmed (sent; "
+            "nothing observable yet). "
+            "A refused input is "
             "an error, not a value."
         ),
     )
