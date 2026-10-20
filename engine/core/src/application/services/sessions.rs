@@ -2368,13 +2368,21 @@ where
         filled.effort = profile.effort.clone();
     }
     if !caller("budget") {
-        filled.budget = (profile.budget_turns.is_some()
-            || profile.budget_wall_clock_minutes.is_some())
-        .then(|| SessionBudget {
-            turns: profile.budget_turns,
-            wall_clock_minutes: profile.budget_wall_clock_minutes,
-            ..SessionBudget::default()
-        });
+        // Sized by the model the start will run, the caller's or the
+        // profile's (WI-1833).
+        let turns = if caller("model") {
+            profile.turns_for(params.model.as_deref())
+        } else {
+            profile.turns_for(Some(&profile.model))
+        };
+        filled.budget =
+            (turns.is_some() || profile.budget_wall_clock_minutes.is_some()).then(|| {
+                SessionBudget {
+                    turns,
+                    wall_clock_minutes: profile.budget_wall_clock_minutes,
+                    ..SessionBudget::default()
+                }
+            });
     }
     if !caller("worktree") {
         filled.worktree = Some(profile.worktree);
@@ -2390,7 +2398,7 @@ where
 
 /// The `dispatch.*` values a person last wrote, by key. A key nobody wrote is
 /// absent, which the resolver reads as its default.
-fn dispatch_preferences<C, I>(
+pub(crate) fn dispatch_preferences<C, I>(
     ctx: &AppContext<C, I>,
 ) -> Result<std::collections::BTreeMap<String, Value>, VogtError>
 where
@@ -2399,12 +2407,7 @@ where
 {
     let view = ctx.declared.read()?;
     let mut stored = std::collections::BTreeMap::new();
-    for key in [
-        dispatch_profiles::PROFILES_KEY,
-        dispatch_profiles::MAX_WORKERS_KEY,
-        dispatch_profiles::ESCALATE_KEY,
-        dispatch_profiles::REVIEW_BY_OVERSIGHT_KEY,
-    ] {
+    for key in dispatch_profiles::KEYS {
         if let Some(row) = view.latest_human_preference(key)? {
             if row
                 .value

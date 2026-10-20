@@ -1530,7 +1530,7 @@ const WORK_ADOPTED: &str = "work.adopted";
 /// in the same transaction (`writeback.attempt`), outcome `skipped` while no
 /// forge provider is wired. An upstream item is the write-through and stores
 /// nothing.
-fn comment_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+pub(crate) fn comment_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,

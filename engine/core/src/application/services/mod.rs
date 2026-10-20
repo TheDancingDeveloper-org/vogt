@@ -30,6 +30,9 @@ pub mod install;
 pub mod native_migration;
 pub mod work;
 
+/// Not called from a loop yet: the Rust core has no in-process schedule.
+#[allow(dead_code)]
+pub mod budget_handoff;
 pub mod decisions;
 pub mod import_merge;
 pub mod inbox;
@@ -150,3 +153,6 @@ mod sessions_test;
 
 #[cfg(test)]
 mod handoff_test;
+
+#[cfg(test)]
+mod budget_handoff_test;

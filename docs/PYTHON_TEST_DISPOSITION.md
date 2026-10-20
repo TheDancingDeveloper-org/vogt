@@ -45,6 +45,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_bootstrap_core_token.py | ported | Core-token adoption in `application/services/install.rs`. |
 | test_branch_binding.py | ported | `branches.rs` and the work-item branch binding service. |
 | test_bridge.py | ported | `adapters/mcp/bridge.rs`. |
+| test_budget_handoff.py | ported | `engine/core/src/application/services/budget_handoff_test.rs` (all 5 cases, WI-1081 port of WI-1833). The scheduler hook is not ported: the Rust core has no in-process sweep schedule yet. |
 | test_bundle_budget.py | retired | PWA first-screen bundle budget. `web/`, not the core. |
 | test_cargo_cache.py | retired | `engine/deploy/cargo-cache.sh` (WI-1256, done): Cargo cache survival on redeploy. Shell in the engine image, not the core crate; the Python test keeps driving the script. |
 | test_chats.py | ported | Chat operations in the application services, with the engine transport stood in. |
@@ -67,7 +68,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_delivery.py | ported | `delivery.rs`. |
 | test_demo_delivery.py | retired | Browser-only public demo delivery. Not the core. |
 | test_diagnostics.py | ported | Instance diagnostics service. |
-| test_dispatch.py | ported | `engine/core/src/application/dispatch_test.rs` (all 6 cases; the 8 parametrized malformed-value cases run as one table-driven test). |
+| test_dispatch.py | ported | `engine/core/src/application/dispatch_test.rs` (all 9 cases; the 8 parametrized malformed-value cases run as one table-driven test). |
 | test_drift.py | ported | `application/drift.rs`. |
 | test_engine_image_core.py | retired | Static checks on `engine/Dockerfile` and `engine/deploy/entrypoint.sh` (WI-1078). Engine image, not the core crate. |
 | test_engine_parity.py | retired | Rust engine wire parity. Owned by `engine/server` tests, not `engine/core`. |
