@@ -557,7 +557,9 @@ impl EngineClient {
 
     /// Choose an option of the dialog on screen. A dialog that is gone, changed,
     /// or lacks the option is a `Conflict` naming why; a permission prompt
-    /// answered without `person` is `PersonRequired` (WI-983).
+    /// answered without `person` is `PersonRequired` (WI-983), unless
+    /// `overseer` names the oversight session answering and the engine finds
+    /// the command allow-listed (WI-1831).
     pub fn answer_session(
         &self,
         session_id: &str,
@@ -565,9 +567,13 @@ impl EngineClient {
         label: Option<&str>,
         expect_question: Option<&str>,
         person: bool,
+        overseer: Option<&str>,
     ) -> Result<Option<Value>, VogtError> {
         let mut body = Map::new();
         body.insert("person".to_string(), Value::Bool(person));
+        if let Some(overseer) = overseer {
+            body.insert("overseer".to_string(), Value::String(overseer.to_string()));
+        }
         if let Some(option) = option {
             body.insert("option".to_string(), Value::from(option));
         }
@@ -2599,7 +2605,7 @@ mod tests {
         let client = client(transport);
         assert!(client.send_input("s", "yes", true, false).unwrap());
         client
-            .answer_session("s", Some(1), None, Some("allow?"), true)
+            .answer_session("s", Some(1), None, Some("allow?"), true, None)
             .unwrap();
         let sent = seen.lock().unwrap();
         assert!(sent[0].contains(r#""text":"yes","submit":true,"person":false"#));
@@ -2607,6 +2613,20 @@ mod tests {
         assert!(sent[1].contains(r#""option":1"#));
         assert!(sent[1].contains(r#""expect_question":"allow?""#));
         assert!(!sent[1].contains("label"));
+        assert!(!sent[1].contains("overseer"));
+    }
+
+    #[test]
+    fn an_oversight_answer_names_the_overseer_and_is_not_a_persons() {
+        // WI-1831: the engine holds an overseer to allow-listed commands in
+        // the worker's own worktree, so the core names it rather than
+        // relaying it as a person.
+        let (seen, transport) = scripted(200, r#"{"ok":true}"#);
+        client(transport)
+            .answer_session("s", Some(1), None, None, false, Some("over-1"))
+            .unwrap();
+        let sent = seen.lock().unwrap();
+        assert!(sent[0].contains(r#""person":false,"overseer":"over-1","option":1"#));
     }
 
     #[test]

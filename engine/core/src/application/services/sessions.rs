@@ -1826,7 +1826,9 @@ where
 /// Answer the dialog a session shows — a permission request or a startup gate —
 /// by option, not by keystrokes. Exactly one of `option` or `label`. Whether the
 /// caller counts as a person is the engine's decision: the flag is sent, and a
-/// permission prompt an agent answers is refused there.
+/// permission prompt an agent answers is refused there. The one exception is
+/// an oversight session choosing "Yes" on an allow-listed command in the
+/// worker's own worktree, which the engine decides and audits (WI-1831).
 pub fn answer<C, I>(ctx: &AppContext<C, I>, params: &AnswerParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
@@ -1846,9 +1848,26 @@ where
     let engine = engine_of(ctx)?;
     let found = resolve_target(ctx, &params.id)?;
     let engine_id = found.engine_session_id.clone();
+    // A person answers anything. An oversight session is relayed by its
+    // engine id, not as a person: the engine lets it choose "Yes" only on an
+    // allow-listed command in the worker's own worktree and refuses the rest
+    // with `PersonRequired` (WI-1831). The audit line records which answered.
     let person = answers_as_person(ctx)?;
+    let by_oversight = !person && is_oversight_caller(ctx, engine)?;
+    let overseer = if by_oversight {
+        session_commit::caller_engine_session_id(ctx)?
+    } else {
+        None
+    };
     let answered = engine
-        .answer_session(&engine_id, params.option, label, params.expect_question.as_deref(), person)?
+        .answer_session(
+            &engine_id,
+            params.option,
+            label,
+            params.expect_question.as_deref(),
+            person,
+            overseer.as_deref(),
+        )?
         .ok_or_else(|| {
             VogtError::NotFound(format!(
                 "the engine has no session {}, or predates answering (no POST /api/sessions/{{id}}/answer)",
@@ -1887,6 +1906,7 @@ where
         "label": chosen_label.chars().take(200).collect::<String>(),
         "dismissed": dismissed,
         "person": person,
+        "oversight": by_oversight,
     });
     let mut writing = write_of(ctx);
     audited_action(
@@ -3145,6 +3165,24 @@ where
     Ok(SessionResult {
         session: summarize(ctx, &session, Some(&woken))?,
     })
+}
+
+/// Python's `_is_oversight_caller`: whether the caller is a session the
+/// engine has marked `oversight`.
+fn is_oversight_caller<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+) -> Result<bool, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let Some(caller) = session_commit::caller_engine_session_id(ctx)? else {
+        return Ok(false);
+    };
+    Ok(engine
+        .get_session(&caller)?
+        .is_some_and(|session| session.role == "oversight"))
 }
 
 /// Whether the caller counts as a person for the engine's person gate: a human
