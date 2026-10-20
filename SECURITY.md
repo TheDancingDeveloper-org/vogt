@@ -168,30 +168,27 @@ those runners can reach.
 
 ### Release signing: build once, promote by digest
 
-Every published image is signed keylessly with cosign, by digest, using the
-workflow's own GitHub OIDC identity — there is no signing key to store or
-rotate. A released image carries two signatures on the **same digest**:
+`build.yml` still signs each image it builds, keylessly with cosign, by digest,
+under its own GitHub OIDC identity (`…/.github/workflows/build.yml@refs/heads/main`).
+The release no longer adds a signature of its own: `release.yml` does not
+install cosign, does not sign, and holds no `id-token` permission. Dropping the
+build-time signature is tracked as a follow-up.
 
-- `…/.github/workflows/build.yml@refs/heads/main`, made when `build.yml` built
-  and smoke-tested it for a commit on `main`;
-- `…/.github/workflows/release.yml@refs/tags/vX.Y.Z`, made when the `v*` tag
-  promoted that digest. Deployments verify this identity
-  ([`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §6).
-
-`release.yml` never builds. Before it signs, it requires a `build.yml` run on
-`main` for the tagged commit whose image jobs succeeded, and it verifies each
-digest's `build.yml` signature with the certificate's workflow-sha pinned to
-the tagged commit, so it can only promote what `build.yml` built from that
-exact source. It retags by digest (`imagetools create --prefer-index=false`)
-and asserts every semver tag resolves to the promoted digest. The SBOM and
-provenance attestations are the ones BuildKit recorded in the image index at
-build time; they travel with the digest. If any of this is missing the
-release fails; there is no rebuild fallback.
+`release.yml` never builds. It requires a `build.yml` run on `main` for the
+tagged commit whose image jobs succeeded, finds each image by its `sha-`
+commit tag, and checks that the digest carries the SBOM and provenance
+attestations. It retags by digest (`imagetools create --prefer-index=false`)
+and asserts every semver tag resolves to the promoted digest. The attestations
+are the ones BuildKit recorded in the image index at build time; they travel
+with the digest. If any of this is missing the release fails; there is no
+rebuild fallback. Because the release no longer verifies a signature, a
+deployment pins a digest and trusts it by the registry name and the
+attestations, not by a signature.
 
 **Accepted trade-off.** `build.yml` imports its BuildKit layer cache from the
 operator's plaintext, unauthenticated LAN registry (`VOGT_BUILDKIT_CACHE_REGISTRY`)
 to keep per-commit builds fast. Releases used to build cold precisely so that
-a poisoned cache entry could not become a release-signed artefact; promoting
+a poisoned cache entry could not become a release artefact; promoting
 the `main` build gives that up in exchange for shipping exactly the bytes the
 development lane ran. The cache is therefore part of the release trust
 boundary: it must stay reachable only from the runner hosts, and the

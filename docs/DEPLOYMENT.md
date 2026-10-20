@@ -606,22 +606,11 @@ docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.
   | grep -m 1 Digest
 ```
 
-Verify the keyless signatures before starting Compose. Every release image is
-signed by the release workflow's own OIDC identity, so the check constrains
-both the workflow and the issuer, and performs an anonymous registry read.
-(The same digest also carries the signature `build.yml` made when it built it
-on `main` — a release promotes that build rather than rebuilding, §9 — but
-the release identity is the one that says "this is version X".)
-
-```console
-cosign verify \
-  --certificate-identity-regexp '^https://github.com/TheDancingDeveloper-org/vogt/.github/workflows/release.yml@refs/tags/v[0-9].*$' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>
-```
-
-The same command applies to `vogt-voice@sha256:<digest>` unchanged. Then, in
-`deploy/.env`:
+Release images are not signed by the release workflow: it no longer runs
+cosign, so there is no release-identity signature to verify. Pin the digest
+itself, which a registry tag cannot silently move. Check that the digest
+matches the release manifest (`vogt-release-manifest.json`) and the dev
+receipt it was promoted from (§9). Then, in `deploy/.env`:
 
 ```dotenv
 VOGT_STACK_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>
@@ -707,8 +696,8 @@ from it. A release publishes, for each of the core image (`vogt`), the stack
 - tags `X.Y.Z`, `X.Y` and `latest` — `latest` moves on a release and on
   nothing else (a pre-release tag such as `v1.0.0-rc.1` gets only its exact
   version);
-- a keyless **cosign signature** over the digest, bound to
-  `release.yml@refs/tags/v*` (§6);
+- a keyless **cosign signature** over the digest, made by `build.yml` at build
+  time; the release adds no signature of its own (§6);
 - an **SBOM** and **provenance** attestation attached to the digest.
 
 ### Release process: build once, promote by digest
@@ -734,15 +723,12 @@ existed:
    - finds a `build.yml` run for the exact commit on `main` whose three
      image jobs succeeded (the demo image's job is not required), resolves
      each `sha-<commit>` tag to its digest, and verifies that digest carries
-     `build.yml`'s signature **for that commit** (the certificate's
-     workflow-sha) plus its SBOM and provenance attestations;
+     its SBOM and provenance attestations;
    - retags each digest `X.Y.Z`, `X.Y` and `latest` with
      `docker buildx imagetools create --prefer-index=false <repo>@<digest>` —
      a registry-side copy of the original manifest, no pull and no rebuild —
      and asserts every new tag resolves to exactly the source digest;
-   - signs those same digests with cosign under its own identity, so both a
-     build signature and a release signature sit on one digest;
-   - builds and signs the Android APK (the app is not a container image, so
+   - builds and signs the Android APK (Android app signing, not cosign; the app is not a container image, so
      it is still built at tag time; `release-mobile.yml` builds the Play AAB
      the same way) and writes a GitHub Release carrying the APK and
      `vogt-release-manifest.json`.
