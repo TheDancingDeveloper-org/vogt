@@ -4392,5 +4392,13 @@
     },
     "is_error": false,
     "operation": "connect"
+  },
+  {
+    "body": {
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "event_lag": {}
+    },
+    "is_error": false,
+    "operation": "engine.status"
   }
 ]
