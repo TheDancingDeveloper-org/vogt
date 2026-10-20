@@ -6019,7 +6019,11 @@ class SessionReportParams(Params):
     summary: str = Field(
         min_length=1,
         max_length=2000,
-        description="What happened or what is needed, in a sentence or two.",
+        description=(
+            "What happened or what is needed, in a sentence or two. Never "
+            "paste credentials: credential-shaped text is redacted before it "
+            "is stored."
+        ),
     )
     work_item: str | None = Field(
         default=None,

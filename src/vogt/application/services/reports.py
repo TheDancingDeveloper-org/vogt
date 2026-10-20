@@ -12,6 +12,10 @@ Two rules:
 - **A report is the session's own.** From inside a session the token names
   it; an agent naming a different session is refused. A person (or a
   caller with no session) names the session with `id`.
+- **Credentials never land.** Every free-text field is passed through the
+  agent-activity redactor before it is stored, so a token pasted into
+  `checks` or `blockers` is not copied into the comment, the Inbox or the
+  audit event. The SHA is left as given: it is a commit id, not text.
 - **The text is untrusted.** It is the agent's account, shown verbatim and
   never acted on; the claim check still judges a DONE against git and the
   forge.
@@ -28,6 +32,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import _resolve
 from vogt.application.writes import WriteOutcome, audited_write
+from vogt.core.agent_activity import redact
 from vogt.core.entities import Actor, Comment, SessionReport, SessionReportFields
 from vogt.errors import InvalidRequest, ReportRefused
 from vogt.storage.interface import ReadView, WriteTxn
@@ -42,17 +47,17 @@ def report(ctx: AppContext, params: SessionReportParams) -> SessionReportResult:
     """Record a session's typed report; it shows on its row, the Inbox and
     its work item."""
     reason = writes.validate_reason(params.reason)
-    summary = params.summary.strip()
+    summary = redact(params.summary.strip())
     if not summary:
         raise InvalidRequest("a report has a summary")
     own = _own_engine_session(ctx)
     engine_id = _reporting_session(ctx, params.id, own)
     fields = SessionReportFields(
         branch=_blank(params.branch),
-        sha=_blank(params.sha),
+        sha=_blank(params.sha, scrub=False),
         pr=_blank(params.pr),
-        checks=[c.strip() for c in params.checks if c.strip()],
-        blockers=[b.strip() for b in params.blockers if b.strip()],
+        checks=[redact(c.strip()) for c in params.checks if c.strip()],
+        blockers=[redact(b.strip()) for b in params.blockers if b.strip()],
         next_step=_blank(params.next_step),
     )
 
@@ -225,8 +230,10 @@ def _work_item_id(txn: WriteTxn, ref: str | None, engine_id: str) -> str | None:
     return None if session is None else session.work_item_id
 
 
-def _blank(value: str | None) -> str | None:
+def _blank(value: str | None, *, scrub: bool = True) -> str | None:
     if value is None:
         return None
     cleaned = value.strip()
-    return cleaned or None
+    if not cleaned:
+        return None
+    return redact(cleaned) if scrub else cleaned
