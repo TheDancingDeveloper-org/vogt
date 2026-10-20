@@ -213,7 +213,7 @@ def _schema(binary: str) -> dict[str, Any]:
         for name in ("declared", "observed"):
             conn = sqlite3.connect(data / f"{name}.sqlite3")
             try:
-                objects = {
+                objects: dict[str, Any] = {
                     f"{kind}:{obj}": {"table": table, "sql": sql}
                     for kind, obj, table, sql in conn.execute(
                         "SELECT type, name, tbl_name, sql FROM sqlite_master "
@@ -453,7 +453,9 @@ class _McpStdio:
         self.server.wait(timeout=10)
 
 
-def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _run_mcp(
+    binary: str, steps: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Drive the steps that take parameters over MCP stdio.
 
     The binary serves `mcp stdio` on a fresh instance, and each step with
@@ -667,7 +669,9 @@ class _StandInEngine:
         self.server.server_close()
 
 
-def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _run_cli(
+    binary: str, steps: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     root = Path(tempfile.mkdtemp(prefix="vogt-parity-"))
     data = root / "instance"
     env = _child_env()
@@ -876,7 +880,9 @@ def _substitute(
     return {key: one(value) for key, value in params.items()}
 
 
-def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _run_http(
+    binary: str, steps: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Drive the steps that name a route over HTTP against a served instance.
 
     Steps without an ``http`` block are CLI steps and are skipped, so a run
@@ -994,8 +1000,12 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         f"wanted {spec['status']}: {result!r}"
                     )
                 if "error_code" in spec:
-                    error = result.get("error") if isinstance(result, dict) else None
-                    code = error.get("code") if isinstance(error, dict) else None
+                    body_error = (
+                        result.get("error") if isinstance(result, dict) else None
+                    )
+                    code = (
+                        body_error.get("code") if isinstance(body_error, dict) else None
+                    )
                     if code != spec["error_code"]:
                         raise SystemExit(
                             f"{step['operation']} over HTTP answered error code "
@@ -1318,18 +1328,18 @@ def _errors(golden: Path, check: bool) -> int:
     codes: dict[str, dict[str, set[Any]]] = {}
     for row in rows.values():
         for transport in ("cli", "http", "mcp"):
-            got = row.get(transport)
-            if not got or not got.get("error_code"):
+            seen = row.get(transport)
+            if not seen or not seen.get("error_code"):
                 continue
             entry = codes.setdefault(
-                got["error_code"],
+                seen["error_code"],
                 {"cli_exit": set(), "http_status": set(), "transports": set()},
             )
             entry["transports"].add(transport)
-            if "exit" in got:
-                entry["cli_exit"].add(got["exit"])
-            if "status" in got:
-                entry["http_status"].add(got["status"])
+            if "exit" in seen:
+                entry["cli_exit"].add(seen["exit"])
+            if "status" in seen:
+                entry["http_status"].add(seen["status"])
     document = {
         "generated_by": "scripts/parity.py errors",
         "golden": golden.name,

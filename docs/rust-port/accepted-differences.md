@@ -48,11 +48,12 @@ would reopen it.
   refused).
 - **Reopen if:** an engine field could exceed `u64`.
 
-## A3. Error paths where Python raises uncaught (proposed, awaiting operator review)
+## A3. Error paths where Python raises uncaught (accepted 2026-10-20)
 
-The WI-1081 drift ports (main @09d3c552) handle a few inputs that Python does
-not catch. In each case Python fails with an unhandled exception (a 500 on
-REST), and Rust degrades gracefully instead. The happy paths match.
+Accepted by the operator on 2026-10-20 (WI-1081). The WI-1081 drift ports
+(main @09d3c552) handle a few inputs that Python does not catch. In each case
+Python fails with an unhandled exception (a 500 on REST), and Rust degrades
+gracefully instead. The happy paths match.
 
 - **GitHub App, non-JSON reply** (main c8d6211): Rust raises
   `github_unavailable`, where Python lets the JSON decode error escape.
@@ -62,9 +63,20 @@ REST), and Rust degrades gracefully instead. The happy paths match.
 - **Claim check, naive `merged_at`/`closed_at`** (main 78a3636): Rust reads a
   timestamp without an offset as UTC. Python raises a `TypeError` when it
   compares it with the session start.
-- **Claim check, PR number in non-ASCII digits** (main 78a3636): Rust's
-  `mentioned_pulls` drops it. Python's `\d` matches it.
-- **GitHub rate budget** (main 1c59243): `reset_at` is kept as whole epoch
-  seconds.
 
 - **Reopen if:** the operator wants the uncaught behaviour reproduced.
+
+## A4. Input-handling differences that are not crashes (accepted 2026-10-20)
+
+Accepted with A3 on 2026-10-20. Neither path raises in Python; each reads an
+input GitHub does not send in practice slightly differently.
+
+- **Claim check, PR number in non-ASCII digits** (main 78a3636): Python's `\d`
+  matches Unicode digits (e.g. Arabic-Indic), so Python reads `#١٢` as PR 12.
+  Rust's `mentioned_pulls` matches ASCII digits only and drops it.
+- **GitHub rate budget, `reset_at`** (main 1c59243): Python parses
+  `x-ratelimit-reset` with `float()`; Rust keeps it as whole epoch seconds.
+  GitHub sends whole seconds, so the two agree on every real header; a
+  fractional value would be truncated in Rust.
+
+- **Reopen if:** a forge is found that sends either form.
