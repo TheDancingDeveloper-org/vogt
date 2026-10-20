@@ -427,6 +427,18 @@ asking session may. `decision.list` (`read`) filters by `state` (`pending`,
 be answered and implies no answer. Nothing is applied when a decision is
 answered. The design is `design/agent-harness-services.md` §2.3.
 
+`charter.set` (`work.write`, audited) sets the standing instructions of a
+scope (WI-2038): `scope` is `workspace`, `project` or `initiative`, `ref` the
+project or initiative slug (none for the workspace), `body` Markdown (≤ 8000;
+empty clears), optional `expected_version` (0 for never set; a stale one is
+refused `409 charter_version_conflict`). Each set appends the next version,
+recording who set it and why. `charter.get` (`read`) returns `current` and,
+with `history: true`, earlier versions newest first. Every session brief
+carries the charters of its scope in a `## Charters` section, broadest first
+(workspace, then project, then initiative, then the rest of the brief); a
+cleared or absent charter adds nothing. The same section is sent to the engine
+as `charter`, which appends it to a Codex session's `developer_instructions`.
+
 Only a session whose conversation id the
 engine knows can hibernate: Claude Code started by Vogt, or any `resume`. A
 shell needs `allow_shell`, and wakes as a fresh shell. The engine side is

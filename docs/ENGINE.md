@@ -1103,6 +1103,13 @@ its own. `DELETE /api/sessions/:id` removes the guide with the brief, and the
 prompt sweep keeps a guide while its session is known, live or hibernated,
 exactly as it keeps the brief.
 
+**Charters.** When the start request carries a non-empty `charter` (the
+`## Charters` section of the brief, WI-2038) and the command is Codex, the
+engine appends it to the `developer_instructions` override after the workspace
+guidance, or adds one when there is none (`agent_cli::with_codex_charter`). A
+result over 120 KiB is not sent there; the brief still carries it. Other agent
+CLIs ignore the field: the brief is how they get it.
+
 **Project policy.** A project's `agent_policy` reaches a session as text in
 its brief, which vogt-core composes, and the engine writes no per-session
 hooks. One part of it is enforced before a session exists at all:

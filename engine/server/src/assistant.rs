@@ -3296,6 +3296,7 @@ mod tests {
                 rows: Some(24),
                 scrollback_bytes: None,
                 companion: None,
+                charter: None,
                 budget: None,
             })
             .expect("spawn cat")
@@ -4528,6 +4529,7 @@ mod tests {
                 rows: Some(24),
                 scrollback_bytes: None,
                 companion: None,
+                charter: None,
                 budget: None,
             })
             .expect("spawn worker")

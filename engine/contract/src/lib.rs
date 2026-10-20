@@ -98,6 +98,13 @@ pub struct SessionSpec {
     /// there is no brief.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companion: Option<String>,
+    /// The scope's charters (WI-2038): standing instructions for the
+    /// workspace, project and initiative, broadest first. They are already in
+    /// the brief; the engine also appends them to the standing instructions
+    /// of an agent CLI that keeps those apart from its first prompt (Codex
+    /// `developer_instructions`), so they outlive a compacted conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charter: Option<String>,
     /// Which model the agent CLI in `command` should run, and how hard it
     /// should think. The engine turns these into that CLI's own
     /// flags or environment; a command it has no mapping for is refused by

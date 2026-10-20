@@ -1488,6 +1488,7 @@ impl AgentTaskRegistry {
             rows: Some(30),
             scrollback_bytes: None,
             companion: None,
+            charter: None,
             budget: None,
         })?;
 
