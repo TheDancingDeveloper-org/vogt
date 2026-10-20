@@ -127,6 +127,23 @@ pub struct SessionResult {
     pub session: SessionSummary,
     #[serde(default)]
     pub digest: Option<SessionDigest>,
+    /// On `session.start` for a project with a landing rule: the rule the worker runs under and any task lines it overrode.
+    #[serde(default)]
+    pub effective_policy: Option<EffectivePolicy>,
+}
+/// The landing rule a started session runs under (WI-1832).
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EffectivePolicy {
+    pub base_branch: String,
+    pub lands_by: String,
+    pub merge_by: String,
+    pub merge_mode: String,
+    pub deploy_by: String,
+    /// Where the task contradicted this policy, one line per axis (PR vs push only, merge, base branch, deploy). The policy wins and the brief says so; empty when the task agreed or set none.
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub overrides: Vec<String>,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

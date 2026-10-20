@@ -29,6 +29,7 @@ mod memo_test;
 pub mod models;
 pub mod observations;
 pub mod place;
+pub mod policy_conflicts;
 pub mod projects;
 pub mod resolve;
 pub mod services;

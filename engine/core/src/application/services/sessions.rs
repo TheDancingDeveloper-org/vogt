@@ -30,9 +30,10 @@ use crate::adapters::engine::{
     EngineScreen, EngineSession, EngineSweepEntry,
 };
 use crate::adapters::transcripts;
-use crate::application::brief::{self, ComposedBrief, WhyResult, WorkBrief};
+use crate::application::brief::{self, ComposedBrief, LandingFields, WhyResult, WorkBrief};
 use crate::application::context::{write_of, AppContext};
 use crate::application::dispatch as dispatch_profiles;
+use crate::application::policy_conflicts;
 use crate::application::resolve;
 use crate::application::session_commit;
 use crate::application::writes::{self, audited_action, audited_write, WriteOutcome};
@@ -515,6 +516,82 @@ fn worktree_branch(subject: &Subject, session_id: &str) -> String {
     format!("{flat}-{tail}")
 }
 
+/// Python's `_caller_merges`: whether this start is oversight's own landing
+/// work (WI-1841).
+///
+/// On a project where oversight merges, an oversight session that starts a
+/// mechanical session to land a branch is doing what the policy says; its
+/// "merge" is not overridden to "do not merge".
+fn caller_merges(
+    policy: &crate::core::AgentPolicy,
+    params: &StartSessionParams,
+    started_by_kind: Option<&str>,
+) -> bool {
+    LandingFields::of(policy).is_some_and(|landing| landing.merge_by == "oversight")
+        && started_by_kind == Some("oversight")
+        && params.purpose.as_deref() == Some("mechanical")
+}
+
+/// Python's `_effective_policy`: the landing rule a started worker runs
+/// under, and what it overrode.
+///
+/// Returned on `session.start` so the caller sees, before the worker runs,
+/// that its task said one thing and the policy another (WI-1832).
+fn effective_policy(
+    policy: &crate::core::AgentPolicy,
+    task: Option<&str>,
+    caller_merges: bool,
+) -> Option<EffectivePolicy> {
+    let landing = LandingFields::of(policy)?;
+    let overrides =
+        policy_conflicts::task_policy_conflicts(task.unwrap_or(""), Some(&landing), caller_merges);
+    Some(EffectivePolicy {
+        base_branch: landing.base_branch,
+        lands_by: landing.worker_lands_by,
+        merge_by: landing.merge_by,
+        merge_mode: landing.merge_mode,
+        deploy_by: landing.deploy_by,
+        overrides,
+    })
+}
+
+/// Python's `_with_item_base`: the project as this start sees it, its policy
+/// on the item's base.
+///
+/// A project's landing rule names one base, but a long-lived integration
+/// line — the Rust port on `rust-core` — has its own (WI-1841). The
+/// initiative's base applies to its items, and a task that names a known
+/// long-lived branch as its base is taken at its word. The brief, the
+/// worktree and the conflict check all read the result, so they agree.
+fn with_item_base(
+    view: &impl ReadView,
+    mut project: crate::core::Project,
+    item: Option<&WorkItem>,
+    task: Option<&str>,
+) -> Result<crate::core::Project, VogtError> {
+    let Some(landing) = LandingFields::of(&project.agent_policy) else {
+        return Ok(project);
+    };
+    let mut base = landing.base_branch.clone();
+    if let Some(initiative_id) = item.and_then(|item| item.initiative_id.as_deref()) {
+        let mut keys = vec![initiative_id.to_string()];
+        if let Some(initiative) = view.initiative_by_id(initiative_id)? {
+            keys.push(initiative.slug);
+        }
+        if let Some(found) = keys
+            .iter()
+            .find_map(|key| landing.initiative_bases.get(key))
+        {
+            base = found.clone();
+        }
+    }
+    if let Some(named) = policy_conflicts::task_named_base(task.unwrap_or(""), Some(&landing)) {
+        base = named;
+    }
+    project.agent_policy = project.agent_policy.with_base(&base);
+    Ok(project)
+}
+
 /// Python's `_worktree_base`: the project's integration branch, else `main`.
 fn worktree_base(policy: &crate::core::AgentPolicy) -> String {
     let stated = policy.base_branch.trim();
@@ -734,6 +811,30 @@ pub struct SessionResult {
     pub session: SessionSummary,
 }
 
+/// `session.start`'s result: Python's `SessionResult` with its
+/// `effective_policy` (WI-1832), which only a start fills.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StartSessionResult {
+    pub session: SessionSummary,
+    /// On `session.start` for a project with a landing rule: the rule the
+    /// worker runs under and any task lines it overrode.
+    pub effective_policy: Option<EffectivePolicy>,
+}
+
+/// The landing rule a started session runs under (WI-1832).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EffectivePolicy {
+    pub base_branch: String,
+    pub lands_by: String,
+    pub merge_by: String,
+    pub merge_mode: String,
+    pub deploy_by: String,
+    /// Where the task contradicted this policy, one line per axis (PR vs
+    /// push only, merge, base branch, deploy). The policy wins and the brief
+    /// says so; empty when the task agreed or set none.
+    pub overrides: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionListResult {
     pub sessions: Vec<SessionSummary>,
@@ -855,7 +956,7 @@ pub struct SessionInputResult {
 pub fn start_session<C, I>(
     ctx: &AppContext<C, I>,
     params: &StartSessionParams,
-) -> Result<SessionResult, VogtError>
+) -> Result<StartSessionResult, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
@@ -879,22 +980,20 @@ where
     let mut writing = write_of(ctx);
     let session_id = fresh(&writing, "ses");
     let subject = subject_of(ctx, params, &session_id)?;
+    let caller_merges = caller_merges(&subject.policy, params, started_by_kind.as_deref());
     let actor_ref = format!("agent:session:{session_id}");
     let scopes = session_scopes(ctx)?;
     let (secret, token_hash) = minted_token()?;
-    let policy = ctx
-        .declared
-        .read()?
-        .project_by_id(&subject.project_id)?
-        .map(|project| project.agent_policy)
-        .unwrap_or_default();
+    // The project's policy on the item's base (WI-1841), as the subject
+    // resolved it: the brief, the worktree and the conflict check agree.
+    let policy = subject.policy.clone();
     let budget = effective_budget(params, &policy);
     // The audit records what the start asked for (Python `params.worktree`),
     // so a start with no purpose and no value shows null, not false.
     let audit_worktree = params.worktree;
     let audit_repo_map = params.repo_map;
     let worktree = params.worktree.unwrap_or(false);
-    let mut spec = build_spec(ctx, params, &subject, &secret, read_only)?;
+    let mut spec = build_spec(ctx, params, &subject, &secret, read_only, caller_merges)?;
     spec.budget = budget.as_ref().map(budget_wire);
     if worktree {
         spec.worktree = Some(json!({
@@ -1069,8 +1168,9 @@ where
         );
         return Err(error);
     }
-    Ok(SessionResult {
+    Ok(StartSessionResult {
         session: summarize(ctx, &stored?, Some(&started))?,
+        effective_policy: effective_policy(&policy, params.task.as_deref(), caller_merges),
     })
 }
 
@@ -2037,6 +2137,8 @@ struct Subject {
     name: String,
     brief: ComposedBrief,
     is_scratch: bool,
+    /// The project's agent policy on this start's base (WI-1841).
+    policy: crate::core::AgentPolicy,
 }
 
 /// The project and work item a session opens on, and the directory it runs in.
@@ -2147,6 +2249,13 @@ where
             }
         },
     };
+    // The policy on the item's base, before the brief states it (WI-1841).
+    let project = with_item_base(
+        &ctx.declared.read()?,
+        project,
+        work_item.as_ref(),
+        params.task.as_deref(),
+    )?;
     let cwd = if project.root_path.is_empty() {
         return Err(VogtError::InvalidRequest(format!(
             "project {} has no checkout to open a session in",
@@ -2205,6 +2314,7 @@ where
     };
     Ok(Subject {
         session_id: session_id.to_string(),
+        policy: project.agent_policy.clone(),
         project_id: project.id,
         project_slug: project.slug,
         work_item_id: work_item.as_ref().map(|item| item.id.clone()),
@@ -2479,6 +2589,7 @@ fn build_spec<C, I>(
     subject: &Subject,
     token: &str,
     read_only: bool,
+    caller_merges: bool,
 ) -> Result<CreateSession, VogtError>
 where
     C: Clock,
@@ -2506,6 +2617,8 @@ where
         autopilot,
         read_only,
         params.review_of.is_some(),
+        LandingFields::of(&subject.policy).as_ref(),
+        caller_merges,
     ));
     spec.companion = (!subject.brief.companion.is_empty()).then(|| subject.brief.companion.clone());
     spec.env = Some(session_env(
@@ -2527,6 +2640,8 @@ fn brief_with_task(
     autopilot: bool,
     read_only: bool,
     review: bool,
+    landing: Option<&LandingFields>,
+    caller_merges: bool,
 ) -> String {
     let mut text = brief.to_string();
     if autopilot {
@@ -2538,6 +2653,15 @@ fn brief_with_task(
     let task = task.unwrap_or("").trim();
     if !task.is_empty() {
         let heading = if review { "## Also asked" } else { "## Task" };
+        // Where the task contradicts the landing rule the policy wins, and
+        // the brief says so above the task rather than leaving the worker
+        // two instructions to choose between (WI-1832).
+        let overrides = policy_conflicts::overrides_section(
+            &policy_conflicts::task_policy_conflicts(task, landing, caller_merges),
+        );
+        if !overrides.is_empty() {
+            text = format!("{}\n\n{overrides}", text.trim_end());
+        }
         text = format!("{}\n\n{heading}\n\n{task}\n", text.trim_end());
     }
     text
