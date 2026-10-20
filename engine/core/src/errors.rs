@@ -62,6 +62,15 @@ pub enum VogtError {
     GitCommandFailed(String),
     /// GitHub did not answer or refused the credential (`adapters/github/client.py`).
     GitHubUnavailable(String),
+    /// The token's core budget is below the floor, so reads wait for the reset
+    /// (`GitHubRateLimited` in `adapters/github/client.py`, WI-1838). A
+    /// subclass of `GitHubUnavailable` in Python, so every place that treats
+    /// GitHub as unavailable treats this the same unless it says otherwise.
+    /// `reset_at` is the epoch second the budget resets, when known.
+    GitHubRateLimited {
+        message: String,
+        reset_at: Option<i64>,
+    },
     /// A peer instance could not be reached, refused, or answered nonsense
     /// (`adapters/peer.py`). `status` is `unreachable`, `refused` or
     /// `invalid_response`.
@@ -130,6 +139,7 @@ impl VogtError {
             | Self::GitHubUnavailable(m)
             | Self::ForgejoUnavailable(m) => m,
             Self::PeerUnavailable { message, .. }
+            | Self::GitHubRateLimited { message, .. }
             | Self::TransitionRejected { message, .. }
             | Self::Unauthenticated(message)
             | Self::Forbidden(message)
@@ -178,6 +188,7 @@ impl VogtError {
             Self::EngineUnavailable(_) => "engine_unavailable",
             Self::GitUnavailable(_) | Self::GitCommandFailed(_) => "git_unavailable",
             Self::GitHubUnavailable(_) => "github_unavailable",
+            Self::GitHubRateLimited { .. } => "github_rate_limited",
             Self::PeerUnavailable { .. } => "peer_unavailable",
             Self::ForgejoUnavailable(_) => "forgejo_unavailable",
             Self::TransitionRejected { .. } => "transition_rejected",
@@ -229,7 +240,7 @@ impl VogtError {
             | Self::ForgejoUnavailable(_) => 502,
             Self::InvalidParams(_) => 422,
             Self::MigrationError(_) => 500,
-            Self::MigrationLocked(_) => 503,
+            Self::MigrationLocked(_) | Self::GitHubRateLimited { .. } => 503,
             Self::TransitionRejected { .. } => 409,
             Self::Unauthenticated(_) => 401,
             Self::Forbidden(_) => 403,

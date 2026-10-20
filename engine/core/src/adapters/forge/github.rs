@@ -652,26 +652,57 @@ impl<T: ForgeTransport> GitHubProvider<T> {
         })
     }
 
+    /// Which update-automation config exists, read from the git tree.
+    ///
+    /// One `git/trees/HEAD` read lists the root, and only when the root holds
+    /// `.github` is that one subtree read too — at most two calls, both
+    /// ETag-cached, where this used to be eight `/contents/` probes per
+    /// repository per sweep (WI-1838). A paused read is "not read", not "no
+    /// config": it is raised so the posture collector records nothing and
+    /// retries next sweep.
     fn version_update_config(&self, repo: &RepoRef) -> Result<Option<String>, VogtError> {
-        for path in VERSION_UPDATE_CONFIGS {
-            match self.transport.get(
-                &format!("/repos/{}/{}/contents/{path}", repo.owner, repo.repo),
-                &[],
-            ) {
-                Err(_) => return Ok(None),
-                Ok(ForgeResponse::Missing | ForgeResponse::Empty) => {}
-                Ok(_) => return Ok(Some((*path).to_owned())),
-            }
-        }
-        Ok(None)
+        let base = format!("/repos/{}/{}/git/trees", repo.owner, repo.repo);
+        let read = || -> Result<(Vec<(String, String)>, Vec<(String, String)>), VogtError> {
+            let root = tree_entries(&self.transport.get(&format!("{base}/HEAD"), &[])?);
+            let github_dir = root
+                .iter()
+                .find(|(path, _)| path == ".github")
+                .map(|(_, sha)| sha.clone())
+                .filter(|sha| !sha.is_empty());
+            let nested = match github_dir {
+                Some(sha) => tree_entries(&self.transport.get(&format!("{base}/{sha}"), &[])?),
+                None => Vec::new(),
+            };
+            Ok((root, nested))
+        };
+        let (root, nested) = match read() {
+            Ok(found) => found,
+            Err(error @ VogtError::GitHubRateLimited { .. }) => return Err(error),
+            Err(_) => return Ok(None),
+        };
+        let present: std::collections::BTreeSet<String> = root
+            .into_iter()
+            .map(|(path, _)| path)
+            .chain(
+                nested
+                    .into_iter()
+                    .map(|(name, _)| format!(".github/{name}")),
+            )
+            .collect();
+        Ok(VERSION_UPDATE_CONFIGS
+            .iter()
+            .find(|path| present.contains(**path))
+            .map(|path| (*path).to_owned()))
     }
 
-    /// 204 is on, 404 is off, and a transport error is "could not tell".
+    /// 204 is on, 404 is off, and a transport error is "could not tell" — but
+    /// a paused read is raised, so nothing is recorded (WI-1838).
     fn toggle(&self, repo: &RepoRef, endpoint: &str) -> Result<Option<bool>, VogtError> {
         match self.transport.get(
             &format!("/repos/{}/{}/{endpoint}", repo.owner, repo.repo),
             &[],
         ) {
+            Err(error @ VogtError::GitHubRateLimited { .. }) => Err(error),
             Err(_) => Ok(None),
             Ok(ForgeResponse::Missing) => Ok(Some(false)),
             Ok(_) => Ok(Some(true)),
@@ -685,6 +716,46 @@ impl ForgeResponse {
             Self::Json(serde_json::Value::String(text)) => Some(text),
             _ => None,
         }
+    }
+}
+
+/// `path → sha` for one level of a git tree payload, in payload order; empty
+/// when absent. Ports `_tree_entries`.
+fn tree_entries(response: &ForgeResponse) -> Vec<(String, String)> {
+    let ForgeResponse::Json(serde_json::Value::Object(payload)) = response else {
+        return Vec::new();
+    };
+    let Some(serde_json::Value::Array(items)) = payload.get("tree") else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for item in items.iter().filter_map(serde_json::Value::as_object) {
+        let path = json_text(item.get("path"));
+        if !truthy(item.get("path")) {
+            continue;
+        }
+        let sha = if truthy(item.get("sha")) {
+            json_text(item.get("sha"))
+        } else {
+            String::new()
+        };
+        match entries.iter_mut().find(|(known, _)| *known == path) {
+            Some(entry) => entry.1 = sha,
+            None => entries.push((path, sha)),
+        }
+    }
+    entries
+}
+
+/// Python truthiness for a JSON value.
+fn truthy(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(flag)) => *flag,
+        Some(serde_json::Value::Number(number)) => number.as_f64().is_some_and(|n| n != 0.0),
+        Some(serde_json::Value::String(text)) => !text.is_empty(),
+        Some(serde_json::Value::Array(items)) => !items.is_empty(),
+        Some(serde_json::Value::Object(map)) => !map.is_empty(),
     }
 }
 

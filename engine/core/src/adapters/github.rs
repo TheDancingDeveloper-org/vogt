@@ -9,7 +9,7 @@
 //! read through (WI-1065). The trait itself lives in that lane; the methods
 //! here are its contract: `get`, `send`, `identity`, `api_root`, `token`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
@@ -27,6 +27,206 @@ pub const DEFAULT_PER_PAGE: u32 = 100;
 
 /// The one host this adapter can read.
 pub const SUPPORTED_HOST: &str = "github.com";
+/// Below this many core requests left in the hour, reads stop until the
+/// window resets (WI-1838). The limit is per *user*, shared with every agent
+/// session and CI helper on the same account, so the sweep leaves headroom.
+pub const DEFAULT_RATE_LIMIT_FLOOR: i64 = 500;
+/// How many conditional-request entries are kept. One per URL the sweep reads;
+/// the estate is ~70 repositories at ~15 URLs each.
+pub const ETAG_CACHE_SIZE: usize = 4096;
+
+/// Process-wide state, as Python's module globals are. Under `cargo test` it
+/// is per test thread instead, which is what the Python suite's autouse reset
+/// fixture buys: one test's reads must not shape the next's.
+macro_rules! process_state {
+    ($(#[$meta:meta])* $vis:vis fn $name:ident($ty:ty)) => {
+        $(#[$meta])*
+        $vis fn $name<R>(f: impl FnOnce(&mut $ty) -> R) -> R {
+            #[cfg(not(test))]
+            {
+                static STATE: std::sync::LazyLock<std::sync::Mutex<$ty>> =
+                    std::sync::LazyLock::new(Default::default);
+                let mut guard = STATE
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                f(&mut guard)
+            }
+            #[cfg(test)]
+            {
+                thread_local! {
+                    static STATE: std::cell::RefCell<$ty> =
+                        std::cell::RefCell::new(Default::default());
+                }
+                STATE.with(|state| f(&mut state.borrow_mut()))
+            }
+        }
+    };
+}
+pub(crate) use process_state;
+
+/// A non-reversible key for per-token state; never the token itself.
+pub(crate) fn token_key(token: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    match token {
+        Some(token) if !token.is_empty() => {
+            hex::encode(Sha256::digest(token.as_bytes()))[..16].to_owned()
+        }
+        _ => "anonymous".to_owned(),
+    }
+}
+
+/// ETag → body per (token, URL), so an unchanged resource costs nothing.
+///
+/// GitHub answers `If-None-Match` with 304 when nothing changed, and a 304
+/// does not count against the rate limit. Process-wide because providers are
+/// built per project per sweep; bounded LRU so it cannot grow without limit.
+#[derive(Default)]
+pub(crate) struct ConditionalCache {
+    entries: HashMap<(String, String), (u64, String, Vec<u8>)>,
+    order: BTreeMap<u64, (String, String)>,
+    tick: u64,
+}
+
+impl ConditionalCache {
+    fn touch(&mut self, key: &(String, String)) {
+        self.tick += 1;
+        if let Some(entry) = self.entries.get_mut(key) {
+            self.order.remove(&entry.0);
+            entry.0 = self.tick;
+            self.order.insert(self.tick, key.clone());
+        }
+    }
+
+    fn get(&mut self, key: &(String, String)) -> Option<(String, Vec<u8>)> {
+        self.touch(key);
+        self.entries
+            .get(key)
+            .map(|(_, etag, body)| (etag.clone(), body.clone()))
+    }
+
+    fn put(&mut self, key: (String, String), etag: String, body: Vec<u8>) {
+        self.tick += 1;
+        if let Some((old, _, _)) = self.entries.insert(key.clone(), (self.tick, etag, body)) {
+            self.order.remove(&old);
+        }
+        self.order.insert(self.tick, key);
+        while self.entries.len() > ETAG_CACHE_SIZE {
+            let Some((_, oldest)) = self.order.pop_first() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+}
+
+/// The last `X-RateLimit-Remaining`/`-Reset` seen per token.
+///
+/// Read on every response. When remaining drops below the floor, reads are
+/// refused locally until the reset time passes; then the budget is unknown
+/// again and the next response re-learns it.
+pub(crate) struct RateBudget {
+    pub(crate) floor: i64,
+    seen: HashMap<String, (i64, f64)>,
+    /// A fixed "now" for tests; `None` reads the system clock.
+    pub(crate) clock: Option<f64>,
+}
+
+impl Default for RateBudget {
+    fn default() -> Self {
+        Self {
+            floor: DEFAULT_RATE_LIMIT_FLOOR,
+            seen: HashMap::new(),
+            clock: None,
+        }
+    }
+}
+
+impl RateBudget {
+    fn now(&self) -> f64 {
+        self.clock.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs_f64())
+                .unwrap_or(0.0)
+        })
+    }
+
+    pub(crate) fn observe(&mut self, token_key: &str, headers: &BTreeMap<String, String>) {
+        let (Some(remaining), Some(reset)) = (
+            headers.get("x-ratelimit-remaining"),
+            headers.get("x-ratelimit-reset"),
+        ) else {
+            return;
+        };
+        // Only the core resource gates the sweep; search and GraphQL have
+        // their own buckets.
+        if headers
+            .get("x-ratelimit-resource")
+            .map_or("core", String::as_str)
+            != "core"
+        {
+            return;
+        }
+        let (Ok(remaining), Ok(reset)) =
+            (remaining.trim().parse::<i64>(), reset.trim().parse::<f64>())
+        else {
+            return;
+        };
+        self.seen.insert(token_key.to_owned(), (remaining, reset));
+    }
+
+    /// The reset epoch while the budget is below the floor, else `None`.
+    pub(crate) fn blocked_until(&mut self, token_key: &str) -> Option<f64> {
+        let (remaining, reset) = *self.seen.get(token_key)?;
+        if self.now() >= reset {
+            self.seen.remove(token_key);
+            return None;
+        }
+        (remaining < self.floor).then_some(reset)
+    }
+}
+
+/// The two process-wide halves: every client for one token shares one budget
+/// and one conditional cache, whichever collector built it.
+#[derive(Default)]
+pub(crate) struct BudgetState {
+    pub(crate) etags: ConditionalCache,
+    pub(crate) budget: RateBudget,
+}
+
+process_state!(
+    /// Run `f` against the process-wide ETag cache and rate budget.
+    pub(crate) fn with_budget(BudgetState)
+);
+
+/// Set the remaining-requests floor below which reads pause (WI-1838).
+pub fn configure_rate_limit_floor(floor: i64) {
+    with_budget(|state| state.budget.floor = floor.max(0));
+}
+
+/// `time.strftime("%H:%M:%SZ", time.gmtime(reset_at))`.
+fn reset_clock(reset_at: f64) -> String {
+    chrono::DateTime::from_timestamp(reset_at.floor() as i64, 0)
+        .map(|when| when.format("%H:%M:%SZ").to_string())
+        .unwrap_or_default()
+}
+
+/// A paused read, refused before it is sent.
+pub(crate) fn budget_refusal(message: String, reset_at: f64) -> VogtError {
+    VogtError::GitHubRateLimited {
+        message,
+        reset_at: Some(reset_at.floor() as i64),
+    }
+}
+
+/// An exhausted 403/429: the reset comes from the header when it is digits.
+pub(crate) fn exhausted_refusal(message: String, headers: &BTreeMap<String, String>) -> VogtError {
+    let reset_at = headers
+        .get("x-ratelimit-reset")
+        .filter(|reset| !reset.is_empty() && reset.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|reset| reset.parse::<i64>().ok());
+    VogtError::GitHubRateLimited { message, reset_at }
+}
 
 /// Who a token belongs to, and what it may do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,9 +300,55 @@ impl GitHubClient {
 
     /// GET one resource. A 404 is `Missing`, a 204 is `Empty`, and a 403 is
     /// `github_unavailable` rather than a silent empty answer.
+    ///
+    /// Spends the shared budget carefully (WI-1838): a read is refused locally
+    /// while the token's budget is below the floor, an unchanged resource is a
+    /// conditional request whose 304 replays the cached body, and an exhausted
+    /// 403/429 is `github_rate_limited` rather than a plain refusal.
     pub fn get(&self, path: &str, query: &[(&str, String)]) -> Result<ForgeResponse, VogtError> {
         let url = self.url(path, query);
-        let (status, body, _) = self.fetch(&url, &self.headers(false), b"", "GET")?;
+        let mut headers = self.headers(false);
+        let key = token_key(self.token.as_deref());
+        let blocked = with_budget(|state| {
+            let reset = state.budget.blocked_until(&key)?;
+            Some((state.budget.floor, reset))
+        });
+        if let Some((floor, reset_at)) = blocked {
+            return Err(budget_refusal(
+                format!(
+                    "GitHub rate budget below {floor}; skipping {path} until the reset at {}",
+                    reset_clock(reset_at)
+                ),
+                reset_at,
+            ));
+        }
+        let cache_key = (key.clone(), url.clone());
+        let cached = with_budget(|state| state.etags.get(&cache_key));
+        if let Some((etag, _)) = &cached {
+            headers.insert("If-None-Match".to_string(), etag.clone());
+        }
+
+        let (mut status, mut body, response_headers) = self.fetch(&url, &headers, b"", "GET")?;
+        with_budget(|state| state.budget.observe(&key, &response_headers));
+        if let (304, Some((_, kept))) = (status, &cached) {
+            // Unchanged since the last read, and free: replay what we kept.
+            status = 200;
+            body = kept.clone();
+        } else if status == 200 {
+            if let Some(etag) = response_headers.get("etag").filter(|etag| !etag.is_empty()) {
+                let (etag, kept) = (etag.clone(), body.clone());
+                with_budget(|state| state.etags.put(cache_key, etag, kept));
+            }
+        }
+        let exhausted = response_headers
+            .get("x-ratelimit-remaining")
+            .is_some_and(|remaining| remaining == "0");
+        if matches!(status, 403 | 429) && exhausted {
+            return Err(exhausted_refusal(
+                format!("GitHub rate limit exhausted reading {path}"),
+                &response_headers,
+            ));
+        }
         self.read_outcome(path, status, &body)
     }
 
@@ -118,12 +364,14 @@ impl GitHubClient {
         let verb = method.as_str();
         let url = self.url(path, &[]);
         let encoded = body.map(|value| value.to_string()).unwrap_or_default();
-        let (status, response, _) = self.fetch(
+        let (status, response, response_headers) = self.fetch(
             &url,
             &self.headers(true),
             encoded.as_bytes(),
             method.as_str(),
         )?;
+        let key = token_key(self.token.as_deref());
+        with_budget(|state| state.budget.observe(&key, &response_headers));
         if status == 404 {
             return Ok(Value::Null);
         }
@@ -242,8 +490,15 @@ impl GitHubClient {
         method: &str,
     ) -> Result<(u16, Vec<u8>, BTreeMap<String, String>), VogtError> {
         if let Some(transport) = &self.transport {
+            // Names lower-cased, as the network path already returns them. A
+            // fake that supplies none gets no scopes, ETags or rate
+            // accounting, honestly.
             let (status, body, response_headers) = transport(url, headers, body, method);
-            return Ok((status, body, response_headers));
+            let lowered = response_headers
+                .into_iter()
+                .map(|(name, value)| (name.to_ascii_lowercase(), value))
+                .collect();
+            return Ok((status, body, lowered));
         }
         super::engine::http1::exchange(url, method, headers, body, self.timeout)
             .map_err(|error| VogtError::GitHubUnavailable(format!("GitHub unreachable: {error}")))
