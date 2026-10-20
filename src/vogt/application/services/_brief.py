@@ -242,7 +242,9 @@ _REVIEW = (
     "This review is read-only. Make no edits to the branch or the checkout, "
     "and no commits, pushes, merges or deploys; do not open, approve or "
     "merge a pull request. Run the gates in a scratch worktree checked out "
-    "at the head below. The one thing you write is your verdict.\n"
+    "at the head below, and remove that worktree (`git worktree remove "
+    "--force`) and any build output you made outside it once the verdict is "
+    "posted. The one thing you write is your verdict.\n"
 )
 
 #: The shape of the answer. Fixed text so a driver can read the first line

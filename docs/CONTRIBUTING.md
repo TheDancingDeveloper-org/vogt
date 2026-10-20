@@ -357,11 +357,13 @@ Actions expression in `runs-on`, and any third-party action not pinned to a
 full commit SHA. A queued job is a runner-capacity question; changing
 `runs-on` is not the fix and fails the gate.
 
-[`ci.yml`](../.github/workflows/ci.yml) runs on every pull request and on
-pushes to `main`. A `changes` job classifies the diff and runs only the halves
-it touches; a change to anything shared (workflows, the Dockerfile, `deploy/`,
-`.gitignore`) or any push runs everything. The halves are `build` (the Python
-gates on 3.11 and 3.13, with the generated-config drift check and the
+[`ci.yml`](../.github/workflows/ci.yml) runs on every pull request, in the
+merge queue (`merge_group`) and on pushes to `main`. On a pull request a
+`changes` job classifies the diff and runs only the halves it touches, with
+the engine job split into its Rust and web halves; a change to anything shared
+(workflows, the Dockerfile, `deploy/`, `.gitignore`) runs everything. The queue
+and `main` always run everything. [`docs/ci.md`](ci.md) has the full table.
+The halves are `build` (the Python gates on 3.13, plus 3.11 in the queue, with the generated-config drift check and the
 product-version check), `core` (the Python suite again with `engine/`, `web/`
 and `mobile/` deleted first), `engine` (Rust fmt, `cargo audit`, clippy and
 tests, with the PWA type-checked, tested, its demo Playwright project run,
@@ -373,6 +375,14 @@ The `ci` job at the end is the single gate: it succeeds trivially on a
 docs-only diff and fails whenever any half failed. **Required status checks on
 `main` are `ci` and `runner-policy`.** The `e2e` workflow (§5) is not
 required; it runs after a merge and nightly.
+
+**Landing: the merge queue.** Push a branch and open a pull request. The PR
+gets only the fast, path-scoped checks above, so do not expect, or re-run by
+hand, the full suite on it. Land with `land-pr`, which enqueues the PR
+(`gh pr merge --auto`) and follows the queue's `merge_group` runs. The full
+suite runs there, against the exact tree `main` will become. A failed queue run
+dequeues the PR: fix, push, re-run `land-pr`. Rebase only when the queue
+reports a conflict, never just because `main` moved.
 
 **Pull requests from forks.** A fork has no runner registered to it, so the
 workflows do not run on the fork's own Actions. A pull request from a fork

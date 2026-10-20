@@ -29,6 +29,7 @@ import { fireEvent, getConfig, render, waitFor } from "@solidjs/testing-library"
 import App from "../App";
 import { APP_ROUTES } from "../routes";
 import { setToken } from "../api";
+import { DISCONNECT_GRACE_MS } from "../store";
 import { replaceTabs, tabsStore } from "../tabs";
 import {
   fakeVogt,
@@ -284,9 +285,10 @@ describe("a pasted link opens the surface it names", () => {
     await waitFor(() => expect(shell.url()).toBe("/sessions"));
   });
 
-  it("keeps the engine's rail order instead of reshuffling by attention (WI-1289)", async () => {
-    // The engine already lists oversight first, then last event. The rail
-    // keeps that order; attention stays a badge. Waiting does not jump ahead.
+  it("groups the rail by state, keeping the engine's order within a section (WI-1289, WI-1736)", async () => {
+    // The rail sections sessions by what they need from a person (WI-1736):
+    // a waiting session is in Needs you, ahead of running work; idle work is
+    // in Ready / idle. Within a section the engine's order is kept.
     const sessions = [
       { id: "eng-idle", name: "idle-one", cwd: "/a", activity: "idle", exit_code: null },
       { id: "eng-wait", name: "waiting-one", cwd: "/b", activity: "waiting-for-input", exit_code: null },
@@ -294,16 +296,18 @@ describe("a pasted link opens the surface it names", () => {
     ];
     const { container } = mountShell("/sessions", { sessions });
 
+    // The accessible name is "<name>, <state>": badges (WI-1736) sit in the
+    // visible name and would otherwise leak into the comparison.
     const railRows = () =>
-      container.querySelectorAll(".places-rail-session-area .session-row .name");
-    const names = () => [...railRows()].map((node) => node.textContent);
+      container.querySelectorAll(".places-rail-session-area .session-row");
+    const names = () => [...railRows()].map((node) => node.getAttribute("aria-label")?.split(",")[0]);
     // A previous retained shell can leave a same-sized roster in the shared
     // store until this mount's list request lands; wait for identities, not
     // merely for a coincidentally equal row count.
     await waitFor(() =>
-      expect(names()).toEqual(["idle-one", "waiting-one", "running-one"]),
+      expect(names()).toEqual(["waiting-one", "running-one", "idle-one"]),
     );
-    expect(names()).toEqual(["idle-one", "waiting-one", "running-one"]);
+    expect(names()).toEqual(["waiting-one", "running-one", "idle-one"]);
   });
 
   it("shows a session's work item as a chip and binds and unbinds it (WI-998)", async () => {
@@ -415,7 +419,10 @@ describe("shared live steering", () => {
       expect(container.querySelector('[aria-label="Projects unavailable"]')).toBeTruthy();
       expect(container.querySelector('.phone-bottom-nav [aria-label="12 Board work items"]')).toBeTruthy();
       expect(container.querySelector('.phone-bottom-nav [aria-label="7 Backlog candidates"]')).toBeTruthy();
-      expect(container.querySelector('.places-section-label [aria-label="2 running sessions"]')).toBeTruthy();
+      // Each section counts its own sessions (WI-1736): one waits for input,
+      // one is idle at its prompt.
+      expect(container.querySelector('.places-section-label [aria-label="1 needs you sessions"]')).toBeTruthy();
+      expect(container.querySelector('.places-section-label [aria-label="1 ready / idle sessions"]')).toBeTruthy();
       // Scoped to the rail: the desktop Sessions overview now also lists the
       // running sessions as rows, so the waiting session is drawn once
       // in the rail and once in that list. This assertion is about the rail's
@@ -474,10 +481,10 @@ describe("shared live steering", () => {
         expect(cards).toHaveLength(1);
         expect(cards[0]).toHaveTextContent("needs-answer");
         expect(cards[0]).not.toHaveTextContent("old-prompt");
-        expect(container.querySelector(".sessions-overview-heading"))
-          .toHaveTextContent("RUNNING — 3");
-        expect(container.querySelector(".sessions-overview-breakdown"))
-          .toHaveTextContent("1 idle · 1 exited");
+        // The list carries its own state sections (WI-1736); the duplicate
+        // "RUNNING — N" summary is gone.
+        expect(container.querySelector(".sessions-overview-heading")).toBeNull();
+        expect(container.querySelector(".session-list")).toHaveTextContent("Ready / idle");
         expect(container.querySelector('.phone-bottom-nav [aria-label="1 sessions waiting for input"]'))
           .toBeTruthy();
       });
@@ -497,21 +504,27 @@ describe("shared live steering", () => {
   });
 
   it("keeps the last session values stale when a refresh goes offline", async () => {
+    // The engine goes away as a whole: its stream refuses too. An open stream
+    // is the engine saying the front door is reachable (store.ts), so only a
+    // refused stream lets the refresh's failure read as offline.
     const { container } = mountShell("/sessions", {
       engine: {
         "GET /api/sessions": {
           status: 503,
           body: { error: "session service offline" },
         },
+        "GET /api/events": { status: 503, body: { error: "engine offline" } },
       },
     });
 
+    // "Offline" waits out the disconnect grace period (store.ts), so the
+    // wait has to outlast it rather than the default 1 s.
     await waitFor(() => {
       expect(container.querySelector('.places-nav .place-count[data-state="stale"]')).toBeTruthy();
       expect(container.querySelector('.places-section-label .place-count[data-state="stale"]')).toBeTruthy();
       expect(container.querySelector(".rail-connection.offline .rail-connection-dot")).toBeTruthy();
       expect(container.textContent).toContain("Offline");
-    });
+    }, { timeout: Math.max(DISCONNECT_GRACE_MS + 2_000, getConfig().asyncUtilTimeout) });
   });
 
   it("opens, bookmarks, and closes a session entirely from the keyboard", async () => {

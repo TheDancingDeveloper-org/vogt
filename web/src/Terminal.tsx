@@ -985,8 +985,12 @@ const TerminalView: Component<Props> = (props) => {
     // has the jump-to-bottom chip. Snapping to the tail here threw a phone
     // reader back down on every WebView focus and every event-stream loss —
     // which read as the terminal ignoring swipes.
-    wakeCleanup = onWake(() => {
+    wakeCleanup = onWake((wake) => {
       scheduleFit();
+      // The event stream's reopen says it was down; a pane whose own socket
+      // is open has nothing to recover, and reconnecting it here is what
+      // made every pane flap during an outage.
+      if (wake.reason === "sse-reconnect" && ws?.readyState === WebSocket.OPEN) return;
       if (!readyToConnect()) return;
       if (isParked()) return;
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {

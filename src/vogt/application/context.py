@@ -7,6 +7,7 @@ the registry; they never reach past it.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -14,7 +15,11 @@ from vogt.adapters.engine import EngineClient
 from vogt.adapters.git import Cloner, Pusher, clone_repository, push_branch
 from vogt.adapters.github.client import Transport
 from vogt.adapters.peer import PeerClient
-from vogt.application.identity import PublicIdentity, identity_from_config
+from vogt.application.identity import (
+    PublicIdentity,
+    claimed_engine_session,
+    identity_from_config,
+)
 from vogt.application.test_hooks import clock_from_env, hooks_active, ids_from_env
 from vogt.config import VogtConfig, load_config
 from vogt.core.clock import Clock, utc_now
@@ -82,6 +87,12 @@ class AppContext:
     #: A peer instance `instance.diagnostics` can ask about itself, or `None`
     #: when none is configured. Injectable for the same reason the engine is.
     peer: PeerClient | None = None
+    #: The engine session a pod-token caller says it runs in
+    #: (`X-Vogt-Engine-Session`, sent by the MCP bridge), or `None`. A claim,
+    #: not an identity: only `session.start` reads it, to attribute a start
+    #: by a resumed oversight session that lost its own token (WI-1852), and
+    #: only after the engine confirms that session is live oversight.
+    claimed_engine_session: str | None = None
 
 
 def build_context(
@@ -216,3 +227,13 @@ def release_store_connections() -> None:
     what folds its WAL back before the swap.
     """
     drain_read_pool()
+
+
+def with_claimed_engine_session(
+    ctx: AppContext, headers: Mapping[str, str]
+) -> AppContext:
+    """`ctx` with the engine session the request claims, when it claims one."""
+    claimed = claimed_engine_session(headers)
+    if claimed is None:
+        return ctx
+    return replace(ctx, claimed_engine_session=claimed)

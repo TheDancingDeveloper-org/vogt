@@ -158,17 +158,6 @@ const Sessions: Component<Props> = (props) => {
         (session.activity === "waiting-for-input" || session.activity === "awaiting-approval"),
     ),
   );
-  const displayedRows = createMemo(() => {
-    if (!narrow()) return sessions();
-    const waitingIds = new Set(waiting().map((session) => session.id));
-    return sessions().filter((session) => !waitingIds.has(session.id));
-  });
-  const idleRowCount = () =>
-    displayedRows().filter(
-      (session) => session.exit_code === null && session.activity === "idle",
-    ).length;
-  const exitedRowCount = () =>
-    displayedRows().filter((session) => session.exit_code !== null).length;
   // Terminal and Assistant have their own narrow headers in the redesign.
   // The Sessions surface header remains the desktop owner and still wraps the
   // other machine tools, but must not stack a second title/tools bar above
@@ -366,22 +355,11 @@ const Sessions: Component<Props> = (props) => {
                 )}
               >
                 <div class="sessions-overview-list">
-                  <div class="sessions-overview-section-head">
-                    <h2 class="sessions-overview-heading">
-                      RUNNING — {displayedRows().length}
-                    </h2>
-                    <span class="sessions-overview-breakdown">
-                      {idleRowCount()} idle · {exitedRowCount()} exited
-                    </span>
-                  </div>
-                  {/* On a narrow shell the waiting sessions are already the
-                      attention cards above, so the list carries the rest;
-                      on a desk there are no cards and it carries them all. */}
-                  <SessionList
-                    sessions={sessions()}
-                    omit={narrow() ? waiting().map((session) => session.id) : []}
-                    label={narrow() ? "Non-waiting sessions" : "All sessions"}
-                  />
+                  {/* The list carries every session, Needs you included, so a
+                      worker that needs a person is lifted into its section
+                      (WI-1736). On a narrow shell the cards above still answer
+                      the waiting ones. */}
+                  <SessionList sessions={sessions()} label="All sessions" />
                 </div>
               </Show>
             </div>

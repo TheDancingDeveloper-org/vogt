@@ -80,6 +80,9 @@ def collector_registry(ctx: AppContext) -> CollectorRegistry:
     # — the conditional registration that keeps "not configured" honestly out
     # of coverage (D8).
     if has_configured_forge(ctx.config):
+        from vogt.adapters.github.client import configure_rate_limit_floor
+
+        configure_rate_limit_floor(ctx.config.github_rate_limit_floor)
         for sync_collector in forge_sync_collectors(
             ctx.observed, transport=ctx.forge_transport
         ):

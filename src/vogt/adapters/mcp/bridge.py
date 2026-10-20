@@ -39,6 +39,11 @@ TOKEN_FILE_ENV = "VOGT_TOKEN_FILE"
 #: Set by a coding session for the agent it starts, and by the container's
 #: auth broker for everything else. See `resolve_token` for which wins.
 HTTP_TOKEN_ENV = "VOGT_HTTP_TOKEN"
+#: Set by the engine on every session's process (`pty.rs`).
+ENGINE_SESSION_ENV = "VOGT_ENGINE_SESSION_ID"
+#: `vogt.application.identity.HEADER_ENGINE_SESSION`, spelled out: the
+#: bridge ships to clients and imports nothing from the application.
+ENGINE_SESSION_HEADER = "X-Vogt-Engine-Session"
 DEFAULT_TIMEOUT_SECONDS = 30
 #: A tools/call that itself waits (`timeout_s` / `wake_timeout_s`) needs the
 #: HTTP read to outlast that wait. The bridge adds the default on top and
@@ -72,6 +77,7 @@ class Bridge:
         url: str,
         *,
         token: str | None = None,
+        engine_session: str | None = None,
         stdin: TextIO | None = None,
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
@@ -79,6 +85,7 @@ class Bridge:
     ) -> None:
         self._url = url.rstrip("/")
         self._token = token
+        self._engine_session = (engine_session or "").strip() or None
         self._stdin = stdin if stdin is not None else sys.stdin
         self._stdout = stdout if stdout is not None else sys.stdout
         self._stderr = stderr if stderr is not None else sys.stderr
@@ -250,6 +257,11 @@ class Bridge:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
+        if self._engine_session:
+            # Which engine session this bridge runs in (WI-1852). Advisory:
+            # the core uses it only to attribute a pod-token caller's
+            # session.start, after the engine vouches for the session.
+            headers[ENGINE_SESSION_HEADER] = self._engine_session
         return headers
 
     def _get(
@@ -354,7 +366,11 @@ def main() -> int:  # pragma: no cover - exercised via the console script
             f"(and {TOKEN_FILE_ENV} to a file holding a token)\n"
         )
         return 2
-    Bridge(url, token=resolve_token(os.environ)).serve()
+    Bridge(
+        url,
+        token=resolve_token(os.environ),
+        engine_session=os.environ.get(ENGINE_SESSION_ENV),
+    ).serve()
     return 0
 
 

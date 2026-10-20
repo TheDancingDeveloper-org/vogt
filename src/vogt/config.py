@@ -443,6 +443,53 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    github_app_id: str | None = Field(
+        default=None,
+        description=(
+            "The ID or the client ID of a GitHub App for the forge adapter "
+            "to authenticate as; GitHub accepts either as the JWT issuer. "
+            "With `github_app_private_key_file` also set, GitHub reads and "
+            "writes use short-lived installation tokens, which have their own "
+            "rate limit, instead of `github_token_file`. The notifications "
+            "collector stays on `github_token_file`, because notifications "
+            "belong to a user and an App cannot read them. Not a secret, so "
+            "plain config is fine. Setup, including the permissions the App "
+            "needs, is in docs/GITHUB_APP.md."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_app_installation_id: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Pin every GitHub request to one installation of "
+            "`github_app_id`. Unset, the installation is discovered per "
+            "repository owner (`GET /repos/{owner}/{repo}/installation`, "
+            "then `/orgs/{owner}/installation` or "
+            "`/users/{owner}/installation`) and remembered, so one App "
+            "installed on several accounts or organisations covers them all; "
+            "an owner without the App is read with `github_token_file`. "
+            "Publishing a new repository needs an owner to create it under: "
+            "this installation's account or, unset, the App's only "
+            "installation. An App with several installations must set this "
+            "to publish."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_app_private_key_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to the GitHub App's PEM private key, which signs the "
+            "short-lived JWT exchanged for installation tokens. A file for "
+            "the same reason as `github_token_file`: the key never appears "
+            "in the environment or a process listing. When this and "
+            "`github_app_id` are set, the App takes precedence over "
+            "`github_token_file` for every GitHub read and write except "
+            "notifications. Unset, or unreadable, the personal token is used "
+            "as before."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     forge_account_key_file: Path | None = Field(
         default=None,
         description=(
@@ -731,6 +778,29 @@ class VogtConfig(BaseSettings):
             "never looks is the failure this product exists to prevent: "
             "stale evidence and no evidence are indistinguishable from the "
             "outside, so the safe default is to keep looking."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    forge_posture_interval_seconds: int = Field(
+        default=86400,
+        ge=0,
+        description=(
+            "How often the forge posture collector re-reads a repository's "
+            "update-automation settings (version-update config, vulnerability "
+            "alerts, automated security fixes). Posture changes rarely and "
+            "cost several API calls per repository, so the default is daily; "
+            "sweeps in between skip it. Zero reads it on every sweep."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_rate_limit_floor: int = Field(
+        default=500,
+        ge=0,
+        description=(
+            "When GitHub reports fewer core API requests than this left in "
+            "the hour, forge reads stop until the limit resets instead of "
+            "spending the rest. The limit is per GitHub user and shared with "
+            "every other tool on that account. Zero never pauses early."
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )

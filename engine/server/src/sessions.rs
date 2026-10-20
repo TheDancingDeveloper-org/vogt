@@ -115,6 +115,15 @@ const MAX_SESSION_NAME_BYTES: usize = 256;
 /// be gone before it gives up and leaves the directory alone (WI-1304).
 const CLEAN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Whose processes a worktree cleanup waits on before it deletes anything.
+enum Leader {
+    /// A session just stopped: its leader (unknown means skip) and the tree
+    /// read before it was signalled.
+    Process(Option<u32>, Vec<u32>),
+    /// A session with no process left (hibernated, being removed).
+    Stopped,
+}
+
 /// Which sessions a hibernation may take, and how a session was created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
@@ -123,6 +132,13 @@ enum Origin {
     /// An agent-task run: its runner watches the session and reads its
     /// conclusion from it, so it is never hibernated or recorded.
     AgentTask,
+}
+
+/// What [`SessionRegistry::clean_scratch`] does to a session's scratchpad.
+#[derive(Debug, Clone, Copy)]
+enum Scratch {
+    Remove,
+    Prune,
 }
 
 /// What `SessionRegistry::create_inner` is doing.
@@ -497,6 +513,23 @@ impl SessionRegistry {
             }
         }
 
+        // A host short of disk takes on no new session (WI-1810): a full
+        // root took Infisical down with it. A wake is let through; it brings
+        // back work already under way.
+        if let Creating::Fresh(_) = &creating {
+            let watched = [self.cfg.workspace_root.clone(), std::env::temp_dir()];
+            if let Some((path, free)) =
+                crate::session_scratch::short_of_space(&watched, self.cfg.min_free_percent)
+            {
+                return Err(ApiError::InsufficientStorage(format!(
+                    "{} has {free}% free, under the {}% a new session needs \
+                     (ENGINE_MIN_FREE_PERCENT); free space or stop finished sessions",
+                    path.display(),
+                    self.cfg.min_free_percent
+                )));
+            }
+        }
+
         // Every refusal has passed: cut the worktree now. Its destination is
         // checked against the workspace root first — a checkout at the root
         // has its sibling outside it. From here on the guard removes the
@@ -522,6 +555,20 @@ impl SessionRegistry {
             let created = git::create_worktree(&checkout, &worktree.branch, &worktree.base_ref)?;
             spec.cwd = Some(created.to_string_lossy().into_owned());
             cut.0 = Some((checkout, created, worktree.branch.trim().to_string()));
+        }
+
+        // Scratch builds share one Cargo target per repository (WI-1810):
+        // a config file under the session's scratch directory, so the
+        // session's own worktree keeps its own target.
+        if let Some(shared) = self.cfg.shared_cargo_target_dir.as_deref() {
+            let cwd = spec
+                .cwd
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| self.cfg.default_cwd.clone());
+            if let Some(root) = crate::session_scratch::roots().into_iter().next() {
+                crate::session_scratch::write_scratch_cargo_config(&root, &cwd, shared);
+            }
         }
 
         // WI-1357. Codex reads no CLAUDE.md, .claude/rules or .claude/skills,
@@ -755,6 +802,9 @@ impl SessionRegistry {
                 // — a publish is a push the operator already received. The next
                 // hibernation captures whatever the session still holds.
                 session.restore_blocked(record.blocked.take());
+                // The declaration a wake keeps: the live session carries it
+                // again, and the next hibernation copies it back (WI-1518).
+                session.restore_done_at(record.done_at.clone());
                 hibernation::remove_screen(&self.cfg.state_dir, id);
                 Some(record)
             }
@@ -1214,6 +1264,7 @@ impl SessionRegistry {
         // The report survives the stop: a wake and a restart both read it
         // back off this record (C4).
         record.blocked = session.blocked();
+        record.done_at = session.done_at();
         record.rows = Some(rows);
         record.cols = Some(cols);
         // A handoff survives a forced wake and a later hibernation that does
@@ -1285,7 +1336,11 @@ impl SessionRegistry {
         }
         self.sessions.remove(&id);
         self.secret_broker.revoke(id);
-        self.clean_worktree(id, &session.cwd, session.pid(), tree);
+        self.kill_strays(id);
+        if self.cfg.worktree_clean_on_hibernate {
+            self.clean_worktree(id, &session.cwd, session.pid(), tree);
+        }
+        self.clean_scratch(id, Scratch::Prune);
         self.bus
             .publish(ServerEvent::SessionHibernated { id, trigger });
         tracing::info!(session = %id, ?trigger, "session hibernated");
@@ -1766,6 +1821,29 @@ impl SessionRegistry {
         }
     }
 
+    /// Stamp that a live autopilot session's agent declared itself done
+    /// (WI-1518), in the session and in its record so a wake keeps it. False
+    /// when this turn already carries the declaration, so the caller publishes
+    /// nothing twice.
+    pub fn mark_done(&self, id: Uuid, at: String) -> bool {
+        let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) else {
+            return false;
+        };
+        if !session.mark_done(at.clone()) {
+            return false;
+        }
+        let updated = self.records.get_mut(&id).map(|mut record| {
+            record.done_at = Some(at);
+            record.clone()
+        });
+        if let Some(record) = updated.as_ref() {
+            if let Err(e) = hibernation::write(&self.cfg.state_dir, record) {
+                tracing::warn!(session = %id, error = %e, "could not write the session's hibernation record");
+            }
+        }
+        true
+    }
+
     /// Turn a session's autopilot on or off (WI-949), live and in its record
     /// so a wake keeps the answer.
     pub fn set_autopilot(&self, id: Uuid, on: bool) -> Result<()> {
@@ -1943,7 +2021,7 @@ impl SessionRegistry {
     /// exactly what it was.
     fn tree_for_clean(&self, s: &Session) -> Vec<u32> {
         match s.pid() {
-            Some(pid) if self.cfg.worktree_clean_on_hibernate => hibernation::descendants(pid),
+            Some(pid) if self.cfg.worktree_clean_on_stop => hibernation::descendants(pid),
             _ => Vec::new(),
         }
     }
@@ -1952,7 +2030,9 @@ impl SessionRegistry {
     /// of the tree too (a cargo or node grandchild in its own group would
     /// otherwise keep writing into the directory), then clean.
     fn finish_for_clean(&self, id: Uuid, s: &Session, tree: Vec<u32>) {
-        if !self.cfg.worktree_clean_on_hibernate {
+        self.kill_strays(id);
+        self.clean_scratch(id, Scratch::Remove);
+        if !self.cfg.worktree_clean_on_stop {
             return;
         }
         if let Some(pid) = s.pid() {
@@ -1961,9 +2041,54 @@ impl SessionRegistry {
         self.clean_worktree(id, &s.cwd, s.pid(), tree);
     }
 
+    /// `SIGKILL` whatever still runs with session `id`'s environment after
+    /// its tree was stopped: a `setsid`/`nohup` job that left the tree
+    /// (WI-1810). Logged by count; never fails the caller.
+    fn kill_strays(&self, id: Uuid) {
+        let killed = crate::session_scratch::kill_strays(id);
+        if !killed.is_empty() {
+            tracing::info!(session = %id, pids = ?killed, "killed the session's background processes");
+        }
+    }
+
+    /// Remove (stop) or shrink (hibernation) session `id`'s Claude
+    /// scratchpad, when worktree cleanup is not turned off (WI-1810).
+    /// Off the runtime and best-effort, like the worktree cleanup.
+    fn clean_scratch(&self, id: Uuid, how: Scratch) {
+        if !self.cfg.worktree_clean_on_stop {
+            return;
+        }
+        let limit = self.cfg.scratch_prune_bytes;
+        let shared = self.cfg.shared_cargo_target_dir.clone();
+        let shared_limit = self.cfg.shared_cargo_target_max_bytes;
+        let job = move || {
+            if let (Scratch::Remove, Some(shared)) = (how, shared.as_deref()) {
+                for r in crate::session_scratch::cap_shared_targets(shared, shared_limit) {
+                    tracing::info!(path = %r.path.display(), bytes = r.bytes, "removed an oversized shared scratch Cargo target");
+                }
+            }
+            let roots = crate::session_scratch::roots();
+            let removed = match how {
+                Scratch::Remove => crate::session_scratch::remove(&roots, id),
+                Scratch::Prune => crate::session_scratch::prune(&roots, id, limit),
+            };
+            if !removed.is_empty() {
+                let bytes: u64 = removed.iter().map(|r| r.bytes).sum();
+                tracing::info!(session = %id, ?how, entries = removed.len(), bytes, "cleaned the session's scratchpad");
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn_blocking(job);
+            }
+            Err(_) => job(),
+        }
+    }
+
     /// Drop regenerable build output in a session's linked worktree, when the
-    /// deployment asked for it (WI-1304). Off unless
-    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` is set. Best-effort and off the
+    /// deployment asked for it (WI-1304). Callers check the policy: on stop
+    /// and remove by default (WI-1750), on hibernation only when
+    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` is true. Best-effort and off the
     /// runtime: a cleanup that fails must not fail the hibernation or stop.
     ///
     /// Fails closed. Nothing is removed when the session's leader pid is
@@ -1972,15 +2097,31 @@ impl SessionRegistry {
     /// hibernated, which a wake brings back — has its directory inside the
     /// same worktree. An exited session left in the registry builds nothing.
     fn clean_worktree(&self, id: Uuid, cwd: &str, pid: Option<u32>, tree: Vec<u32>) {
-        if !self.cfg.worktree_clean_on_hibernate {
-            return;
-        }
+        self.clean_worktree_after(id, cwd, Leader::Process(pid, tree));
+    }
+
+    /// `clean_worktree` for a session whose processes are already gone: a
+    /// hibernated one being removed, whose tree its hibernation stopped.
+    fn clean_stopped_worktree(&self, id: Uuid, cwd: &str) {
+        self.clean_worktree_after(id, cwd, Leader::Stopped);
+    }
+
+    fn clean_worktree_after(&self, id: Uuid, cwd: &str, leader: Leader) {
         let Some(root) = crate::worktree_clean::linked_worktree(std::path::Path::new(cwd)) else {
             return;
         };
         // Off Linux the process tree cannot be read, so whether a grandchild
         // still writes into the worktree cannot be known.
-        let Some(pid) = pid.filter(|_| cfg!(target_os = "linux")) else {
+        let pids = match leader {
+            _ if !cfg!(target_os = "linux") => None,
+            Leader::Process(Some(pid), mut tree) => {
+                tree.push(pid);
+                Some(tree)
+            }
+            Leader::Process(None, _) => None,
+            Leader::Stopped => Some(Vec::new()),
+        };
+        let Some(pids) = pids else {
             tracing::info!(session = %id, "worktree cleanup skipped: the session's process tree cannot be read");
             return;
         };
@@ -2004,8 +2145,6 @@ impl SessionRegistry {
             );
             return;
         }
-        let mut pids = tree;
-        pids.push(pid);
         let job = move || {
             if !crate::worktree_clean::tree_gone(&pids, CLEAN_WAIT) {
                 tracing::warn!(
@@ -2049,7 +2188,8 @@ impl SessionRegistry {
                 );
             }
         }
-        let recorded = recorded.is_some();
+        let recorded_record = recorded;
+        let recorded = recorded_record.is_some();
         hibernation::remove(&self.cfg.state_dir, id);
         if live.is_none() && !recorded {
             return Err(ApiError::NotFound);
@@ -2058,6 +2198,15 @@ impl SessionRegistry {
             let tree = self.tree_for_clean(&s);
             let _ = s.kill();
             self.finish_for_clean(id, &s, tree);
+        } else if self.cfg.worktree_clean_on_stop {
+            // A hibernated session has no process left: its hibernation
+            // stopped the tree, so removing it is the stop that cleans.
+            self.clean_scratch(id, Scratch::Remove);
+            if let Some((_, record)) = recorded_record.as_ref() {
+                if let Some(cwd) = record.cwd.as_deref() {
+                    self.clean_stopped_worktree(id, cwd);
+                }
+            }
         }
         // Forgetting the session forgets its leave to ask the broker.
         self.secret_broker.revoke(id);
@@ -2193,6 +2342,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         keep_awake: record.keep_awake,
         autopilot: record.autopilot,
         autopilot_nudges: 0,
+        done_at: record.done_at.clone(),
         role: record.role,
         work_item: record.work_item.clone(),
         resources: None,
@@ -2533,6 +2683,7 @@ mod tests {
             keep_awake: false,
             autopilot: false,
             autopilot_nudges: 0,
+            done_at: None,
             role: vogt_engine_contract::SessionRole::Worker,
             work_item: None,
             resources: None,

@@ -87,7 +87,12 @@ fn test_config() -> Config {
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         worktree_clean_on_hibernate: false,
+        worktree_clean_on_stop: false,
         disk_warn_percent: 85,
+        scratch_prune_bytes: 2 << 30,
+        min_free_percent: 0,
+        shared_cargo_target_dir: None,
+        shared_cargo_target_max_bytes: 40 << 30,
         metrics_bind: None,
         chat: Default::default(),
         economics_tick: std::time::Duration::ZERO,
@@ -12613,6 +12618,121 @@ done
     assert_eq!(done.lines().count(), ITEMS);
 }
 
+/// WI-1518: an autopilot session whose agent prints `AUTOPILOT: DONE` at its
+/// prompt yields exactly one `done` change on the overseer feed, and a
+/// wait-any on the default `until` wakes for it. Autopilot is off once the
+/// marker is seen, so the change does not repeat however long it sits there.
+#[tokio::test]
+async fn an_autopilot_session_that_declares_done_yields_one_done_change() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let opencode = bin.join("opencode");
+    std::fs::write(
+        &opencode,
+        r#"#!/usr/bin/env bash
+box() { printf '  ┃\r\n  ┃  Ask anything…\r\n  ┃\r\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\r\n   tab agents  ctrl+p commands\r\n'; }
+box
+printf '     AUTOPILOT: DONE\r\n'
+box
+while IFS= read -r _; do box; done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cfg = test_config();
+    cfg.autopilot = vogt_engine_server::autopilot::Policy {
+        nudge_after: Duration::from_millis(600),
+        max_nudges: 10,
+    };
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "backlog",
+            "command": [opencode.display().to_string()],
+            "autopilot": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // An overseer's wait: the default `until`, advancing its cursor past
+    // anything else (the prompt's `ready` comes first) until `done` lands.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut cursor = 0u64;
+    let done = loop {
+        let wait: Value = client
+            .get(format!(
+                "{base}/api/sessions/wait-any?ids={id}&cursor={cursor}&timeout_s=5"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        cursor = wait["next_cursor"].as_u64().unwrap();
+        if wait["change"]["kind"] == "done" {
+            break wait["change"].clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no done change arrived: {wait}"
+        );
+    };
+    assert_eq!(done["session"], id.as_str());
+
+    // Sit past several ticks: no second `done`, and autopilot is off.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let feed: Value = client
+        .get(format!(
+            "{base}/api/sessions/changes?since=0&ids={id}&limit=500"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let dones = feed["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "done")
+        .count();
+    assert_eq!(dones, 1, "exactly one done change: {feed}");
+
+    let detail: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let summary = &detail["summary"];
+    assert!(
+        summary.get("autopilot").is_none(),
+        "autopilot is off: {summary}"
+    );
+    assert!(
+        summary["done_at"].is_string(),
+        "the summary keeps when it was declared: {summary}"
+    );
+}
+
 /// A session blocked on a person is never nudged, autopilot or not.
 #[tokio::test]
 async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {
@@ -15646,7 +15766,7 @@ async fn worktree_cleanup_waits_for_every_session_in_the_worktree() {
     cfg.default_cwd = tmp.path().to_path_buf();
     cfg.workspace_root = tmp.path().canonicalize().unwrap();
     cfg.state_dir = tmp.path().join("state");
-    cfg.worktree_clean_on_hibernate = true;
+    cfg.worktree_clean_on_stop = true;
     let (base, _h) = boot_with_config(cfg).await;
     let client = reqwest::Client::builder()
         .default_headers(auth())
@@ -15691,6 +15811,81 @@ async fn worktree_cleanup_waits_for_every_session_in_the_worktree() {
     assert!(!target.exists(), "the last session out cleans the worktree");
     assert!(linked.join("Cargo.toml").exists());
     assert!(repo.join("README").exists());
+}
+
+/// WI-1750: by default a hibernation keeps the worktree's build output (the
+/// session is woken to carry on, and every engine shutdown hibernates every
+/// live session); removing the hibernated session is its stop, and cleans.
+#[tokio::test]
+async fn hibernation_keeps_build_output_and_removal_cleans_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "seed@vogt.invalid"]);
+    git(&repo, &["config", "user.name", "seed"]);
+    std::fs::write(repo.join("README"), "r").unwrap();
+    git(&repo, &["add", "README"]);
+    git(&repo, &["commit", "-qm", "init"]);
+    let linked = tmp.path().join("linked");
+    git(&repo, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+    std::fs::write(linked.join("Cargo.toml"), "[package]\nname=\"t\"\n").unwrap();
+    let target = linked.join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("out"), "built").unwrap();
+
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    cfg.worktree_clean_on_stop = true;
+    cfg.worktree_clean_on_hibernate = false;
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let cwd = linked.to_string_lossy().into_owned();
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "h", "command": ["/bin/cat"], "cwd": cwd }),
+    )
+    .await;
+
+    let hibernated = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({ "allow_shell": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hibernated.status(), StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        target.join("out").exists(),
+        "a hibernated session keeps its build output"
+    );
+
+    let removed = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(removed.status().is_success(), "{}", removed.status());
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while target.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!target.exists(), "removing the hibernated session cleans");
+    assert!(linked.join("Cargo.toml").exists());
 }
 
 /// A Codex turn whose title says `working` while its screen has gone quiet
@@ -15756,4 +15951,133 @@ fn a_quiet_working_codex_session_does_not_starve_the_runtime() {
     done_rx
         .recv_timeout(Duration::from_secs(20))
         .expect("the engine runtime stalled: the activity watcher is spinning");
+}
+
+/// WI-1812: a session launched through the real `agent-auth.sh` while the
+/// secrets manager is unreachable still starts, says so in its terminal, and
+/// shows in `/api/status`; once the secrets manager answers again, the next
+/// session gets its credentials from the same engine, with no restart.
+#[tokio::test]
+async fn a_launch_with_the_secrets_manager_down_degrades_and_recovers_without_restart() {
+    for tool in ["jq", "curl", "timeout"] {
+        if std::process::Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: the launch uses {tool}");
+            return;
+        }
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../deploy/agent-auth.sh");
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let write_exec = |name: &str, body: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_exec("vogt-mcp-bootstrap", "#!/bin/sh\nexit 0\n");
+    // Down: the login hangs, as it did against an Infisical with no Redis.
+    write_exec("infisical", "#!/bin/sh\nexec sleep 30\n");
+
+    // A stand-in secrets-manager API that answers the one bulk read.
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", api.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/api/v4/secrets",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "secrets": [
+                    { "secretKey": "ALPHA", "secretValue": "alpha-value" }
+                ]}))
+            }),
+        );
+        axum::serve(api, app).await.unwrap()
+    });
+
+    let cfg = broker_config(&tmp, "ALPHA proj-a ALPHA\n");
+    let (base, _state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let start = |name: &'static str| {
+        let client = client.clone();
+        let base = base.clone();
+        let script = script.display().to_string();
+        let (path, api_url, bin) = (path.clone(), api_url.clone(), bin.clone());
+        async move {
+            client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({
+                    "name": name,
+                    "command": ["/bin/bash", script, "run", "--", "/bin/bash", "-c",
+                        "echo \"granted=[$AGENT_AUTH_GRANTED] alpha=[${ALPHA:-}]\"; sleep 30"],
+                    "env": [
+                        ["VOGT_ENGINE_BROKER_URL", base],
+                        ["PATH", path],
+                        ["VOGT_MCP_BOOTSTRAP", bin.join("vogt-mcp-bootstrap").display().to_string()],
+                        ["ENGINE_AGENT_AUTH_TIMEOUT", "1"],
+                        ["ENGINE_AGENT_AUTH_SECRETS", "ALPHA proj-a ALPHA"],
+                        ["INFISICAL_API_URL", format!("{api_url}/api")],
+                        ["INFISICAL_CLIENT_ID", "id"],
+                        ["INFISICAL_CLIENT_SECRET", "secret"],
+                    ],
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    let down = start("auth-down").await;
+    live_output_containing(
+        &client,
+        &base,
+        &down,
+        &["agent auth unavailable", "granted=[] alpha=[]"],
+    )
+    .await;
+    let mut status = Value::Null;
+    for _ in 0..50 {
+        status = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        if status["auth_broker"]["degraded_session_count"] == json!(1) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(status["auth_broker"]["degraded_session_count"], json!(1));
+    assert_eq!(status["auth_broker"]["degraded"]["session_id"], json!(down));
+    assert!(status["auth_broker"]["degraded"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("timed out"));
+
+    // The secrets manager is back: the next launch gets its credentials.
+    write_exec("infisical", "#!/bin/sh\nprintf tok-123\n");
+    let up = start("auth-up").await;
+    live_output_containing(
+        &client,
+        &base,
+        &up,
+        &["granted=[ALPHA] alpha=[alpha-value]"],
+    )
+    .await;
 }

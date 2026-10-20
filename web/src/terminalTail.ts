@@ -14,9 +14,12 @@ const TAIL_LINES = 12;
  *  full ring — so the card no longer pulls and base64-decodes up to 4 MiB. */
 export const TAIL_FETCH_BYTES = 16 * 1024;
 
+/** A row with nothing to read: whitespace, box drawing, block and dot glyphs. */
+const DECORATION = /^[\s\u2500-\u259f\u00b7\u2022\u2026.\u22ef]*$/;
+
 /** The tail of a session's scrollback, decoded and stripped of the escape
  *  sequences a terminal would have consumed. */
-export function tailOf(scrollbackBase64: string): string {
+export function tailOf(scrollbackBase64: string, maxLines = TAIL_LINES): string {
   let raw: string;
   try {
     const bytes = Uint8Array.from(atob(scrollbackBase64), (c) => c.charCodeAt(0));
@@ -29,13 +32,25 @@ export function tailOf(scrollbackBase64: string): string {
     // rendered with them intact is unreadable in a <pre>.
     // eslint-disable-next-line no-control-regex
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    // A full-screen TUI (Claude Code's permission prompt among them) spaces
+    // words with cursor-forward and starts rows with cursor moves rather than
+    // writing spaces and newlines. Dropped outright, its prompt runs together
+    // or vanishes (WI-1830), so keep what those two moves meant.
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\[(\d*)C/g, (_, n: string) => " ".repeat(Math.min(Number(n) || 1, 200)))
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\[[0-9;]*[HfEB]/g, "\n")
     // eslint-disable-next-line no-control-regex
     .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n");
-  const lines = plain.split("\n");
-  while (lines.length && (lines[lines.length - 1] ?? "").trim() === "") lines.pop();
-  return lines.slice(-TAIL_LINES).join("\n");
+  // Rows that carry no words — blanks, box rules, dot leaders — are what a
+  // TUI frame is mostly made of; a tail of them reads as an empty box.
+  const lines = plain
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => !DECORATION.test(line));
+  return lines.slice(-maxLines).join("\n");
 }
 
 /** Does the tail end in something that reads like a yes/no question?

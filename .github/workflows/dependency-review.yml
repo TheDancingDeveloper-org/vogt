@@ -17,6 +17,17 @@ name: dependency review
 
 on:
   pull_request:
+  # `dependency review` is required on `main`, so a merge-queue entry needs
+  # the context too or it waits until the queue times it out. The review
+  # itself compares a PR's base and head, which a `merge_group` event does
+  # not carry; the dependencies an entry adds were reviewed on its PR, and the
+  # queue only rebases them, so the queue run posts the context and skips the
+  # review (WI-1886).
+  merge_group:
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -30,8 +41,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: github.event_name == 'pull_request'
+
+      - name: reviewed on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "dependencies were reviewed on the pull request; the queue rebases them unchanged"
 
       - name: review changed dependencies
+        if: github.event_name == 'pull_request'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
         with:
           # A real gate, not a rubber stamp, but scoped to what a PR introduces:

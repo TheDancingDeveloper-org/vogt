@@ -42,7 +42,7 @@ sidecar, released as a pair and run by one Compose file,
   on by default (`COMPOSE_PROFILES=voice`).
 
 The engine is not optional: it is the only way in. The core image,
-`ghcr.io/thedancingdeveloper-org/vogt:0.7.17`, is also published at every
+`ghcr.io/thedancingdeveloper-org/vogt:0.7.20`, is also published at every
 release because the stack image is built from it by digest and the release
 manifest records both — it is a build input, not a deployment target.
 `deploy/vogt.compose.yml` and `deploy/engine.overlay.yml` run a core and an
@@ -136,8 +136,8 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `ENGINE_BIND` | no | `127.0.0.1` | Host interface the port is published on. Loopback until you mean to expose it. |
 | `ENGINE_PORT` | no | `8910` | Host port the container's 8910 is published on. |
 | `ENGINE_PUBLIC_URL` | no | — | The URL clients reach the stack at. Set it once there is a stable one (§4). |
-| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.17` | The image to run. Pin a digest (§6). |
-| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.17` | The sidecar. Pin the same release as the stack. |
+| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.20` | The image to run. Pin a digest (§6). |
+| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.20` | The sidecar. Pin the same release as the stack. |
 | `COMPOSE_PROFILES` | no | `voice` | Clear it to run without the sidecar; the voice controls stay present but inert. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | no | `agent:engine` | Who the adopted stack secret acts as — and therefore whom a break-glass token's Vogt calls are attributed to. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | no | `read,work.write,project.write` | What it may do. Everything in the pod can read the file, so this is the blast radius. |
@@ -152,7 +152,11 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `ENGINE_AGENT_CODEX_POLICY` | no | the image file, else `/etc/codex/requirements.toml` | The Codex half. Codex itself reads `/etc/codex/requirements.toml` and no other path; the engine checks that file, and a named one too, is readable and wires the gitguard hook (`[[hooks.SessionStart]]` + `[[hooks.PreToolUse]]` running `/usr/local/bin/klaudia hook gitguard` with `failClosed = true`, plus the `[features] hooks = true` pin that stops a session switching hooks off) before a Codex launch. `/etc/codex/requirements.toml` and its directory must also be root-owned and not group- or world-writable, and `/usr/local/bin/klaudia` a root-owned regular file the same way; the hook always runs that image build, never a runtime `VOGT_KLAUDIA_VERSION` copy, so a gitguard fix ships only with an image rebuild (WI-1146). This is an accident guard, not a sandbox: the session user's passwordless sudo can defeat it. Empty checks `/etc/codex/requirements.toml`; the image's reference copy at `/usr/local/share/vogt/driven-session-codex-requirements.toml` without it is a refusal. `off` is the only way a deployment that has the file skips the check. A path that is missing, empty, unreadable or without that hook refuses the Codex launch (400) and does not fall through to bypass; Claude and opencode are not blocked. The shipped file wires the hook for the Codex fork (WI-1356) ([`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture)). |
 | `ENGINE_SESSION_RSS_WARN` | no | off | Flag any session whose process tree's resident memory reaches this (`8GiB`). Usage is shown either way; this only marks the heavy ones. |
 | `ENGINE_WORKTREE_GITHUB_TOKEN` | no | unset | GitHub token the engine uses when `session.start` fetches the worktree base from a GitHub `origin` (WI-1666). Set it to the same token sessions receive as `GH_TOKEN` (the manifest entry named by `ENGINE_AGENT_AUTH_GH_TOKEN_FROM`). A file is not used: the engine reads the variable and passes it to `GIT_ASKPASS` for that one fetch, and redacts it from errors. Unset, an `https://github.com` origin refuses the worktree start instead of failing as `Repository not found`. SSH GitHub origins and non-GitHub origins do not need it and keep the engine user's own git credentials. |
-| `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` | no | off | When a session is hibernated or stopped and its directory is a linked git worktree, remove regenerable build output there (`target` beside a `Cargo.toml`, `node_modules`, `.venv`). A repo's main checkout is never touched, and a tracked file is never deleted ([`ENGINE.md`, "Worktree build output"](ENGINE.md#worktree-build-output)). |
+| `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` | no | stop only | When a session is stopped or removed and its directory is a linked git worktree, remove regenerable build output there; on by default (WI-1750). `true` also cleans on hibernation (a hibernated session is woken to carry on, and every engine shutdown hibernates every live session, so this costs a full rebuild after each restart); `0` or `false` keeps build output. (`target` beside a `Cargo.toml`, `node_modules`, `.venv`). A repo's main checkout is never touched, and a tracked file is never deleted ([`ENGINE.md`, "Worktree build output"](ENGINE.md#worktree-build-output)). |
+| `ENGINE_SCRATCH_PRUNE_GB` | no | `2` | With cleanup on, a hibernation removes Cargo `target` dirs from the session's Claude scratchpad and any top-level entry there over this many GiB; a stop or remove deletes the scratchpad ([`ENGINE.md`](ENGINE.md#session-scratch-background-processes-and-free-space), WI-1810). |
+| `ENGINE_MIN_FREE_PERCENT` | no | `10` | Refuse new sessions (507) while the workspace or temp volume has less free space than this percent. `0` turns the guard off. |
+| `ENGINE_SHARED_CARGO_TARGET_DIR` | no | `<tmp>/claude-<uid>/cargo-target` | Shared Cargo target root for builds inside session scratch directories (one per repository, via a scratch-only `.cargo/config.toml`); `off` disables. Sessions' own worktrees are unaffected. |
+| `ENGINE_SHARED_CARGO_TARGET_MAX_GB` | no | `40` | A repository's shared scratch target over this is removed when a session stops. |
 | `ENGINE_DISK_WARN_PERCENT` | no | `85` | Flag the workspace volume on `sweep`, `status` and `engine.status` once this percent of it is used. A whole percent from 1 to 100; anything else fails the boot. |
 | `ENGINE_ECONOMICS_TICK_SECS` | no | `15` | How often the engine reads each live session's transcript to meter its turns, context and compactions, reported on the session summary and as histograms on `GET /metrics` ([`ENGINE.md`, "Session economics"](ENGINE.md#session-economics)). `0` disables it. |
 | `ENGINE_HIBERNATE_IDLE_AFTER` | no | off | Hibernate an agent session quiet this long (`2h`, `30m`): its processes stop, it stays listed, and a wake resumes its conversation ([`ENGINE.md`, "Hibernation"](ENGINE.md#hibernation)). Sessions running a turn, at a permission dialog, blocked on a person, running a tool shell, pinned awake or on autopilot are exempt (autopilot only from this idle trigger). |
@@ -610,9 +614,9 @@ a deployment are separate acts, and the digest line is what moves one.
 Resolve the digests of a release:
 
 ```console
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.17 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.20 \
   | grep -m 1 Digest
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.17 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.20 \
   | grep -m 1 Digest
 ```
 

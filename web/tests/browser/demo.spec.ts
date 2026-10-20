@@ -300,9 +300,10 @@ test("phone session menu makes a session oversight and removes it again", async 
   await page.goto("/#/sessions");
   const server = page.locator('.session-list a[href="#/t/demo-server"]');
   await expect(server.locator(".session-role-badge")).toHaveText("oversight");
-  // Listed with the overseers, above every worker.
+  // Placed by its state, not pinned above every worker (WI-1736): it is listed
+  // and marked as the overseer, wherever its state puts it.
   const promoted = await rowIds();
-  expect(promoted.indexOf("#/t/demo-server")).toBeLessThan(promoted.indexOf("#/t/demo-build"));
+  expect(promoted).toContain("#/t/demo-server");
 
   const remove = await openMenu();
   await expect(remove).toHaveText("Remove oversight");
@@ -310,8 +311,9 @@ test("phone session menu makes a session oversight and removes it again", async 
   await page.goto("/#/sessions");
   await expect(server.locator(".session-role-badge")).toHaveCount(0);
   await expect(page.locator('.session-list a[href="#/t/demo-oversight"] .session-role-badge')).toHaveText("oversight");
+  // Placed by its state again: listed, and no longer marked (WI-1736).
   const demoted = await rowIds();
-  expect(demoted.indexOf("#/t/demo-server")).toBeGreaterThan(demoted.indexOf("#/t/demo-oversight"));
+  expect(demoted).toContain("#/t/demo-server");
 
   const again = await openMenu();
   await expect(again).toHaveText("Make oversight");
