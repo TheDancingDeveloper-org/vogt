@@ -191,9 +191,17 @@ def _texts(entry: Mapping[str, object]) -> Iterable[str]:
 def claude_reading(texts: Iterable[str], *, now: datetime) -> AccountReading:
     """What one Claude account's transcripts say: the newest limit-hit
     message with its reset, and the tokens the account used in the last five
-    hours (the subscription's short window)."""
+    hours (the subscription's short window), each message once, cache reads
+    excluded. A turn answered after the hit means the limit has lifted."""
     since = now - timedelta(hours=5)
-    tokens = 0
+    #: Tokens per message id, last entry wins: Claude repeats one message's
+    #: usage across streamed and resumed entries, and a sum would count it
+    #: once per entry. Cache reads are left out, as the field says.
+    by_message: dict[str, int] = {}
+    unnamed = 0
+    #: The newest turn that carried usage: an answered turn after a limit hit
+    #: means the limit has lifted, whatever the hit said about its reset.
+    answered_at: datetime | None = None
     hit_at: datetime | None = None
     hit_text: str | None = None
     newest: datetime | None = None
@@ -204,15 +212,27 @@ def claude_reading(texts: Iterable[str], *, now: datetime) -> AccountReading:
                 newest = at
             message = entry.get("message")
             usage = message.get("usage") if isinstance(message, dict) else None
-            if isinstance(usage, dict) and at is not None and at >= since:
-                for key in (
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_creation_input_tokens",
-                ):
-                    value = usage.get(key)
-                    if isinstance(value, int) and not isinstance(value, bool):
-                        tokens += value
+            if isinstance(usage, dict) and at is not None:
+                if answered_at is None or at > answered_at:
+                    answered_at = at
+                if at >= since:
+                    count = sum(
+                        value
+                        for key in (
+                            "input_tokens",
+                            "output_tokens",
+                            "cache_creation_input_tokens",
+                        )
+                        if isinstance(value := usage.get(key), int)
+                        and not isinstance(value, bool)
+                    )
+                    message_id = (
+                        message.get("id") if isinstance(message, dict) else None
+                    )
+                    if isinstance(message_id, str) and message_id:
+                        by_message[message_id] = count
+                    else:
+                        unnamed += count
             if not entry.get("isApiErrorMessage") and entry.get("error") != (
                 "rate_limit"
             ):
@@ -222,6 +242,8 @@ def claude_reading(texts: Iterable[str], *, now: datetime) -> AccountReading:
                     hit_at is None or (at is not None and at >= hit_at)
                 ):
                     hit_at, hit_text = at, said
+    tokens = sum(by_message.values()) + unnamed
+    lifted = hit_at is not None and answered_at is not None and answered_at > hit_at
     windows: tuple[LimitWindow, ...] = ()
     if hit_text is not None:
         epoch = _CLAUDE_EPOCH.search(hit_text)
@@ -234,7 +256,7 @@ def claude_reading(texts: Iterable[str], *, now: datetime) -> AccountReading:
         )
         # A reset already past means the limit has lifted: report the hit,
         # not a window that still binds.
-        if resets_at is None or resets_at > now:
+        if not lifted and (resets_at is None or resets_at > now):
             windows = (window,)
     return AccountReading(
         windows=windows,
@@ -248,9 +270,9 @@ def claude_reading(texts: Iterable[str], *, now: datetime) -> AccountReading:
 def key_spend(info: Mapping[str, object], *, alert_usd: float | None) -> KeySpend:
     """A LiteLLM `/key/info` answer, read, with its alert decided.
 
-    The alert fires on the key's current-window spend at or above
-    `alert_usd`. A key with no daily window still alerts on its spend, and
-    says that spend is not a day's.
+    The alert fires only for a key with a one-day budget window, whose spend
+    is today's, at or above `alert_usd`. A key with no day window raises no
+    alert, and its `detail` says its spend is not a day's.
     """
     inner = info.get("info")
     body: Mapping[str, object] = inner if isinstance(inner, dict) else info
@@ -258,7 +280,10 @@ def key_spend(info: Mapping[str, object], *, alert_usd: float | None) -> KeySpen
     duration = body.get("budget_duration")
     duration = duration if isinstance(duration, str) and duration else None
     daily = duration in _DAILY
-    alert = alert_usd is not None and spend is not None and spend >= alert_usd
+    # A day threshold compared with a total or a month's spend would always
+    # fire, so only a key whose spend is a day's can alert.
+    over = alert_usd is not None and spend is not None and spend >= alert_usd
+    alert = daily and over
     detail = None
     if not daily:
         detail = (
@@ -266,7 +291,7 @@ def key_spend(info: Mapping[str, object], *, alert_usd: float | None) -> KeySpen
             "day's spend is not reported"
             if duration is None
             else f"spend is for the key's {duration} budget window, not one day"
-        )
+        ) + ("; no day alert is raised on it" if alert_usd is not None else "")
     alias = body.get("key_alias")
     return KeySpend(
         spend_usd=spend,
@@ -282,9 +307,12 @@ def key_spend(info: Mapping[str, object], *, alert_usd: float | None) -> KeySpen
 
 
 def is_limited(reading: AccountReading, *, now: datetime) -> bool:
-    """Whether an account is limited now: a window at 100% or a reported hit
-    whose reset is still ahead."""
+    """Whether an account is limited now: a window at 100%, or a reported hit,
+    whose reset is still ahead (or unknown)."""
     for window in reading.windows:
+        if window.resets_at is not None and window.resets_at <= now:
+            # The window has reset since it was read: what it said is stale.
+            continue
         if window.used_percent is not None and window.used_percent >= 100:
             return True
         if window.name == "limit" and (

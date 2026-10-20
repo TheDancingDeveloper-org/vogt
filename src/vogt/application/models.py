@@ -4119,7 +4119,9 @@ class UsageAccountView(Result):
     limit_reached: str | None = None
     plan: str | None = None
     tokens_5h: int = Field(
-        default=0, description="Tokens the transcripts record in the last 5h."
+        default=0,
+        description="Tokens the transcripts record in the last 5h, each "
+        "message once, cache reads excluded (Claude only).",
     )
     observed_at: datetime | None = Field(
         default=None, description="The newest transcript entry read."

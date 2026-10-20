@@ -33,11 +33,11 @@ def _codex_line(at: datetime, limits: object) -> str:
 
 CODEX_LIMITS = {
     "limit_id": "codex",
-    "primary": {"used_percent": 42.0, "window_minutes": 300, "resets_at": 1760968800},
+    "primary": {"used_percent": 42.0, "window_minutes": 300, "resets_at": 1792504800},
     "secondary": {
         "used_percent": 100.0,
         "window_minutes": 10080,
-        "resets_at": 1761300000,
+        "resets_at": 1792836000,
     },
     "plan_type": "pro",
     "rate_limit_reached_type": "secondary",
@@ -56,7 +56,7 @@ def test_codex_reading_takes_the_newest_rate_limits() -> None:
     reading = usage_board.codex_reading(text)
     assert [w.name for w in reading.windows] == ["primary", "secondary"]
     assert reading.windows[0].used_percent == 42.0
-    assert reading.windows[0].resets_at == datetime.fromtimestamp(1760968800, UTC)
+    assert reading.windows[0].resets_at == datetime.fromtimestamp(1792504800, UTC)
     assert reading.plan == "pro" and reading.limit_reached == "secondary"
     assert reading.limited_at == NOW
     assert usage_board.is_limited(reading, now=NOW)
@@ -264,3 +264,53 @@ def test_an_unreachable_litellm_says_why(
     )
     key = usage_board_read(ctx, UsageBoardParams()).keys[0]
     assert key.spend_usd is None and key.detail == "LiteLLM /key/info answered 401"
+
+
+def test_a_worded_limit_lifts_once_a_later_turn_is_answered() -> None:
+    said = "You've hit your limit · resets 3pm (Europe/London)"
+    hit = _claude_entry(
+        NOW - timedelta(hours=2),
+        isApiErrorMessage=True,
+        message={"content": [{"text": said}]},
+    )
+    still = usage_board.claude_reading([hit], now=NOW)
+    assert usage_board.is_limited(still, now=NOW)
+    answered = _claude_entry(
+        NOW - timedelta(minutes=5),
+        message={"id": "msg_after", "usage": {"output_tokens": 3}},
+    )
+    lifted = usage_board.claude_reading([hit + "\n" + answered], now=NOW)
+    assert lifted.limited_at is not None and lifted.windows == ()
+    assert not usage_board.is_limited(lifted, now=NOW)
+
+
+def test_a_codex_window_past_its_reset_is_not_limiting() -> None:
+    reset = NOW - timedelta(minutes=1)
+    limits = {
+        "primary": {
+            "used_percent": 100.0,
+            "window_minutes": 300,
+            "resets_at": int(reset.timestamp()),
+        }
+    }
+    reading = usage_board.codex_reading(_codex_line(NOW - timedelta(hours=1), limits))
+    assert not usage_board.is_limited(reading, now=NOW)
+
+
+def test_claude_tokens_count_a_repeated_message_once() -> None:
+    usage = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 999}
+    lines = [
+        _claude_entry(NOW, message={"id": "msg_1", "usage": usage}),
+        _claude_entry(NOW, message={"id": "msg_1", "usage": usage}),
+        _claude_entry(NOW, message={"id": "msg_2", "usage": {"output_tokens": 1}}),
+    ]
+    reading = usage_board.claude_reading(["\n".join(lines)], now=NOW)
+    assert reading.tokens_5h == 16
+
+
+def test_a_key_without_a_day_window_raises_no_day_alert() -> None:
+    spend = usage_board.key_spend(
+        {"info": {"spend": 80.0, "budget_duration": "30d"}}, alert_usd=30
+    )
+    assert not spend.alert
+    assert spend.detail is not None and "no day alert" in spend.detail
