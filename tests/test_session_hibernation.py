@@ -93,6 +93,12 @@ class Engine:
         self._swallow_left = 0
         self.composer = "empty"
         self.dialog = False
+        #: A Claude fake (WI-2025): its screen draws the input box, holding
+        #: the last text typed until an Enter takes it; `resume_turn` reads
+        #: as running even while the box still holds it, as the resume's own
+        #: turn did live.
+        self.typed = ""
+        self.resume_turn = False
         #: When set, a hibernate is refused (409) with this reason.
         self.refuse_hibernate: str | None = None
         #: When set, a wake is refused (409) with this reason and the session
@@ -217,6 +223,7 @@ class Engine:
                 return conflict[0], conflict[1].encode()
             if payload.get("text"):
                 self.composer = "held"
+                self.typed = payload["text"]
             if payload.get("submit") and self.composer == "held" and not self.dialog:
                 if self._swallow_left > 0:
                     self._swallow_left -= 1
@@ -240,6 +247,12 @@ class Engine:
                 else:
                     shot = CODEX["resumed_cleared"]
                 activity, lines = shot["activity"], shot["lines"]
+            elif not asleep and self.agent.get(engine_id) == "claude":
+                held = self.composer == "held"
+                rule = "\u2500" * 40
+                lines = [rule, "\u276f " + (self.typed if held else ""), rule]
+                if held and not self.resume_turn:
+                    activity = "idle"
             return 200, json.dumps(
                 {
                     "id": engine_id,
@@ -474,19 +487,99 @@ def test_a_delivered_submit_is_not_pressed_again(
     assert result.woke is True
 
 
-def test_a_non_codex_session_never_gets_the_retry(
-    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Claude stays on one Enter even when the confirm reads stay idle.
-
-    A second Enter there can accept a dialog the screen parser missed.
-    """
+def _send_to_woken_claude(
+    wired: AppContext,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    swallow: int = 0,
+    resume_turn: bool = False,
+    wake_first: bool = False,
+) -> Any:
+    """Hibernate a Claude session, then type into it with Enter (WI-2025)."""
     import vogt.application.services.sessions as sessions
 
     monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
     monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
     ses_id, engine_id = _started(wired)
-    assert engine.agent.get(engine_id, "claude") == "claude"
+    engine.agent[engine_id] = "claude"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.swallow_enters = swallow
+    engine.resume_turn = resume_turn
+    if wake_first:
+        wake_session(wired, WakeSessionParams(id=ses_id, reason=WHY))
+    engine.sent.clear()
+    return session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+
+def test_text_and_enter_go_as_separate_checked_steps(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Typed in one burst, a just-woken Claude read the Enter as a newline
+    (WI-2025): the Enter goes only after the text shows in the box."""
+    result = _send_to_woken_claude(wired, engine, monkeypatch, wake_first=True)
+    inputs = [r for r in engine.sent if r["path"].endswith("/input")]
+    assert [(r["body"]["text"], r["body"]["submit"]) for r in inputs] == [
+        ("go on", False),
+        ("", True),
+    ]
+    between = engine.sent.index(inputs[0]) + 1
+    assert engine.sent[between]["path"].endswith("/screen"), "echo checked first"
+    assert result.delivery == "delivered"
+    assert result.woke is False
+
+
+def test_an_enter_a_woken_claude_left_in_its_box_is_pressed_again(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seen three times on 2026-10-20 (WI-2025): reported delivered, the
+    text still under the prompt."""
+    result = _send_to_woken_claude(
+        wired, engine, monkeypatch, swallow=1, wake_first=True
+    )
+    assert len(_submits(engine)) == 2
+    assert result.delivery == "delivered"
+
+
+def test_the_resume_turn_is_not_taken_for_the_inputs_turn(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn running while the box still holds the text is the resume's,
+    not the input's: never "delivered" (WI-2025)."""
+    result = _send_to_woken_claude(
+        wired, engine, monkeypatch, swallow=10, resume_turn=True, wake_first=True
+    )
+    assert result.delivery != "delivered"
+    assert "input box" in result.delivery_evidence or "composer" in (
+        result.delivery_evidence
+    )
+
+
+def test_a_claude_box_that_never_clears_is_reported_stuck(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _send_to_woken_claude(wired, engine, monkeypatch, swallow=10)
+    assert len(_submits(engine)) == 3
+    assert result.delivery == "stuck"
+    assert result.woke is True
+
+
+def test_a_session_with_no_readable_box_gets_one_enter(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """opencode and Klaudia draw no box Vogt can read: a second Enter there
+    could accept a dialog the screen parser missed."""
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    engine.agent[engine_id] = "opencode"
     hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
     engine.idle_reads_after_wake = 2
     engine.sent.clear()
@@ -582,7 +675,7 @@ def test_a_woken_session_that_is_not_ready_is_not_typed_into(
     with pytest.raises(Conflict, match="not ready for input"):
         session_input(wired, SessionInputParams(id=ses_id, text="go", reason=WHY))
 
-    assert engine.calls(engine_id).count("POST input") == 1, "only the refused one"
+    assert "POST input" not in engine.calls(engine_id), "nothing typed"
     assert engine_id in engine.live, "it was woken; only the typing was held back"
 
 

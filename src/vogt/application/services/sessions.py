@@ -26,6 +26,7 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -1675,6 +1676,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     submitted = submit or "enter" in keys
     confirming = submitted and params.confirm
     before: str | None = None
+    seen = None
     if confirming:
         # What the agent was doing as the input arrived decides between
         # "starts a turn" and "waits behind one". A failed read only costs
@@ -1684,10 +1686,21 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         except EngineUnavailable:
             seen = None
         before = None if seen is None else seen.activity
+    # Text and Enter to an agent whose input box Vogt can read go one step
+    # at a time, each checked on the screen (WI-2025).
+    stepwise = confirming and submit and bool(text) and not keys
     woke = False
     woken_verdict: delivery.Verdict | None = None
     try:
-        _send_all(engine, engine_id, params.id, writes_in_order, person=person)
+        if stepwise and seen is not None and seen.hibernated:
+            msg = "hibernated"
+            raise Conflict(msg)
+        if stepwise and _has_input_box(seen):
+            woken_verdict = _type_then_submit(
+                engine, engine_id, params.id, text, before=before, person=person
+            )
+        else:
+            _send_all(engine, engine_id, params.id, writes_in_order, person=person)
     except Conflict:
         # The engine refuses input to a hibernated session. Typing into one
         # is asking for it back: wake it — resuming its conversation, with a
@@ -1715,20 +1728,21 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             raise Conflict(msg) from None
         # Freshly woken and at its prompt: nothing was running.
         before = "waiting-for-input"
-        _send_all(engine, engine_id, params.id, writes_in_order, person=person)
-        # A resumed Codex accepts the text but swallows the Enter while it
-        # is still settling, reading as working all the while (WI-1669,
-        # captured live). Only Codex: on Claude, Klaudia or opencode a second
-        # Enter can accept a dialog or picker the screen parser missed.
-        if params.confirm and submit and text and _is_codex(current):
-            woken_verdict = _submit_until_taken(
-                engine, engine_id, params.id, before, text, person=person
+        # A resumed agent can take the text but not the Enter: a resumed
+        # Codex swallows it while settling (WI-1669), a just-woken Claude
+        # left it in its box, or read it as a newline (WI-2025). Stepwise,
+        # checked on the screen, on the agents whose box Vogt can read.
+        if stepwise and _has_input_box(current):
+            woken_verdict = _type_then_submit(
+                engine, engine_id, params.id, text, before=before, person=person
             )
+        else:
+            _send_all(engine, engine_id, params.id, writes_in_order, person=person)
 
-    if woken_verdict is not None:
-        verdict = woken_verdict
-    elif confirming:
-        verdict = _confirm_delivery(engine, engine_id, before, text or None)
+    if woken_verdict is not None or confirming:
+        verdict = woken_verdict or _confirm_delivery(
+            engine, engine_id, before, text or None
+        )
         if verdict.delivery == "queued" and text and submit:
             # Behind a running turn. The CLI should take it when the turn
             # ends, but a Claude Code turn can end with the text left in
@@ -1785,10 +1799,76 @@ def _pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
-#: A resumed Codex gets at most this many Enters for one input, the first
-#: included, each after it has settled for up to `_CODEX_SETTLE_S`.
-_CODEX_MAX_ENTERS = 3
-_CODEX_SETTLE_S = 10
+#: A submitted text gets at most this many Enters, the first included, each
+#: after the agent has settled for up to `_SETTLE_S` (WI-1669, WI-2025).
+_MAX_ENTERS = 3
+_SETTLE_S = 10
+
+#: Before typing into an agent whose input box is not drawn yet — still
+#: starting or resuming — wait up to this long for its ready prompt; then
+#: watch for the typed text to show in the box for up to `_TYPED_READS`
+#: reads, `_CONFIRM_PAUSE_S` apart, before pressing Enter (WI-2025).
+_READY_GATE_S = 30
+_TYPED_READS = 10
+
+
+def _has_input_box(session: object) -> bool:
+    """Whether a session the engine reported runs an agent whose input box
+    `delivery.composer_text` can read: Claude Code or Codex."""
+    agent = getattr(session, "conversation_agent", None)
+    return agent in {"claude", "codex"}
+
+
+def _read(engine: EngineClient, engine_id: str) -> delivery.Observation | None:
+    """One read of the session's screen, or None when it cannot be read."""
+    try:
+        screen = engine.session_screen(engine_id)
+    except EngineUnavailable:
+        return None
+    if screen is None:
+        return None
+    return delivery.Observation(activity=screen.activity, lines=screen.lines)
+
+
+def _box_drawn(engine: EngineClient, engine_id: str) -> bool:
+    seen = _read(engine, engine_id)
+    return seen is not None and delivery.composer_text(seen.lines) is not None
+
+
+def _type_then_submit(
+    engine: EngineClient,
+    engine_id: str,
+    named: str,
+    text: str,
+    *,
+    before: str | None,
+    person: bool,
+) -> delivery.Verdict:
+    """Type `text`, then press Enter, each step checked on the screen
+    (WI-2025).
+
+    Written together, a just-woken Claude Code took the text and the Enter
+    as one burst: the Enter landed as a newline, or not at all, while the
+    resume's own redraw read as a turn starting. So: an agent with no input
+    box drawn and no turn running is still starting — wait for its ready
+    prompt. Then type, and wait for the text to show in the box before the
+    Enter, so the Enter arrives as a key of its own. Then judge, pressing
+    Enter again while the box still holds the text (`_submit_until_taken`).
+    """
+    boxed = _box_drawn(engine, engine_id)
+    if not boxed and before not in {"running", "awaiting-approval"}:
+        with contextlib.suppress(EngineUnavailable):
+            engine.wait_session(engine_id, until="ready", timeout_s=_READY_GATE_S)
+        boxed = _box_drawn(engine, engine_id)
+    _send_all(engine, engine_id, named, [(text, False)], person=person)
+    if boxed:
+        for _ in range(_TYPED_READS):
+            seen = _read(engine, engine_id)
+            if seen is None or delivery.composer_holds(seen.lines, text):
+                break
+            _pause(_CONFIRM_PAUSE_S)
+    _send_all(engine, engine_id, named, [("", True)], person=person)
+    return _submit_until_taken(engine, engine_id, named, before, text, person=person)
 
 
 def _submit_until_taken(
@@ -1800,32 +1880,56 @@ def _submit_until_taken(
     *,
     person: bool,
 ) -> delivery.Verdict:
-    """Judge an Enter already pressed on a resumed Codex, pressing it again
-    while the composer still holds the text (WI-1669).
+    """Judge an Enter already pressed, pressing it again while the input box
+    still holds the text (WI-1669, WI-2025).
 
-    Bounded to `_CODEX_MAX_ENTERS`. Before each further Enter it waits for
-    the prompt to settle and reads the screen once more; it presses only
-    when the composer is drawn, still holds the text and no dialog or
-    approval shows. It stops as soon as a turn starts or the composer
+    Bounded to `_MAX_ENTERS`. A "delivered" judged from a turn that started
+    is checked once more: a resume's own turn reads as running too, and the
+    text left in the box after it is the sign the Enter did not land. Before
+    each further Enter it waits for the prompt to settle and reads the
+    screen once more; it presses only when the box is drawn, still holds
+    the text and no dialog or approval shows. It stops as soon as the box
     clears.
     """
-    verdict = _confirm_delivery(engine, engine_id, before, text)
-    for _ in range(_CODEX_MAX_ENTERS - 1):
+    verdict = _settled(
+        engine, engine_id, text, _confirm_delivery(engine, engine_id, before, text)
+    )
+    for _ in range(_MAX_ENTERS - 1):
         if verdict.delivery not in {"unconfirmed", "stuck"}:
             break
         try:
-            engine.wait_session(engine_id, until="ready", timeout_s=_CODEX_SETTLE_S)
-            screen = engine.session_screen(engine_id)
+            engine.wait_session(engine_id, until="ready", timeout_s=_SETTLE_S)
         except EngineUnavailable:
             break
-        if screen is None:
+        seen = _read(engine, engine_id)
+        if seen is None:
             break
-        seen = delivery.Observation(activity=screen.activity, lines=screen.lines)
         if not delivery.safe_to_resubmit(seen, text):
+            if delivery.composer_text(seen.lines) is not None:
+                # The box is drawn and no longer holds the text: taken.
+                verdict = delivery.Verdict(
+                    "delivered", "the input box cleared after the Enter"
+                )
             break
         _send_all(engine, engine_id, named, [("", True)], person=person)
-        verdict = _confirm_delivery(engine, engine_id, before, text)
+        verdict = _settled(
+            engine, engine_id, text, _confirm_delivery(engine, engine_id, before, text)
+        )
     return verdict
+
+
+def _settled(
+    engine: EngineClient, engine_id: str, text: str, verdict: delivery.Verdict
+) -> delivery.Verdict:
+    """A "delivered" verdict, re-checked once after a pause: still the text
+    in the box, with no turn running, is `stuck` (WI-2025)."""
+    if verdict.delivery != "delivered":
+        return verdict
+    _pause(_CONFIRM_PAUSE_S)
+    seen = _read(engine, engine_id)
+    if seen is None or seen.activity == "running":
+        return verdict
+    return delivery.judge(submitted=True, before=None, after=[seen], pending=text)
 
 
 #: How long a queued input is followed for its turn to end, and how many
@@ -1914,12 +2018,6 @@ def _submit_queued(
         return "unconfirmed"
     _log.warning("queued input to %s is stuck in its input box", named)
     return "stuck"
-
-
-def _is_codex(session: object) -> bool:
-    """Whether a session the engine reported runs Codex."""
-    agent = getattr(session, "conversation_agent", None)
-    return agent == "codex"
 
 
 def _confirm_delivery(
