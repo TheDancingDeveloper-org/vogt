@@ -6,7 +6,8 @@
 //! plan growth, the same seeded relation edges, the same report JSON shape.
 //!
 //! `run` drives the real operations in-process through the registry
-//! (`driver`, WI-1744); no Python is involved.
+//! (`driver`, WI-1744); no Python is involved. The report's `host.python`
+//! field is best-effort metadata: the `python3` on PATH, or `unknown`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -60,25 +61,20 @@ pub fn percentile(values: &[f64], pct: f64) -> Result<f64, String> {
     Ok(ordered[index])
 }
 
-/// Round the way the CPython on this machine rounds, by asking it.
+/// Round the way CPython's `round(value, digits)` rounds.
 ///
-/// Python 3 documents half-to-even, but a binary float that lands just off a
-/// midpoint rounds the other way, and the recorded baselines were produced by
-/// that runtime. Asking `round` keeps a Rust report comparable with them.
+/// CPython formats the double to `digits` decimals with correct rounding
+/// (`_Py_dg_dtoa` mode 3: the exact binary value, ties to even) and parses the
+/// text back. Rust's `{:.N}` formatting is the same exact, ties-to-even
+/// conversion, so `1.225` (just below the midpoint as a double) rounds down
+/// and `2.5` rounds to `2`, as Python does. The recorded baselines were
+/// produced by that runtime, so a Rust report stays comparable with them.
 fn round_digits(value: f64, digits: i32) -> f64 {
-    if !value.is_finite() {
+    if !value.is_finite() || digits < 0 {
         return value;
     }
-    let bits = value.to_bits().swap_bytes();
-    let script = format!("import struct; print(round(struct.unpack('d', bytes.fromhex('{bits:016x}'))[0], {digits}))");
-    Command::new("python3")
-        .args(["-c", &script])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .and_then(|text| text.trim().parse().ok())
-        .unwrap_or(value)
+    let precision = usize::try_from(digits).unwrap_or(0);
+    format!("{value:.precision$}").parse().unwrap_or(value)
 }
 
 // -- recorded numbers ------------------------------------------------------
@@ -388,13 +384,13 @@ pub fn deployed_plan_from_scale(
 /// `count <= 0` is empty. Fewer than two refs is an error, because a self-edge
 /// is the only edge one item can form and `work.relate` refuses it.
 ///
-/// The sequence comes from CPython's `random.Random`, run in a short-lived
-/// interpreter. Reimplementing MT19937 drifts by a constant, and the recorded
-/// baselines and the Python tests pin the exact edges for a seed.
+/// The sequence is CPython's `random.Random(seed)` reproduced exactly
+/// ([`PyRandom`]): the recorded baselines and the Python tests pin the exact
+/// edges for a seed, so the same seed must draw the same edges.
 pub fn relation_triples(
     refs: &[String],
     count: i64,
-    seed: u64,
+    seed: i64,
 ) -> Result<Vec<(String, String, String)>, String> {
     if count <= 0 {
         return Ok(Vec::new());
@@ -402,34 +398,129 @@ pub fn relation_triples(
     if refs.len() < 2 {
         return Err("at least two work items are needed to relate any".to_string());
     }
-    let script = "import random,sys\nrefs=sys.argv[2].split(\"\\n\")\nkinds=[\"depends_on\",\"relates_to\",\"duplicate_of\",\"parent_of\"]\ncount=int(sys.argv[1]); rng=random.Random(int(sys.argv[3]))\nseen=set(); out=[]\nbudget=len(refs)*(len(refs)-1)*len(kinds)*4; attempts=0\nwhile len(out)<count and attempts<budget:\n    attempts+=1\n    s=rng.choice(refs); t=rng.choice(refs)\n    if s==t: continue\n    k=rng.choice(kinds); tri=(s,t,k)\n    if tri in seen: continue\n    seen.add(tri); out.append(tri)\nprint(\"\\n\".join(f\"{a}\\t{b}\\t{c}\" for a,b,c in out))\n";
-    let output = Command::new("python3")
-        .args([
-            "-c",
-            script,
-            &count.to_string(),
-            &refs.join("\n"),
-            &seed.to_string(),
-        ])
-        .output()
-        .map_err(|err| format!("relation edges need python3: {err}"))?;
-    if !output.status.success() {
-        return Err("relation edges: python3 random failed".to_string());
+    let wanted = usize::try_from(count).unwrap_or(usize::MAX);
+    let mut rng = PyRandom::new(seed.unsigned_abs());
+    let mut seen: BTreeSet<(&str, &str, usize)> = BTreeSet::new();
+    let mut triples = Vec::new();
+    let max_edges = refs.len() * (refs.len() - 1) * RELATION_KINDS.len();
+    let attempt_budget = max_edges * 4;
+    let mut attempts = 0;
+    while triples.len() < wanted && attempts < attempt_budget {
+        attempts += 1;
+        let source = rng.below(refs.len());
+        let target = rng.below(refs.len());
+        // Python compares the strings, so a repeated ref is a self-edge too.
+        if refs[source] == refs[target] {
+            continue;
+        }
+        let kind = rng.below(RELATION_KINDS.len());
+        if !seen.insert((refs[source].as_str(), refs[target].as_str(), kind)) {
+            continue;
+        }
+        triples.push((
+            refs[source].clone(),
+            refs[target].clone(),
+            RELATION_KINDS[kind].to_string(),
+        ));
     }
-    let text =
-        String::from_utf8(output.stdout).map_err(|_| "relation edges: not utf-8".to_string())?;
-    Ok(text
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            let mut parts = line.split('\t');
-            (
-                parts.next().unwrap_or("").to_string(),
-                parts.next().unwrap_or("").to_string(),
-                parts.next().unwrap_or("").to_string(),
-            )
-        })
-        .collect())
+    Ok(triples)
+}
+
+/// CPython's `random.Random`: MT19937 seeded the way `Random(int)` seeds it,
+/// with `choice`'s `_randbelow` (rejection sampling on `getrandbits`).
+struct PyRandom {
+    state: [u32; 624],
+    index: usize,
+}
+
+impl PyRandom {
+    const N: usize = 624;
+    const M: usize = 397;
+
+    /// `random.seed(n)` for a non-negative int: `init_by_array` over the
+    /// 32-bit little-endian words of `n` (`[0]` for zero).
+    fn new(seed: u64) -> Self {
+        let mut key = vec![(seed & 0xffff_ffff) as u32];
+        if seed >> 32 != 0 {
+            key.push((seed >> 32) as u32);
+        }
+        let mut rng = PyRandom {
+            state: [0; 624],
+            index: Self::N,
+        };
+        rng.init_genrand(19_650_218);
+        let (mut i, mut j) = (1usize, 0usize);
+        for _ in 0..Self::N.max(key.len()) {
+            let prev = rng.state[i - 1] ^ (rng.state[i - 1] >> 30);
+            rng.state[i] = (rng.state[i] ^ prev.wrapping_mul(1_664_525))
+                .wrapping_add(key[j])
+                .wrapping_add(j as u32);
+            i += 1;
+            j += 1;
+            if i >= Self::N {
+                rng.state[0] = rng.state[Self::N - 1];
+                i = 1;
+            }
+            if j >= key.len() {
+                j = 0;
+            }
+        }
+        for _ in 0..Self::N - 1 {
+            let prev = rng.state[i - 1] ^ (rng.state[i - 1] >> 30);
+            rng.state[i] = (rng.state[i] ^ prev.wrapping_mul(1_566_083_941)).wrapping_sub(i as u32);
+            i += 1;
+            if i >= Self::N {
+                rng.state[0] = rng.state[Self::N - 1];
+                i = 1;
+            }
+        }
+        rng.state[0] = 0x8000_0000;
+        rng
+    }
+
+    fn init_genrand(&mut self, seed: u32) {
+        self.state[0] = seed;
+        for i in 1..Self::N {
+            let prev = self.state[i - 1] ^ (self.state[i - 1] >> 30);
+            self.state[i] = 1_812_433_253u32.wrapping_mul(prev).wrapping_add(i as u32);
+        }
+        self.index = Self::N;
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        if self.index >= Self::N {
+            for k in 0..Self::N {
+                let y =
+                    (self.state[k] & 0x8000_0000) | (self.state[(k + 1) % Self::N] & 0x7fff_ffff);
+                let mag = if y & 1 == 1 { 0x9908_b0df } else { 0 };
+                self.state[k] = self.state[(k + Self::M) % Self::N] ^ (y >> 1) ^ mag;
+            }
+            self.index = 0;
+        }
+        let mut y = self.state[self.index];
+        self.index += 1;
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9d2c_5680;
+        y ^= (y << 15) & 0xefc6_0000;
+        y ^ (y >> 18)
+    }
+
+    /// `getrandbits(k)` for `1 <= k <= 32`.
+    fn getrandbits(&mut self, k: u32) -> u32 {
+        self.next_u32() >> (32 - k)
+    }
+
+    /// `_randbelow(n)` for `1 <= n < 2**32`, as `choice` uses it.
+    fn below(&mut self, n: usize) -> usize {
+        let n = u32::try_from(n).expect("choice over at most 2**32 - 1 items");
+        let k = u32::BITS - n.leading_zeros();
+        loop {
+            let r = self.getrandbits(k);
+            if r < n {
+                return r as usize;
+            }
+        }
+    }
 }
 
 // -- reports ---------------------------------------------------------------
@@ -1507,5 +1598,136 @@ mod tests {
         assert_eq!(round_digits(1.235, 2), 1.24);
         assert_eq!(round_digits(2.5, 0), 2.0);
         assert_eq!(round_digits(3.5, 0), 4.0);
+        // Pinned against CPython's round(): exact binary value, ties to even.
+        for (value, digits, want) in [
+            (0.125, 2, 0.12),
+            (0.375, 2, 0.38),
+            (2.675, 2, 2.67),
+            (1e-7, 3, 0.0),
+            (12345.6789, 1, 12345.7),
+            (0.5, 0, 0.0),
+            (1.5, 0, 2.0),
+            (1e22, 2, 1e22),
+            (5e-324, 3, 0.0),
+            (0.0005, 3, 0.001),
+            (0.0015, 3, 0.002),
+        ] {
+            assert_eq!(
+                round_digits(value, digits),
+                want,
+                "round({value}, {digits})"
+            );
+        }
+        let negative_zero = round_digits(-0.0004, 3);
+        assert_eq!(negative_zero, 0.0);
+        assert!(negative_zero.is_sign_negative(), "Python keeps -0.0");
+        assert!(round_digits(f64::NAN, 3).is_nan());
+        assert_eq!(round_digits(f64::INFINITY, 3), f64::INFINITY);
+    }
+
+    #[test]
+    fn relation_triples_match_cpython_for_other_seeds() {
+        // Pinned against CPython random.Random: zero, a seed wider than 32
+        // bits (a two-word init_by_array key) and a negative seed (abs()).
+        let refs: Vec<String> = (0..7).map(|i| format!("WI-{i}")).collect();
+        let edge = |a: &str, b: &str, k: &str| (a.to_string(), b.to_string(), k.to_string());
+        for (seed, first, last) in [
+            (
+                0,
+                edge("WI-6", "WI-3", "parent_of"),
+                edge("WI-1", "WI-6", "depends_on"),
+            ),
+            (
+                (1i64 << 40) + 7,
+                edge("WI-4", "WI-5", "parent_of"),
+                edge("WI-6", "WI-4", "relates_to"),
+            ),
+            (
+                -5,
+                edge("WI-4", "WI-2", "duplicate_of"),
+                edge("WI-6", "WI-1", "parent_of"),
+            ),
+        ] {
+            let triples = relation_triples(&refs, 6, seed).unwrap();
+            assert_eq!(triples.len(), 6, "seed {seed}");
+            assert_eq!(triples[0], first, "seed {seed}");
+            assert_eq!(triples[5], last, "seed {seed}");
+        }
+        // The attempt budget stops a request for more edges than exist.
+        let two = vec!["A".to_string(), "B".to_string()];
+        assert_eq!(relation_triples(&two, 100, 3).unwrap().len(), 5);
+    }
+
+    /// Cross-check against the `python3` on PATH when there is one: the same
+    /// edges and the same rounding for a spread of seeds and values. Skipped
+    /// (passes) on a host with no python3; the pinned tests above still run.
+    #[test]
+    fn relation_triples_and_rounding_agree_with_python3_when_present() {
+        let probe = Command::new("python3").arg("-c").arg("pass").output();
+        if !matches!(probe, Ok(ref output) if output.status.success()) {
+            return;
+        }
+        let script = "import random,sys\nK=['depends_on','relates_to','duplicate_of','parent_of']\nrefs=sys.argv[2].split(',')\ncount=int(sys.argv[1]); rng=random.Random(int(sys.argv[3]))\nseen=set(); out=[]; budget=len(refs)*(len(refs)-1)*len(K)*4; a=0\nwhile len(out)<count and a<budget:\n    a+=1; s=rng.choice(refs); t=rng.choice(refs)\n    if s==t: continue\n    k=rng.choice(K); x=(s,t,k)\n    if x in seen: continue\n    seen.add(x); out.append(x)\nprint('\\n'.join('\\t'.join(x) for x in out))\n";
+        for (size, count, seed) in [
+            (3, 10, 1),
+            (12, 40, 7),
+            (50, 200, 123_456_789),
+            (300, 25, -42),
+        ] {
+            let refs: Vec<String> = (0..size).map(|i| format!("WI-{i}")).collect();
+            let output = Command::new("python3")
+                .args([
+                    "-c",
+                    script,
+                    &count.to_string(),
+                    &refs.join(","),
+                    &seed.to_string(),
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let want: Vec<(String, String, String)> = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    (
+                        parts[0].to_string(),
+                        parts[1].to_string(),
+                        parts[2].to_string(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                relation_triples(&refs, count, seed).unwrap(),
+                want,
+                "seed {seed}"
+            );
+        }
+        let values: Vec<f64> = (0..400)
+            .map(|i| f64::from(i) * 0.000_125 + f64::from(i % 7) * 13.37)
+            .collect();
+        let joined: Vec<String> = values.iter().map(|v| format!("{v:?}")).collect();
+        for digits in [0, 1, 2, 3, 6] {
+            let output = Command::new("python3")
+                .args([
+                    "-c",
+                    "import sys\nd=int(sys.argv[1])\nprint(' '.join(repr(round(float(v), d)) for v in sys.argv[2].split(',')))",
+                    &digits.to_string(),
+                    &joined.join(","),
+                ])
+                .output()
+                .unwrap();
+            let text = String::from_utf8(output.stdout).unwrap();
+            for (value, want) in values.iter().zip(text.split_whitespace()) {
+                let want: f64 = want.parse().unwrap();
+                assert_eq!(
+                    round_digits(*value, digits),
+                    want,
+                    "round({value:?}, {digits})"
+                );
+            }
+        }
     }
 }

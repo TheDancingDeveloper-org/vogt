@@ -739,7 +739,7 @@ existed:
    smoke test against them.
 4. **Tag** `vX.Y.Z` on that same commit. `release.yml` then:
    - checks the tag is reachable from `main` and matches the package, PWA,
-     mobile and workflow versions (`scripts/check_product_version.py`, which
+     mobile and workflow versions (`vogt-core check-product-version`, which
      also proves `build.yml` baked that version);
    - finds a `build.yml` run for the exact commit on `main` whose three
      image jobs succeeded (the demo image's job is not required), resolves
