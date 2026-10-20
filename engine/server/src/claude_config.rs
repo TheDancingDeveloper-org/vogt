@@ -557,6 +557,49 @@ impl Onboarding {
         };
         if let Err(e) = accept_project(&path, cwd) {
             tracing::info!(path = %path.display(), error = %e, "could not pre-accept Claude Code's folder trust; it may ask");
+            return;
+        }
+        // Another Claude Code already running on the same account rewrites
+        // the whole file from the copy it loaded at its own start, and drops
+        // an entry written since (WI-2000: acct2 lost WI-1710 and WI-1716
+        // minutes after both were seeded). Write the answers again while the
+        // new CLI starts and reads them.
+        let cwd = cwd.to_string();
+        let spawned = std::thread::Builder::new()
+            .name("claude-trust-reassert".into())
+            .spawn(move || reassert_project(&path, &cwd, REASSERT_AFTER));
+        if let Err(e) = spawned {
+            tracing::info!(error = %e, "could not start the folder-trust re-check");
+        }
+    }
+}
+
+/// When, counted from the first write, [`Onboarding::prepare`] checks the
+/// answers again. Claude Code reads them within a few seconds of starting.
+const REASSERT_AFTER: &[std::time::Duration] = &[
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(10),
+];
+
+/// [`accept_project`] again at each offset in `after`, for answers a
+/// concurrent rewrite removed. Stops when the config's directory is gone.
+fn reassert_project(path: &Path, cwd: &str, after: &[std::time::Duration]) {
+    let start = std::time::Instant::now();
+    for offset in after {
+        std::thread::sleep(offset.saturating_sub(start.elapsed()));
+        if !path.parent().is_some_and(Path::is_dir) {
+            return;
+        }
+        match accept_project(path, cwd) {
+            Ok(true) => {
+                tracing::info!(path = %path.display(), cwd, "Claude Code folder trust was overwritten; written again")
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::info!(path = %path.display(), error = %e, "could not re-check Claude Code's folder trust")
+            }
         }
     }
 }
@@ -948,6 +991,27 @@ mod tests {
                 Some("untrusted")
             );
         }
+    }
+
+    #[test]
+    fn answers_a_concurrent_rewrite_dropped_are_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        assert!(accept_project(&path, "/w/a").unwrap());
+        // A running Claude Code saves the copy it loaded before the seed.
+        std::fs::write(&path, r#"{"projects":{"/w/other":{}}}"#).unwrap();
+        reassert_project(&path, "/w/a", &[std::time::Duration::ZERO]);
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for key in KEYS {
+            assert_eq!(config["projects"]["/w/a"][key], true, "{config}");
+        }
+        assert!(config["projects"].get("/w/other").is_some());
+
+        // Once the directory is gone nothing is recreated.
+        let gone = dir.path().join("gone").join(".claude.json");
+        reassert_project(&gone, "/w/a", &[std::time::Duration::ZERO]);
+        assert!(!gone.parent().unwrap().exists());
     }
 
     #[test]

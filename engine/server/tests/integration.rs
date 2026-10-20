@@ -11110,9 +11110,11 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
 async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
     let (tmp, mut cfg, _stub) = hibernation_sandbox();
     let acct2 = tmp.path().join("acct2");
+    let default_home = tmp.path().join("default-home");
+    let workspace = cfg.workspace_root.clone();
     cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
-        enabled: false,
-        default_dir: None,
+        enabled: true,
+        default_dir: Some(default_home.clone()),
         settings_file: None,
         opencode_config: None,
         accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
@@ -11141,6 +11143,7 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
             "command": [stub.to_string_lossy()],
             "env": [["CLAUDE_CONFIG_DIR", "/somewhere/the/caller/chose"]],
             "account": "acct2",
+            "cwd": workspace.to_string_lossy(),
         }))
         .send()
         .await
@@ -11152,6 +11155,18 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
     let id = created["id"].as_str().unwrap().to_string();
     // The engine's directory for the name wins over a caller-supplied one.
     live_output_containing(&client, &base, &id, &[&want]).await;
+
+    // Folder trust and the external-import approval are answered in the
+    // account's own `.claude.json`, not the default one (WI-2000).
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(acct2.join(".claude.json")).unwrap()).unwrap();
+    let project = &config["projects"][workspace.to_string_lossy().as_ref()];
+    assert_eq!(project["hasTrustDialogAccepted"], true, "{config}");
+    assert_eq!(
+        project["hasClaudeMdExternalIncludesApproved"], true,
+        "{config}"
+    );
+    assert!(!default_home.join(".claude.json").exists());
 
     // A wake stays on the same login, and the summary still names it.
     client
