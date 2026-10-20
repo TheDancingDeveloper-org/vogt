@@ -81,6 +81,12 @@ pub struct AppContext<C, I> {
     /// one request spends the stand-in on more than one provider. The resolvers
     /// take the boxed form, so [`Self::forge_transport`] hands one back.
     pub(crate) forge_transport: Option<super::forge_transport::SharedForgeTransport>,
+    /// The engine session a pod-token caller says it runs in
+    /// (`X-Vogt-Engine-Session`, sent by the MCP bridge), or `None`. A claim,
+    /// not an identity: only `session.start` reads it, to attribute a start by
+    /// a resumed oversight session that lost its own token (WI-1852), and only
+    /// after the engine confirms that session is live oversight.
+    pub claimed_engine_session: Option<String>,
 }
 
 /// The wall clock. Reads the system; it holds no state of its own.
@@ -370,6 +376,7 @@ where
         peer,
         public_identity: public_identity.unwrap_or_else(|| identity_of(&config)),
         forge_transport: None,
+        claimed_engine_session: None,
         config,
     }
 }
@@ -444,6 +451,38 @@ where
         peer: None,
         public_identity: ctx.public_identity.clone(),
         forge_transport: ctx.forge_transport.clone(),
+        claimed_engine_session: ctx.claimed_engine_session.clone(),
+    }
+}
+
+/// The engine session header the MCP bridge sends, from
+/// `$VOGT_ENGINE_SESSION_ID` (WI-1852). Python's
+/// `identity.HEADER_ENGINE_SESSION`.
+pub const HEADER_ENGINE_SESSION: &str = "x-vogt-engine-session";
+
+static ENGINE_SESSION_ID: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        .expect("a fixed pattern")
+});
+
+/// The engine session id a request claims to come from, or `None`.
+///
+/// Only a well-formed engine id is kept, lower-cased; anything else is no
+/// claim at all rather than an error, because the header is advisory. Ports
+/// `claimed_engine_session` in `identity.py`; `raw` is the header's value.
+pub fn claimed_engine_session(raw: Option<&str>) -> Option<String> {
+    let raw = raw.unwrap_or("").trim().to_lowercase();
+    ENGINE_SESSION_ID.is_match(&raw).then_some(raw)
+}
+
+impl Built {
+    /// This context with the engine session the request claims, when it
+    /// claims one. Ports `with_claimed_engine_session` in `context.py`.
+    pub fn with_claimed_engine_session(mut self, raw: Option<&str>) -> Self {
+        if let Some(claimed) = claimed_engine_session(raw) {
+            crate::with_ctx!(&mut self, |ctx| ctx.claimed_engine_session = Some(claimed));
+        }
+        self
     }
 }
 
@@ -461,4 +500,25 @@ pub fn write_of<C, I>(
         Arc::clone(&ctx.clock),
         Arc::clone(&ctx.id_factory),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claimed_engine_session;
+
+    #[test]
+    fn only_a_well_formed_engine_session_claim_is_kept() {
+        // tests/test_bridge.py (WI-1852).
+        let good = "0CC46582-ED57-4327-9A28-624A7AE2474A";
+        assert_eq!(
+            claimed_engine_session(Some(good)).as_deref(),
+            Some("0cc46582-ed57-4327-9a28-624a7ae2474a")
+        );
+        assert_eq!(
+            claimed_engine_session(Some(" 0cc46582-ed57-4327-9a28-624a7ae2474a ")).as_deref(),
+            Some("0cc46582-ed57-4327-9a28-624a7ae2474a")
+        );
+        assert_eq!(claimed_engine_session(Some("ses_1; drop")), None);
+        assert_eq!(claimed_engine_session(None), None);
+    }
 }

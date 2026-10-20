@@ -2208,13 +2208,16 @@ mod tests {
 // compare them.
 
 /// Lower first. `stalled` sits above `running` because a turn that has printed
-/// nothing for a long time is worth a look before one that is busy.
+/// nothing for a long time is worth a look before one that is busy. `done` (an
+/// autopilot session that said `AUTOPILOT: DONE`, WI-1518) sits after
+/// `waiting`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Attention {
     Approval,
     Blocked,
     Waiting,
+    Done,
     Stalled,
     Running,
     Idle,
@@ -2229,12 +2232,13 @@ impl Attention {
             Self::Approval => 0,
             Self::Blocked => 1,
             Self::Waiting => 2,
-            Self::Stalled => 3,
-            Self::Running => 4,
-            Self::Idle => 5,
-            Self::Hibernated => 6,
-            Self::Exited => 7,
-            Self::Unknown => 8,
+            Self::Done => 3,
+            Self::Stalled => 4,
+            Self::Running => 5,
+            Self::Idle => 6,
+            Self::Hibernated => 7,
+            Self::Exited => 8,
+            Self::Unknown => 9,
         }
     }
 
@@ -2249,6 +2253,7 @@ impl Attention {
             Self::Approval => "approval",
             Self::Blocked => "blocked",
             Self::Waiting => "waiting",
+            Self::Done => "done",
             Self::Stalled => "stalled",
             Self::Running => "running",
             Self::Idle => "idle",
@@ -2258,18 +2263,22 @@ impl Attention {
         }
     }
 
-    /// `order` looked up by wire value, for sorting rows that only kept the name.
+    /// `order` looked up by wire value, for sorting rows that only kept the
+    /// name. A name outside the table sorts last, as Python's
+    /// `ORDER.get(name, 99)` does.
     pub fn order_of(name: &str) -> u8 {
         match name {
             "approval" => 0,
             "blocked" => 1,
             "waiting" => 2,
-            "stalled" => 3,
-            "running" => 4,
-            "idle" => 5,
-            "hibernated" => 6,
-            "exited" => 7,
-            _ => 8,
+            "done" => 3,
+            "stalled" => 4,
+            "running" => 5,
+            "idle" => 6,
+            "hibernated" => 7,
+            "exited" => 8,
+            "unknown" => 9,
+            _ => 99,
         }
     }
 
@@ -2289,6 +2298,20 @@ fn gate_words(kind: &str) -> Option<&'static str> {
     }
 }
 
+/// Turns a first turn takes: read the brief, then say what it is (WI-1854).
+pub const FIRST_TURN_TURNS: i64 = 3;
+
+/// The reason a session idle since its first turn is shown with.
+pub const AWAITING_TASK: &str =
+    "awaiting task: idle at its prompt since its first turn, no work done; \
+     give it the task with session_input";
+
+/// The reason a session at rest with unsent text in its input box is shown
+/// with (WI-1870).
+pub const INPUT_PENDING: &str =
+    "input pending: at rest with text typed into its input box but not \
+     submitted; read session_screen, then press enter with session_input";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
     pub attention: Attention,
@@ -2296,6 +2319,11 @@ pub struct Verdict {
 }
 
 /// Where one session belongs in the oversight table, and why.
+///
+/// `turns` is the engine's metered turn count, `None` when it has none. A
+/// session resting after no more than [`FIRST_TURN_TURNS`] of them did its
+/// first turn and nothing else: it was never given work (WI-1854). `done_at`
+/// is when an autopilot session said `AUTOPILOT: DONE` this turn (WI-1518).
 #[allow(clippy::too_many_arguments)]
 pub fn classify(
     activity: Option<&str>,
@@ -2307,6 +2335,8 @@ pub fn classify(
     last_output_at: Option<crate::core::Moment>,
     now: crate::core::Moment,
     stall_after_secs: i64,
+    done_at: Option<crate::core::Moment>,
+    turns: Option<i64>,
 ) -> Verdict {
     let verdict = |attention: Attention, reason: String| Verdict { attention, reason };
     if activity == Some("hibernated") {
@@ -2333,6 +2363,17 @@ pub fn classify(
     if approval_question.is_some_and(|text| !text.is_empty())
         || activity == Some("awaiting-approval")
     {
+        if let Some(question) = approval_question
+            .filter(|text| !text.is_empty())
+            .filter(|_| approval_kind == Some("question"))
+        {
+            // WI-1871: an agent's question menu (AskUserQuestion) waits on an
+            // answer just as a permission dialog does.
+            return verdict(
+                Attention::Approval,
+                format!("asking a question (answer with session_answer): {question}"),
+            );
+        }
         if let (Some(gate), Some(question)) = (
             approval_kind.and_then(gate_words),
             approval_question.filter(|text| !text.is_empty()),
@@ -2357,6 +2398,15 @@ pub fn classify(
         );
     }
     if activity == Some("waiting-for-input") || (activity == Some("idle") && ready == Some(true)) {
+        if done_at.is_some() {
+            return verdict(
+                Attention::Done,
+                "said it is done (AUTOPILOT: DONE), at its prompt".to_string(),
+            );
+        }
+        if awaiting_task(turns) {
+            return verdict(Attention::Waiting, AWAITING_TASK.to_string());
+        }
         return verdict(
             Attention::Waiting,
             "at its prompt, waiting for the next instruction".to_string(),
@@ -2378,10 +2428,17 @@ pub fn classify(
         }
         return verdict(Attention::Running, "working".to_string());
     }
+    if activity == Some("idle") && done_at.is_none() && awaiting_task(turns) {
+        return verdict(Attention::Waiting, AWAITING_TASK.to_string());
+    }
     verdict(
         Attention::Idle,
         "resting, not at a recognised prompt".to_string(),
     )
+}
+
+fn awaiting_task(turns: Option<i64>) -> bool {
+    turns.is_some_and(|turns| 0 < turns && turns <= FIRST_TURN_TURNS)
 }
 
 #[cfg(test)]
@@ -2407,6 +2464,8 @@ mod oversight_tests {
             )),
             moment,
             600,
+            None,
+            None,
         )
     }
 
@@ -2478,6 +2537,8 @@ mod oversight_tests {
                 ago(0),
                 moment,
                 600,
+                None,
+                None,
             );
             assert_eq!(found.attention, *want, "{activity}");
         }
@@ -2491,6 +2552,8 @@ mod oversight_tests {
             ago(25),
             moment,
             600,
+            None,
+            None,
         );
         assert_eq!(stalled.attention, Attention::Stalled);
         assert_eq!(stalled.reason, "running, but nothing printed for 25 min");
@@ -2505,6 +2568,8 @@ mod oversight_tests {
             ago(0),
             moment,
             600,
+            None,
+            None,
         );
         assert_eq!(dialog.attention, Attention::Approval);
         assert!(dialog.reason.contains("Run rm?"));
@@ -2520,6 +2585,8 @@ mod oversight_tests {
             ago(0),
             moment,
             600,
+            None,
+            None,
         );
         assert_eq!(empty.attention, Attention::Running);
     }
@@ -2534,6 +2601,7 @@ mod oversight_tests {
             Attention::Unknown,
             Attention::Waiting,
             Attention::Stalled,
+            Attention::Done,
         ];
         let mut sorted = ranked.to_vec();
         sorted.sort_by_key(|attention| attention.order());
@@ -2543,6 +2611,7 @@ mod oversight_tests {
                 Attention::Approval,
                 Attention::Blocked,
                 Attention::Waiting,
+                Attention::Done,
                 Attention::Stalled,
                 Attention::Running,
                 Attention::Idle,
@@ -2551,6 +2620,121 @@ mod oversight_tests {
         );
         assert!(Attention::Approval.needs_you());
         assert!(!Attention::Stalled.needs_you());
+        assert!(!Attention::Done.needs_you());
+        assert_eq!(Attention::order_of("done"), 3);
+        assert_eq!(Attention::order_of("unknown"), 9);
+        assert_eq!(Attention::order_of("nonsense"), 99);
+    }
+
+    /// The parametrised helper in `tests/test_oversight.py`: alive, not ready,
+    /// no dialog, no blocker, output just now, unless a case says otherwise.
+    fn resting(activity: &str, ready: bool, done: bool, turns: Option<i64>) -> Verdict {
+        classify(
+            Some(activity),
+            Some(true),
+            Some(ready),
+            None,
+            None,
+            None,
+            Some(now()),
+            now(),
+            600,
+            done.then(now),
+            turns,
+        )
+    }
+
+    #[test]
+    fn a_done_declaration_at_the_prompt_is_done_and_not_while_running() {
+        // tests/test_oversight.py, the WI-1518 rows of the parametrised table.
+        assert_eq!(
+            resting("waiting-for-input", false, true, None).attention,
+            Attention::Done
+        );
+        let done = resting("idle", true, true, None);
+        assert_eq!(done.attention, Attention::Done);
+        assert_eq!(
+            done.reason,
+            "said it is done (AUTOPILOT: DONE), at its prompt"
+        );
+        assert_eq!(
+            resting("running", false, true, None).attention,
+            Attention::Running
+        );
+    }
+
+    #[test]
+    fn a_session_idle_since_its_first_turn_is_awaiting_task() {
+        // WI-1854: a worker that only read its brief is waiting on a task.
+        for activity in ["waiting-for-input", "idle"] {
+            let found = resting(activity, true, false, Some(2));
+            assert_eq!(found.attention, Attention::Waiting, "{activity}");
+            assert!(found.reason.starts_with("awaiting task"), "{activity}");
+            assert_eq!(found.reason, AWAITING_TASK);
+        }
+    }
+
+    #[test]
+    fn a_session_that_did_work_or_was_never_metered_is_not_awaiting_task() {
+        for turns in [None, Some(0), Some(40)] {
+            let waiting = resting("waiting-for-input", false, false, turns);
+            assert!(!waiting.reason.starts_with("awaiting task"), "{turns:?}");
+            assert_eq!(
+                resting("idle", false, false, turns).attention,
+                Attention::Idle,
+                "{turns:?}"
+            );
+        }
+        // Idle and not ready after one turn is still awaiting a task.
+        assert_eq!(resting("idle", false, false, Some(1)).reason, AWAITING_TASK);
+    }
+
+    #[test]
+    fn a_done_session_is_not_awaiting_task() {
+        assert_eq!(
+            resting("waiting-for-input", false, true, Some(2)).attention,
+            Attention::Done
+        );
+    }
+
+    #[test]
+    fn a_question_menu_needs_you_not_idle() {
+        // WI-1871: an agent at an AskUserQuestion menu is not resting.
+        let found = classify(
+            Some("idle"),
+            Some(true),
+            Some(false),
+            Some("Which approach should the sweep fix take?"),
+            None,
+            Some("question"),
+            Some(now()),
+            now(),
+            600,
+            None,
+            None,
+        );
+        assert_eq!(found.attention, Attention::Approval);
+        assert!(found.attention.needs_you());
+        assert!(found
+            .reason
+            .starts_with("asking a question (answer with session_answer)"));
+        assert!(found.reason.contains("Which approach"));
+        // Without the question text it is a plain dialog, as Python's
+        // `approval_kind == "question" and approval_question` is.
+        let bare = classify(
+            Some("awaiting-approval"),
+            Some(true),
+            None,
+            Some(""),
+            None,
+            Some("question"),
+            None,
+            now(),
+            600,
+            None,
+            None,
+        );
+        assert_eq!(bare.reason, "showing a permission dialog");
     }
 
     #[test]
@@ -2572,6 +2756,8 @@ mod oversight_tests {
             None,
             now(),
             600,
+            None,
+            None,
         );
         assert_eq!(gate.attention, Attention::Approval);
         assert_eq!(
@@ -2582,7 +2768,19 @@ mod oversight_tests {
 
     #[test]
     fn an_unasked_engine_is_unknown_and_a_dead_process_has_exited() {
-        let unknown = classify(None, Some(true), None, None, None, None, None, now(), 600);
+        let unknown = classify(
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            now(),
+            600,
+            None,
+            None,
+        );
         assert_eq!(unknown.attention, Attention::Unknown);
 
         let ended = classify(
@@ -2595,6 +2793,8 @@ mod oversight_tests {
             None,
             now(),
             600,
+            None,
+            None,
         );
         assert_eq!(ended.reason, "its process ended (crashed)");
     }

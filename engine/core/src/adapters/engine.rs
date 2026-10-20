@@ -50,7 +50,41 @@ impl Clone for EngineClient {
     }
 }
 
+/// An engine client's plain parts, which may cross to another thread. A
+/// client with an injected transport (a test's stand-in) has none: its
+/// transport is not `Send`.
+pub struct DetachedEngine {
+    base_url: String,
+    token: Option<String>,
+    timeout: Duration,
+    label: String,
+}
+
+impl DetachedEngine {
+    /// The client again, on whichever thread holds this.
+    pub fn client(self) -> EngineClient {
+        EngineClient {
+            base_url: self.base_url,
+            token: self.token,
+            transport: None,
+            timeout: self.timeout,
+            label: self.label,
+        }
+    }
+}
+
 impl EngineClient {
+    /// This client's parts for another thread, or `None` when its transport
+    /// was injected and cannot cross one (WI-1870's queued-input follow-up).
+    pub fn detached(&self) -> Option<DetachedEngine> {
+        self.transport.is_none().then(|| DetachedEngine {
+            base_url: self.base_url.clone(),
+            token: self.token.clone(),
+            timeout: self.timeout,
+            label: self.label.clone(),
+        })
+    }
+
     /// The engine's own URL, as configured.
     pub fn base_url(&self) -> &str {
         &self.base_url
@@ -1226,6 +1260,9 @@ pub struct EngineSession {
     pub alive: bool,
     pub turn_started_at: Option<String>,
     pub last_output_at: Option<String>,
+    /// When the agent declared itself done under autopilot this turn
+    /// (WI-1518); `None` when it has not, or from an engine that predates it.
+    pub done_at: Option<String>,
     pub approval: Option<EngineApproval>,
     pub command: Option<String>,
     pub blocked: Option<EngineBlocked>,
@@ -1281,6 +1318,7 @@ impl EngineSession {
             alive,
             turn_started_at: optional_str(get("turn_started_at")),
             last_output_at: optional_str(get("last_output_at")),
+            done_at: optional_str(get("done_at")),
             approval: EngineApproval::from_payload(get("approval")),
             command: optional_str(get("command")),
             blocked: EngineBlocked::from_payload(get("blocked")),

@@ -672,7 +672,7 @@ pub struct HandoffFields {
 pub struct SessionApproval {
     pub question: String,
     pub command_excerpt: String,
-    /// permission (a tool call) / folder-trust / external-imports (a CLAUDE.md importing files from outside) / read-outside-cwd.
+    /// permission (a tool call) / folder-trust / external-imports (a CLAUDE.md importing files from outside) / read-outside-cwd / question (the agent asks a question with a menu of answers).
     #[serde(default = "default_session_approval_kind")]
     pub kind: String,
     /// The menu, in order; `selected` is where the highlight is.
@@ -938,6 +938,10 @@ pub struct SessionSummary {
     #[serde(default)]
     #[schemars(schema_with = "optional_date_time")]
     pub last_output_at: Option<String>,
+    /// Live from the engine: when an autopilot session declared itself done (`AUTOPILOT: DONE`) this turn. Cleared when the next turn starts; null otherwise.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub done_at: Option<String>,
     /// The permission dialog on screen while activity is awaiting-approval; null otherwise.
     #[serde(default)]
     pub approval: Option<SessionApproval>,
@@ -1657,6 +1661,10 @@ pub struct SessionDigest {
     #[serde(default)]
     #[schemars(schema_with = "optional_date_time")]
     pub turn_started_at: Option<String>,
+    /// When an autopilot session declared itself done this turn.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub done_at: Option<String>,
     /// First 120 characters of the last reply.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
@@ -1667,6 +1675,17 @@ pub struct SessionDigest {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub brief_file: Option<String>,
+    /// The question or dialog the session is showing, when it waits on one (WI-1871). Untrusted terminal text.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub question: Option<String>,
+    /// `question` (an agent's question menu) or a dialog kind.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub question_kind: Option<String>,
+    /// The menu's choices in order, numbered from 1; answer with `session_answer` by number or label. Untrusted terminal text.
+    #[serde(default)]
+    pub options: Option<Vec<String>>,
     /// The engine's economics line for the session, e.g. `96 turns, 2 compactions`; null when the engine has not metered it.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
@@ -1685,7 +1704,7 @@ pub struct SessionDigest {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSweepRow {
-    /// approval / blocked / waiting (at its prompt, wants the next instruction) / stalled (running, silent too long) / running / idle / hibernated / exited / unknown. The table is ordered by it.
+    /// approval (a permission dialog, startup gate or question menu) / blocked / waiting (at its prompt, wants the next instruction) / stalled (running, silent too long) / running / idle / hibernated / exited / unknown. The table is ordered by it.
     pub attention: String,
     /// Why, in words.
     pub attention_reason: String,
@@ -1699,6 +1718,16 @@ pub struct SessionSweepRow {
     pub screen_tail: Vec<String>,
     #[serde(default)]
     pub ready: Option<bool>,
+    /// When the session's blocked report was made, if it has one.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub blocked_since: Option<String>,
+    /// How old the blocked report is, in seconds.
+    #[serde(default)]
+    pub blocked_age_s: Option<i64>,
+    /// The blocked report predates the session's current turn: it went back to work after reporting, so the report no longer says what it waits on and the row is not counted in `needs_you` (WI-1834).
+    #[serde(default)]
+    pub blocked_stale: bool,
     /// On a `done` row bound to a work item: its AUTOPILOT: DONE claim checked against git and the forge (WI-1835).
     #[serde(default)]
     pub claim_check: Option<ClaimCheck>,

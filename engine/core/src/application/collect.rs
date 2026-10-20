@@ -904,6 +904,7 @@ impl ErrorName for VogtError {
             Self::RoleRefused(_) => "RoleRefused",
             Self::GrantRefused(_) => "GrantRefused",
             Self::PersonRequired(_) => "PersonRequired",
+            Self::PolicyRefused(_) => "PolicyRefused",
             Self::EngineOnly(_) => "EngineOnly",
             Self::InvalidRequest(_) => "InvalidRequest",
             Self::InstallClosed(_) => "InstallClosed",

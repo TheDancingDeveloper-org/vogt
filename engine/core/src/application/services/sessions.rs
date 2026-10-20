@@ -786,6 +786,9 @@ pub struct SessionSummary {
     pub alive: Option<bool>,
     pub turn_started_at: Option<String>,
     pub last_output_at: Option<String>,
+    /// When an autopilot session declared itself done (`AUTOPILOT: DONE`)
+    /// this turn (WI-1518); cleared when the next turn starts.
+    pub done_at: Option<String>,
     pub approval: Option<SessionApproval>,
     pub blocked: Option<SessionBlocked>,
     pub last_reply_excerpt: Option<String>,
@@ -865,6 +868,13 @@ pub struct SessionSweepRow {
     pub session: SessionSummary,
     pub screen_tail: Vec<String>,
     pub ready: Option<bool>,
+    /// When the session's blocked report was made, if it has one (WI-1834).
+    pub blocked_since: Option<String>,
+    /// How old the blocked report is, in seconds.
+    pub blocked_age_s: Option<i64>,
+    /// The blocked report predates the session's current turn, so it is not
+    /// counted in `needs_you`.
+    pub blocked_stale: bool,
     /// On a `done` row bound to a work item: its AUTOPILOT: DONE claim checked
     /// against git and the forge (WI-1835). Always null here until the sweep
     /// classifies `done` rows (WI-1518); `claims::check_claim` and
@@ -981,6 +991,8 @@ where
     // the caller could ask for directly (WI-1323).
     let (resolved, read_only, overrides) = resolve_purpose(ctx, params)?;
     let params = &resolved;
+    // After the profile fills the model, before anything reaches the engine.
+    refuse_forbidden_model(params)?;
     let (started_by_session, started_by_kind) = started_by(ctx, engine)?;
     let mut writing = write_of(ctx);
     let session_id = fresh(&writing, "ses");
@@ -1434,7 +1446,9 @@ where
         }
         Some(engine) => engine,
     };
-    let entries = match engine.sweep_sessions(params.screen_lines) {
+    // Enough of every screen to see an input box holding unsent text
+    // (WI-1870), whatever the caller asked to be shown.
+    let entries = match engine.sweep_sessions(params.screen_lines.max(SWEEP_INPUT_LINES)) {
         Ok(Some(rows)) => rows,
         Ok(None) => engine
             .list_sessions()?
@@ -1472,7 +1486,8 @@ where
         else {
             continue;
         };
-        let verdict = decisions::classify(
+        let stale = block_is_stale(&summary);
+        let mut verdict = decisions::classify(
             summary.activity.as_deref(),
             summary.alive,
             Some(entry.ready),
@@ -1483,24 +1498,45 @@ where
             summary
                 .blocked
                 .as_ref()
+                .filter(|_| !stale)
                 .map(|blocked| blocked.blocker.as_str()),
             summary
                 .approval
                 .as_ref()
                 .map(|approval| approval.kind.as_str()),
-            summary
-                .last_output_at
-                .as_deref()
-                .and_then(|text| crate::core::from_iso(text).ok()),
+            moment_of(summary.last_output_at.as_deref()),
             swept_at,
             stall,
+            moment_of(summary.done_at.as_deref()),
+            turns_of(&entry.session),
         );
+        if matches!(
+            verdict.attention,
+            decisions::Attention::Waiting | decisions::Attention::Done | decisions::Attention::Idle
+        ) && delivery::input_pending(&entry.screen_tail).is_some()
+        {
+            verdict = decisions::Verdict {
+                attention: decisions::Attention::Waiting,
+                reason: decisions::INPUT_PENDING.to_string(),
+            };
+        }
+        let shown = usize::try_from(params.screen_lines).unwrap_or(0);
+        let screen_tail = if shown == 0 {
+            Vec::new()
+        } else {
+            let tail = &entry.screen_tail;
+            tail[tail.len().saturating_sub(shown)..].to_vec()
+        };
+        let (blocked_since, blocked_age_s) = block_age(&summary, swept_at);
         rows.push(SessionSweepRow {
             attention: verdict.attention.as_str().to_string(),
             attention_reason: verdict.reason.clone(),
-            screen_tail: entry.screen_tail.clone(),
+            screen_tail,
             ready: Some(entry.ready),
             session: summary,
+            blocked_since,
+            blocked_age_s,
+            blocked_stale: stale,
             claim_check: None,
         });
     }
@@ -1533,6 +1569,59 @@ where
         swept_at,
         engine: None,
     })
+}
+
+/// Screen lines the sweep always reads, to find an input box (WI-1870).
+const SWEEP_INPUT_LINES: i64 = 8;
+
+/// An engine timestamp as a moment, or `None` when absent or unreadable.
+fn moment_of(text: Option<&str>) -> Option<Moment> {
+    text.and_then(|text| crate::core::from_iso(text).ok())
+}
+
+/// The engine's metered turn count, or `None` when it has not metered one
+/// (Python's `_turns_of`). A bool or a float is not a count.
+fn turns_of(engine_session: &EngineSession) -> Option<i64> {
+    engine_session
+        .economics
+        .as_ref()
+        .and_then(|economics| economics.get("turns"))
+        .and_then(Value::as_i64)
+}
+
+/// Whether the session's blocked report predates its current turn.
+///
+/// A report is made mid-turn, just before the agent stops. A turn that began
+/// after it means the session went back to work — it was typed into, woken,
+/// or nudged on — so the report no longer says what it waits on (WI-1834).
+/// So does a done declaration (`AUTOPILOT: DONE`) made after the report, even
+/// in the same turn: the agent says nothing is left for it. The report stays
+/// on the row, flagged stale, so it is not lost.
+fn block_is_stale(summary: &SessionSummary) -> bool {
+    let Some(since) = summary
+        .blocked
+        .as_ref()
+        .and_then(|blocked| moment_of(blocked.since.as_deref()))
+    else {
+        return false;
+    };
+    [&summary.turn_started_at, &summary.done_at]
+        .into_iter()
+        .filter_map(|at| moment_of(at.as_deref()))
+        .any(|at| at > since)
+}
+
+/// The sweep row's `blocked_since` and `blocked_age_s` (Python's
+/// `_block_age`); both null when the session has no dated report.
+fn block_age(summary: &SessionSummary, now: Moment) -> (Option<String>, Option<i64>) {
+    let Some(blocked) = summary.blocked.as_ref() else {
+        return (None, None);
+    };
+    let Some(since) = moment_of(blocked.since.as_deref()) else {
+        return (None, None);
+    };
+    let age = now.seconds_since(since).trunc() as i64;
+    (blocked.since.clone(), Some(age.max(0)))
 }
 
 /// The tail of a session's own raw output log.
@@ -1683,9 +1772,17 @@ where
         send_all(engine, &engine_id, &params.id, &writes_in_order, person)?;
     }
     let verdict = if confirming {
-        confirm_delivery(engine, &engine_id, before.as_deref())
+        let pending = (!text.is_empty()).then_some(text.as_str());
+        let verdict = confirm_delivery(engine, &engine_id, before.as_deref(), pending);
+        if verdict.delivery == delivery::Delivery::Queued && !text.is_empty() && params.submit {
+            // Behind a running turn. The CLI should take it when the turn
+            // ends, but a Claude Code turn can end with the text left in the
+            // box, unsent (WI-1870): watch for that and press Enter.
+            follow_queued(engine, &engine_id, &params.id, &text, person);
+        }
+        verdict
     } else {
-        delivery::judge(submitted, None, &[])
+        delivery::judge(submitted, None, &[], None)
     };
     let entity = found
         .session
@@ -1714,6 +1811,19 @@ where
         "session.input",
         Some(&detail),
     )?;
+    if submitted {
+        // A new instruction answers whatever the session reported it was
+        // blocked on, or supersedes it (WI-1834). A draft is not sent yet.
+        // Python does this from `_input_digest`'s read of the session, which
+        // a failed read skips.
+        match engine.get_session(&engine_id) {
+            Ok(Some(live)) => {
+                clear_block_on(ctx, engine, &found, "input", &reason, Some(live))?;
+            }
+            Ok(None) | Err(VogtError::EngineUnavailable(_)) | Err(VogtError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
     Ok(SessionInputResult {
         id: params.id.clone(),
         engine_session_id: engine_id,
@@ -1820,7 +1930,14 @@ where
     let reason = writes::validate_reason(&params.reason)?;
     let engine = engine_of(ctx)?;
     let found = resolve_target(ctx, &params.id)?;
-    wake_resolved(ctx, engine, &found, &reason)
+    let result = wake_resolved(ctx, engine, &found, &reason)?;
+    // Woken on purpose: whoever woke it is acting on it, so the report it
+    // slept with no longer stands (WI-1834). A session that is still blocked
+    // reports again.
+    if clear_block_on(ctx, engine, &found, "wake", &reason, None)?.is_some() {
+        return wake_resolved(ctx, engine, &found, &reason);
+    }
+    Ok(result)
 }
 
 /// Keep a session awake, or let it hibernate again.
@@ -2496,6 +2613,18 @@ where
     let mut filled = params.clone();
     if !caller("template") {
         filled.template = Some(profile.template.clone());
+        if caller("model")
+            && params
+                .model
+                .as_deref()
+                .is_some_and(|model| CLAUDE_MODEL.is_match(model))
+            && resolved_template_tag(Some(&profile.template)).as_deref() != Some("claude")
+        {
+            // A Claude model on the profile's other agent never runs: klaudia
+            // answers `opus` with 400 "Invalid model name" on every turn
+            // (WI-1852). The caller named the model, so the agent follows it.
+            filled.template = Some("claude".to_string());
+        }
     }
     if !caller("model") {
         filled.model = Some(profile.model.clone());
@@ -2530,6 +2659,69 @@ where
         filled.autopilot = Some(profile.autopilot);
     }
     Ok((filled, profile.read_only, overrides))
+}
+
+/// `opus`, `sonnet`, `haiku` and `fable` are the aliases Claude Code resolves
+/// itself; a full id is `claude-…`.
+static CLAUDE_MODEL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^(claude-.+|opus|sonnet|haiku|fable)$").expect("a fixed pattern")
+});
+/// The bare aliases among those: names only Claude Code resolves.
+static CLAUDE_ALIAS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^(opus|sonnet|haiku|fable)$").expect("a fixed pattern")
+});
+/// Agent templates that are not Claude Code.
+const NON_CLAUDE_AGENTS: [&str; 3] = ["codex", "opencode", "klaudia"];
+
+/// The agent a template name means, after the engine's alias and tag rules.
+///
+/// The engine matches a template by name first and, failing that, by tag, so
+/// `claude` reaches the template tagged `claude` and `Claude Code
+/// (protected)` is the same template by name. The core never sees the
+/// deployment's template list, so the resolution mirrored here is the
+/// built-in set those names come from: a name or tag of `claude`, `codex`,
+/// `opencode` or `klaudia`, compared case-insensitively the way the engine
+/// compares them. A name that names none of them is returned as given,
+/// lower-cased. Ports `_resolved_template_tag`.
+fn resolved_template_tag(template: Option<&str>) -> Option<String> {
+    let folded = template?.trim().to_lowercase();
+    for agent in ["claude", "codex", "opencode", "klaudia"] {
+        if folded == agent || folded.ends_with(&format!("({agent})")) {
+            return Some(agent.to_string());
+        }
+    }
+    // The built-in template's own name, "Claude Code (protected)": the engine
+    // matches a template by its full name before it tries a tag.
+    if folded.starts_with("claude code") {
+        return Some("claude".to_string());
+    }
+    Some(folded)
+}
+
+/// The WI-1852 half of Python's `_refuse_forbidden_model`: a bare Claude Code
+/// alias on an agent template that is not Claude Code is refused before the
+/// engine spawns anything, rather than failing every turn.
+///
+/// The WI-1590 rules in the same Python function (a Claude Code template with
+/// a model it does not speak, and the project's `never_models` and
+/// `forbidden_text` matched against the model) are not ported yet; none of
+/// them can refuse the start this one refuses, since a template is either
+/// Claude Code or not.
+fn refuse_forbidden_model(params: &StartSessionParams) -> Result<(), VogtError> {
+    let template = resolved_template_tag(params.template.as_deref());
+    if let (Some(agent), Some(model)) = (template.as_deref(), params.model.as_deref()) {
+        if NON_CLAUDE_AGENTS.contains(&agent) && CLAUDE_ALIAS.is_match(model) {
+            // The mirror image (WI-1852): `opus` is a name only Claude Code
+            // resolves, and the other agents refuse it on every turn.
+            return Err(VogtError::PolicyRefused(format!(
+                "template {} runs {agent}, which does not resolve the Claude Code alias {}; \
+                 use template 'claude', or name a model that agent takes",
+                py_repr(params.template.as_deref().unwrap_or_default()),
+                py_repr(model),
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The `dispatch.*` values a person last wrote, by key. A key nobody wrote is
@@ -2573,7 +2765,7 @@ where
         return Ok((None, Some("person".to_string())));
     }
     let Some(caller) = session_commit::caller_engine_session_id(ctx)? else {
-        return Ok((None, None));
+        return claimed_oversight(ctx, engine);
     };
     let live = match engine.get_session(&caller) {
         Ok(live) => live,
@@ -2586,6 +2778,45 @@ where
         _ => None,
     };
     Ok((Some(caller), kind))
+}
+
+/// The shared pod token's actor (`agent:pod:<stack>`).
+const POD_ACTOR_PREFIX: &str = "agent:pod:";
+
+/// A pod-token caller's starter, from the session its bridge says it runs in.
+///
+/// An oversight session resumed by hand (`claude --resume` in a shell) runs
+/// with the pod's token, not its own, so it has no session identity and its
+/// starts were recorded with no starter — and its ownership filter lost them
+/// (WI-1852). The MCP bridge names the engine session it runs in; that claim
+/// counts only from the pod token, which already outranks any session, and
+/// only when the engine says that session is live and oversight. It sets
+/// attribution and nothing else.
+fn claimed_oversight<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+) -> Result<(Option<String>, Option<String>), VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let Some(claimed) = ctx.claimed_engine_session.clone() else {
+        return Ok((None, None));
+    };
+    if !ctx.principal.identity_ref.starts_with(POD_ACTOR_PREFIX) {
+        return Ok((None, None));
+    }
+    let live = match engine.get_session(&claimed) {
+        Ok(live) => live,
+        Err(VogtError::EngineUnavailable(_)) => return Ok((None, None)),
+        Err(error) => return Err(error),
+    };
+    match live {
+        Some(live) if live.alive && live.role == "oversight" => {
+            Ok((Some(claimed), Some("oversight".to_string())))
+        }
+        _ => Ok((None, None)),
+    }
 }
 
 /// What the engine was asked to run.
@@ -2617,9 +2848,15 @@ where
     spec.role = params.role.clone();
     spec.work_item = subject.work_item_ref.clone();
     spec.autopilot = autopilot;
+    // A start that names no task takes the one it implies (WI-1854); a
+    // review's Task section is written by `brief_with_task` instead.
+    let mut task = params.task.as_deref().unwrap_or("").trim().to_string();
+    if params.review_of.is_none() && task.is_empty() {
+        task = default_task(params);
+    }
     spec.prompt = Some(brief_with_task(
         &subject.brief.text,
-        params.task.as_deref(),
+        Some(&task),
         autopilot,
         read_only,
         params.review_of.is_some(),
@@ -2657,6 +2894,12 @@ fn brief_with_task(
         text = format!("{}\n\n{}", text.trim_end(), brief::READ_ONLY);
     }
     let task = task.unwrap_or("").trim();
+    if review {
+        // The agent's launch prompt looks for a Task section and otherwise
+        // waits, so a reviewer gets one even when the caller named no task
+        // (WI-1854). The caller's own task stays under "Also asked".
+        text = format!("{}\n\n## Task\n\n{REVIEW_TASK}\n", text.trim_end());
+    }
     if !task.is_empty() {
         let heading = if review { "## Also asked" } else { "## Task" };
         // Where the task contradicts the landing rule the policy wins, and
@@ -2671,6 +2914,40 @@ fn brief_with_task(
         text = format!("{}\n\n{heading}\n\n{task}\n", text.trim_end());
     }
     text
+}
+
+/// The Task section a review start gets (WI-1854): what the review brief
+/// above it already asks, said under the heading the launch prompt looks for.
+const REVIEW_TASK: &str = "Review the branch this item's latest hand-off names, as the Review \
+     section above says, and post the verdict as one `work_comment`: \
+     `no blockers (head <sha>)` or `blockers (head <sha>):` with the list.";
+
+/// How a reason says it is the task (WI-1854): `Task: do the thing`.
+static TASK_PREFIX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?i)^\s*task\s*:\s*").expect("a fixed pattern")
+});
+
+/// The task a start implies when it names none (WI-1854).
+///
+/// An agent is launched to "carry out the Task section, or summarise and
+/// wait", so a start that leaves `task` out opens an agent that idles.
+/// Callers often put the task in `reason` instead; an agent start takes it
+/// from there. A purpose of `review` gets the review task. A plain shell gets
+/// nothing: it has no agent to read a task.
+fn default_task(params: &StartSessionParams) -> String {
+    if params.purpose.as_deref() == Some("review") {
+        let target = params.work_item.as_deref().unwrap_or("the bound work item");
+        return format!(
+            "Review the pull request or branch bound to {target} and \
+             report blockers: post one `work_comment` whose first line is \
+             `no blockers (head <sha>)` or `blockers (head <sha>):` followed \
+             by a numbered list. Make no edits, commits or pushes."
+        );
+    }
+    if params.template.is_none() {
+        return String::new();
+    }
+    TASK_PREFIX.replace(&params.reason, "").trim().to_string()
 }
 
 /// Add the branch a session will use to the item's overlay, idempotently.
@@ -2778,6 +3055,7 @@ where
         alive: asked.then(|| live.is_some_and(|live| live.alive)),
         turn_started_at: None,
         last_output_at: None,
+        done_at: None,
         approval: None,
         blocked: None,
         last_reply_excerpt: None,
@@ -2811,6 +3089,7 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.conversation_agent = live.conversation_agent.clone();
     summary.turn_started_at = live.turn_started_at.clone();
     summary.last_output_at = live.last_output_at.clone();
+    summary.done_at = live.done_at.clone();
     summary.approval = live.approval.as_ref().map(approval_of);
     summary.blocked = live.blocked.as_ref().map(blocked_of);
     summary.hibernation = live.hibernation.as_ref().map(hibernation_of);
@@ -3031,6 +3310,7 @@ fn unlinked_summary(
         alive: Some(session.alive),
         turn_started_at: None,
         last_output_at: None,
+        done_at: None,
         approval: None,
         blocked: None,
         last_reply_excerpt: None,
@@ -3124,29 +3404,271 @@ fn input_bytes(text: &str, keys: &[String], submit: bool) -> i64 {
     (text.len() + keys + usize::from(submit)) as i64
 }
 
+/// Read the session a few times after a submit and judge, stopping at the
+/// first decisive read. An engine that cannot be read leaves the judgement
+/// to what was seen before. `pending` is the submitted text when the input
+/// box should be checked for it.
 fn confirm_delivery(
     engine: &EngineClient,
     engine_id: &str,
     before: Option<&str>,
+    pending: Option<&str>,
 ) -> delivery::Verdict {
-    let mut seen = Vec::new();
+    let mut observed = Vec::new();
+    let mut verdict = delivery::judge(true, before, &observed, pending);
+    if verdict.delivery != delivery::Delivery::Unconfirmed {
+        return verdict;
+    }
     for _ in 0..CONFIRM_READS {
-        std::thread::sleep(CONFIRM_INTERVAL);
+        pause(CONFIRM_INTERVAL);
         let Ok(Some(screen)) = engine.session_screen(engine_id, 0) else {
             break;
         };
-        seen.push(delivery::Observation {
+        observed.push(delivery::Observation {
             activity: screen.activity.clone(),
             lines: screen.lines.clone(),
         });
-        if matches!(
-            screen.activity.as_deref(),
-            Some("running") | Some("awaiting-approval")
+        verdict = delivery::judge(true, before, &observed, pending);
+        // A held box can be the CLI not yet having read the Enter: `stuck`
+        // stands only if it is still held at the last read.
+        if !matches!(
+            verdict.delivery,
+            delivery::Delivery::Unconfirmed | delivery::Delivery::Stuck
         ) {
             break;
         }
     }
-    delivery::judge(true, before, &seen)
+    verdict
+}
+
+/// The pause between delivery reads. Instant under test, as Python's
+/// conftest makes `_pause` instant.
+fn pause(interval: Duration) {
+    if !cfg!(test) {
+        std::thread::sleep(interval);
+    }
+}
+
+/// How long a queued input is followed for its turn to end, and how many
+/// Enters it gets once the agent is at rest with the text still in its box.
+const QUEUED_FOLLOW_S: u64 = 3600;
+const QUEUED_MAX_ENTERS: usize = 2;
+
+/// The longest single wait the engine accepts (its `/wait` caps at 600 s and
+/// refuses more); a longer follow-up waits in chunks of this.
+const ENGINE_WAIT_MAX_S: u64 = 600;
+
+/// Follow a queued input in the background (WI-1870). Under test it runs
+/// inline, as Python's conftest swaps `_follow_queued` for `_submit_queued`
+/// so a test sees what it did. A client whose transport was injected (a
+/// stand-in) cannot cross a thread, so it is followed inline too.
+fn follow_queued(engine: &EngineClient, engine_id: &str, named: &str, text: &str, person: bool) {
+    let detached = if cfg!(test) { None } else { engine.detached() };
+    let Some(detached) = detached else {
+        submit_queued_logged(engine, engine_id, named, text, person);
+        return;
+    };
+    let (engine_id, named, text) = (engine_id.to_string(), named.to_string(), text.to_string());
+    let spawned = std::thread::Builder::new()
+        .name(format!("vogt-queued-input-{engine_id}"))
+        .spawn(move || {
+            let engine = detached.client();
+            submit_queued_logged(&engine, &engine_id, &named, &text, person);
+        });
+    if let Err(error) = spawned {
+        tracing::error!(
+            target: "vogt.sessions",
+            "following queued input failed to start: {error}"
+        );
+    }
+}
+
+/// The follow-up thread's body: nothing it raises may die silently.
+fn submit_queued_logged(
+    engine: &EngineClient,
+    engine_id: &str,
+    named: &str,
+    text: &str,
+    person: bool,
+) {
+    if let Err(error) = submit_queued(engine, engine_id, named, text, person) {
+        tracing::error!(
+            target: "vogt.sessions",
+            "following queued input to {named} failed: {error}"
+        );
+    }
+}
+
+/// Wait up to `QUEUED_FOLLOW_S` for the session to be ready, in waits of at
+/// most `ENGINE_WAIT_MAX_S` each. False when it never was, or the engine no
+/// longer holds it.
+fn wait_turn_end(engine: &EngineClient, engine_id: &str) -> Result<bool, VogtError> {
+    let chunks = QUEUED_FOLLOW_S.div_ceil(ENGINE_WAIT_MAX_S);
+    for _ in 0..chunks {
+        let Some(waited) =
+            engine.wait_session(engine_id, "ready", Duration::from_secs(ENGINE_WAIT_MAX_S))?
+        else {
+            return Ok(false);
+        };
+        if waited.outcome == "ready" {
+            return Ok(true);
+        }
+        if waited.outcome != "timeout" {
+            // Exited, hibernated, refused: nothing left to submit to.
+            return Ok(false);
+        }
+    }
+    Ok(false)
+}
+
+/// Once the running turn ends, make sure the queued text was taken (WI-1870).
+///
+/// Waits for the agent to be ready, then reads its screen: a box that no
+/// longer holds the text means the CLI took it. A box still holding it, with
+/// no dialog or approval showing, gets an Enter, at most `QUEUED_MAX_ENTERS`
+/// times. Still held after that is `stuck`; the sweep shows such a session
+/// as "input pending" from its screen.
+fn submit_queued(
+    engine: &EngineClient,
+    engine_id: &str,
+    named: &str,
+    text: &str,
+    person: bool,
+) -> Result<delivery::Delivery, VogtError> {
+    let attempt = || -> Result<Option<delivery::Delivery>, VogtError> {
+        if !wait_turn_end(engine, engine_id)? {
+            return Ok(Some(delivery::Delivery::Queued));
+        }
+        for _ in 0..QUEUED_MAX_ENTERS {
+            let Some(screen) = engine.session_screen(engine_id, 0)? else {
+                return Ok(Some(delivery::Delivery::Unconfirmed));
+            };
+            let seen = delivery::Observation {
+                activity: screen.activity.clone(),
+                lines: screen.lines.clone(),
+            };
+            if !delivery::safe_to_resubmit(&seen, text) {
+                return Ok(Some(delivery::Delivery::Delivered));
+            }
+            send_all(engine, engine_id, named, &[(String::new(), true)], person)?;
+            let verdict =
+                confirm_delivery(engine, engine_id, Some("waiting-for-input"), Some(text));
+            if verdict.delivery == delivery::Delivery::Delivered {
+                tracing::info!(
+                    target: "vogt.sessions",
+                    "queued input to {named} submitted by a follow-up Enter"
+                );
+                return Ok(Some(delivery::Delivery::Delivered));
+            }
+        }
+        Ok(None)
+    };
+    match attempt() {
+        Ok(Some(found)) => return Ok(found),
+        Ok(None) => {}
+        Err(VogtError::EngineUnavailable(_) | VogtError::NotFound(_)) => {
+            return Ok(delivery::Delivery::Unconfirmed)
+        }
+        Err(error) => return Err(error),
+    }
+    tracing::warn!(
+        target: "vogt.sessions",
+        "queued input to {named} is stuck in its input box"
+    );
+    Ok(delivery::Delivery::Stuck)
+}
+
+/// `submit_queued` for the service tests, which drive it directly as
+/// `tests/test_delivery.py` drives `_submit_queued`.
+#[cfg(test)]
+pub(crate) fn tests_submit_queued(
+    engine: &EngineClient,
+    engine_id: &str,
+    named: &str,
+    text: &str,
+) -> Result<delivery::Delivery, VogtError> {
+    submit_queued(engine, engine_id, named, text, false)
+}
+
+/// Clear `target`'s blocked report because someone acted on the session
+/// (WI-1834): it was given new input, or woken. The report it replaces stays
+/// in the audit, as an unblock naming the cause and what it said.
+///
+/// A session typing into or waking itself clears nothing, and a report that
+/// cannot be read or cleared is left for the sweep's staleness rule: this
+/// never fails the input or wake it rides on. `current` is a read of the
+/// session the caller already holds, to spare a second one. The session as
+/// cleared when one was, else `None`.
+fn clear_block_on<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    target: &Target,
+    cause: &str,
+    reason: &str,
+    current: Option<EngineSession>,
+) -> Result<Option<EngineSession>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let engine_id = &target.engine_session_id;
+    let own = ctx.principal.identity_ref == format!("agent:session:{engine_id}")
+        || target.session.as_ref().is_some_and(|session| {
+            ctx.principal.identity_ref == format!("agent:session:{}", session.id)
+        });
+    if own {
+        return Ok(None);
+    }
+    let read = || -> Result<Option<(EngineBlocked, EngineSession)>, VogtError> {
+        let current = match current {
+            Some(current) => current,
+            None => match engine.get_session(engine_id)? {
+                Some(current) => current,
+                None => return Ok(None),
+            },
+        };
+        let Some(was) = current.blocked else {
+            return Ok(None);
+        };
+        Ok(engine
+            .set_blocked(engine_id, false, None, &[])?
+            .map(|cleared| (was, cleared)))
+    };
+    let (was, cleared) = match read() {
+        Ok(Some(found)) => found,
+        Ok(None) => return Ok(None),
+        Err(VogtError::EngineUnavailable(_) | VogtError::Conflict(_) | VogtError::NotFound(_)) => {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    let entity = target
+        .session
+        .as_ref()
+        .map(|session| session.id.clone())
+        .unwrap_or_else(|| engine_id.clone());
+    let outcome = json!({
+        "engine_session_id": engine_id,
+        "linked": target.session.is_some(),
+        "blocker": null,
+        "items": [],
+        "cleared_by": cause,
+        "was_blocker": was.reason,
+        "was_items": was.items,
+        "was_since": was.since,
+    });
+    let mut writing = write_of(ctx);
+    audited_action(
+        &mut writing,
+        "session.report_unblocked",
+        &format!("cleared by {cause}: {reason}"),
+        "session",
+        &entity,
+        &outcome,
+        "session.unblocked",
+        None,
+    )?;
+    Ok(Some(cleared))
 }
 
 /// One engine write per chunk. `Ok(false)` is the engine saying it has no live

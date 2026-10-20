@@ -506,6 +506,13 @@ async fn dispatch<C: Clock, I: IdFactory>(
         .get("if-none-match")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    // The engine session the MCP bridge says it runs in (WI-1852): read
+    // here, before the body takes the request, and set on the context below.
+    let claimed_session = request
+        .headers()
+        .get(crate::application::context::HEADER_ENGINE_SESSION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let server = request
         .extensions()
         .get::<ServerScope>()
@@ -677,7 +684,8 @@ async fn dispatch<C: Clock, I: IdFactory>(
                 .expect("a fixed response builds");
         }
     };
-    let built = context_for(&request_store, &state, &grant, principal, build);
+    let built = context_for(&request_store, &state, &grant, principal, build)
+        .map(|built| built.with_claimed_engine_session(claimed_session.as_deref()));
     // Conditional reads answer after authentication and authorization: an old
     // validator must never turn a refused request into a 304.
     let etag = if etag::is_conditional_read(operation.name) {

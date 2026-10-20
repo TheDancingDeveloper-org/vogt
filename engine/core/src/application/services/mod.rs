@@ -149,6 +149,8 @@ where
 }
 
 #[cfg(test)]
+mod session_drive_test;
+#[cfg(test)]
 mod sessions_test;
 
 #[cfg(test)]

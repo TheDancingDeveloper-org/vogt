@@ -329,6 +329,7 @@ fn summarize_asked<C: Clock, I: IdFactory>(
         alive: asked.then(|| live.is_some_and(|live| live.alive)),
         turn_started_at: None,
         last_output_at: None,
+        done_at: None,
         approval: None,
         blocked: None,
         hibernation: None,
@@ -391,6 +392,7 @@ fn unlinked_summary<C: Clock, I: IdFactory>(
         alive: Some(session.alive),
         turn_started_at: None,
         last_output_at: None,
+        done_at: None,
         approval: None,
         blocked: None,
         hibernation: None,
@@ -424,6 +426,7 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.conversation_agent = live.conversation_agent.clone();
     summary.turn_started_at = live.turn_started_at.clone();
     summary.last_output_at = live.last_output_at.clone();
+    summary.done_at = live.done_at.clone();
     summary.approval = live.approval.as_ref().map(|approval| SessionApproval {
         question: approval.question.clone(),
         command_excerpt: approval.command_excerpt.clone(),

@@ -48,7 +48,7 @@ pub struct StartSessionParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub template: Option<String>,
-    /// What the session's agent should do, in the user's words. Folded into the brief as its Task section; an agent template (Claude Code, Codex, OpenCode, Klaudia) is started with a first prompt telling it to read the brief and carry that task out, so 'start a session on X and check its containers' opens an agent already checking them. A plain shell only gets the brief's path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with `template` when it is something to carry out.
+    /// What the session's agent should do, in the user's words. Folded into the brief as its Task section; an agent template (Claude Code, Codex, OpenCode, Klaudia) is started with a first prompt telling it to read the brief and carry that task out, so 'start a session on X and check its containers' opens an agent already checking them. A plain shell only gets the brief's path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with `template` when it is something to carry out. Omitted on an agent start, the task is taken from `reason` (a leading `Task:` dropped); a `review` purpose gets a default review task.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub task: Option<String>,
@@ -268,7 +268,7 @@ pub struct SessionInputResult {
     /// Enter was pressed — by `submit` or as one of the `keys`.
     #[serde(default)]
     pub submitted: bool,
-    /// typed (no Enter: the text sits in the input) / delivered (a turn started) / queued (behind a running turn) / unconfirmed (sent; nothing observable yet). A refused input is an error, not a value.
+    /// typed (no Enter: the text sits in the input) / delivered (a turn started) / queued (behind a running turn; once it ends Vogt checks the input box and presses Enter if the text is still there) / stuck (at rest with the text still in the input box: the submit did not land; the sweep shows it as input pending) / unconfirmed (sent; nothing observable yet). A refused input is an error, not a value.
     #[serde(default = "default_session_input_result_delivery")]
     pub delivery: String,
     /// What `delivery` was judged from.
