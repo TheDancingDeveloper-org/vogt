@@ -2345,6 +2345,330 @@
     "auth": "admin",
     "status": 200
    }
+  },
+  {
+   "operation": "contract.adopt",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/contract/adopt",
+    "auth": "admin",
+    "body": {
+     "project": "second",
+     "reason": "parity harness"
+    },
+    "status": 200
+   },
+   "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
+  },
+  {
+   "operation": "contract.inapplicable",
+   "params": {
+    "project": "parity",
+    "rule": "required_file",
+    "target": "README.md",
+    "reason": "parity harness exemption"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/contract/inapplicable",
+    "auth": "admin",
+    "body": {
+     "project": "second",
+     "rule": "required_file",
+     "target": "README.md",
+     "reason": "parity harness exemption"
+    },
+    "status": 200
+   },
+   "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
+  },
+  {
+   "operation": "compliance",
+   "params": {
+    "project": "parity"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "why": "an exempted criterion reports applicable false; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)",
+   "http": {
+    "method": "GET",
+    "path": "/api/compliance?project=second",
+    "auth": "admin",
+    "status": 200
+   }
+  },
+  {
+   "operation": "contract.check",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "why": "RB2-4: an exempted criterion reports applicable false; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)",
+   "http": {
+    "method": "POST",
+    "path": "/api/contract/check",
+    "auth": "admin",
+    "body": {
+     "project": "second",
+     "reason": "parity harness"
+    },
+    "status": 200
+   }
+  },
+  {
+   "operation": "contract.applicable",
+   "params": {
+    "project": "parity",
+    "rule": "required_file",
+    "target": "README.md",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/contract/applicable",
+    "auth": "admin",
+    "body": {
+     "project": "second",
+     "rule": "required_file",
+     "target": "README.md",
+     "reason": "parity harness"
+    },
+    "status": 200
+   },
+   "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
+  },
+  {
+   "operation": "contract.decline",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/contract/decline",
+    "auth": "admin",
+    "body": {
+     "project": "second",
+     "reason": "parity harness"
+    },
+    "status": 200
+   },
+   "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
+  },
+  {
+   "operation": "contract.adopt",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/contract/adopt",
+    "auth": "admin",
+    "body": {
+     "project": "second",
+     "reason": "parity harness"
+    },
+    "status": 200
+   },
+   "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
+  },
+  {
+   "operation": "observations.list",
+   "params": {},
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/observations",
+    "auth": "admin",
+    "status": 200
+   }
+  },
+  {
+   "operation": "suppress",
+   "params": {
+    "subject": "git:parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/suppressions",
+    "auth": "admin",
+    "body": {
+     "subject": "git:parity",
+     "reason": "parity harness"
+    },
+    "status": 200
+   }
+  },
+  {
+   "operation": "suppression.list",
+   "params": {
+    "include_revoked": true
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/suppressions?include_revoked=true",
+    "auth": "admin",
+    "status": 200
+   }
+  },
+  {
+   "operation": "suppression.revoke",
+   "params": {
+    "id": "{seen:suppress#suppression.id}",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/suppressions/revoke",
+    "auth": "admin",
+    "body": {
+     "id": "sup_0001",
+     "reason": "parity harness"
+    },
+    "status": 200
+   }
+  },
+  {
+   "operation": "suppression.list",
+   "params": {
+    "include_revoked": true
+   },
+   "expect": {
+    "exit": 0
+   },
+   "why": "a revoked suppression stays listed with its revocation",
+   "http": {
+    "method": "GET",
+    "path": "/api/suppressions?include_revoked=true",
+    "auth": "admin",
+    "status": 200
+   }
+  },
+  {
+   "operation": "observations.prune",
+   "params": {
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/observations/prune",
+    "auth": "admin",
+    "body": {
+     "reason": "parity harness"
+    },
+    "status": 200
+   }
+  },
+  {
+   "operation": "drift.detect",
+   "params": {
+    "auto_accept": false,
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "POST",
+    "path": "/api/drift/detect",
+    "auth": "admin",
+    "body": {
+     "auto_accept": false,
+     "reason": "parity harness"
+    },
+    "status": 200
+   }
+  },
+  {
+   "operation": "drift.list",
+   "params": {},
+   "expect": {
+    "exit": 0
+   },
+   "http": {
+    "method": "GET",
+    "path": "/api/drift",
+    "auth": "admin",
+    "status": 200
+   }
+  },
+  {
+   "operation": "drift.resolve",
+   "params": {
+    "id": "dft_0001",
+    "resolution": "rejected",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 1,
+    "error_code": "not_found"
+   },
+   "why": "no proposal was raised, so resolving one is refused as not found",
+   "http": {
+    "method": "POST",
+    "path": "/api/drift/resolve",
+    "auth": "admin",
+    "body": {
+     "id": "dft_0001",
+     "resolution": "rejected",
+     "reason": "parity harness"
+    },
+    "status": 404,
+    "error_code": "not_found"
+   }
+  },
+  {
+   "operation": "dump.s5",
+   "dump": true,
+   "tables": [
+    "suppressions",
+    "contract_exemptions",
+    "drift_proposals",
+    "observations",
+    "latest_observations",
+    "latest_dep_refs",
+    "sweeps"
+   ],
+   "why": "declared (suppressions, contract exemptions, drift proposals) and observed (observations, promotions, sweeps) after the S5 block"
   }
  ]
 }

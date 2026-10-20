@@ -204,10 +204,11 @@ fn compliance<C: Clock, I: IdFactory>(
         .iter()
         .map(|exemption| (exemption.rule.clone(), exemption.target.clone()))
         .collect();
-    let now = clock_now(&ctx.clock);
+    // The clock is read only when there is a check to age, as Python does: a
+    // read on a never-checked project would shift every later timestamp.
     let age = project
         .compliance_checked_at
-        .map(|checked| now.seconds_since(checked) as i64);
+        .map(|checked| clock_now(&ctx.clock).seconds_since(checked) as i64);
     let failing = recorded_failing(&ctx.observed, &project.id)?
         .into_iter()
         .filter(|criterion| {

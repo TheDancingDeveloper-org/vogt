@@ -1268,6 +1268,54 @@ mod tests {
         assert_eq!(report["new"], 1, "{swept}");
     }
 
+    /// Coverage keeps "not collected" apart from "no data". A collector that
+    /// has never swept says `never_run` with no time and no projects; one that
+    /// swept a project and found nothing says `ok` with when and how many, so
+    /// an empty result is never read as a collector that did not look.
+    #[test]
+    fn coverage_keeps_not_collected_distinct_from_no_data() {
+        let built = opened();
+        let root = std::env::temp_dir().join(format!(
+            "vogt-coverage-empty-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        register(&built, "alpha", &root, None);
+
+        let entry = |answer: &Value, name: &str| -> Value {
+            answer["collectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["collector"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} missing from {answer}"))
+        };
+        let before = crate::application::coverage::coverage_op(&built, json!({})).unwrap();
+        let never = entry(&before, "source-markers");
+        assert_eq!(never["status"], "never_run", "{never}");
+        assert!(never["last_swept_at"].is_null(), "{never}");
+        assert!(never["age_seconds"].is_null(), "{never}");
+        assert_eq!(never["projects"], 0, "{never}");
+
+        let swept = sweep_op(&built, json!({"collectors": ["source-markers"]})).unwrap();
+        let report = &swept["reports"].as_array().unwrap()[0];
+        assert_eq!(report["outcome"], "ok", "{swept}");
+        assert_eq!(report["new"], 0, "an empty project yields nothing: {swept}");
+
+        let after = crate::application::coverage::coverage_op(&built, json!({})).unwrap();
+        let empty = entry(&after, "source-markers");
+        assert_eq!(empty["status"], "ok", "{empty}");
+        assert!(empty["last_swept_at"].is_string(), "{empty}");
+        assert!(empty["age_seconds"].is_i64(), "{empty}");
+        assert_eq!(empty["projects"], 1, "{empty}");
+        assert_eq!(empty["never_swept"], 0, "{empty}");
+        let other = entry(&after, "dep-refs");
+        assert_eq!(other["status"], "never_run", "{other}");
+        assert!(other["last_swept_at"].is_null(), "{other}");
+    }
+
     /// Coverage lists the unported collectors as `never_run` while a forge or a
     /// deploy lane is configured. Omitting them reads as "not configured", which
     /// is what Python says only when neither is.

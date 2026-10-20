@@ -394,5 +394,113 @@
     "reason": "parity harness",
     "revision": 32,
     "txn_id": "txn_0044"
+  },
+  {
+    "actor_id": "act_0001",
+    "at": "2026-01-02T03:04:46+00:00",
+    "entity_id": "prj_0001",
+    "entity_kind": "project",
+    "id": "aud_0034",
+    "operation": "contract.adopt",
+    "payload_digest": "<payload-digest>",
+    "reason": "parity harness",
+    "revision": 33,
+    "txn_id": "txn_0045"
+  },
+  {
+    "actor_id": "act_0001",
+    "at": "2026-01-02T03:04:48+00:00",
+    "entity_id": "prj_0001",
+    "entity_kind": "project",
+    "id": "aud_0035",
+    "operation": "contract.inapplicable",
+    "payload_digest": "<payload-digest>",
+    "reason": "parity harness exemption",
+    "revision": 34,
+    "txn_id": "txn_0046"
+  },
+  {
+    "actor_id": "act_0001",
+    "at": "2026-01-02T03:04:51+00:00",
+    "entity_id": "prj_0001",
+    "entity_kind": "project",
+    "id": "aud_0036",
+    "operation": "contract.check",
+    "payload_digest": "<payload-digest>",
+    "reason": "parity harness",
+    "revision": 35,
+    "txn_id": "txn_0047"
+  },
+  {
+    "actor_id": "act_0001",
+    "at": "2026-01-02T03:04:52+00:00",
+    "entity_id": "prj_0001",
+    "entity_kind": "project",
+    "id": "aud_0037",
+    "operation": "contract.applicable",
+    "payload_digest": "<payload-digest>",
+    "reason": "parity harness",
+    "revision": 36,
+    "txn_id": "txn_0048"
+  },
+  {
+    "actor_id": "act_0001",
+    "at": "2026-01-02T03:04:54+00:00",
+    "entity_id": "prj_0001",
+    "entity_kind": "project",
+    "id": "aud_0038",
+    "operation": "contract.decline",
+    "payload_digest": "<payload-digest>",
+    "reason": "parity harness",
+    "revision": 37,
+    "txn_id": "txn_0049"
+  },
+  {
+    "actor_id": "act_0001",
+    "at": "2026-01-02T03:04:56+00:00",
+    "entity_id": "prj_0001",
+    "entity_kind": "project",
+    "id": "aud_0039",
+    "operation": "contract.adopt",
+    "payload_digest": "<payload-digest>",
+    "reason": "parity harness",
+    "revision": 38,
+    "txn_id": "txn_0050"
+  },
+  {
+    "actor_id": "act_0001",
+    "at": "2026-01-02T03:04:58+00:00",
+    "entity_id": "sup_0001",
+    "entity_kind": "suppression",
+    "id": "aud_0040",
+    "operation": "suppress",
+    "payload_digest": "<payload-digest>",
+    "reason": "parity harness",
+    "revision": 39,
+    "txn_id": "txn_0051"
+  },
+  {
+    "actor_id": "act_0001",
+    "at": "2026-01-02T03:05:00+00:00",
+    "entity_id": "sup_0001",
+    "entity_kind": "suppression",
+    "id": "aud_0041",
+    "operation": "suppression.revoke",
+    "payload_digest": "<payload-digest>",
+    "reason": "parity harness",
+    "revision": 40,
+    "txn_id": "txn_0052"
+  },
+  {
+    "actor_id": "act_0001",
+    "at": "2026-01-02T03:05:02+00:00",
+    "entity_id": "observations",
+    "entity_kind": "instance",
+    "id": "aud_0042",
+    "operation": "observations.prune",
+    "payload_digest": "<payload-digest>",
+    "reason": "parity harness",
+    "revision": 41,
+    "txn_id": "txn_0053"
   }
 ]
