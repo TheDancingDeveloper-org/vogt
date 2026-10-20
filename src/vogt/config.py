@@ -892,7 +892,7 @@ class VogtConfig(BaseSettings):
         json_schema_extra={"default_policy": "behaviour"},
     )
     cold_wake_ttl_seconds: dict[str, int] = Field(
-        default_factory=lambda: {"anthropic": 300, "deepseek": 300},
+        default={"anthropic": 300, "deepseek": 300},
         description=(
             "Prompt-cache lifetime per provider, in seconds (WI-2037): a "
             "session hibernated longer than this is treated as cold. Keys are "

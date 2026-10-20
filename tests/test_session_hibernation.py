@@ -20,6 +20,8 @@ import pytest
 from vogt.adapters.engine import EngineClient
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    CommentParams,
+    CreateWorkParams,
     HibernateSessionParams,
     KeepSessionAwakeParams,
     ListAuditParams,
@@ -35,6 +37,8 @@ from vogt.application.models import (
     WakeSessionParams,
 )
 from vogt.application.services import (
+    comment_work,
+    create_work,
     hibernate_session,
     keep_session_awake,
     list_audit,
@@ -50,6 +54,7 @@ from vogt.application.services import (
     wake_session,
 )
 from vogt.core.auth import hash_token
+from vogt.core.entities import HandoffFields
 from vogt.core.principal import Principal
 from vogt.errors import Conflict, RoleRefused
 
@@ -107,6 +112,10 @@ class Engine:
         #: The successor recorded by the last hibernate that named one.
         self.superseded_by: dict[str, str] = {}
         self.blocked: dict[str, dict[str, Any]] = {}
+        #: When a hibernated session went to sleep, and its last economics
+        #: reading (WI-2037), keyed by engine id.
+        self.hibernated_at = "2026-10-05T01:00:00Z"
+        self.economics: dict[str, dict[str, Any]] = {}
 
     def summary(self, engine_id: str) -> dict[str, Any]:
         asleep = engine_id in self.hibernated
@@ -123,11 +132,16 @@ class Engine:
                 "id": engine_id,
             },
             "keep_awake": engine_id in self.keep_awake,
+            **(
+                {"economics": self.economics[engine_id]}
+                if engine_id in self.economics
+                else {}
+            ),
             **({"role": "oversight"} if engine_id in self.oversight else {}),
             **(
                 {
                     "hibernation": {
-                        "at": "2026-10-05T01:00:00Z",
+                        "at": self.hibernated_at,
                         "trigger": "manual",
                         "reason": "idle",
                         "resumable": True,
@@ -1011,3 +1025,158 @@ def test_set_role_nominates_any_session_and_is_audited(
     )
     assert back.session.role == "worker"
     assert back.session.keep_awake is False, "removing oversight lifts its pin"
+
+
+# -- cold-wake compaction (WI-2037) -----------------------------------------
+
+#: An hour before the test clock's start: past the 5-minute Anthropic TTL.
+COLD = "2026-08-12T04:00:00Z"
+
+
+def _compacting(ctx: AppContext, **update: Any) -> AppContext:
+    config = ctx.config.model_copy(update={"cold_wake_compaction": True, **update})
+    return dataclasses.replace(ctx, config=config)
+
+
+def _cold_wake_session(
+    ctx: AppContext, engine: Engine, **start: Any
+) -> tuple[str, str]:
+    item = create_work(
+        ctx,
+        CreateWorkParams(
+            kind="feature",
+            title="Cache-aware compaction",
+            project="vogt",
+            local_only=True,
+            reason=WHY,
+        ),
+    ).item
+    comment_work(
+        ctx,
+        CommentParams(
+            ref=item.ref,
+            body="Engine half pushed; core half next.",
+            kind="handoff",
+            handoff=HandoffFields(
+                branch="wi-2037-cold-wake-compaction",
+                remaining=["wire the core wake path"],
+            ),
+            reason=WHY,
+        ),
+    )
+    result = start_session(
+        ctx,
+        StartSessionParams(
+            work_item=item.ref,
+            template="claude",
+            reason=WHY,
+            **start,
+        ),
+    )
+    engine.hibernated_at = COLD
+    engine.economics[result.session.engine_session_id] = {"context_tokens": 180_000}
+    return result.session.id, result.session.engine_session_id
+
+
+def _last_wake(engine: Engine) -> dict[str, Any]:
+    return [r for r in engine.sent if r["path"].endswith("/wake")][-1]["body"]
+
+
+def _woken_summary(ctx: AppContext) -> dict[str, Any]:
+    woken = [
+        e
+        for e in list_events(ctx, ListEventsParams()).events
+        if e.kind == "session.woken"
+    ]
+    return woken[-1].summary
+
+
+def test_a_cold_wake_of_a_large_session_starts_from_a_summary(
+    wired: AppContext, engine: Engine
+) -> None:
+    ctx = _compacting(wired)
+    ses_id, _ = _cold_wake_session(ctx, engine)
+    hibernate_session(ctx, HibernateSessionParams(id=ses_id, reason=WHY))
+
+    wake_session(ctx, WakeSessionParams(id=ses_id, reason=WHY))
+
+    prompt = _last_wake(engine)["fresh_prompt"]
+    assert prompt.startswith("# Resumed from a summary (cold wake)")
+    assert "Cache-aware compaction" in prompt
+    assert "Engine half pushed; core half next." in prompt
+    assert "branch: wi-2037-cold-wake-compaction" in prompt
+    assert "- wire the core wake path" in prompt
+    audit = _woken_summary(ctx)["cold_wake"]
+    assert audit["outcome"] == "compact"
+    assert audit["provider"] == "anthropic"
+    assert audit["ttl_seconds"] == 300
+    assert audit["context_tokens"] == 180_000
+    # The measured saving: the first turn re-reads the summary, not 180k tokens.
+    assert len(prompt) // 4 < 180_000 // 50
+
+
+def test_compaction_is_off_unless_configured(wired: AppContext, engine: Engine) -> None:
+    ses_id, _ = _cold_wake_session(wired, engine)
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+
+    wake_session(wired, WakeSessionParams(id=ses_id, reason=WHY))
+
+    assert "fresh_prompt" not in _last_wake(engine)
+    assert _woken_summary(wired)["cold_wake"]["outcome"] == "disabled"
+
+
+def test_a_session_opted_out_resumes_its_transcript(
+    wired: AppContext, engine: Engine
+) -> None:
+    ctx = _compacting(wired)
+    ses_id, _ = _cold_wake_session(ctx, engine, cold_wake_opt_out=True)
+    hibernate_session(ctx, HibernateSessionParams(id=ses_id, reason=WHY))
+
+    wake_session(ctx, WakeSessionParams(id=ses_id, reason=WHY))
+
+    assert "fresh_prompt" not in _last_wake(engine)
+    assert _woken_summary(ctx)["cold_wake"]["outcome"] == "opted-out"
+
+
+def test_hibernate_changes_the_opt_out(wired: AppContext, engine: Engine) -> None:
+    ctx = _compacting(wired)
+    ses_id, _ = _cold_wake_session(ctx, engine)
+    hibernate_session(
+        ctx, HibernateSessionParams(id=ses_id, cold_wake_opt_out=True, reason=WHY)
+    )
+    wake_session(ctx, WakeSessionParams(id=ses_id, reason=WHY))
+    assert _woken_summary(ctx)["cold_wake"]["outcome"] == "opted-out"
+
+    hibernate_session(
+        ctx, HibernateSessionParams(id=ses_id, cold_wake_opt_out=False, reason=WHY)
+    )
+    wake_session(ctx, WakeSessionParams(id=ses_id, reason=WHY))
+    assert _woken_summary(ctx)["cold_wake"]["outcome"] == "compact"
+
+
+def test_a_warm_or_small_session_is_resumed(wired: AppContext, engine: Engine) -> None:
+    ctx = _compacting(wired, cold_wake_ttl_seconds={"anthropic": 3600 * 24 * 365})
+    ses_id, engine_id = _cold_wake_session(ctx, engine)
+    hibernate_session(ctx, HibernateSessionParams(id=ses_id, reason=WHY))
+    wake_session(ctx, WakeSessionParams(id=ses_id, reason=WHY))
+    assert "fresh_prompt" not in _last_wake(engine)
+    assert _woken_summary(ctx)["cold_wake"]["outcome"] == "warm"
+
+    small = _compacting(wired)
+    engine.economics[engine_id] = {"context_tokens": 20_000}
+    hibernate_session(small, HibernateSessionParams(id=ses_id, reason=WHY))
+    wake_session(small, WakeSessionParams(id=ses_id, reason=WHY))
+    assert "fresh_prompt" not in _last_wake(engine)
+    assert _woken_summary(small)["cold_wake"]["outcome"] == "small"
+
+
+def test_typing_into_a_cold_session_wakes_it_compacted(
+    wired: AppContext, engine: Engine
+) -> None:
+    ctx = _compacting(wired)
+    ses_id, _ = _cold_wake_session(ctx, engine)
+    hibernate_session(ctx, HibernateSessionParams(id=ses_id, reason=WHY))
+
+    session_input(ctx, SessionInputParams(id=ses_id, text="carry on", reason=WHY))
+
+    assert "fresh_prompt" in _last_wake(engine)

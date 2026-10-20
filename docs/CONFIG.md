@@ -63,6 +63,9 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
 | `watch_interval_seconds` | `VOGT_WATCH_INTERVAL_SECONDS` | integer | `60` | behaviour |
+| `cold_wake_compaction` | `VOGT_COLD_WAKE_COMPACTION` | boolean | `False` | behaviour |
+| `cold_wake_threshold_tokens` | `VOGT_COLD_WAKE_THRESHOLD_TOKENS` | integer | `100000` | behaviour |
+| `cold_wake_ttl_seconds` | `VOGT_COLD_WAKE_TTL_SECONDS` | map of string to integer | `{'anthropic': 300, 'deepseek': 300}` | behaviour |
 | `forge_posture_interval_seconds` | `VOGT_FORGE_POSTURE_INTERVAL_SECONDS` | integer | `86400` | behaviour |
 | `github_rate_limit_floor` | `VOGT_GITHUB_RATE_LIMIT_FLOOR` | integer | `500` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
@@ -279,6 +282,18 @@ How often `serve` runs collectors in the background. Zero disables the schedule,
 ### `watch_interval_seconds`
 
 How often `serve` evaluates armed watches (WI-2036) and wakes the sessions whose trigger fired. Zero disables the loop: watches are stored but nothing wakes. Vogt-side triggers (a work item's state, a session ending) fire within this interval; forge triggers read what the sweep observed, so they also wait on `sweep_interval_seconds`.
+
+### `cold_wake_compaction`
+
+Cache-aware compaction on a cold wake (WI-2037). When on, waking a hibernated session whose provider prompt cache has expired (hibernated longer than its `cold_wake_ttl_seconds`) and whose context is at least `cold_wake_threshold_tokens` starts a fresh conversation seeded with a structured summary — task, state, decisions, files, branch, next step — instead of resuming the transcript at full uncached price. Off by default; a session opts out with `cold_wake_opt_out` at start or hibernate.
+
+### `cold_wake_threshold_tokens`
+
+The context size, in tokens, at or above which a cold wake is compacted (WI-2037). A smaller conversation is cheap enough to re-read and is resumed as it is.
+
+### `cold_wake_ttl_seconds`
+
+Prompt-cache lifetime per provider, in seconds (WI-2037): a session hibernated longer than this is treated as cold. Keys are `anthropic`, `openai`, `deepseek`, `google`, … A provider with no entry is never compacted, because its cache cannot be judged. Anthropic's 1-hour cache tier is `anthropic = 3600`.
 
 ### `forge_posture_interval_seconds`
 

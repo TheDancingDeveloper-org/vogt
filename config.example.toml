@@ -212,6 +212,18 @@
 # default policy: behaviour
 # watch_interval_seconds = 60
 
+# Cache-aware compaction on a cold wake (WI-2037). When on, waking a hibernated session whose provider prompt cache has expired (hibernated longer than its `cold_wake_ttl_seconds`) and whose context is at least `cold_wake_threshold_tokens` starts a fresh conversation seeded with a structured summary — task, state, decisions, files, branch, next step — instead of resuming the transcript at full uncached price. Off by default; a session opts out with `cold_wake_opt_out` at start or hibernate.
+# default policy: behaviour
+# cold_wake_compaction = false
+
+# The context size, in tokens, at or above which a cold wake is compacted (WI-2037). A smaller conversation is cheap enough to re-read and is resumed as it is.
+# default policy: behaviour
+# cold_wake_threshold_tokens = 100000
+
+# Prompt-cache lifetime per provider, in seconds (WI-2037): a session hibernated longer than this is treated as cold. Keys are `anthropic`, `openai`, `deepseek`, `google`, … A provider with no entry is never compacted, because its cache cannot be judged. Anthropic's 1-hour cache tier is `anthropic = 3600`.
+# default policy: behaviour
+# cold_wake_ttl_seconds = {"anthropic": 300, "deepseek": 300}
+
 # How often the forge posture collector re-reads a repository's update-automation settings (version-update config, vulnerability alerts, automated security fixes). Posture changes rarely and cost several API calls per repository, so the default is daily; sweeps in between skip it. Zero reads it on every sweep.
 # default policy: behaviour
 # forge_posture_interval_seconds = 86400
