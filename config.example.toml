@@ -208,6 +208,10 @@
 # default policy: behaviour
 # sweep_interval_seconds = 900
 
+# How often `serve` evaluates armed watches (WI-2036) and wakes the sessions whose trigger fired. Zero disables the loop: watches are stored but nothing wakes. Vogt-side triggers (a work item's state, a session ending) fire within this interval; forge triggers read what the sweep observed, so they also wait on `sweep_interval_seconds`.
+# default policy: behaviour
+# watch_interval_seconds = 60
+
 # How often the forge posture collector re-reads a repository's update-automation settings (version-update config, vulnerability alerts, automated security fixes). Posture changes rarely and cost several API calls per repository, so the default is daily; sweeps in between skip it. Zero reads it on every sweep.
 # default policy: behaviour
 # forge_posture_interval_seconds = 86400
