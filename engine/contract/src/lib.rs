@@ -544,6 +544,12 @@ pub struct WakeRequest {
     /// (WI-1251). Off unless asked for.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
+    /// Cold-wake compaction (WI-2037): instead of resuming the recorded
+    /// conversation, start a fresh one whose first prompt is this summary,
+    /// followed by the session directory's git facts and the original
+    /// brief. vogt-core decides when; the engine only carries it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh_prompt: Option<String>,
 }
 
 /// What a session is for (WI-957). Absent on the wire means `worker`.

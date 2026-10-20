@@ -9666,6 +9666,98 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
     drop(tmp);
 }
 
+/// A compacting wake (WI-2037) does not resume: it starts a new conversation
+/// under a new id whose first prompt is the summary, the git facts and the
+/// original brief; the next wake resumes that new conversation.
+#[tokio::test]
+async fn a_cold_wake_with_a_summary_starts_a_fresh_conversation() {
+    let (tmp, cfg, stub) = hibernation_sandbox();
+    let state_dir = cfg.state_dir.clone();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "cold agent",
+            "prompt": "## Task\n\nDo the original thing.\n",
+            "command": [stub.to_string_lossy()],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    live_output_containing(&client, &base, &id, &["helper=["]).await;
+    let hibernate = |client: reqwest::Client, base: String, id: String| async move {
+        let res = client
+            .post(format!("{base}/api/sessions/{id}/hibernate"))
+            .json(&json!({ "reason": "idle" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    };
+    hibernate(client.clone(), base.clone(), id.clone()).await;
+
+    // Too large a summary is refused before anything starts.
+    let refused = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .json(&json!({ "fresh_prompt": "x".repeat(65 * 1024) }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+    let woken: Value = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .json(&json!({ "fresh_prompt": "# Resumed from a summary\n\nState: half done.\n" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let fresh = woken["conversation"]["id"].as_str().unwrap().to_string();
+    assert_ne!(fresh, id, "a fresh conversation needs its own id");
+    let printed = live_output_containing(&client, &base, &id, &["helper=["]).await;
+    assert!(!printed.contains("--resume"), "{printed:?}");
+    assert!(
+        printed.contains(&format!("arg=[--session-id]\r\narg=[{fresh}]")),
+        "{printed:?}"
+    );
+    let brief = std::fs::read_to_string(
+        state_dir
+            .join("agent-task-prompts")
+            .join("sessions")
+            .join(format!("{id}.md")),
+    )
+    .unwrap();
+    assert!(brief.starts_with("# Resumed from a summary"), "{brief}");
+    assert!(brief.contains("## Git (session directory)"), "{brief}");
+    assert!(brief.contains("# Original brief"), "{brief}");
+    assert!(brief.contains("Do the original thing."), "{brief}");
+
+    // The next plain wake resumes the new conversation, not the old one.
+    hibernate(client.clone(), base.clone(), id.clone()).await;
+    let woken = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(woken.status(), StatusCode::OK);
+    let printed = live_output_containing(&client, &base, &id, &["helper=["]).await;
+    assert!(
+        printed.contains(&format!("arg=[--resume]\r\narg=[{fresh}]")),
+        "{printed:?}"
+    );
+    drop(tmp);
+}
+
 /// A budget is part of the session, not of the process: hibernating and
 /// waking under the same id must bring back the same limits (WI-1245 / C7).
 #[tokio::test]
