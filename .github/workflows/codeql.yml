@@ -1,24 +1,23 @@
 name: codeql
 
 # Repository-owned code scanning for all three implementation languages.
-# This starts as an independent check: once the self-hosted runner has
-# produced a receipt for every matrix entry it can be added to branch
-# protection without turning runner/tool-download uncertainty into a merge
-# outage.
+# Operator decision: CodeQL runs only when a release build is cut. A beta or
+# prod tag push (the same trigger release.yml and release-mobile.yml use)
+# starts it, and so does a manual dispatch. The dev deploy lane dispatches it
+# with `ref` set to the commit it deploys. It does not run on pull_request,
+# merge_group, push to main, or a schedule. The job names are unchanged.
+# See docs/ci.md, "CodeQL".
 
 on:
   push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
-  # The merge queue analyses every language; a PR analyses only the languages
-  # its diff touches (the `changes` job below, WI-1886).
-  merge_group:
-  schedule:
-    - cron: "23 3 * * 1"
+    tags:
+      - "v*"
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA to analyse (default: the dispatched ref)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -36,6 +35,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
+          ref: ${{ inputs.ref }}
 
       - id: classify
         env:
@@ -92,15 +92,16 @@ jobs:
           - javascript-typescript
           - rust
     steps:
-      # A required context must still report on a PR that does not touch the
-      # language, so the job runs and its steps skip; the merge queue and
-      # `main` always analyse every language.
+      # Every release-triggered or dispatched run analyses every language, so
+      # the change classifier above always reports true for these events.
       - name: nothing in this language changed
         if: needs.changes.outputs[matrix.language] != 'true'
         run: echo "no ${{ matrix.language }} change on this pull request; the merge queue analyses it"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: needs.changes.outputs[matrix.language] == 'true'
+        with:
+          ref: ${{ inputs.ref }}
 
       # The Actions runtime bundles Node for action execution, but the
       # JavaScript/TypeScript extractor starts `node` from PATH. The

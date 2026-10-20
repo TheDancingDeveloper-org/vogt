@@ -86,7 +86,10 @@ GitHub dependency graph and Dependabot security updates are enabled for every
 manifest Vogt ships (`.github/dependabot.yml`). Pull requests run the
 `dependency review` workflow, which blocks a change introducing a high or
 critical severity dependency advisory. CodeQL scans Python, TypeScript,
-JavaScript, and Rust on pull requests, pushes to `main`, and weekly.
+JavaScript, and Rust only when a release is cut: on a `v*` tag push (beta and
+prod) or a manual `workflow_dispatch`. The dev deploy lane dispatches it with
+`ref` set to the commit it deploys. It does not run on pull requests, the
+merge queue, pushes to `main`, or a schedule.
 
 `.github/dependabot.yml` carries two deliberate exceptions. The CodeQL
 `init` and `analyze` actions are grouped into one update, because a PR that
@@ -111,9 +114,6 @@ After enabling these workflows, configure repository Settings → Rules → Rule
 
 - `ci`
 - `dependency review`
-- `analyze (python)`
-- `analyze (javascript-typescript)`
-- `analyze (rust)`
 - `runner-policy`
 
 Also enable **Dependency graph**, **Dependabot alerts**, and **Dependabot
@@ -122,8 +122,8 @@ settings and therefore cannot be represented in tracked files; verify them
 after a repository transfer or visibility change.
 
 This is a public repository, and `pull_request`-triggered jobs run on the
-project's self-hosted runner pool (`ci.yml`, `codeql.yml`,
-`runner-policy.yml`, `docs.yml`, `mirror-base-images.yml`). Those jobs run
+project's self-hosted runner pool (`ci.yml`, `runner-policy.yml`, `docs.yml`,
+`mirror-base-images.yml`). Those jobs run
 `uv`/`pytest`, `pnpm install`, `cargo`, Playwright and `gradlew` over
 PR-controlled source — arbitrary code execution by design — on a pool that
 also runs the secret-bearing jobs.

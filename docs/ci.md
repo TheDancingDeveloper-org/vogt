@@ -9,9 +9,11 @@ and each merge forced sibling PRs to rebase and run it all again.
 
 | Event | `ci.yml` | `codeql.yml` | `runner-policy` | `dependency review` |
 |---|---|---|---|---|
-| `pull_request` | only the halves the diff touches (below) | only the languages the diff touches | full | reviews the PR's dependency changes |
-| `merge_group` (the queue) | **everything** | every language | full | posts the context; the review already ran on the PR |
-| `push` to `main` | everything | every language | full | — |
+| `pull_request` | only the halves the diff touches (below) | **does not run** | full | reviews the PR's dependency changes |
+| `merge_group` (the queue) | **everything** | **does not run** | full | posts the context; the review already ran on the PR |
+| `push` to `main` | everything | **does not run** | full | — |
+| `push` of a `v*` tag (beta, prod) | — | every language | — | — |
+| `workflow_dispatch` | — | every language, at `ref` if given | — | — |
 
 ### Path scoping on a pull request
 
@@ -35,10 +37,14 @@ Only the queue and `main` run these:
 - a web-only change rebuilt into the engine. The crate embeds `web/dist`, but
   a web-only PR does not run clippy or nextest against the new bundle.
 
-CodeQL classifies `*.py`, JS/TS sources plus `package.json`/`pnpm-lock.yaml`,
-and `*.rs` plus `Cargo.*`. A language with no change still reports its
-`analyze (<language>)` context, with its steps skipped. A change to
-`codeql.yml` or `.github/codeql/` analyses everything.
+### CodeQL
+
+CodeQL runs only when a release is cut, as an operator decision. It does not
+gate pull requests, the merge queue, or `main`, so its `analyze (<language>)`
+jobs are not required checks. A `v*` tag push (beta and prod) runs it. So does
+a `workflow_dispatch`: the dev deploy lane passes the commit it deploys as the
+`ref` input, and checkout uses that SHA. Every such run analyses all three
+languages. The job names are unchanged.
 
 ### Concurrency
 
@@ -60,8 +66,8 @@ Queue runs use the same labels as PR runs: `self-hosted`, plus `docker`,
 `publish` or `bigmem` where a job asks for one. No vogt workflow targets the
 GCP rust-heavy or spot labels. The queue adds full runs, but PRs now skip
 everything they do not touch, and a merge no longer re-runs every open PR.
-CodeQL still has a single `bigmem` slot, so its three languages serialise in
-the queue just as they did on PRs.
+CodeQL no longer runs in the queue. Its single `bigmem` slot serialises the
+three languages within a release run.
 
 ## Landing
 
