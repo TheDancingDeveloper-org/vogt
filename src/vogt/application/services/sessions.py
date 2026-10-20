@@ -3023,7 +3023,8 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
     engine_id = target.engine_session_id
     # A person answers anything. An oversight session is relayed by its
     # engine id, not as a person: the engine lets it answer a permission
-    # prompt and refuses other kinds with `PersonRequired` (WI-2028). The audit line records which answered.
+    # prompt and refuses other kinds with `PersonRequired` (WI-2028). The
+    # audit line records which answered.
     by_person = _answers_as_person(ctx)
     by_oversight = not by_person and _is_oversight_caller(ctx, engine)
     answered = engine.answer_session(
