@@ -412,6 +412,10 @@ impl SessionRegistry {
             Creating::Wake(record) => record.id,
             Creating::Fresh(_) => preassigned.unwrap_or_else(Uuid::new_v4),
         };
+        let conversation_pin = match &creating {
+            Creating::Wake(record) => record.fresh_conversation.unwrap_or(id),
+            Creating::Fresh(_) => id,
+        };
         let brief = spec
             .prompt
             .as_deref()
@@ -458,7 +462,9 @@ impl SessionRegistry {
                 effort: spec.effort.as_deref(),
                 resume: spec.resume.as_deref(),
                 brief_file: brief_path.as_deref(),
-                session_id: Some(id),
+                // A compacting wake pins a new conversation id (WI-2037): the
+                // engine id is the conversation it replaces.
+                session_id: Some(conversation_pin),
                 codex_session_id: self.cfg.codex_session_id,
                 permission_mode: spec.permission_mode.as_deref(),
                 // A wake replays the posture recorded at the first start. The
@@ -618,7 +624,7 @@ impl SessionRegistry {
             _ => agent_cli::conversation(
                 base_command.as_deref(),
                 spec.resume.as_deref(),
-                id,
+                conversation_pin,
                 self.cfg.codex_session_id,
             ),
         };
@@ -793,6 +799,12 @@ impl SessionRegistry {
             Creating::Wake(record) => {
                 let mut record = *record;
                 record.hibernation = None;
+                // A compacting wake runs a new conversation from a new brief;
+                // the next wake resumes that one (WI-2037).
+                if record.fresh_conversation.take().is_some() {
+                    record.conversation = conversation.clone();
+                    record.brief_file = prompt_file.clone();
+                }
                 record.name = session.name();
                 session.set_keep_awake(record.keep_awake);
                 session.set_budget(record.budget.clone());
@@ -1491,6 +1503,16 @@ impl SessionRegistry {
         let mut env = record.env.clone();
         env.extend(req.env.unwrap_or_default());
         let (command, template) = self.wake_launch(&record);
+        let mut record = record;
+        let fresh = req
+            .fresh_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty() && record.conversation.is_some())
+            .map(|summary| {
+                record.fresh_conversation = Some(Uuid::new_v4());
+                fresh_wake_prompt(summary, &record)
+            });
         // The credential is not in the record (it is a secret); an engine-
         // started agent session is given a new one, superseding the last.
         if let Some(identity) = self
@@ -1511,7 +1533,7 @@ impl SessionRegistry {
                 .clone()
                 .filter(|c| std::path::Path::new(c) != self.cfg.default_cwd),
             env: Some(env),
-            prompt: None,
+            prompt: fresh.clone(),
             model: record.model.clone(),
             effort: record.effort.clone(),
             permission_mode: record.permission_mode.clone(),
@@ -1523,7 +1545,11 @@ impl SessionRegistry {
             // A wake returns to the worktree the first start already cut; it
             // does not cut another (WI-1298).
             worktree: None,
-            resume: record.conversation.as_ref().map(|c| c.id.clone()),
+            resume: if fresh.is_some() {
+                None
+            } else {
+                record.conversation.as_ref().map(|c| c.id.clone())
+            },
             cols: req.cols.or(record.cols),
             rows: req.rows.or(record.rows),
             scrollback_bytes: None,
@@ -1533,7 +1559,17 @@ impl SessionRegistry {
         };
         let session = self.create_inner(spec, Creating::Wake(Box::new(record)), None)?;
         self.bus.publish(ServerEvent::SessionWoken { id });
-        tracing::info!(session = %id, "session woken");
+        if fresh.is_some() {
+            tracing::info!(
+                target: "vogt::audit",
+                event = "session.wake.compacted",
+                session = %id,
+                conversation = ?session.conversation().map(|c| c.id),
+                "session woken into a fresh conversation from a summary"
+            );
+        } else {
+            tracing::info!(session = %id, "session woken");
+        }
         Ok(session)
     }
 
@@ -2326,6 +2362,42 @@ fn session_list_order(a: &SessionSummary, b: &SessionSummary) -> std::cmp::Order
     })
 }
 
+/// The largest summary a compacting wake accepts (WI-2037).
+pub const FRESH_PROMPT_MAX: usize = 64 * 1024;
+
+/// How much of the original brief a compacting wake carries forward.
+const FRESH_BRIEF_CAP: usize = 32 * 1024;
+
+/// The first prompt of a compacting wake (WI-2037): vogt-core's summary, then
+/// the git facts of the session's directory, then the brief it was first
+/// started with. Read before the new prompt replaces that brief's file.
+fn fresh_wake_prompt(summary: &str, record: &Record) -> String {
+    let mut out = summary.trim_end().to_string();
+    out.push_str("\n\n## Git (session directory)\n\n");
+    match record.cwd.as_deref().and_then(crate::handoff::git_facts) {
+        Some(git) => out.push_str(git.trim()),
+        None => out.push_str("(not a git checkout)"),
+    }
+    let brief = record
+        .brief_file
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .filter(|b| !b.trim().is_empty());
+    if let Some(brief) = brief {
+        let mut end = brief.len().min(FRESH_BRIEF_CAP);
+        while !brief.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.push_str("\n\n---\n\n# Original brief\n\n");
+        out.push_str(brief[..end].trim_end());
+        if end < brief.len() {
+            out.push_str("\n\n[brief truncated]");
+        }
+    }
+    out.push('\n');
+    out
+}
+
 /// A hibernated record as the wire lists it.
 fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSummary> {
     let hibernation = record.hibernation.clone()?;
@@ -2359,7 +2431,11 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         permission_mode: record.permission_mode.clone(),
         account: record.account.clone(),
         stop: None,
-        economics: None,
+        // The last reading, so a caller can judge the wake (WI-2037).
+        economics: record
+            .economics
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok()),
         budget: record.budget.clone(),
     })
 }
