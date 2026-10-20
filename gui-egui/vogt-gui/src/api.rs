@@ -210,15 +210,23 @@ impl ApiError {
             error: ErrorField,
         }
         let message = match serde_json::from_slice::<Body>(body) {
-            Ok(Body { error: ErrorField::Text(m) | ErrorField::Object { message: m } }) => m,
+            Ok(Body {
+                error: ErrorField::Text(m) | ErrorField::Object { message: m },
+            }) => m,
             Err(_) => format!("HTTP {status}"),
         };
-        Self { status: Some(status), message }
+        Self {
+            status: Some(status),
+            message,
+        }
     }
 
     /// An error with no response at all (network, DNS, CORS).
     pub fn transport(message: impl Into<String>) -> Self {
-        Self { status: None, message: message.into() }
+        Self {
+            status: None,
+            message: message.into(),
+        }
     }
 }
 
@@ -255,9 +263,14 @@ mod tests {
     #[test]
     fn events_decode_and_unknown_kinds_fall_through() {
         let created: ServerEvent = serde_json::from_str(r#"{"type":"session-created","id":"a","name":"n"}"#).unwrap();
-        assert_eq!(created, ServerEvent::SessionCreated { id: "a".into(), name: "n".into() });
-        let activity: ServerEvent =
-            serde_json::from_str(r#"{"type":"activity","id":"a","state":"idle"}"#).unwrap();
+        assert_eq!(
+            created,
+            ServerEvent::SessionCreated {
+                id: "a".into(),
+                name: "n".into()
+            }
+        );
+        let activity: ServerEvent = serde_json::from_str(r#"{"type":"activity","id":"a","state":"idle"}"#).unwrap();
         assert!(matches!(activity, ServerEvent::Activity { state, .. } if state == "idle"));
         let other: ServerEvent = serde_json::from_str(r#"{"type":"session-resources","samples":[]}"#).unwrap();
         assert_eq!(other, ServerEvent::Other);
@@ -266,8 +279,7 @@ mod tests {
     #[test]
     fn session_list_accepts_both_shapes() {
         let wrapped: SessionListBody =
-            serde_json::from_str(r#"{"sessions":[{"id":"a","name":"x","activity":"idle"}],"hidden_count":0}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"sessions":[{"id":"a","name":"x","activity":"idle"}],"hidden_count":0}"#).unwrap();
         assert_eq!(wrapped.into_sessions().len(), 1);
         let bare: SessionListBody = serde_json::from_str(r#"[{"id":"a"},{"id":"b"}]"#).unwrap();
         assert_eq!(bare.into_sessions().len(), 2);
@@ -275,8 +287,14 @@ mod tests {
 
     #[test]
     fn error_message_prefers_server_text() {
-        assert_eq!(ApiError::from_status(401, br#"{"error":"bad password"}"#).message, "bad password");
-        assert_eq!(ApiError::from_status(429, br#"{"error":{"message":"slow down"}}"#).message, "slow down");
+        assert_eq!(
+            ApiError::from_status(401, br#"{"error":"bad password"}"#).message,
+            "bad password"
+        );
+        assert_eq!(
+            ApiError::from_status(429, br#"{"error":{"message":"slow down"}}"#).message,
+            "slow down"
+        );
         assert_eq!(ApiError::from_status(502, b"<html>").message, "HTTP 502");
         assert!(ApiError::from_status(401, b"").is_unauthorized());
     }

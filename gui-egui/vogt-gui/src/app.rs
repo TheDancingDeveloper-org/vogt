@@ -32,7 +32,12 @@ const BASE_KEY: &str = "vogt.base";
 impl VogtApp {
     /// An app on `backend`, with the login form starting at `base`.
     pub fn new(backend: Box<dyn Backend>, base: impl Into<String>) -> Self {
-        Self { model: Model::new(base), backend, docs: None, theme_installed: false }
+        Self {
+            model: Model::new(base),
+            backend,
+            docs: None,
+            theme_installed: false,
+        }
     }
 
     /// The app as eframe creates it: the real HTTP backend, the last base from
@@ -42,11 +47,6 @@ impl VogtApp {
         let backend = crate::backend::HttpBackend::new(move || ctx.request_repaint());
         let base = cc.storage.and_then(|s| s.get_string(BASE_KEY)).unwrap_or(default_base);
         Self::new(Box::new(backend), base)
-    }
-
-    /// The backend, for tests that drive a fixture.
-    pub fn backend_mut(&mut self) -> &mut dyn Backend {
-        self.backend.as_mut()
     }
 
     fn run(&mut self, commands: Vec<Command>) {
@@ -91,15 +91,22 @@ impl VogtApp {
             ui.add_space(16.0);
             let form = &mut self.model.login;
             Field::new("API address").show(ui, |ui| {
-                ui.add(Input::new(&mut form.base).label("API address").placeholder("https://vogt-dev.example"))
+                ui.add(
+                    Input::new(&mut form.base)
+                        .label("API address")
+                        .placeholder("https://vogt-dev.example"),
+                )
             });
             Field::new("Username").show(ui, |ui| ui.add(Input::new(&mut form.username).label("Username")));
-            let password = Field::new("Password")
-                .show(ui, |ui| ui.add(Input::new(&mut form.password).label("Password").password()));
+            let password = Field::new("Password").show(ui, |ui| {
+                ui.add(Input::new(&mut form.password).label("Password").password())
+            });
             let enter = password.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.add_space(8.0);
             let label = if form.busy { "Signing in…" } else { "Sign in" };
-            let clicked = ui.add_enabled(!form.busy, Button::new(label).appearance(Appearance::Primary)).clicked();
+            let clicked = ui
+                .add_enabled(!form.busy, Button::new(label).appearance(Appearance::Primary))
+                .clicked();
             if (clicked || enter) && !form.busy {
                 commands = self.model.submit_password();
             }
@@ -107,8 +114,7 @@ impl VogtApp {
             ui.add(Divider::horizontal());
             ui.add_space(8.0);
             let form = &mut self.model.login;
-            Field::new("Or paste a token")
-                .show(ui, |ui| ui.add(Input::new(&mut form.token).label("Token").password()));
+            Field::new("Or paste a token").show(ui, |ui| ui.add(Input::new(&mut form.token).label("Token").password()));
             if ui.add(Button::new("Use token")).clicked() {
                 commands = self.model.submit_token();
             }
@@ -185,10 +191,12 @@ impl VogtApp {
                         ui.weak(format!("exit {code}"));
                     }
                     ui.weak(&session.cwd);
-                    if let Some(reference) = work_ref_in(&session.name) {
-                        if ui.add(Button::new(format!("Open {reference}")).appearance(Appearance::Subtle)).clicked() {
-                            open_ref = Some(reference);
-                        }
+                    if let Some(reference) = work_ref_in(&session.name)
+                        && ui
+                            .add(Button::new(format!("Open {reference}")).appearance(Appearance::Subtle))
+                            .clicked()
+                    {
+                        open_ref = Some(reference);
                     }
                 });
                 ui.separator();
@@ -203,7 +211,12 @@ impl VogtApp {
     fn work_item_screen(&mut self, ui: &mut Ui) {
         let mut commands = Vec::new();
         ui.horizontal(|ui| {
-            let input = ui.add(Input::new(&mut self.model.work_ref).label("Work item").placeholder("WI-123").desired_width(160.0));
+            let input = ui.add(
+                Input::new(&mut self.model.work_ref)
+                    .label("Work item")
+                    .placeholder("WI-123")
+                    .desired_width(160.0),
+            );
             let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.add(Button::new("Open").appearance(Appearance::Primary)).clicked() || enter {
                 let reference = self.model.work_ref.clone();
@@ -222,11 +235,18 @@ impl VogtApp {
                 });
             }
             WorkView::Failed(reference, error) => {
-                ui.colored_label(ui.visuals().error_fg_color, format!("Could not read {reference}: {error}"));
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Could not read {reference}: {error}"),
+                );
             }
             WorkView::Loaded(detail) => {
                 let key = (detail.item.reference.clone(), detail.item.updated_at.clone());
-                if self.docs.as_ref().is_none_or(|d| d.key != key || d.comments.len() != detail.comments.len()) {
+                if self
+                    .docs
+                    .as_ref()
+                    .is_none_or(|d| d.key != key || d.comments.len() != detail.comments.len())
+                {
                     self.docs = Some(Docs {
                         key,
                         body: Document::parse(&detail.item.body),
@@ -254,7 +274,9 @@ impl VogtApp {
                         }
                     });
                     ui.add_space(8.0);
-                    let out = MarkdownView::new("work-body", &docs.body).link_policy(&default_link_policy).show(ui);
+                    let out = MarkdownView::new("work-body", &docs.body)
+                        .link_policy(&default_link_policy)
+                        .show(ui);
                     open = open.take().or(out.clicked);
                     if !detail.comments.is_empty() {
                         ui.add_space(12.0);
@@ -262,7 +284,9 @@ impl VogtApp {
                         for (i, (comment, doc)) in detail.comments.iter().zip(&docs.comments).enumerate() {
                             Card::new().show(ui, |ui| {
                                 ui.weak(&comment.created_at);
-                                let out = MarkdownView::new(("comment", i), doc).link_policy(&default_link_policy).show(ui);
+                                let out = MarkdownView::new(("comment", i), doc)
+                                    .link_policy(&default_link_policy)
+                                    .show(ui);
                                 open = open.take().or(out.clicked);
                             });
                         }
@@ -332,7 +356,10 @@ mod tests {
     #[test]
     fn waiting_badge_counts_down() {
         let now = Instant::now();
-        let state = StreamState::Waiting { retry_at: now + std::time::Duration::from_millis(1500), attempt: 1 };
+        let state = StreamState::Waiting {
+            retry_at: now + std::time::Duration::from_millis(1500),
+            attempt: 1,
+        };
         assert_eq!(stream_badge(state, now).0, "Reconnecting in 2s");
     }
 }

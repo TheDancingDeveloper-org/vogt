@@ -24,11 +24,18 @@ impl HttpBackend {
     /// A backend that calls `wake` whenever a reply arrives, so the UI repaints
     /// and polls (pass `ctx.request_repaint()`).
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self { queue: Arc::default(), wake: Arc::new(wake), live_stream: Arc::default() }
+        Self {
+            queue: Arc::default(),
+            wake: Arc::new(wake),
+            live_stream: Arc::default(),
+        }
     }
 
     fn sink(&self) -> Sink {
-        Sink { queue: Arc::clone(&self.queue), wake: Arc::clone(&self.wake) }
+        Sink {
+            queue: Arc::clone(&self.queue),
+            wake: Arc::clone(&self.wake),
+        }
     }
 }
 
@@ -48,7 +55,9 @@ impl Sink {
 }
 
 fn authed(request: ehttp::Request, auth: &Auth) -> ehttp::Request {
-    request.with_header("Authorization", format!("Bearer {}", auth.token)).with_header("Accept", "application/json")
+    request
+        .with_header("Authorization", format!("Bearer {}", auth.token))
+        .with_header("Accept", "application/json")
 }
 
 /// Decode a finished response as JSON `T`, or say why not.
@@ -57,8 +66,10 @@ fn decode<T: serde::de::DeserializeOwned>(result: ehttp::Result<ehttp::Response>
     if !response.ok {
         return Err(ApiError::from_status(response.status, &response.bytes));
     }
-    serde_json::from_slice(&response.bytes)
-        .map_err(|e| ApiError { status: Some(response.status), message: format!("unexpected reply: {e}") })
+    serde_json::from_slice(&response.bytes).map_err(|e| ApiError {
+        status: Some(response.status),
+        message: format!("unexpected reply: {e}"),
+    })
 }
 
 impl Backend for HttpBackend {
@@ -69,23 +80,33 @@ impl Backend for HttpBackend {
             .with_header("Content-Type", "application/json")
             .with_header("Accept", "application/json");
         let sink = self.sink();
-        ehttp::fetch(request, move |result| sink.push(login_reply(&base, decode::<LoginResult>(result))));
+        ehttp::fetch(request, move |result| {
+            sink.push(login_reply(&base, decode::<LoginResult>(result)))
+        });
     }
 
     fn fetch_sessions(&mut self, auth: &Auth) {
         let request = authed(ehttp::Request::get(format!("{}/api/sessions", auth.base)), auth);
         let sink = self.sink();
         ehttp::fetch(request, move |result| {
-            sink.push(Reply::Sessions(decode::<SessionListBody>(result).map(SessionListBody::into_sessions)));
+            sink.push(Reply::Sessions(
+                decode::<SessionListBody>(result).map(SessionListBody::into_sessions),
+            ));
         });
     }
 
     fn fetch_work_item(&mut self, auth: &Auth, reference: &str) {
-        let url = format!("{}/api/vogt/work/get?ref={}&mode=full", auth.base, encode_query(reference));
+        let url = format!(
+            "{}/api/vogt/work/get?ref={}&mode=full",
+            auth.base,
+            encode_query(reference)
+        );
         let request = authed(ehttp::Request::get(url), auth);
         let sink = self.sink();
         let reference = reference.to_owned();
-        ehttp::fetch(request, move |result| sink.push(Reply::WorkItem(reference, decode::<WorkDetail>(result))));
+        ehttp::fetch(request, move |result| {
+            sink.push(Reply::WorkItem(reference, decode::<WorkDetail>(result).map(Box::new)))
+        });
     }
 
     fn open_events(&mut self, auth: &Auth, generation: u64) {
@@ -118,7 +139,10 @@ impl Backend for HttpBackend {
                     }
                 }
                 Ok(ehttp::streaming::Part::Chunk(bytes)) if bytes.is_empty() => {
-                    sink.push(Reply::StreamClosed(generation, ApiError::transport("the event stream ended")));
+                    sink.push(Reply::StreamClosed(
+                        generation,
+                        ApiError::transport("the event stream ended"),
+                    ));
                     ControlFlow::Break(())
                 }
                 Ok(ehttp::streaming::Part::Chunk(bytes)) => {
