@@ -111,6 +111,17 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("project.get", {"slug": "parity-project"}),
+    (
+        "charter.set",
+        {
+            "scope": "project",
+            "ref": "parity-project",
+            "body": "Commit as the project identity.",
+            "expected_version": 0,
+            "reason": WHY,
+        },
+    ),
+    ("charter.get", {"scope": "project", "ref": "parity-project", "history": True}),
     ("project.list", {}),
     (
         "project.update",

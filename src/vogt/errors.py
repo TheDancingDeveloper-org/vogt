@@ -349,6 +349,12 @@ class PreferenceVersionConflict(Conflict):
     code = "preference_version_conflict"
 
 
+class CharterVersionConflict(Conflict):
+    """A charter write named a version that is no longer current."""
+
+    code = "charter_version_conflict"
+
+
 class InvalidPreference(InvalidRequest):
     """A preference key or value is not acceptable."""
 

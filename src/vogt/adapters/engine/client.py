@@ -776,6 +776,7 @@ class EngineClient:
         policy: dict[str, Any] | None = None,
         budget: dict[str, Any] | None = None,
         worktree: dict[str, str] | None = None,
+        charter: str | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -839,6 +840,11 @@ class EngineClient:
             # The standing guide written beside the brief (WI-1243). The
             # brief points at it by name; the engine writes the text.
             spec["companion"] = companion
+        if charter:
+            # The scope's charters (WI-2038), already in the brief. The engine
+            # also hands them to an agent CLI that keeps standing instructions
+            # apart from its first prompt (Codex `developer_instructions`).
+            spec["charter"] = charter
         if policy:
             # The project's agent policy (WI-1243), enforced by the session's
             # hook. Sent only when the project states one, so a project

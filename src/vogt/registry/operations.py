@@ -40,6 +40,10 @@ from vogt.application.models import (
     BoardListParams,
     BoardListResult,
     BugsParams,
+    CharterGetParams,
+    CharterGetResult,
+    CharterSetParams,
+    CharterSetResult,
     ChatApprovalView,
     ChatArchiveParams,
     ChatCreateParams,
@@ -2119,6 +2123,44 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.restore_inbox,
             route=HttpRoute("POST", "/inbox/restore"),
             cli=CliBinding(("inbox", "restore")),
+        ),
+        # -- charters (WI-2038) ---------------------------------------------
+        #
+        # Standing instructions per scope, carried into every session brief
+        # started there: workspace, then project, then initiative, then the
+        # brief. `work.write`, because a charter steers every worker started
+        # on the scope; versioned and audited.
+        Operation(
+            name="charter.get",
+            summary=(
+                "Read the charter (standing instructions injected into every "
+                "session brief) of the workspace, a project or an initiative "
+                "(scope + ref slug). history=true adds earlier versions."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=CharterGetParams,
+            result_model=CharterGetResult,
+            handler=services.get_charter,
+            route=HttpRoute("GET", "/charters"),
+            cli=CliBinding(("charter", "get")),
+        ),
+        Operation(
+            name="charter.set",
+            summary=(
+                "Set the charter of the workspace, a project or an initiative: "
+                "Markdown injected into every session brief started there "
+                "(workspace, then project, then initiative, then the brief) "
+                "and into Codex developer_instructions. Writes the next "
+                "version; empty body clears; optional expected_version."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=CharterSetParams,
+            result_model=CharterSetResult,
+            handler=services.set_charter,
+            route=HttpRoute("POST", "/charters"),
+            cli=CliBinding(("charter", "set")),
         ),
         # -- per-actor preferences ------------------------------------------
         #

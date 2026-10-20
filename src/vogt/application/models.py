@@ -620,6 +620,70 @@ class PreferenceSetResult(Result):
     preference: PreferenceView
 
 
+# -- charters (WI-2038) ----------------------------------------------------
+
+CharterScopeKind = Literal["workspace", "project", "initiative"]
+#: A charter is a few standing rules, not a document.
+CHARTER_MAX_CHARS = 8000
+
+
+class CharterView(Result):
+    """One version of a scope's charter."""
+
+    scope: CharterScopeKind
+    ref: str | None = Field(
+        default=None, description="Project or initiative slug; none for workspace."
+    )
+    version: int
+    body: str
+    author: str = Field(description="identity_ref of whoever set this version.")
+    created_at: datetime
+    reason: str
+
+
+class CharterGetParams(Params):
+    scope: CharterScopeKind = Field(description="workspace, project or initiative.")
+    ref: str | None = Field(
+        default=None,
+        description="Project or initiative slug; omitted for workspace.",
+    )
+    history: bool = Field(
+        default=False, description="Also return earlier versions, newest first."
+    )
+    limit: int = Field(default=20, ge=1, le=200)
+
+
+class CharterGetResult(Result):
+    current: CharterView | None = Field(
+        default=None,
+        description="The newest version, or none when never set. An empty "
+        "body is a cleared charter.",
+    )
+    history: list[CharterView] = []
+
+
+class CharterSetParams(Params):
+    scope: CharterScopeKind = Field(description="workspace, project or initiative.")
+    ref: str | None = Field(
+        default=None,
+        description="Project or initiative slug; omitted for workspace.",
+    )
+    body: str = Field(
+        max_length=CHARTER_MAX_CHARS,
+        description="The standing instructions, in Markdown. Empty clears it.",
+    )
+    expected_version: int | None = Field(
+        default=None,
+        ge=0,
+        description="Write only if the current version is this (0: never set).",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class CharterSetResult(Result):
+    charter: CharterView
+
+
 # -- projects --------------------------------------------------------------
 
 
