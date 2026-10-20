@@ -867,6 +867,41 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    cold_wake_compaction: bool = Field(
+        default=False,
+        description=(
+            "Cache-aware compaction on a cold wake (WI-2037). When on, waking "
+            "a hibernated session whose provider prompt cache has expired "
+            "(hibernated longer than its `cold_wake_ttl_seconds`) and whose "
+            "context is at least `cold_wake_threshold_tokens` starts a fresh "
+            "conversation seeded with a structured summary — task, state, "
+            "decisions, files, branch, next step — instead of resuming the "
+            "transcript at full uncached price. Off by default; a session "
+            "opts out with `cold_wake_opt_out` at start or hibernate."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    cold_wake_threshold_tokens: int = Field(
+        default=100_000,
+        ge=0,
+        description=(
+            "The context size, in tokens, at or above which a cold wake is "
+            "compacted (WI-2037). A smaller conversation is cheap enough to "
+            "re-read and is resumed as it is."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    cold_wake_ttl_seconds: dict[str, int] = Field(
+        default_factory=lambda: {"anthropic": 300, "deepseek": 300},
+        description=(
+            "Prompt-cache lifetime per provider, in seconds (WI-2037): a "
+            "session hibernated longer than this is treated as cold. Keys are "
+            "`anthropic`, `openai`, `deepseek`, `google`, … A provider with no "
+            "entry is never compacted, because its cache cannot be judged. "
+            "Anthropic's 1-hour cache tier is `anthropic = 3600`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     forge_posture_interval_seconds: int = Field(
         default=86400,
         ge=0,

@@ -4489,6 +4489,14 @@ class StartSessionParams(Params):
             "`cwd` is given. Recorded as the session's cwd."
         ),
     )
+    cold_wake_opt_out: bool = Field(
+        default=False,
+        description=(
+            "Never compact this session on a cold wake (WI-2037): every wake "
+            "resumes its full transcript, whatever the deployment's "
+            "cold_wake_compaction says. Changeable later at session_hibernate."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
     purpose: Purpose | None = Field(
         default=None,
@@ -4802,6 +4810,15 @@ def _watch_trigger_text(value: object) -> object:
     return value
 
 
+COLD_WAKE_OPT_OUT_DESCRIPTION = (
+    "Never compact this session on a cold wake (WI-2037): a wake always "
+    "resumes its full transcript, even when the deployment's "
+    "cold_wake_compaction is on and the prompt cache has expired. Unset "
+    "keeps the session's current choice (a new session follows the "
+    "deployment)."
+)
+
+
 class HibernateSessionParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     allow_shell: bool = Field(
@@ -4828,6 +4845,9 @@ class HibernateSessionParams(Params):
     )
     wake_on_ttl_seconds: int = Field(
         default=86_400, ge=60, le=1_209_600, description=WATCH_TTL_DESCRIPTION
+    )
+    cold_wake_opt_out: bool | None = Field(
+        default=None, description=COLD_WAKE_OPT_OUT_DESCRIPTION
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
 

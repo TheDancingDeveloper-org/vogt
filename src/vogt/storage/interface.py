@@ -810,6 +810,10 @@ class WriteTxn(ReadView, Protocol):
         """Replace a grant's decision and revocation fields."""
         ...
 
+    def set_session_cold_wake_opt_out(self, session_id: str, *, opt_out: bool) -> None:
+        """Opt a session out of cold-wake compaction (WI-2037), or back in."""
+        ...
+
     def set_session_work_item(self, session_id: str, work_item_id: str | None) -> None:
         """Re-declare the work item a session serves (WI-998), or clear it.
 

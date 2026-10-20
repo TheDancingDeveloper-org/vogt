@@ -2230,8 +2230,9 @@ class SqliteWriteTxn(SqliteReadView):
         self._conn.execute(
             "INSERT INTO coding_sessions (id, engine_session_id, project_id, "
             "work_item_id, actor_id, cwd, template, model, effort, reason, "
-            "purpose, started_by_session, started_by_kind, started_at, stopped_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "purpose, started_by_session, started_by_kind, started_at, stopped_at, "
+            "cold_wake_opt_out) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session.id,
                 session.engine_session_id,
@@ -2248,7 +2249,14 @@ class SqliteWriteTxn(SqliteReadView):
                 session.started_by_kind,
                 to_iso(session.started_at),
                 None if session.stopped_at is None else to_iso(session.stopped_at),
+                int(session.cold_wake_opt_out),
             ),
+        )
+
+    def set_session_cold_wake_opt_out(self, session_id: str, *, opt_out: bool) -> None:
+        self._conn.execute(
+            "UPDATE coding_sessions SET cold_wake_opt_out = ? WHERE id = ?",
+            (int(opt_out), session_id),
         )
 
     def set_session_work_item(self, session_id: str, work_item_id: str | None) -> None:
@@ -3081,6 +3089,7 @@ def _row_to_session(row: sqlite3.Row) -> CodingSession:
         started_by_kind=_opt(row, "started_by_kind"),  # type: ignore[arg-type]
         started_at=from_iso(str(row["started_at"])),
         stopped_at=None if stopped is None else from_iso(str(stopped)),
+        cold_wake_opt_out=bool(row["cold_wake_opt_out"]),
     )
 
 
