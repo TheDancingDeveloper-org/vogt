@@ -448,8 +448,9 @@ fn find_existing(
     initiative: &Initiative,
 ) -> Result<Option<PlacedIssue>, VogtError> {
     use crate::adapters::forge::ForgeProvider;
+    use crate::adapters::forge::IssuesItem;
     let issues = target.provider.issues_updated_since(&target.repo, None)?;
-    for issue in issues {
+    for issue in issues.into_iter().filter_map(IssuesItem::into_issue) {
         if crate::decisions::body_has_marker(issue.body.as_deref(), &initiative.slug) {
             return Ok(Some(PlacedIssue {
                 number: issue.number,

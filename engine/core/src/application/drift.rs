@@ -622,6 +622,10 @@ fn forge_findings(
                     item.project_id.as_deref(),
                     snapshot(&observation),
                     Some(&observation.id),
+                    observation
+                        .payload
+                        .get("state_reason")
+                        .and_then(Value::as_str),
                 ));
             }
         }

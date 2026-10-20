@@ -8,7 +8,7 @@
 
 use super::models::{
     ForgeActor, ForgeCapabilities, ForgeCheck, ForgeComparison, ForgeIssue, ForgeJob, ForgeLabel,
-    ForgeNotification, ForgePosture, ForgePull, ForgeRelease, ForgeRepo, RepoRef,
+    ForgeNotification, ForgePosture, ForgePull, ForgeRelease, ForgeRepo, IssuesItem, RepoRef,
 };
 use super::payloads::{comparison, decoded_content, quote_path};
 use super::provider::ForgeProvider;
@@ -170,7 +170,7 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         &self,
         repo: &RepoRef,
         since: Option<&str>,
-    ) -> Result<Vec<ForgeIssue>, VogtError> {
+    ) -> Result<Vec<IssuesItem>, VogtError> {
         // Ascending by update time so a watermark walks history forward.
         let mut query = vec![
             ("state", "all".to_owned()),
@@ -187,8 +187,18 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         )?;
         Ok(as_list(&response)
             .into_iter()
-            .filter(|item| !item.contains_key("pull_request"))
-            .map(|item| to_issue(repo, item))
+            .map(|item| {
+                if item.contains_key("pull_request") {
+                    // The issues endpoint returns PRs too. They are not issues,
+                    // but they are part of the page: a page of nothing but PRs
+                    // must still move the watermark, or the same window is
+                    // asked for forever (WI-1752). The issues collector steps
+                    // over them.
+                    IssuesItem::Pull(to_pull(repo, item))
+                } else {
+                    IssuesItem::Issue(to_issue(repo, item))
+                }
+            })
             .collect())
     }
 
@@ -727,6 +737,7 @@ fn to_issue(repo: &RepoRef, item: &serde_json::Map<String, serde_json::Value>) -
             .map(str::to_owned),
         updated_at: text(item.get("updated_at")).map(str::to_owned),
         closed_at: text(item.get("closed_at")).map(str::to_owned),
+        state_reason: text(item.get("state_reason")).map(str::to_owned),
         source_url: text(item.get("html_url")).map(str::to_owned),
     }
 }
@@ -1115,8 +1126,14 @@ mod tests {
     }
 
     #[test]
-    fn issues_skip_pull_requests_and_keep_the_shape() {
-        let issues = provider().issues_updated_since(&repo(), None).unwrap();
+    fn issues_yield_pull_requests_as_pulls_and_keep_the_shape() {
+        let items = provider().issues_updated_since(&repo(), None).unwrap();
+        assert_eq!(items.len(), 2, "the PR stays on the page (WI-1752)");
+        assert!(matches!(&items[1], IssuesItem::Pull(pull) if pull.number == 8));
+        let issues: Vec<ForgeIssue> = items
+            .into_iter()
+            .filter_map(IssuesItem::into_issue)
+            .collect();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].number, 7);
         assert_eq!(issues[0].labels, vec!["bug".to_owned()]);
@@ -1315,16 +1332,22 @@ mod tests {
         let provider = GitHubProvider::new(Fixture::new(vec![(
             "/repos/acme/widget/issues",
             serde_json::json!([
-                {"number": 7, "title": "Fixed weeks ago", "state": "closed",
+                {"number": 7, "title": "Fixed weeks ago", "state": "closed", "state_reason": "not_planned",
                  "labels": [{"name": "bug"}], "closed_at": "2025-02-01T00:00:00Z"},
                 {"number": 9, "title": "Open and unlabelled", "state": "open", "labels": []}
             ]),
         )]));
-        let issues = provider.issues_updated_since(&repo(), None).unwrap();
+        let issues: Vec<ForgeIssue> = provider
+            .issues_updated_since(&repo(), None)
+            .unwrap()
+            .into_iter()
+            .filter_map(IssuesItem::into_issue)
+            .collect();
         let closed = issues.iter().find(|issue| issue.number == 7).unwrap();
         assert_eq!(closed.state, "closed");
         assert_eq!(closed.labels, vec!["bug".to_owned()]);
         assert!(closed.closed_at.is_some());
+        assert_eq!(closed.state_reason.as_deref(), Some("not_planned"));
         let open = issues.iter().find(|issue| issue.number == 9).unwrap();
         assert_eq!(open.state, "open");
         assert!(open.labels.is_empty(), "no label is reported, not invented");

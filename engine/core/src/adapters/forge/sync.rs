@@ -29,7 +29,7 @@ use serde_json::{Map, Value};
 
 use super::edges::parse_edges;
 use super::kinds::{COLLECTOR_ISSUES, COLLECTOR_PULLS, KIND_ISSUE, KIND_PULL_REQUEST, KIND_SYNC};
-use super::models::{ForgeIssue, ForgePull, RepoRef};
+use super::models::{ForgeIssue, ForgePull, IssuesItem, RepoRef};
 use super::provider::ForgeProvider;
 use crate::core::{from_iso, to_iso, Moment, Project};
 use crate::decisions::digest_of;
@@ -211,16 +211,20 @@ impl<'a, S: SyncBook> ForgeSyncCollector<'a, S> {
 
         let watermark = self.store.get_watermark(self.name, &project.id)?;
         let since = since_of(watermark.as_deref());
-        let (findings, subject_keys, newest) = match self.kind {
+        let (findings, subject_keys, newest, page_len) = match self.kind {
             SyncKind::Issues => {
                 let items = provider.issues_updated_since(&repo, since.as_deref())?;
-                self.fold_issues(provider, &repo, project, &items)
+                let (findings, keys, newest) = self.fold_issues(provider, &repo, project, &items);
+                (findings, keys, newest, items.len())
             }
             SyncKind::Pulls => {
                 let items = provider.pulls_updated_since(&repo, since.as_deref())?;
-                self.fold_pulls(provider, &repo, project, &items)
+                let (findings, keys, newest) = self.fold_pulls(provider, &repo, project, &items);
+                (findings, keys, newest, items.len())
             }
         };
+        // The receipt counts what this collector owns; pull requests sharing
+        // the issues page are stepped over, not counted (WI-1752).
         let count = subject_keys.len();
         // The stored watermark seeds the comparison, so an overlap replay of an
         // older item can never move it backwards. A watermark that does not
@@ -244,7 +248,9 @@ impl<'a, S: SyncBook> ForgeSyncCollector<'a, S> {
             repo: Some(&repo),
             supported: true,
             count,
-            truncated: count >= PAGE,
+            // A full page means the forge may hold more that moved since the
+            // watermark. Counted over the whole page, pull requests included.
+            truncated: page_len >= PAGE,
             watermark: advanced.map(to_iso),
             detail: None,
         }));
@@ -279,15 +285,17 @@ impl<'a, S: SyncBook> ForgeSyncCollector<'a, S> {
         provider: &dyn ForgeProvider,
         repo: &RepoRef,
         project: &Project,
-        items: &[ForgeIssue],
+        items: &[IssuesItem],
     ) -> (Vec<PendingObservation>, Vec<String>, Option<Moment>) {
         let mut findings = Vec::with_capacity(items.len());
         let mut keys = Vec::with_capacity(items.len());
         let mut newest: Option<Moment> = None;
-        for item in items {
-            let key = provider.subject_key(repo, item.number);
-            keys.push(key.clone());
-            if let Some(moved) = moment_of(item.updated_at.as_deref()) {
+        for entry in items {
+            // Every item moves the watermark, including one this collector
+            // does not own: a page can be all pull requests (WI-1752), and
+            // skipping them without advancing would ask for the same window
+            // forever.
+            if let Some(moved) = moment_of(entry.updated_at()) {
                 if newest.is_none_or(|seen| {
                     moved.unix_seconds() > seen.unix_seconds()
                         || (moved.unix_seconds() == seen.unix_seconds()
@@ -296,6 +304,11 @@ impl<'a, S: SyncBook> ForgeSyncCollector<'a, S> {
                     newest = Some(moved);
                 }
             }
+            let Some(item) = entry.issue() else {
+                continue;
+            };
+            let key = provider.subject_key(repo, item.number);
+            keys.push(key.clone());
             findings.push(issue_finding(provider, repo, project, item, &key));
         }
         (findings, keys, newest)
@@ -444,6 +457,11 @@ fn issue_finding(
     payload.insert("body".into(), option_string(item.body.clone()));
     payload.insert("updated_at".into(), option_string(item.updated_at.clone()));
     payload.insert("closed_at".into(), option_string(item.closed_at.clone()));
+    // How a closed issue closed: a not-planned close is `wont_do`.
+    payload.insert(
+        "state_reason".into(),
+        option_string(item.state_reason.clone()),
+    );
     payload.insert("repo".into(), Value::String(repo.slug()));
     finding(
         KIND_ISSUE,
@@ -615,6 +633,9 @@ mod tests {
     struct StubProvider {
         issues: Vec<ForgeIssue>,
         pulls: Vec<ForgePull>,
+        /// When set, the issues endpoint as GitHub serves it: issues and PRs
+        /// mixed, `since` honoured, ascending by update, 100 to a page.
+        page: Vec<IssuesItem>,
     }
 
     impl ForgeProvider for StubProvider {
@@ -664,9 +685,22 @@ mod tests {
         fn issues_updated_since(
             &self,
             _: &RepoRef,
-            _: Option<&str>,
-        ) -> Result<Vec<ForgeIssue>, VogtError> {
-            Ok(self.issues.clone())
+            since: Option<&str>,
+        ) -> Result<Vec<IssuesItem>, VogtError> {
+            if !self.page.is_empty() {
+                let mut items: Vec<IssuesItem> = self
+                    .page
+                    .iter()
+                    .filter(|item| {
+                        since.is_none_or(|since| item.updated_at().unwrap_or("") >= since)
+                    })
+                    .cloned()
+                    .collect();
+                items.sort_by_key(|item| item.updated_at().unwrap_or("").to_owned());
+                items.truncate(PAGE);
+                return Ok(items);
+            }
+            Ok(self.issues.iter().cloned().map(IssuesItem::Issue).collect())
         }
         fn pulls_updated_since(
             &self,
@@ -846,6 +880,7 @@ mod tests {
             provider: Some(StubProvider {
                 issues: vec![older, newer],
                 pulls: Vec::new(),
+                page: Vec::new(),
             }),
             reason: String::new(),
         };
@@ -889,6 +924,7 @@ mod tests {
             provider: Some(StubProvider {
                 issues: vec![replayed],
                 pulls: Vec::new(),
+                page: Vec::new(),
             }),
             reason: String::new(),
         };
@@ -941,6 +977,7 @@ mod tests {
             provider: Some(StubProvider {
                 issues: Vec::new(),
                 pulls: vec![pull],
+                page: Vec::new(),
             }),
             reason: String::new(),
         };
@@ -966,5 +1003,110 @@ mod tests {
         assert_eq!(since, "2026-05-01T00:00:30Z");
         assert_eq!(since_of(None), None);
         assert_eq!(moment_of(Some("not a date")), None);
+    }
+
+    /// One sync against `directory`, committed, with the stored watermark
+    /// carried forward the way the observed store would keep it.
+    fn sync_once(store: &RecordingStore, directory: &Directory) -> Vec<PendingObservation> {
+        let mut collector = ForgeSyncCollector::issues(store, directory);
+        let findings = collector.collect(&project()).unwrap();
+        collector.after_append(Moment::from_unix(1, 0)).unwrap();
+        if let Some(Some(stamp)) = store.written.borrow().last() {
+            *store.watermark.borrow_mut() = Some(stamp.clone());
+        }
+        findings
+    }
+
+    #[test]
+    fn a_page_of_pull_requests_does_not_wedge_the_watermark() {
+        // WI-1752: GitHub's issues endpoint returns PRs on the same page. A
+        // page made only of PRs must still move the watermark, or every sweep
+        // asks for the same window and the closure behind it is never seen.
+        // An hour apart, so the overlap on the next sweep replays only one.
+        let mut page: Vec<IssuesItem> = (0..100)
+            .map(|n| {
+                let mut pull = ForgePull::new(1000 + n, "a PR", "open", "acme/widgets");
+                pull.updated_at = Some(format!("2026-01-0{}T{:02}:00:00Z", 1 + n / 24, n % 24));
+                IssuesItem::Pull(pull)
+            })
+            .collect();
+        let mut closed = ForgeIssue::new(7, "fixed upstream", "closed", "acme/widgets");
+        closed.updated_at = Some("2026-02-01T00:00:00Z".into());
+        closed.state_reason = Some("completed".into());
+        page.push(IssuesItem::Issue(closed));
+        let store = RecordingStore {
+            watermark: RefCell::new(None),
+            written: RefCell::new(Vec::new()),
+            touched: RefCell::new(Vec::new()),
+        };
+        let directory = Directory {
+            provider: Some(StubProvider {
+                issues: Vec::new(),
+                pulls: Vec::new(),
+                page,
+            }),
+            reason: String::new(),
+        };
+
+        let first = sync_once(&store, &directory);
+        let receipt = first.last().unwrap();
+        assert_eq!(
+            receipt.payload["count"],
+            Value::from(0),
+            "PRs are not counted as issues"
+        );
+        assert_eq!(
+            receipt.payload["truncated"],
+            Value::Bool(true),
+            "judged over the raw page"
+        );
+        assert!(first.iter().all(|finding| finding.kind == KIND_SYNC));
+        assert_eq!(
+            store.watermark.borrow().as_deref(),
+            Some("2026-01-05T03:00:00+00:00"),
+            "the watermark walks past the PRs"
+        );
+
+        let second = sync_once(&store, &directory);
+        let issue = second
+            .iter()
+            .find(|finding| finding.kind == KIND_ISSUE)
+            .expect("the close behind the PR page is observed");
+        assert_eq!(issue.payload["number"], Value::from(7));
+        assert_eq!(issue.payload["state"], Value::String("closed".into()));
+        assert_eq!(
+            issue.payload["state_reason"],
+            Value::String("completed".into())
+        );
+        assert_eq!(second.last().unwrap().payload["count"], Value::from(1));
+        assert_eq!(
+            second.last().unwrap().payload["truncated"],
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn a_not_planned_close_carries_its_reason_into_the_observation() {
+        let mut declined = ForgeIssue::new(3, "won't fix", "closed", "acme/widgets");
+        declined.updated_at = Some("2026-02-01T00:00:00Z".into());
+        declined.state_reason = Some("not_planned".into());
+        let store = RecordingStore {
+            watermark: RefCell::new(None),
+            written: RefCell::new(Vec::new()),
+            touched: RefCell::new(Vec::new()),
+        };
+        let directory = Directory {
+            provider: Some(StubProvider {
+                issues: vec![declined],
+                pulls: Vec::new(),
+                page: Vec::new(),
+            }),
+            reason: String::new(),
+        };
+        let findings = sync_once(&store, &directory);
+        assert_eq!(
+            findings[0].payload["state_reason"],
+            Value::String("not_planned".into())
+        );
     }
 }

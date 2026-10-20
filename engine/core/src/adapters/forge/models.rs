@@ -68,6 +68,9 @@ pub struct ForgeIssue {
     pub body: Option<String>,
     pub updated_at: Option<String>,
     pub closed_at: Option<String>,
+    /// Why a closed issue closed: `completed`, `not_planned`, `reopened`.
+    /// `None` is "the forge did not say" (or an open issue).
+    pub state_reason: Option<String>,
     pub source_url: Option<String>,
 }
 
@@ -92,7 +95,49 @@ impl ForgeIssue {
             body: None,
             updated_at: None,
             closed_at: None,
+            state_reason: None,
             source_url: None,
+        }
+    }
+}
+
+/// One item from a forge's issues endpoint. GitHub's issues endpoint returns
+/// pull requests on the same page; they are not issues, but they are part of
+/// the page, so the reader yields them and the sync moves the watermark past
+/// them (WI-1752).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssuesItem {
+    Issue(ForgeIssue),
+    Pull(ForgePull),
+}
+
+impl IssuesItem {
+    pub fn number(&self) -> i64 {
+        match self {
+            Self::Issue(issue) => issue.number,
+            Self::Pull(pull) => pull.number,
+        }
+    }
+
+    pub fn updated_at(&self) -> Option<&str> {
+        match self {
+            Self::Issue(issue) => issue.updated_at.as_deref(),
+            Self::Pull(pull) => pull.updated_at.as_deref(),
+        }
+    }
+
+    /// The issue, or `None` for a pull request sharing the page.
+    pub fn issue(&self) -> Option<&ForgeIssue> {
+        match self {
+            Self::Issue(issue) => Some(issue),
+            Self::Pull(_) => None,
+        }
+    }
+
+    pub fn into_issue(self) -> Option<ForgeIssue> {
+        match self {
+            Self::Issue(issue) => Some(issue),
+            Self::Pull(_) => None,
         }
     }
 }

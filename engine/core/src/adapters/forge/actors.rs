@@ -314,7 +314,7 @@ mod tests {
             &self,
             _: &RepoRef,
             _: Option<&str>,
-        ) -> Result<Vec<super::super::models::ForgeIssue>, VogtError> {
+        ) -> Result<Vec<super::super::models::IssuesItem>, VogtError> {
             Ok(Vec::new())
         }
         fn pulls_updated_since(

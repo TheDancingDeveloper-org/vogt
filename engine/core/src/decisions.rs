@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::core::{Moment, Observation, WorkItem, WorkOverlay, DONE, TERMINAL_STATES};
+use crate::core::{Moment, Observation, WorkItem, WorkOverlay, DONE, TERMINAL_STATES, WONT_DO};
 
 /// `json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True)`.
 ///
@@ -632,6 +632,22 @@ pub fn lifecycle_of(observation: &Observation) -> &'static str {
     }
 }
 
+/// The finished state an upstream close lands in.
+///
+/// A close the forge says was not planned is `wont_do`, not `done`: the work
+/// was declined, not delivered. Anything else that closed is `done`.
+pub fn closed_state(observation: &Observation) -> &'static str {
+    if observation
+        .payload
+        .get("state_reason")
+        .and_then(Value::as_str)
+        == Some("not_planned")
+    {
+        return WONT_DO;
+    }
+    DONE
+}
+
 pub fn upstream_state(
     observation: &Observation,
     overlay: Option<&WorkOverlay>,
@@ -645,7 +661,7 @@ pub fn upstream_state(
                 }
             }
         }
-        return DONE.to_string();
+        return closed_state(observation).to_string();
     }
     if let Some(overlay) = overlay {
         if let Some(state) = &overlay.workflow_state {
@@ -1437,6 +1453,10 @@ fn last_observed_open(
 }
 
 /// A linked issue's state disagrees with the item's.
+///
+/// A not-planned close proposes `wont_do`, the same finished state the
+/// upstream mapping gives it, so accepting does not turn a declined item into
+/// a delivered one.
 #[allow(clippy::too_many_arguments)]
 pub fn forge_state_mismatch(
     work_item_id: &str,
@@ -1447,7 +1467,13 @@ pub fn forge_state_mismatch(
     project_id: Option<&str>,
     evidence: EvidenceSnapshot,
     evidence_observation_id: Option<&str>,
+    upstream_reason: Option<&str>,
 ) -> DriftFinding {
+    let closed_to = if upstream_reason == Some("not_planned") {
+        WONT_DO
+    } else {
+        DONE
+    };
     let summary = if upstream_state == "closed" {
         format!(
             "{subject_key} is closed upstream, but {work_ref} is {} here",
@@ -1465,7 +1491,7 @@ pub fn forge_state_mismatch(
         serde_json::json!({
             "entity": "work_item", "field": "state",
             "from": declared_state,
-            "to": if upstream_state == "closed" { "done" } else { "open" },
+            "to": if upstream_state == "closed" { closed_to } else { "open" },
             "work_ref": work_ref,
         }),
         Some(evidence),
@@ -4744,6 +4770,7 @@ mod drift_tests {
             None,
             evidence(),
             None,
+            Some("completed"),
         );
         assert_eq!(closed.proposed_change["to"], "done");
         let open = forge_state_mismatch(
@@ -4755,9 +4782,45 @@ mod drift_tests {
             None,
             evidence(),
             None,
+            None,
         );
         assert!(open.summary.contains("observed reopen"));
         assert_eq!(open.proposed_change["to"], "open");
+    }
+
+    #[test]
+    fn a_not_planned_close_proposes_wont_do() {
+        // WI-1752: accepting the drift must not turn declined work into done.
+        let declined = forge_state_mismatch(
+            "wi",
+            "WI-1",
+            "open",
+            "closed",
+            "gh:acme/app#1",
+            None,
+            evidence(),
+            None,
+            Some("not_planned"),
+        );
+        assert_eq!(declined.proposed_change["to"], "wont_do");
+    }
+
+    #[test]
+    fn an_upstream_close_finishes_done_or_wont_do_by_its_reason() {
+        let completed = observed(
+            "forge.issue",
+            serde_json::json!({"state": "closed", "state_reason": "completed"}),
+        );
+        assert_eq!(closed_state(&completed), "done");
+        assert_eq!(upstream_state(&completed, None, "open"), "done");
+        let unsaid = observed("forge.issue", serde_json::json!({"state": "closed"}));
+        assert_eq!(upstream_state(&unsaid, None, "open"), "done");
+        let declined = observed(
+            "forge.issue",
+            serde_json::json!({"state": "closed", "state_reason": "not_planned"}),
+        );
+        assert_eq!(closed_state(&declined), "wont_do");
+        assert_eq!(upstream_state(&declined, None, "open"), "wont_do");
     }
 
     fn observed(kind: &str, payload: serde_json::Value) -> Observation {

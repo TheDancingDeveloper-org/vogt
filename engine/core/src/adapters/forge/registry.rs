@@ -425,7 +425,7 @@ impl ForgeProvider for ForgeClient {
         &self,
         repo: &RepoRef,
         since: Option<&str>,
-    ) -> Result<Vec<super::models::ForgeIssue>, crate::errors::VogtError> {
+    ) -> Result<Vec<super::models::IssuesItem>, crate::errors::VogtError> {
         match self {
             Self::GitHub(provider) => provider.issues_updated_since(repo, since),
             Self::Forgejo(provider) => provider.issues_updated_since(repo, since),
