@@ -21,12 +21,20 @@ from vogt.adapters.github.client import GitHubClient
 from vogt.application.context import AppContext
 from vogt.application.models import (
     BacklogParams,
+    ForgeLinkParams,
+    GetWorkParams,
     RegisterProjectParams,
     SweepParams,
 )
-from vogt.application.services import backlog, register_project, sweep
+from vogt.application.services import (
+    backlog,
+    get_work,
+    link_project,
+    register_project,
+    sweep,
+)
 from vogt.core.observed import LIFECYCLE_CLOSED, closed_state, lifecycle_of
-from vogt.core.workflow import WONT_DO
+from vogt.core.workflow import DONE, WONT_DO
 
 WHY = "forge sync test"
 REPO = "https://github.com/TheDancingDeveloper-org/rustnzb"
@@ -379,3 +387,46 @@ def test_a_not_planned_close_finishes_as_wont_do(
     latest = instance.observed.latest_by_subject("gh:TheDancingDeveloper-org/rustnzb#9")
     assert latest is not None
     assert closed_state(latest) == WONT_DO
+
+
+@pytest.mark.parametrize(
+    ("reason", "finished"),
+    [("completed", DONE), ("not_planned", WONT_DO), (None, DONE)],
+)
+def test_an_upstream_close_finishes_the_mirror_item(
+    instance: AppContext, forge: FakeForge, reason: str | None, finished: str
+) -> None:
+    """The mirror work item itself reaches the finished state on the next sync.
+
+    Inbound only: nothing is written back to the forge, so it holds while the
+    project's write-back policy is `none` (WI-1752).
+    """
+    link_project(instance, ForgeLinkParams(project="rustnzb", reason=WHY))
+    ref = "gh:TheDancingDeveloper-org/rustnzb#7"
+    forge.issues = [
+        {
+            "number": 7,
+            "title": "x",
+            "state": "open",
+            "updated_at": "2026-08-01T00:00:00Z",
+        }
+    ]
+    sweep(instance, SweepParams(reason=WHY))
+    assert get_work(instance, GetWorkParams(ref=ref)).item.state != finished
+
+    closed: dict[str, Any] = {
+        "number": 7,
+        "title": "x",
+        "state": "closed",
+        "updated_at": "2026-08-02T00:00:00Z",
+    }
+    if reason is not None:
+        closed["state_reason"] = reason
+    forge.issues = [closed]
+    writes_before = [r for r in forge.requests if r[0] != "GET"]
+    sweep(instance, SweepParams(reason=WHY))
+
+    assert get_work(instance, GetWorkParams(ref=ref)).item.state == finished
+    assert [r for r in forge.requests if r[0] != "GET"] == writes_before, (
+        "an inbound close writes nothing upstream"
+    )
