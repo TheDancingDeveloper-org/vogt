@@ -47,3 +47,24 @@ would reopen it.
   treats a float (an integral value within `i64` is kept, anything else is
   refused).
 - **Reopen if:** an engine field could exceed `u64`.
+
+## A3. Error paths where Python raises uncaught (proposed, awaiting operator review)
+
+The WI-1081 drift ports (main @09d3c552) handle a few inputs that Python does
+not catch. In each case Python fails with an unhandled exception (a 500 on
+REST), and Rust degrades gracefully instead. The happy paths match.
+
+- **GitHub App, non-JSON reply** (main c8d6211): Rust raises
+  `github_unavailable`, where Python lets the JSON decode error escape.
+- **GitHub App, unreadable private-key file** (main c8d6211/4b4dee6): Rust
+  warns once and falls back to the token file, as it already does for a
+  missing or broken key. Python lets the `OSError` escape.
+- **Claim check, naive `merged_at`/`closed_at`** (main 78a3636): Rust reads a
+  timestamp without an offset as UTC. Python raises a `TypeError` when it
+  compares it with the session start.
+- **Claim check, PR number in non-ASCII digits** (main 78a3636): Rust's
+  `mentioned_pulls` drops it. Python's `\d` matches it.
+- **GitHub rate budget** (main 1c59243): `reset_at` is kept as whole epoch
+  seconds.
+
+- **Reopen if:** the operator wants the uncaught behaviour reproduced.

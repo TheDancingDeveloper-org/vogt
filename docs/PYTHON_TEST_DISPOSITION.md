@@ -32,6 +32,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | File | Disposition | Where / why |
 |---|---|---|
 | test_agent_activity.py | ported | `collectors/agent_activity.rs` |
+| test_agent_auth_degraded.py | retired | `engine/deploy/agent-auth.sh` degraded launch with the secrets manager unreachable (WI-1812). Shell, not the core crate. |
 | test_agent_auth_launch.py | retired | `engine/deploy/agent-auth.sh` launch timing. Shell, not the core crate. |
 | test_agent_cli_boot_contract.py | retired | `engine/deploy/agent-cli-install.sh` and `verify-agent-clis.sh`. Engine image boot, not the core. |
 | test_agent_clis.py | ported | Agent-CLI report service. The engine owns the mechanism; the core passes the report through. |
