@@ -226,6 +226,8 @@ from vogt.application.models import (
     SessionLastReplyParams,
     SessionLastReplyResult,
     SessionListResult,
+    SessionReportParams,
+    SessionReportResult,
     SessionResult,
     SessionScreenParams,
     SessionScreenResult,
@@ -1645,6 +1647,30 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.report_blocked,
             route=HttpRoute("POST", "/sessions/blocked"),
             cli=CliBinding(("session", "blocked")),
+        ),
+        # A session's own typed report (WI-2039): progress, result, question
+        # or blocker, with the facts oversight would otherwise scrape from its
+        # transcript. `work.write`, as for report_blocked: the agent's own
+        # account of its own session, audited with the text.
+        Operation(
+            name="session.report",
+            summary=(
+                "Post this session's short typed report — kind progress, "
+                "result, question or blocker — with summary, branch/sha/pr, "
+                "checks run, blockers and next step. Shown as the latest "
+                "report on session_list/session_sweep/session_digest, raised "
+                "in the Inbox and left as a note on the work item (the "
+                "session's bound item unless `work_item` names one). Post a "
+                "`result` when the deliverable is done. Omit `id` from inside "
+                "a session Vogt started."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=SessionReportParams,
+            result_model=SessionReportResult,
+            handler=services.report_session,
+            route=HttpRoute("POST", "/sessions/report"),
+            cli=CliBinding(("session", "report")),
         ),
         Operation(
             name="session.report_unblocked",

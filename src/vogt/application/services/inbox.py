@@ -47,6 +47,7 @@ from vogt.application.services.ci_watch import (
 )
 from vogt.application.services.decisions import pending_decisions
 from vogt.application.services.grants import pending_grants
+from vogt.application.services.reports import one_line, view_of
 from vogt.application.services.views import trust_for
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.collectors.session_outcomes import KIND_TASK_RUN
@@ -68,6 +69,7 @@ from vogt.core.entities import (
     InboxTriage,
     Observation,
     Project,
+    SessionReport,
     TrustState,
 )
 from vogt.errors import (
@@ -90,6 +92,8 @@ REF_FAILURE_KIND = "ci.ref_failure"
 BRANCH_CONCLUDED_KIND = "ci.branch_concluded"
 DEPLOY_FAILED_KIND = "deploy.failed"
 MAX_SCAN = 10_000
+#: Reports read for the Inbox; the newest per session is kept.
+_REPORT_SCAN = 500
 Cursor = tuple[str, str]
 
 
@@ -555,6 +559,16 @@ def _collect_live(
     # answered by choosing one of its options on the entry itself.
     for decision in pending_decisions(view, ctx):
         entries.append(_decision_entry(decision, view))
+    # Sessions' own reports (WI-2039): the newest one per session, so a
+    # worker's result, question or blocker reaches oversight without a read
+    # of its transcript. A later report replaces the entry (a new key).
+    seen_sessions: set[str] = set()
+    for row in view.list_session_reports(limit=_REPORT_SCAN):
+        key = row.engine_session_id or row.id
+        if key in seen_sessions:
+            continue
+        seen_sessions.add(key)
+        entries.append(_report_entry(view, row, projects))
 
     if ctx.engine is not None:
         try:
@@ -990,6 +1004,40 @@ def _grant_entry(
         actor_kind="human"
         if requester is not None and requester.kind == "human"
         else "bot",
+        actor_relation="org_member",
+    )
+
+
+def _report_entry(
+    view: ReadView, row: SessionReport, projects: dict[str, Project]
+) -> InboxEntry:
+    """A session's latest typed report (WI-2039). The agent's text: untrusted,
+    shown verbatim, never acted on."""
+    report = view_of(view, row)
+    item = None if row.work_item_id is None else view.work_item_by_id(row.work_item_id)
+    project = None if item is None else projects.get(item.project_id or "")
+    who = report.reporter or row.engine_session_id or "a session"
+    return InboxEntry(
+        entry_key=f"agent:report:{row.id}",
+        source=AGENT_KIND,
+        kind=f"session.report.{row.kind}",
+        occurred_at=row.created_at,
+        observed_at=None,
+        title=f"Report ({row.kind}) from {who}"[:200],
+        summary=one_line(report)[:1000],
+        project_slug=None if project is None else project.slug,
+        work_item_ref=report.work_item,
+        session_id=row.engine_session_id,
+        source_subject_key=row.id,
+        trust_state="unverified",
+        freshness="live",
+        provisional=True,
+        action=None
+        if row.engine_session_id is None
+        else InboxAction(kind="session", session_id=row.engine_session_id),
+        evidence_snapshot=report.model_dump(mode="json"),
+        actor_login=report.reporter,
+        actor_kind="bot",
         actor_relation="org_member",
     )
 

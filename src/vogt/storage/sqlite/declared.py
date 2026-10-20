@@ -43,6 +43,8 @@ from vogt.core.entities import (
     Relation,
     RelationKind,
     SessionGrant,
+    SessionReport,
+    SessionReportFields,
     Suppression,
     Token,
     Watch,
@@ -1324,6 +1326,55 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_decision(row) for row in rows]
 
+    def latest_session_reports(
+        self, engine_session_ids: list[str]
+    ) -> dict[str, SessionReport]:
+        wanted = sorted(set(engine_session_ids))
+        found: dict[str, SessionReport] = {}
+        # Chunked under SQLite's host-parameter limit; one indexed read per
+        # chunk, the newest row per session picked by the window.
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start : start + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                "SELECT * FROM (SELECT r.*, ROW_NUMBER() OVER ("
+                "PARTITION BY engine_session_id ORDER BY created_at DESC, id DESC"
+                ") AS rn FROM session_reports r "
+                f"WHERE engine_session_id IN ({placeholders})) WHERE rn = 1",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                report = _row_to_session_report(row)
+                if report.engine_session_id is not None:
+                    found[report.engine_session_id] = report
+        return found
+
+    def list_session_reports(
+        self,
+        *,
+        engine_session_id: str | None = None,
+        work_item_id: str | None = None,
+        kind: str | None = None,
+        limit: int = 200,
+    ) -> list[SessionReport]:
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("engine_session_id", engine_session_id),
+            ("work_item_id", work_item_id),
+            ("kind", kind),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM session_reports {where}"
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [_row_to_session_report(row) for row in rows]
+
     def list_session_grants(
         self,
         *,
@@ -2131,6 +2182,23 @@ class SqliteWriteTxn(SqliteReadView):
                 _iso_or_none(grant.expires_at),
                 grant.revoked_by,
                 _iso_or_none(grant.revoked_at),
+            ),
+        )
+
+    def insert_session_report(self, report: SessionReport) -> None:
+        self._conn.execute(
+            "INSERT INTO session_reports (id, actor_id, engine_session_id, "
+            "work_item_id, kind, summary, data, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                report.id,
+                report.actor_id,
+                report.engine_session_id,
+                report.work_item_id,
+                report.kind,
+                report.summary,
+                json.dumps(report.fields.model_dump(mode="json")),
+                to_iso(report.created_at),
             ),
         )
 
@@ -3010,6 +3078,19 @@ def _row_to_watch(row: sqlite3.Row) -> Watch:
         attempts=int(row["attempts"]),
         last_error=_opt(row, "last_error"),
         reason=str(row["reason"]),
+    )
+
+
+def _row_to_session_report(row: sqlite3.Row) -> SessionReport:
+    return SessionReport(
+        id=str(row["id"]),
+        actor_id=str(row["actor_id"]),
+        engine_session_id=row["engine_session_id"],
+        work_item_id=row["work_item_id"],
+        kind=row["kind"],
+        summary=str(row["summary"]),
+        fields=SessionReportFields.model_validate_json(str(row["data"])),
+        created_at=from_iso(str(row["created_at"])),
     )
 
 
