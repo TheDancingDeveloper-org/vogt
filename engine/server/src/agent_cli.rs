@@ -674,6 +674,47 @@ pub fn with_codex_guidance(
     Some(out)
 }
 
+/// Linux caps one argv entry at 128 KiB; a charter that would push Codex's
+/// `developer_instructions` past this stays in the brief alone.
+const MAX_CHARTER_ARG_BYTES: usize = 120 * 1024;
+
+/// `command` with the scope's charters (WI-2038) appended to Codex's
+/// `developer_instructions`, or `None` when it is not a Codex launch, there is
+/// no charter, or the result would not fit in one argument. Runs after
+/// [`with_codex_guidance`]: an override already present is decoded and
+/// extended, otherwise one is added right after the Codex binary. The
+/// charters are in the brief either way; this keeps them in the standing
+/// instructions too, which a compacted conversation does not drop.
+pub fn with_codex_charter(command: &[String], charter: &str) -> Option<Vec<String>> {
+    const PREFIX: &str = "developer_instructions=";
+    let charter = charter.trim();
+    if charter.is_empty() || agent_name(command).as_deref() != Some("codex") {
+        return None;
+    }
+    let mut out = command.to_vec();
+    let encode = |body: &str| format!("{PREFIX}{}", crate::codex_guidance::toml_basic_string(body));
+    match out.iter().position(|arg| arg.starts_with(PREFIX)) {
+        Some(pos) => {
+            let parsed: toml::Table =
+                toml::from_str(&format!("v = {}", &out[pos][PREFIX.len()..])).ok()?;
+            let existing = parsed.get("v")?.as_str()?;
+            out[pos] = encode(&format!("{}\n\n{charter}", existing.trim_end()));
+            if out[pos].len() > MAX_CHARTER_ARG_BYTES {
+                return None;
+            }
+        }
+        None => {
+            let value = encode(charter);
+            if value.len() > MAX_CHARTER_ARG_BYTES {
+                return None;
+            }
+            let (idx, _) = agent_binary(command);
+            out.splice(idx + 1..idx + 1, ["-c".to_string(), value]);
+        }
+    }
+    Some(out)
+}
+
 /// A conversation id becomes an argument to the agent CLI, so it is held to a
 /// narrower vocabulary than a model id: Claude Code and Codex ids are UUIDs,
 /// OpenCode's are `ses_…`, and a Codex session *name* is a plain word. No `/`
@@ -750,6 +791,46 @@ mod tests {
         assert!(with_codex_guidance(&out, &repo, Some(&home)).is_none());
         let claude = vec!["claude".to_string()];
         assert!(with_codex_guidance(&claude, &repo, Some(&home)).is_none());
+    }
+
+    fn instructions(arg: &str) -> String {
+        let value = arg.strip_prefix("developer_instructions=").unwrap();
+        let parsed: toml::Table = toml::from_str(&format!("v = {value}")).unwrap();
+        parsed["v"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn codex_charter_extends_the_guidance_override_after_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let repo = home.join("Working").join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(home.join("Working").join("AGENTS.md"), "WS \"quoted\"").unwrap();
+        let command: Vec<String> = ["/usr/bin/codex", "--yolo"].map(String::from).to_vec();
+        let guided = with_codex_guidance(&command, &repo, Some(&home)).unwrap();
+        let out = with_codex_charter(&guided, "## Charters\n\nNo brand names.").unwrap();
+        assert_eq!(
+            out.len(),
+            guided.len(),
+            "extended in place, not a second -c"
+        );
+        let body = instructions(&out[2]);
+        assert!(body.contains("WS \"quoted\""));
+        assert!(body.ends_with("## Charters\n\nNo brand names."));
+        assert!(body.find("WS").unwrap() < body.find("No brand names.").unwrap());
+    }
+
+    #[test]
+    fn codex_charter_adds_an_override_when_there_is_no_guidance() {
+        let command: Vec<String> = ["env", "--", "codex"].map(String::from).to_vec();
+        let out = with_codex_charter(&command, "Stop at push.").unwrap();
+        assert_eq!(out[3], "-c");
+        assert_eq!(instructions(&out[4]), "Stop at push.");
+        // Other agents, and an empty charter, are left alone.
+        assert!(with_codex_charter(&["claude".to_string()], "x").is_none());
+        assert!(with_codex_charter(&command, "  ").is_none());
+        // Too large for one argument: the brief carries it alone.
+        assert!(with_codex_charter(&command, &"x".repeat(MAX_CHARTER_ARG_BYTES)).is_none());
     }
     use super::*;
 

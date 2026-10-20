@@ -512,6 +512,14 @@ is yours to decide. `decision_withdraw` takes back one you no longer need.
 Nothing is applied when a decision is answered: act on the answer through the
 op that checks the action.
 
+**Charters.** Standing instructions that apply to every session on a scope
+(commit identity, forbidden names, the delivery footer) belong in a charter,
+not in each brief: `charter_set` with `scope` (`workspace`, `project`,
+`initiative`), `ref` (the slug) and `body`; `charter_get` reads it, with
+`history: true` for earlier versions. Every brief on that scope carries them
+under `## Charters`, workspace first, then project, then initiative, then the
+brief. A later one refines an earlier one.
+
 **Autopilot.** `session_start` with `autopilot: true` adds an Autopilot
 section to the brief: when the agent's next step needs no person, it carries
 on in the same turn instead of ending it to announce the next item, and

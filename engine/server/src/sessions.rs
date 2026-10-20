@@ -588,6 +588,13 @@ impl SessionRegistry {
                 spec.command = Some(rewritten);
             }
         }
+        // WI-2038. The scope's charters ride in Codex's standing
+        // instructions as well as in the brief, after the workspace guidance.
+        if let (Some(command), Some(charter)) = (spec.command.as_deref(), spec.charter.as_deref()) {
+            if let Some(rewritten) = agent_cli::with_codex_charter(command, charter) {
+                spec.command = Some(rewritten);
+            }
+        }
 
         let prompt_file = match brief {
             Some(text) => Some(prompt_files::write_session_prompt(
@@ -1521,6 +1528,7 @@ impl SessionRegistry {
             rows: req.rows.or(record.rows),
             scrollback_bytes: None,
             companion: None,
+            charter: None,
             budget: record.budget.clone(),
         };
         let session = self.create_inner(spec, Creating::Wake(Box::new(record)), None)?;
