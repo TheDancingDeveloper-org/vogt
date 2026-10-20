@@ -75,6 +75,13 @@ INPUT_PENDING = (
     "submitted; read session_screen, then press enter with session_input"
 )
 
+#: Codex echoed input after a model-API error but started no turn (WI-2027).
+WEDGED = (
+    "wedged: Codex shows a model-API error and echoed input since, but "
+    "started no turn; restart it keeping its worktree and conversation with "
+    "session_hibernate, then session_wake"
+)
+
 
 @dataclass(frozen=True)
 class Verdict:

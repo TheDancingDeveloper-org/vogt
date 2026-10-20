@@ -19,9 +19,11 @@ from vogt.application.models import (
 )
 from vogt.application.services import register_project, session_input, start_session
 from vogt.core.delivery import (
+    CODEX_PROMPT,
     Observation,
     claude_composer,
     codex_composer,
+    codex_error_wedge,
     composer_holds,
     input_pending,
     judge,
@@ -479,3 +481,52 @@ def test_a_greyed_suggestion_is_not_input_pending() -> None:
     assert claude_composer(box) == ""
     assert input_pending(box) is None
     assert input_pending(_box(f"{PROMPT} fix lint errors")) == "fix lint errors"
+
+
+#: A Codex screen after two model-API 422s, as the session log of
+#: 2026-10-20 shows it (WI-2027): each message is echoed under the error
+#: and no `•` step ever follows.
+_ERR = (
+    "■ unexpected status 422 Unprocessable Entity: Budget has been exceeded! "
+    "Key=vogt-sessions"
+)
+P = CODEX_PROMPT
+NUDGE = "The LiteLLM key budget has been removed. Continue WI-1262."
+WEDGED_SCREEN = (
+    "• Now the frontend adoption fix.",
+    _ERR,
+    "",
+    f"{P} Autopilot: carry on with the next unblocked item in scope.",
+    "",
+    _ERR,
+    "",
+    f"{P} {NUDGE}",
+    "",
+    f"{P} Ask Codex to do anything",
+    "",
+    "  deepseek-flash · ~/Working/Active/WI-1262",
+    "  ? for shortcuts",
+)
+
+
+def test_an_echo_after_an_api_error_with_no_turn_is_wedged() -> None:
+    assert codex_error_wedge(WEDGED_SCREEN, NUDGE) is not None
+    assert codex_error_wedge(WEDGED_SCREEN) is not None, "an Enter alone"
+    assert codex_error_wedge(WEDGED_SCREEN, "something else") is None
+    seen = Observation("waiting-for-input", WEDGED_SCREEN)
+    found = judge(
+        submitted=True, before="waiting-for-input", after=[seen], pending=NUDGE
+    )
+    assert found.delivery == "wedged"
+    assert "session_hibernate" in found.evidence
+    assert "422" in found.evidence
+
+
+def test_an_error_that_codex_moved_past_is_not_a_wedge() -> None:
+    moved = (*WEDGED_SCREEN[:8], "• Explored", *WEDGED_SCREEN[8:])
+    assert codex_error_wedge(moved) is None
+    bare = (_ERR, "", *WEDGED_SCREEN[9:])
+    assert codex_error_wedge(bare) is None, "an error with nothing sent since"
+    running = Observation("running", WEDGED_SCREEN)
+    found = judge(submitted=True, before="waiting-for-input", after=[running])
+    assert found.delivery == "delivered"
