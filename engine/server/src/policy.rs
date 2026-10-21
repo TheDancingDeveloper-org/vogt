@@ -379,9 +379,18 @@ fn toplevel(dir: &Path) -> Option<PathBuf> {
     Some(canonical(Path::new(&top)))
 }
 
-/// The trimmed first line `git -C dir <args>` prints, bounded by
+/// What `git -C dir <args>` prints, trimmed, bounded by
 /// [`BRANCH_LOOKUP_TIMEOUT`]. `None` on failure, empty output or timeout.
 fn git_line(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = git_output(dir, args, BRANCH_LOOKUP_TIMEOUT)?;
+    let line = out.trim();
+    (!line.is_empty()).then(|| line.to_string())
+}
+
+/// What `git -C dir <args>` prints, or `None` when it fails or does not
+/// return within `timeout`. Stdout is drained while git runs, so a large
+/// answer cannot fill the pipe and stall it into the timeout.
+fn git_output(dir: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     let mut child = std::process::Command::new("git")
         .args(["--no-optional-locks", "-C"])
         .arg(dir)
@@ -390,20 +399,21 @@ fn git_line(dir: &Path, args: &[&str]) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).map(|_| buf)
+    });
     let started = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                let mut stdout = child.stdout.take()?;
-                let mut buf = String::new();
-                stdout.read_to_string(&mut buf).ok()?;
-                let line = buf.trim();
-                return (!line.is_empty()).then(|| line.to_string());
+                let buf = reader.join().ok()?.ok()?;
+                return status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&buf).into_owned());
             }
-            Ok(None) if started.elapsed() < BRANCH_LOOKUP_TIMEOUT => {
+            Ok(None) if started.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(20));
             }
             _ => {
@@ -413,6 +423,74 @@ fn git_line(dir: &Path, args: &[&str]) -> Option<String> {
             }
         }
     }
+}
+
+/// How long the spawn-time `git status` that captures a baseline may take.
+/// Longer than a check's lookup: it runs once, and a big checkout is slow.
+const BASELINE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `policy` with the session's workspace filled in (WI-1326): its kind, its
+/// toplevel and the paths already dirty in it. A worktree cut for this start
+/// (`worktree`) has an empty baseline. A policy that already names a workspace — a
+/// wake's, from the record — is returned as it is, and so is one whose `cwd`
+/// is not in a repository. A `git status` that fails leaves the baseline
+/// empty: the guard is then a no-op, never a blanket refusal.
+pub fn with_workspace(
+    policy: Option<SessionPolicy>,
+    cwd: &Path,
+    worktree: bool,
+) -> Option<SessionPolicy> {
+    if policy.as_ref().is_some_and(|p| p.workspace_path.is_some()) {
+        return policy;
+    }
+    let Some(top) = toplevel(cwd) else {
+        return policy;
+    };
+    let mut policy = policy.unwrap_or_default();
+    // An existing linked worktree opened as `cwd` is a worktree too, but not
+    // a fresh one: what is dirty in it predates the session.
+    let linked = worktree || crate::worktree_clean::linked_worktree(&top).is_some();
+    policy.workspace_kind = Some(if linked { "worktree" } else { "checkout" }.to_string());
+    policy.discard_baseline = if worktree {
+        Vec::new()
+    } else {
+        dirty_paths(&top)
+    };
+    policy.workspace_path = Some(top.display().to_string());
+    Some(policy)
+}
+
+/// The paths `git status` reports as changed or untracked in `root`, sorted.
+/// A rename contributes both of its paths; an untracked directory keeps its
+/// trailing `/`.
+fn dirty_paths(root: &Path) -> Vec<String> {
+    let Some(out) = git_output(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+        BASELINE_TIMEOUT,
+    ) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    let mut fields = out.split('\0');
+    while let Some(field) = fields.next() {
+        if field.len() < 4 {
+            continue;
+        }
+        let (code, path) = field.split_at(3);
+        if code.starts_with("!!") {
+            continue;
+        }
+        paths.push(path.to_string());
+        if code.starts_with(['R', 'C']) {
+            if let Some(source) = fields.next() {
+                paths.push(source.to_string());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 /// How deep `bash -c`, `eval` and `xargs` payloads are followed.
@@ -1427,6 +1505,47 @@ mod tests {
         };
         assert_eq!(check(&none, &command, &wt), None);
         assert_eq!(check(&none, "git reset --hard", &main), None);
+        std::fs::remove_dir_all(&wt).ok();
+        std::fs::remove_dir_all(&main).ok();
+    }
+
+    #[test]
+    fn the_workspace_is_captured_at_spawn() {
+        let root = repo("capture");
+        std::fs::write(root.join("f"), "changed").unwrap();
+        std::fs::create_dir_all(root.join("scratch")).unwrap();
+        std::fs::write(root.join("scratch/n"), "x").unwrap();
+        std::fs::write(root.join("new.txt"), "x").unwrap();
+        let p = with_workspace(None, &root, false).unwrap();
+        assert_eq!(p.workspace_kind.as_deref(), Some("checkout"));
+        assert_eq!(
+            p.workspace_path,
+            Some(canonical(&root).display().to_string())
+        );
+        assert_eq!(p.discard_baseline, ["f", "new.txt", "scratch/"]);
+        // A worktree starts clean whatever git says; a wake keeps the record's.
+        let wt = with_workspace(None, &root, true).unwrap();
+        assert_eq!(wt.workspace_kind.as_deref(), Some("worktree"));
+        assert!(wt.discard_baseline.is_empty());
+        assert_eq!(
+            with_workspace(Some(p.clone()), Path::new("/"), true),
+            Some(p)
+        );
+        // Outside a repo nothing is added.
+        let plain = std::env::temp_dir().join(format!("vogt-policy-norepo-{}", std::process::id()));
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(with_workspace(None, &plain, false), None);
+        std::fs::remove_dir_all(&plain).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_existing_linked_worktree_is_a_worktree_with_its_dirt_kept() {
+        let (main, wt) = checkout_and_worktree("linked");
+        std::fs::write(wt.join("f"), "edited").unwrap();
+        let p = with_workspace(None, &wt, false).unwrap();
+        assert_eq!(p.workspace_kind.as_deref(), Some("worktree"));
+        assert_eq!(p.discard_baseline, ["f"]);
         std::fs::remove_dir_all(&wt).ok();
         std::fs::remove_dir_all(&main).ok();
     }

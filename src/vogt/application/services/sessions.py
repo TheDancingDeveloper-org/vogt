@@ -33,6 +33,7 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -337,6 +338,11 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 }
                 if params.worktree
                 else None
+            ),
+            # Only a session in a worktree is held to them, so a start in
+            # the checkout itself sends exactly what it sent before.
+            protected_checkouts=(
+                _protected_checkouts(ctx) if params.worktree or params.cwd else ()
             ),
         )
     except VogtError as error:
@@ -4349,28 +4355,43 @@ def _touch_dir(root: Path, spec: str) -> Path | None:
     return resolved if resolved.is_dir() else None
 
 
-def _enforced_policy(policy: AgentPolicy | None) -> dict[str, Any] | None:
+def _enforced_policy(
+    policy: AgentPolicy | None, protected_checkouts: Sequence[str] = ()
+) -> dict[str, Any] | None:
     """The slice of a project's agent policy the engine can refuse on.
 
     Guidance (`commit_identity`, `test_recipe`, `rules`) stays in the brief
     and never reaches the session. With nothing to refuse — no forbidden
-    text and merges that do not deploy — the spec omits `policy` entirely,
-    so a start is byte-identical to one from before enforcement existed.
+    text, merges that do not deploy, and no checkouts to protect — the spec
+    omits `policy` entirely, so a start is byte-identical to one from before
+    enforcement existed.
+
+    `protected_checkouts` (WI-1326) are the registered projects' roots a
+    worktree session may not write to; the engine holds only a session whose
+    workspace is a worktree to them, and never for its own.
     """
-    if policy is None:
+    forbidden = [] if policy is None else [str(p) for p in policy.forbidden_text]
+    merges = policy is not None and policy.merge_deploys_prod
+    protected = sorted({str(path) for path in protected_checkouts if path})
+    if not forbidden and not merges and not protected:
         return None
-    forbidden = [str(pattern) for pattern in policy.forbidden_text]
-    merges = policy.merge_deploys_prod
-    if not forbidden and not merges:
-        return None
-    branches = [str(branch) for branch in policy.main_branches]
     enforced: dict[str, Any] = {
         "forbidden_text": forbidden,
         "merge_deploys_prod": merges,
     }
+    branches = [] if policy is None else [str(b) for b in policy.main_branches]
     if branches:
         enforced["main_branches"] = branches
+    if protected:
+        enforced["protected_checkouts"] = protected
     return enforced
+
+
+def _protected_checkouts(ctx: AppContext) -> list[str]:
+    """Every registered project's checkout root (WI-1326)."""
+    with ctx.declared.read() as view:
+        projects = view.list_projects(limit=10_000, offset=0)
+    return [project.root_path for project in projects if project.root_path]
 
 
 def _budget(
@@ -4733,8 +4754,9 @@ def _start_on_engine(
     policy: AgentPolicy | None = None,
     budget: SessionBudgetParams | None = None,
     worktree: dict[str, str] | None = None,
+    protected_checkouts: Sequence[str] = (),
 ) -> EngineSession:
-    enforced = _enforced_policy(policy)
+    enforced = _enforced_policy(policy, protected_checkouts)
     return engine.create_session(
         prompt=brief,
         name=name,
