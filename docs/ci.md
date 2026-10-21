@@ -123,9 +123,9 @@ entry waiting until the queue times it out. `scripts/check_workflow_policy.py`
 
 ### Runners
 
-Queue runs use the same labels as PR runs: `self-hosted`, plus `docker`,
+Queue runs use the same labels as PR runs: `self-hosted`, plus `docker`, `rust-heavy`,
 `publish` or `bigmem` where a job asks for one. No vogt workflow targets the
-GCP rust-heavy or spot labels. The queue adds full runs, but PRs now skip
+GCP spot labels; the engine job uses `rust-heavy` (OOM on the small pool). The queue adds full runs, but PRs now skip
 everything they do not touch, and a merge no longer re-runs every open PR.
 CodeQL no longer runs in the queue. Its single `bigmem` slot serialises the
 three languages within a release run.

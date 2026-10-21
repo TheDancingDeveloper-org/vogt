@@ -1,0 +1,7 @@
+self-hosted-runner:
+  labels:
+    - tailnet
+    - rust-heavy
+    - docker
+    - publish
+    - bigmem

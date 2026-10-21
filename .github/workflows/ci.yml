@@ -377,12 +377,17 @@ jobs:
     name: fmt, clippy, test (engine) and the PWA it embeds
     needs: changes
     if: needs.changes.outputs.engine == 'true'
-    # `tailnet` is carried by the Node B runners (node-b-gha-public-*) and
-    # not by the GCP rust-heavy pool, whose image has no ripgrep and whose
-    # `runner` user has no passwordless sudo — so the install step below
-    # fails there and the `/api/search` tests go red (WI-1887). Widen this
-    # back to the whole pool once that image is rebaked.
-    runs-on: [self-hosted, tailnet]
+    # Cargo jobs run on the rust-heavy pool: on the small Node B runners
+    # rustc was OOM-killed (SIGKILL) linking the server's test binary in a
+    # full-workspace queue run (PR #1179, WI-2073). That image has no
+    # ripgrep and no passwordless sudo, so the install step below falls
+    # back to `cargo install` (WI-1887).
+    runs-on: [self-hosted, rust-heavy]
+    # Line tables only: full debuginfo is what pushed rustc's peak memory
+    # over the limit, and test backtraces still carry file:line.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -668,9 +673,12 @@ jobs:
             if [ "$(id -u)" = "0" ]; then
               apt-get update
               apt-get install -y --no-install-recommends $missing
-            elif command -v sudo >/dev/null; then
+            elif sudo -n true 2>/dev/null; then
               sudo apt-get update
               sudo apt-get install -y --no-install-recommends $missing
+            elif [ "$missing" = " ripgrep" ] && command -v cargo >/dev/null; then
+              # The rust-heavy image: no sudo, but cargo is on the path.
+              cargo install --locked ripgrep --version 14.1.1
             else
               echo "cannot install$missing: not root and no sudo." >&2
               echo "The engine's tests shell out to both; a runner image" >&2
@@ -739,7 +747,12 @@ jobs:
     name: fmt, clippy, test (voice sidecar foundation)
     needs: changes
     if: needs.changes.outputs.voice == 'true'
+    # Stays on the general pool: its native deps (opus, clang) are
+    # apt-installed, which the rust-heavy image cannot do without sudo.
     runs-on: [self-hosted]
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
