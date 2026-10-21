@@ -13,6 +13,10 @@ use crate::api::{ApiError, Auth, ServerEvent, Session, WorkDetail, normalise_bas
 use crate::backend::{Backend, Reply};
 use crate::backoff::Backoff;
 
+/// How long a live stream may go silent before it is treated as dead. The
+/// engine sends a keep-alive every 15 s, so this is three missed beats.
+pub const STREAM_STALE_AFTER: Duration = Duration::from_secs(45);
+
 /// Something the backend must be asked to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -121,6 +125,8 @@ pub struct Model {
     pub work: WorkView,
     generation: u64,
     backoff: Backoff,
+    /// When the current stream last delivered anything.
+    stream_seen: Option<Instant>,
 }
 
 impl Model {
@@ -143,6 +149,7 @@ impl Model {
             work: WorkView::Empty,
             generation: 0,
             backoff: Backoff::default(),
+            stream_seen: None,
         }
     }
 
@@ -297,27 +304,58 @@ impl Model {
             }
             Reply::StreamOpened(generation) if generation == self.generation => {
                 self.stream = StreamState::Live;
+                self.stream_seen = Some(now);
                 self.backoff.reset();
                 // Anything may have changed while the stream was down: reconcile.
                 self.refresh_sessions()
             }
-            Reply::StreamEvent(generation, event) if generation == self.generation => self.on_event(event),
+            Reply::StreamEvent(generation, event) if generation == self.generation => {
+                self.stream_seen = Some(now);
+                self.on_event(event)
+            }
+            Reply::StreamAlive(generation) if generation == self.generation => {
+                self.stream_seen = Some(now);
+                Vec::new()
+            }
             Reply::StreamClosed(generation, error) if generation == self.generation => {
                 if let Some(commands) = self.refused(&error) {
                     return commands;
                 }
-                let attempt = self.backoff.attempt() + 1;
-                let retry_at = now + self.backoff.next_delay();
-                self.stream = StreamState::Waiting { retry_at, attempt };
+                self.wait_to_reconnect(now);
                 Vec::new()
             }
             // A reply from a stream this model has already replaced.
-            Reply::StreamOpened(_) | Reply::StreamEvent(..) | Reply::StreamClosed(..) => Vec::new(),
+            Reply::StreamOpened(_) | Reply::StreamEvent(..) | Reply::StreamAlive(_) | Reply::StreamClosed(..) => {
+                Vec::new()
+            }
         }
     }
 
-    /// Advance time: reconnect when a wait is over.
+    /// Schedule the next connect after the stream was lost.
+    fn wait_to_reconnect(&mut self, now: Instant) {
+        let attempt = self.backoff.attempt() + 1;
+        let retry_at = now + self.backoff.next_delay();
+        self.stream = StreamState::Waiting { retry_at, attempt };
+        self.stream_seen = None;
+    }
+
+    /// When a live stream will count as stale if nothing more arrives.
+    fn stale_at(&self) -> Option<Instant> {
+        match (self.stream, self.stream_seen) {
+            (StreamState::Live, Some(seen)) => Some(seen + STREAM_STALE_AFTER),
+            _ => None,
+        }
+    }
+
+    /// Advance time: reconnect when a wait is over, and drop a live stream
+    /// that has gone silent (a half-open connection never reports a close).
     pub fn tick(&mut self, now: Instant) -> Vec<Command> {
+        if self.stale_at().is_some_and(|at| now >= at) {
+            // Retire this generation so a late chunk from it is ignored.
+            self.generation += 1;
+            self.wait_to_reconnect(now);
+            return vec![Command::CloseEvents];
+        }
         match self.stream {
             StreamState::Waiting { retry_at, .. } if now >= retry_at && self.auth.is_some() => self.connect(),
             _ => Vec::new(),
@@ -328,7 +366,7 @@ impl Model {
     pub fn next_wake(&self, now: Instant) -> Option<Duration> {
         match self.stream {
             StreamState::Waiting { retry_at, .. } => Some(retry_at.saturating_duration_since(now)),
-            _ => None,
+            _ => self.stale_at().map(|at| at.saturating_duration_since(now)),
         }
     }
 
@@ -553,6 +591,29 @@ mod tests {
             run(commands, &model, &mut backend);
         }
         assert_eq!(delays, vec![500, 1000, 2000, 4000]);
+    }
+
+    #[test]
+    fn silent_stream_is_dropped_and_reopened() {
+        let (mut model, mut backend, now) = signed_in();
+        let old = model.generation();
+        assert_eq!(model.next_wake(now), Some(STREAM_STALE_AFTER));
+        // A keep-alive pushes the deadline out.
+        let later = now + Duration::from_secs(30);
+        backend.keep_alive();
+        settle(&mut model, &mut backend, later);
+        assert!(model.tick(now + STREAM_STALE_AFTER).is_empty());
+        assert_eq!(model.stream, StreamState::Live);
+        // Then silence past the deadline.
+        let dead = later + STREAM_STALE_AFTER;
+        assert_eq!(model.tick(dead), vec![Command::CloseEvents]);
+        assert!(matches!(model.stream, StreamState::Waiting { attempt: 1, .. }));
+        assert!(model.generation() > old);
+        // A late chunk from the retired stream changes nothing.
+        assert!(model.apply(Reply::StreamAlive(old), dead).is_empty());
+        let retry = dead + model.next_wake(dead).unwrap();
+        let commands = model.tick(retry);
+        assert_eq!(commands, vec![Command::OpenEvents(model.generation())]);
     }
 
     #[test]

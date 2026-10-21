@@ -150,6 +150,9 @@ impl Backend for HttpBackend {
                         Ok(mut parser) => parser.feed(&bytes),
                         Err(_) => return ControlFlow::Break(()),
                     };
+                    if fed.events.is_empty() && fed.heartbeat {
+                        sink.push(Reply::StreamAlive(generation));
+                    }
                     for data in fed.events {
                         match serde_json::from_str::<ServerEvent>(&data) {
                             Ok(event) => sink.push(Reply::StreamEvent(generation, event)),

@@ -35,6 +35,8 @@ pub enum Reply {
     StreamOpened(u64),
     /// An event arrived on stream `generation`.
     StreamEvent(u64, ServerEvent),
+    /// Stream `generation` delivered bytes but no event (a keep-alive).
+    StreamAlive(u64),
     /// The stream with this generation ended or failed to open.
     StreamClosed(u64, ApiError),
 }

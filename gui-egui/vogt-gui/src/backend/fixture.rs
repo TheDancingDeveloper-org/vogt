@@ -71,6 +71,13 @@ impl FixtureBackend {
         }
     }
 
+    /// Send a keep-alive on the open stream. Does nothing when no stream is open.
+    pub fn keep_alive(&mut self) {
+        if let Some(generation) = self.stream {
+            self.queue.push_back(Reply::StreamAlive(generation));
+        }
+    }
+
     /// End the open stream as a dropped connection would.
     pub fn drop_stream(&mut self) {
         if let Some(generation) = self.stream.take() {
