@@ -324,7 +324,7 @@ def call_timeout(message: Mapping[str, Any]) -> float:
         wait = value
         break
     if wait is None and not any(key in arguments for key in WAIT_ARGUMENTS):
-        wait = DEFAULT_TOOL_WAITS.get(str(params.get("name")))
+        wait = DEFAULT_TOOL_WAITS.get(str(message["params"].get("name")))
     if wait is None:
         return float(DEFAULT_TIMEOUT_SECONDS)
     return float(min(wait + DEFAULT_TIMEOUT_SECONDS, MAX_CALL_TIMEOUT_SECONDS))
