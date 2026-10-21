@@ -222,6 +222,24 @@ pub struct SessionPolicy {
     /// The branches `merge_deploys_prod` protects. Empty means `main`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub main_branches: Vec<String>,
+    /// The checkouts a worktree session must not write to (WI-1326): the
+    /// root of every registered project. vogt-core fills it. Only a session
+    /// whose `workspace_kind` is `worktree` is held to it, and never for its
+    /// own `workspace_path`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_checkouts: Vec<String>,
+    /// Repo-relative paths that already had uncommitted changes when the
+    /// session started (WI-1326). A git command that would discard one is
+    /// refused. The engine fills it at spawn; empty for a fresh worktree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discard_baseline: Vec<String>,
+    /// `worktree` or `checkout` (WI-1326): the kind of directory the session
+    /// works in. The engine fills it at spawn; absent outside a repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_kind: Option<String>,
+    /// The toplevel of the session's own work tree (WI-1326). Engine-filled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
