@@ -774,6 +774,9 @@ pub async fn answer_session(
         chosen.number,
         &chosen.label,
     );
+    // The answer resumes the dialog's turn; that turn's end clears a
+    // blocked report the dialog was about (WI-1314).
+    session.note_addressed(true);
     let mut dismissed = false;
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1156,6 +1159,9 @@ pub async fn session_input(
     session
         .write_input(&bytes)
         .map_err(|e| crate::error::ApiError::Pty(format!("write input: {e}")))?;
+    // Input over the API, from a person or an overseer, addresses a standing
+    // blocked report: the turn it starts clears it (WI-1314).
+    session.note_addressed(false);
     // Only a person moves the retention clock. An agent's `/input` — the
     // common case, and what `session.input` relays with `person: false` —
     // writes the PTY and leaves `last_person_input_at` where it was.
