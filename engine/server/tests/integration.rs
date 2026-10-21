@@ -8438,16 +8438,18 @@ async fn an_exited_session_reports_a_terminal_state_and_not_alive() {
     )
     .await;
 
-    let row = wait_for_session_row(&client, &base, &ok, |s| s["exit_code"] == json!(0)).await;
-    // Well past the 200 ms idle window: nothing may move it off `exited`.
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    let row_later = wait_for_session_row(&client, &base, &ok, |_| true).await;
-    for r in [&row, &row_later] {
-        assert_eq!(r["activity"], "exited", "{r:?}");
-        assert_eq!(r["alive"], false, "{r:?}");
-    }
+    // Poll until the asserted state is reached, not just the exit code: the
+    // summary's activity can lag exit_code on a loaded runner (WI-954).
+    let row = wait_for_session_row(&client, &base, &ok, |s| {
+        s["exit_code"] == json!(0) && s["activity"] == "exited"
+    })
+    .await;
+    assert_eq!(row["alive"], false, "{row:?}");
 
-    let row = wait_for_session_row(&client, &base, &failing, |s| s["exit_code"] == json!(3)).await;
+    let row = wait_for_session_row(&client, &base, &failing, |s| {
+        s["exit_code"] == json!(3) && s["activity"] == "errored"
+    })
+    .await;
     assert_eq!(row["activity"], "errored", "{row:?}");
     assert_eq!(row["alive"], false, "{row:?}");
 
@@ -8462,9 +8464,11 @@ async fn an_exited_session_reports_a_terminal_state_and_not_alive() {
         .send()
         .await
         .unwrap();
-    let row = wait_for_session_row(&client, &base, &live, |s| !s["exit_code"].is_null()).await;
+    let row = wait_for_session_row(&client, &base, &live, |s| {
+        !s["exit_code"].is_null() && s["activity"] == "stopped"
+    })
+    .await;
     assert_eq!(row["alive"], false, "{row:?}");
-    assert_eq!(row["activity"], "stopped", "{row:?}");
 
     // History records the exit and why it ended.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
