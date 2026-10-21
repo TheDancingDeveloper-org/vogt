@@ -27,6 +27,8 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from vogt.core import routing
+
 Purpose = Literal[
     "implement",
     "implement-careful",
@@ -44,6 +46,8 @@ MAX_WORKERS_KEY = "dispatch.max_workers_per_overseer"
 ESCALATE_KEY = "dispatch.escalate_after_failed_reviews"
 REVIEW_BY_OVERSIGHT_KEY = "dispatch.review_by_oversight_only"
 BUDGET_RESTARTS_KEY = "dispatch.budget_restarts_per_item"
+#: Per-purpose ordered model candidates with breaker-aware fallback (WI-1260).
+ROUTES_KEY = "dispatch.routes"
 KEY_PREFIX = "dispatch."
 
 
@@ -188,7 +192,7 @@ _SCALAR_SHAPES: dict[str, type[BaseModel]] = {
     REVIEW_BY_OVERSIGHT_KEY: _BoolSetting,
     BUDGET_RESTARTS_KEY: _CountSetting,
 }
-KEYS: tuple[str, ...] = (PROFILES_KEY, *_SCALAR_SHAPES)
+KEYS: tuple[str, ...] = (PROFILES_KEY, ROUTES_KEY, *_SCALAR_SHAPES)
 
 
 class DispatchSettings(BaseModel):
@@ -201,6 +205,9 @@ class DispatchSettings(BaseModel):
     escalate_after_failed_reviews: int = DEFAULT_ESCALATE_AFTER_FAILED_REVIEWS
     review_by_oversight_only: bool = DEFAULT_REVIEW_BY_OVERSIGHT_ONLY
     budget_restarts_per_item: int = DEFAULT_BUDGET_RESTARTS_PER_ITEM
+    routes: dict[str, routing.Route] = Field(
+        default_factory=lambda: dict(routing.DEFAULT_ROUTES)
+    )
 
 
 def _problems(error: ValidationError) -> str:
@@ -237,6 +244,11 @@ def validate(key: str, value: Mapping[str, object]) -> dict[str, object]:
                 raise DispatchError(msg) from None
             out[name] = parsed.model_dump(mode="json", exclude_none=True)
         return out
+    if key == ROUTES_KEY:
+        try:
+            return routing.validate(value, PURPOSES)
+        except routing.RouteError as error:
+            raise DispatchError(str(error)) from None
     try:
         return _SCALAR_SHAPES[key].model_validate(value).model_dump(mode="json")
     except ValidationError as error:
@@ -278,7 +290,8 @@ def resolve(stored: Mapping[str, Mapping[str, object]]) -> DispatchSettings:
             scalars[field] = _SCALAR_SHAPES[key].model_validate(raw).value  # type: ignore[attr-defined]
         except ValidationError:
             continue
-    return DispatchSettings(profiles=profiles, **scalars)  # type: ignore[arg-type]
+    routes = routing.resolve(stored.get(ROUTES_KEY))
+    return DispatchSettings(profiles=profiles, routes=routes, **scalars)  # type: ignore[arg-type]
 
 
 __all__ = [
@@ -287,6 +300,7 @@ __all__ = [
     "KEY_PREFIX",
     "PROFILES_KEY",
     "PURPOSES",
+    "ROUTES_KEY",
     "DispatchError",
     "DispatchSettings",
     "Profile",
