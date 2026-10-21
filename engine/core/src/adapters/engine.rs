@@ -152,6 +152,12 @@ impl EngineClient {
         if let Some(companion) = spec.companion.as_ref().filter(|text| !text.is_empty()) {
             body.insert("companion".to_string(), Value::String(companion.clone()));
         }
+        // The scope's charters (WI-2038), already in the brief. The engine
+        // also hands them to an agent CLI that keeps standing instructions
+        // apart from its first prompt (Codex `developer_instructions`).
+        if let Some(charter) = spec.charter.as_ref().filter(|text| !text.is_empty()) {
+            body.insert("charter".to_string(), Value::String(charter.clone()));
+        }
         // Policy and worktree are sent only when they carry something, as the
         // Python client does; a budget is sent even when empty (WI-1245).
         if let Some(policy) = spec.policy.as_ref().filter(|value| non_empty(value)) {
@@ -1103,6 +1109,8 @@ pub struct CreateSession {
     pub account: Option<String>,
     /// The standing guide written beside the brief; the engine writes the text.
     pub companion: Option<String>,
+    /// The scope's charters section (WI-2038). Sent only when non-empty.
+    pub charter: Option<String>,
     /// The project's agent policy object. Sent only when non-empty.
     pub policy: Option<Value>,
     /// The session's limits. `Some({})` is "no limits", which the engine reads
@@ -1130,6 +1138,7 @@ impl CreateSession {
             work_item: None,
             account: None,
             companion: None,
+            charter: None,
             policy: None,
             budget: None,
             worktree: None,
@@ -2444,8 +2453,24 @@ mod tests {
         assert!(sent.contains(r#""budget":{}"#));
         assert!(sent.contains(r#""account":"work""#));
         assert!(sent.contains(r#""companion":"guide text""#));
+        assert!(!sent.contains("charter"));
         assert!(!sent.contains("policy"));
         assert!(!sent.contains("worktree"));
+    }
+
+    #[test]
+    fn create_session_sends_a_charter_only_when_one_is_set() {
+        let (seen, transport) = scripted(200, r#"{"id":"s","name":"n","cwd":"/proj"}"#);
+        let mut spec = CreateSession::new("n", "/proj");
+        spec.charter = Some("## Charters".to_string());
+        client(transport).create_session(&spec).unwrap();
+        assert!(seen.lock().unwrap()[0].contains(r###""charter":"## Charters""###));
+
+        let (seen, transport) = scripted(200, r#"{"id":"s","name":"n","cwd":"/proj"}"#);
+        let mut spec = CreateSession::new("n", "/proj");
+        spec.charter = Some(String::new());
+        client(transport).create_session(&spec).unwrap();
+        assert!(!seen.lock().unwrap()[0].contains("charter"));
     }
 
     #[test]

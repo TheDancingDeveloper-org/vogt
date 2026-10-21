@@ -34,6 +34,7 @@ use crate::application::brief::{self, ComposedBrief, WhyResult, WorkBrief};
 use crate::application::context::{write_of, AppContext};
 use crate::application::dispatch as dispatch_profiles;
 use crate::application::resolve;
+use crate::application::services::charters;
 use crate::application::session_commit;
 use crate::application::writes::{self, audited_action, audited_write, WriteOutcome};
 use crate::auth::{self, TOKEN_ENTROPY_BYTES};
@@ -2196,6 +2197,11 @@ where
                     related.insert(relation.related_id.clone(), found);
                 }
             }
+            let charter = brief::charter_section(&charters::charters_for(
+                &view,
+                item.project_id.as_deref(),
+                item.initiative_id.as_deref(),
+            )?);
             let input = WorkBrief {
                 item,
                 session_id,
@@ -2203,6 +2209,7 @@ where
                 project: Some(&project),
                 comments: &comments,
                 related: &related,
+                charter: &charter,
             };
             if review {
                 brief::review_brief_for_work_item(&input)
@@ -2210,7 +2217,12 @@ where
                 brief::brief_for_work_item(&input)?
             }
         }
-        None => brief::brief_for_project(&project.slug, session_id, Some(&project)),
+        None => {
+            let view = ctx.declared.read()?;
+            let charter =
+                brief::charter_section(&charters::charters_for(&view, Some(&project.id), None)?);
+            brief::brief_for_project(&project.slug, session_id, Some(&project), &charter)
+        }
     };
     Ok(Subject {
         session_id: session_id.to_string(),
@@ -2514,6 +2526,7 @@ where
         params.review_of.is_some(),
     ));
     spec.companion = (!subject.brief.companion.is_empty()).then(|| subject.brief.companion.clone());
+    spec.charter = (!subject.brief.charter.is_empty()).then(|| subject.brief.charter.clone());
     spec.env = Some(session_env(
         ctx,
         &subject.session_id,

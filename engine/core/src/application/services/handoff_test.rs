@@ -109,6 +109,7 @@ fn brief(built: &Built, reference: &str, review: bool, project: Option<&Project>
         project,
         comments: &comments,
         related: &related,
+        charter: &[],
     };
     if review {
         review_brief_for_work_item(&input).text

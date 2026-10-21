@@ -524,7 +524,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.input",
-            "Type into a session: text, then named keys (enter, esc, tab, arrows, ctrl-c, ctrl-d, backspace), then Enter. Enter is pressed by default; pass draft=true (or submit=false) to type without sending. Takes either id: ses_\u{2026} or the engine UUID. Read session_screen first and never send a blind Enter: at a menu it accepts whatever is highlighted (dismiss with esc). While a permission prompt shows, only a person's input is typed: an agent's is refused (403 person_required). On a hibernated session it wakes first, and that wake is never forced: a session handed to a successor, or whose work item is already live in the same directory, is refused (409). Audited (byte count and keys, never the text).",
+            "Type into a session: text, then named keys (enter, esc, tab, arrows, ctrl-c, ctrl-d, backspace), then Enter. Enter is pressed by default; pass draft=true (or submit=false) to type without sending. Takes either id: ses_\u{2026} or the engine UUID. Read session_screen first and never send a blind Enter: at a menu it accepts whatever is highlighted (dismiss with esc). While a permission prompt shows, only a person's input is typed: an agent's is refused (403 person_required), except an oversight session's on a permission prompt. On a hibernated session it wakes first, and that wake is never forced: a session handed to a successor, or whose work item is already live in the same directory, is refused (409). Audited (byte count and keys, never the text).",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/sessions/input"),
@@ -540,7 +540,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.hibernate",
-            "Hibernate a session: stop its processes to free their memory, keep it listed (activity `hibernated`, with its last screen), and revoke its token. session_wake (or session_input, which wakes it) resumes the same agent conversation under the same id. Only for a session whose conversation id the engine knows (Claude Code started by Vogt, or any resume); a shell needs allow_shell and wakes fresh. superseded_by names the session taking over the work (ses_\u{2026} or the engine UUID); a later wake is then refused unless forced. Takes either id.",
+            "Hibernate a session: stop its processes to free their memory, keep it listed (activity `hibernated`, with its last screen), and revoke its token. session_wake (or session_input, which wakes it) resumes the same agent conversation under the same id. Only for a session whose conversation id the engine knows (Claude Code started by Vogt, or any resume); a shell needs allow_shell and wakes fresh. superseded_by names the session taking over the work (ses_\u{2026} or the engine UUID); a later wake is then refused unless forced. wake_on arms a watch first (see watch_create), so the session is woken with the outcome when it fires \u{2014} hibernate until PR #N merges instead of polling. Takes either id.",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/sessions/hibernate"),
@@ -668,7 +668,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.answer",
-            "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's \u{2014} an agent is refused (403 person_required) and should leave it for the Inbox. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
+            "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's \u{2014} an agent is refused (403 person_required) and should leave it for the Inbox. One exception: an oversight session may answer a worker's permission prompt (not read-outside-cwd); the engine checks its role and audits it with the command. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/sessions/answer"),
@@ -1064,6 +1064,22 @@ pub fn build_operations() -> Vec<Operation> {
             true,
             HttpRoute::new(HttpMethod::Post, "/inbox/restore"),
             CliBinding::new(&["inbox", "restore"]),
+        ),
+        Operation::new(
+            "charter.get",
+            "Read the charter (standing instructions injected into every session brief) of the workspace, a project or an initiative (scope + ref slug). history=true adds earlier versions.",
+            Scope::Read,
+            false,
+            HttpRoute::new(HttpMethod::Get, "/charters"),
+            CliBinding::new(&["charter", "get"]),
+        ),
+        Operation::new(
+            "charter.set",
+            "Set the charter of the workspace, a project or an initiative: Markdown injected into every session brief started there (workspace, then project, then initiative, then the brief) and into Codex developer_instructions. Writes the next version; empty body clears; optional expected_version.",
+            Scope::WorkWrite,
+            true,
+            HttpRoute::new(HttpMethod::Post, "/charters"),
+            CliBinding::new(&["charter", "set"]),
         ),
         Operation::new(
             "preference.get",

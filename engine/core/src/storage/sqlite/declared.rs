@@ -10,9 +10,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::core::{
     default_workflow, from_iso, to_iso, Actor, ActorKind, ActorPreference, AuditRecord,
-    AuthDecision, Clock, CodingSession, Comment, ContractExemption, Decision, DriftProposal, Event,
-    ForgeAccount, IdFactory, InboxTriage, Initiative, InitiativeState, Label, Moment,
-    PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression, Token,
+    AuthDecision, Charter, Clock, CodingSession, Comment, ContractExemption, Decision,
+    DriftProposal, Event, ForgeAccount, IdFactory, InboxTriage, Initiative, InitiativeState, Label,
+    Moment, PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression, Token,
     WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackAction, WriteBackOutcome, WriteBackRecord,
 };
 use crate::errors::VogtError;
@@ -1283,6 +1283,27 @@ impl ReadView for SqliteReadView {
             row_actor_preference,
         )
     }
+    fn charter(&self, scope_kind: &str, scope_id: &str) -> Result<Option<Charter>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT * FROM charters WHERE scope_kind = ? AND scope_id = ? ORDER BY version DESC LIMIT 1",
+            params![scope_kind, scope_id],
+            row_charter,
+        )
+    }
+    fn charter_history(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Charter>, VogtError> {
+        many(
+            &self.conn,
+            "SELECT * FROM charters WHERE scope_kind = ? AND scope_id = ? ORDER BY version DESC LIMIT ?",
+            params![scope_kind, scope_id, limit],
+            row_charter,
+        )
+    }
     fn session_by_id(&self, session_id: &str) -> Result<Option<CodingSession>, VogtError> {
         one(
             &self.conn,
@@ -1669,6 +1690,12 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
     }
     fn actor_preferences(&self, a: &str) -> Result<Vec<ActorPreference>, VogtError> {
         self.view.actor_preferences(a)
+    }
+    fn charter(&self, a: &str, b: &str) -> Result<Option<Charter>, VogtError> {
+        self.view.charter(a, b)
+    }
+    fn charter_history(&self, a: &str, b: &str, c: i64) -> Result<Vec<Charter>, VogtError> {
+        self.view.charter_history(a, b, c)
     }
     fn latest_human_preference(&self, key: &str) -> Result<Option<ActorPreference>, VogtError> {
         self.view.latest_human_preference(key)
@@ -2406,6 +2433,24 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             ],
         ).map(|_| ()).map_err(sql_err)
     }
+    fn insert_charter(&mut self, charter: &Charter) -> Result<(), VogtError> {
+        self.view
+            .conn
+            .execute(
+                "INSERT INTO charters (scope_kind, scope_id, version, body, author_actor_id, created_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    charter.scope_kind,
+                    charter.scope_id,
+                    charter.version,
+                    charter.body,
+                    charter.author_actor_id,
+                    to_iso(charter.created_at),
+                    charter.reason,
+                ],
+            )
+            .map(|_| ())
+            .map_err(sql_err)
+    }
     fn upsert_actor_preference(&mut self, preference: &ActorPreference) -> Result<(), VogtError> {
         let values = params![
             crate::decisions::python_json_dumps(&preference.value, true),
@@ -2903,6 +2948,18 @@ fn row_inbox_triage(row: &Row<'_>) -> rusqlite::Result<InboxTriage> {
         actor_identity_ref: row.get("actor_identity_ref")?,
         decided_at: moment(row, "decided_at")?,
         occurrence_snapshot: json_cell(row, "occurrence_snapshot")?,
+    })
+}
+
+fn row_charter(row: &Row<'_>) -> rusqlite::Result<Charter> {
+    Ok(Charter {
+        scope_kind: row.get("scope_kind")?,
+        scope_id: row.get("scope_id")?,
+        version: row.get("version")?,
+        body: row.get("body")?,
+        author_actor_id: row.get("author_actor_id")?,
+        created_at: moment(row, "created_at")?,
+        reason: row.get("reason")?,
     })
 }
 

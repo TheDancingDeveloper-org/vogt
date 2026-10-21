@@ -1,5 +1,5 @@
 //! The record operations' parameter and result models: labels, the caller's
-//! preferences, workflows and the ranking explanation.
+//! preferences, charters, workflows and the ranking explanation.
 //!
 //! Ports the `ListLabels*`, `CreateLabel*`, `Preference*`, `Workflow*` and
 //! `Why*` classes in `src/vogt/application/models.py`.
@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::entities::{ContributionView, Label, PreferenceView, WorkflowView};
-use super::{integer, number, open_object};
+use super::{date_time, integer, number, open_object};
 
 fn label_limit_default() -> i64 {
     100
@@ -122,4 +122,103 @@ pub struct WhyResult {
     pub contributions: Vec<ContributionView>,
     /// Documented ranking inputs that cannot fire in this build.
     pub inputs_not_yet_available: BTreeMap<String, String>,
+}
+
+// -- charters (WI-2038) ---------------------------------------------------
+
+fn charter_limit_default() -> i64 {
+    20
+}
+
+// `CharterScopeKind` in Python: a literal, so the schema is inline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum CharterScopeKind {
+    #[serde(rename = "workspace")]
+    Workspace,
+    #[serde(rename = "project")]
+    Project,
+    #[serde(rename = "initiative")]
+    Initiative,
+}
+
+impl CharterScopeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Project => "project",
+            Self::Initiative => "initiative",
+        }
+    }
+}
+
+/// One version of a scope's charter.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharterView {
+    pub scope: CharterScopeKind,
+    /// Project or initiative slug; none for workspace.
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    #[schemars(schema_with = "integer")]
+    pub version: i64,
+    pub body: String,
+    /// identity_ref of whoever set this version.
+    pub author: String,
+    #[schemars(schema_with = "date_time")]
+    pub created_at: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharterGetParams {
+    /// workspace, project or initiative.
+    pub scope: CharterScopeKind,
+    /// Project or initiative slug; omitted for workspace.
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    /// Also return earlier versions, newest first.
+    #[serde(default)]
+    pub history: bool,
+    #[serde(default = "charter_limit_default")]
+    #[schemars(schema_with = "integer", range(min = 1, max = 200), extend("default" = 20))]
+    pub limit: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharterGetResult {
+    /// The newest version, or none when never set. An empty body is a cleared charter.
+    #[serde(default)]
+    pub current: Option<CharterView>,
+    #[serde(default)]
+    #[schemars(extend("default" = [], "x-keep-default" = true))]
+    pub history: Vec<CharterView>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharterSetParams {
+    /// workspace, project or initiative.
+    pub scope: CharterScopeKind,
+    /// Project or initiative slug; omitted for workspace.
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    /// The standing instructions, in Markdown. Empty clears it.
+    #[schemars(length(max = 8000))]
+    pub body: String,
+    /// Write only if the current version is this (0: never set).
+    #[serde(default)]
+    #[schemars(range(min = 0))]
+    pub expected_version: Option<i64>,
+    /// Why this write is being made (audited).
+    #[schemars(length(min = 1))]
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharterSetResult {
+    pub charter: CharterView,
 }

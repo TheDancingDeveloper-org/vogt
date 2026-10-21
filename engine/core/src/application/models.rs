@@ -52,6 +52,8 @@ pub const DERIVED: &[&str] = &[
     "label.create",
     "preference.get",
     "preference.set",
+    "charter.get",
+    "charter.set",
     "why",
     "actor.list",
     "actor.create",
@@ -168,7 +170,7 @@ mod chat;
 mod entities;
 mod forge;
 mod project;
-mod records;
+pub mod records;
 mod session;
 mod session_ops;
 mod system;
@@ -354,6 +356,16 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "preference.set",
             schema_of::<records::PreferenceSetParams>(),
             schema_of::<records::PreferenceSetResult>(),
+        ),
+        (
+            "charter.get",
+            schema_of::<records::CharterGetParams>(),
+            schema_of::<records::CharterGetResult>(),
+        ),
+        (
+            "charter.set",
+            schema_of::<records::CharterSetParams>(),
+            schema_of::<records::CharterSetResult>(),
         ),
         (
             "why",

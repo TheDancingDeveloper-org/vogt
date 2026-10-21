@@ -87,6 +87,9 @@ pub struct WorkBrief<'a> {
     pub project: Option<&'a Project>,
     pub comments: &'a [Comment],
     pub related: &'a BTreeMap<String, WorkItem>,
+    /// The charters section (WI-2038), from `charter_section`; empty when no
+    /// scope has a charter.
+    pub charter: &'a [String],
 }
 
 /// A brief and the companion written beside it. The companion is empty only
@@ -95,6 +98,34 @@ pub struct WorkBrief<'a> {
 pub struct ComposedBrief {
     pub text: String,
     pub companion: String,
+    /// The charters section alone (WI-2038), for an agent CLI that takes
+    /// standing instructions apart from its first prompt (Codex
+    /// `developer_instructions`). Empty when no scope has a charter.
+    pub charter: String,
+}
+
+/// The scope's charters, broadest first (WI-2038). `found` is
+/// `charters::charters_for`. Recorded text, quoted as written; nothing when
+/// none is set, because an empty section would read as a rule.
+pub fn charter_section(found: &[(String, crate::core::Charter)]) -> Vec<String> {
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        "## Charters".to_string(),
+        String::new(),
+        "Standing instructions for this scope, broadest first. A later one refines an earlier one, and the rest of this brief refines them all.".to_string(),
+        String::new(),
+    ];
+    for (heading, charter) in found {
+        lines.extend([
+            format!("### {heading} (v{})", charter.version),
+            String::new(),
+            charter.body.trim().to_string(),
+            String::new(),
+        ]);
+    }
+    lines
 }
 
 /// The project's agent policy, as what it recorded. Empty for a policy that
@@ -419,6 +450,7 @@ pub fn brief_for_work_item(input: &WorkBrief<'_>) -> Result<ComposedBrief, VogtE
     }
     lines.push(facts.join(" · "));
     lines.push(String::new());
+    lines.extend(input.charter.iter().cloned());
 
     let body = item.body.trim();
     if !body.is_empty() {
@@ -536,6 +568,7 @@ pub fn brief_for_work_item(input: &WorkBrief<'_>) -> Result<ComposedBrief, VogtE
     Ok(ComposedBrief {
         text: lines.join("\n"),
         companion: companion(input.session_id, Some(&item.reference)),
+        charter: input.charter.join("\n"),
     })
 }
 
@@ -560,6 +593,7 @@ pub fn review_brief_for_work_item(input: &WorkBrief<'_>) -> ComposedBrief {
         facts.push(format!("**Project** {slug}"));
     }
     lines.extend([facts.join(" · "), String::new(), REVIEW.to_string()]);
+    lines.extend(input.charter.iter().cloned());
 
     lines.extend(["## Done means".to_string(), String::new()]);
     let body = item.body.trim();
@@ -629,6 +663,7 @@ pub fn review_brief_for_work_item(input: &WorkBrief<'_>) -> ComposedBrief {
     ComposedBrief {
         text: lines.join("\n"),
         companion: companion(input.session_id, Some(&item.reference)),
+        charter: input.charter.join("\n"),
     }
 }
 
@@ -639,6 +674,7 @@ pub fn brief_for_project(
     project_slug: &str,
     session_id: &str,
     project: Option<&Project>,
+    charter: &[String],
 ) -> ComposedBrief {
     let mut lines = vec![
         format!("# {project_slug}"),
@@ -646,6 +682,7 @@ pub fn brief_for_project(
         "A terminal opened on this project. No work item is attached, so there is no task here beyond what you were asked for directly — when you take one up, call `session_bind_work` with its ref (and no `id`), so the item shows who is on it.".to_string(),
         String::new(),
     ];
+    lines.extend(charter.iter().cloned());
     lines.extend(policy_section(project));
     lines.extend([
         "## Deployment policy".to_string(),
@@ -657,6 +694,7 @@ pub fn brief_for_project(
     ComposedBrief {
         text: lines.join("\n"),
         companion: companion(session_id, None),
+        charter: charter.join("\n"),
     }
 }
 
@@ -976,6 +1014,7 @@ mod tests {
             project: Some(&project),
             comments: &comments,
             related: &related,
+            charter: &[],
         })
         .unwrap();
         assert_golden(&brief, "worker_full");
@@ -991,6 +1030,7 @@ mod tests {
             project: None,
             comments: &[],
             related: &BTreeMap::new(),
+            charter: &[],
         })
         .unwrap();
         assert_golden(&brief, "worker_plain");
@@ -1009,6 +1049,7 @@ mod tests {
             project: Some(&project),
             comments: &comments,
             related: &related,
+            charter: &[],
         });
         assert_golden(&brief, "review_full");
     }
@@ -1023,6 +1064,7 @@ mod tests {
             project: None,
             comments: &[],
             related: &BTreeMap::new(),
+            charter: &[],
         });
         assert_golden(&brief, "review_none");
     }
@@ -1043,6 +1085,7 @@ mod tests {
             project: None,
             comments: &comments,
             related: &BTreeMap::new(),
+            charter: &[],
         });
         assert_golden(&brief, "review_no_base");
     }
@@ -1064,6 +1107,7 @@ mod tests {
             project: Some(&project),
             comments: &comments,
             related: &BTreeMap::new(),
+            charter: &[],
         });
         assert_golden(&brief, "review_no_head");
     }
@@ -1072,7 +1116,7 @@ mod tests {
     fn a_project_brief_states_its_policy_and_matches_python() {
         let project = project_with(policy_full());
         assert_golden(
-            &brief_for_project("vogt", SESSION, Some(&project)),
+            &brief_for_project("vogt", SESSION, Some(&project), &[]),
             "project_full",
         );
     }
@@ -1081,7 +1125,7 @@ mod tests {
     fn a_project_brief_with_no_policy_matches_python() {
         let project = project_with(AgentPolicy::default());
         assert_golden(
-            &brief_for_project("vogt", SESSION, Some(&project)),
+            &brief_for_project("vogt", SESSION, Some(&project), &[]),
             "project_bare",
         );
     }

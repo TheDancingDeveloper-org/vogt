@@ -101,6 +101,7 @@ pub static STRIPS: &[(&str, &str)] = &[
     ("inbox.archive", "reason"),
     ("inbox.snooze", "reason"),
     ("inbox.restore", "reason"),
+    ("charter.set", "reason"),
     ("preference.set", "reason"),
     ("chat.create", "reason"),
     ("chat.send", "reason"),

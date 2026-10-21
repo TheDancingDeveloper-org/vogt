@@ -13,10 +13,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::{
-    Actor, ActorPreference, AuditRecord, AuthDecision, CodingSession, Comment, ContractExemption,
-    Decision, DepRef, DriftProposal, Event, ForgeAccount, InboxTriage, Initiative, Label, Moment,
-    Observation, PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression,
-    Sweep, SweepOutcome, Token, WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackRecord,
+    Actor, ActorPreference, AuditRecord, AuthDecision, Charter, CodingSession, Comment,
+    ContractExemption, Decision, DepRef, DriftProposal, Event, ForgeAccount, InboxTriage,
+    Initiative, Label, Moment, Observation, PasswordCredential, Principal, Project, RelationKind,
+    SessionGrant, Suppression, Sweep, SweepOutcome, Token, WorkItem, WorkLink, WorkOverlay,
+    Workflow, WriteBackRecord,
 };
 use crate::storage::observed_types::{
     ActivityBatch, ActivityEventRow, ActivityIndexStats, ActivityQuery, ActivitySessionRow,
@@ -417,6 +418,19 @@ pub trait ReadView {
         &self,
         actor_id: &str,
     ) -> Result<Vec<ActorPreference>, crate::errors::VogtError>;
+    /// The newest version of a scope's charter, or `None` when never set.
+    fn charter(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> Result<Option<Charter>, crate::errors::VogtError>;
+    /// A scope's charter versions, newest first.
+    fn charter_history(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Charter>, crate::errors::VogtError>;
     /// The newest preference under `key` that a person (not an agent) wrote.
     /// The deployment's dispatch table is read from these, never from an
     /// agent's own row (WI-1323).
@@ -642,6 +656,8 @@ pub trait WriteTxn: ReadView {
         &mut self,
         preference: &ActorPreference,
     ) -> Result<(), crate::errors::VogtError>;
+    /// Append one charter version; (scope, version) is unique.
+    fn insert_charter(&mut self, charter: &Charter) -> Result<(), crate::errors::VogtError>;
     fn mark_drift_superseded(
         &mut self,
         proposal_id: &str,

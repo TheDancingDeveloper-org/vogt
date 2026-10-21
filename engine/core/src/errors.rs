@@ -43,6 +43,7 @@ pub enum VogtError {
     InboxEntryNotFound(String),
     InvalidTriageState(String),
     PreferenceVersionConflict(String),
+    CharterVersionConflict(String),
     InvalidPreference(String),
     InvalidSnooze(String),
     MissingReason(String),
@@ -118,6 +119,7 @@ impl VogtError {
             | Self::InboxEntryNotFound(m)
             | Self::InvalidTriageState(m)
             | Self::PreferenceVersionConflict(m)
+            | Self::CharterVersionConflict(m)
             | Self::InvalidPreference(m)
             | Self::InvalidSnooze(m)
             | Self::MissingReason(m)
@@ -169,6 +171,7 @@ impl VogtError {
             Self::InboxEntryNotFound(_) => "inbox_entry_not_found",
             Self::InvalidTriageState(_) => "invalid_triage_state",
             Self::PreferenceVersionConflict(_) => "preference_version_conflict",
+            Self::CharterVersionConflict(_) => "charter_version_conflict",
             Self::InvalidPreference(_) => "invalid_preference",
             Self::InvalidSnooze(_) => "invalid_snooze",
             Self::MissingReason(_) => "missing_reason",
@@ -205,7 +208,8 @@ impl VogtError {
             | Self::NotLinked(_)
             | Self::UpstreamWriteRefused(_)
             | Self::InvalidTriageState(_)
-            | Self::PreferenceVersionConflict(_) => 409,
+            | Self::PreferenceVersionConflict(_)
+            | Self::CharterVersionConflict(_) => 409,
             Self::NotFound(_) | Self::InboxEntryNotFound(_) => 404,
             Self::BypassRefused(_)
             | Self::RoleRefused(_)
@@ -375,6 +379,7 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
         ("inbox_entry_not_found", 404),
         ("invalid_triage_state", 409),
         ("preference_version_conflict", 409),
+        ("charter_version_conflict", 409),
         ("invalid_preference", 400),
         ("invalid_snooze", 400),
         ("missing_reason", 400),
@@ -429,6 +434,7 @@ mod tests {
             "inbox_entry_not_found" => VogtError::InboxEntryNotFound(message),
             "invalid_triage_state" => VogtError::InvalidTriageState(message),
             "preference_version_conflict" => VogtError::PreferenceVersionConflict(message),
+            "charter_version_conflict" => VogtError::CharterVersionConflict(message),
             "invalid_preference" => VogtError::InvalidPreference(message),
             "invalid_snooze" => VogtError::InvalidSnooze(message),
             "missing_reason" => VogtError::MissingReason(message),

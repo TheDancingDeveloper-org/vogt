@@ -1985,6 +1985,23 @@ pub struct InboxTriage {
     pub occurrence_snapshot: serde_json::Value,
 }
 
+/// One version of a scope's standing instructions (WI-2038). Ports `Charter`.
+///
+/// Append-only: setting a charter writes the next version, so the history is
+/// the rows. An empty `body` is a cleared charter. The workspace charter has
+/// `scope_id` "", a project's is its id, an initiative's is its id.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Charter {
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub version: i64,
+    pub body: String,
+    pub author_actor_id: String,
+    pub created_at: Moment,
+    pub reason: String,
+}
+
 /// One per-actor setting. Ports `ActorPreference`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
