@@ -166,17 +166,24 @@ def test_a_waiting_tool_call_extends_the_post_timeout() -> None:
         call_timeout,
     )
 
-    def call(arguments: object) -> dict[str, Any]:
+    def call(arguments: object, name: str = "session.wait") -> dict[str, Any]:
         return {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "session.wait", "arguments": arguments},
+            "params": {"name": name, "arguments": arguments},
         }
 
     assert call_timeout(call({"timeout_s": 600})) == 630
     assert call_timeout(call({"wake_timeout_s": 90})) == 120
     assert call_timeout(call({"timeout_s": 700})) == MAX_CALL_TIMEOUT_SECONDS
+    # chat.send / chat.create wait for a reply in wait_s; chat.send waits 60 s
+    # when the caller names no wait (WI-1010).
+    assert call_timeout(call({"wait_s": 300}, "chat.send")) == 330
+    assert call_timeout(call({"text": "hi"}, "chat_send")) == 90
+    assert call_timeout(call({"text": "hi"}, "chat.send")) == 90
+    assert call_timeout(call({"wait_s": 0}, "chat.send")) == DEFAULT_TIMEOUT_SECONDS
+    assert call_timeout(call({"wait_s": "x"}, "chat.send")) == (DEFAULT_TIMEOUT_SECONDS)
     assert call_timeout(call({"timeout_s": "600"})) == DEFAULT_TIMEOUT_SECONDS
     assert call_timeout(call({"timeout_s": True})) == DEFAULT_TIMEOUT_SECONDS
     assert call_timeout(call({})) == DEFAULT_TIMEOUT_SECONDS

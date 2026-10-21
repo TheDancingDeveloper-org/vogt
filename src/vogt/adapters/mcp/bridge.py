@@ -54,6 +54,11 @@ MAX_CALL_TIMEOUT_SECONDS = 660
 #: whole handshake about 30 s, so a pre-flight that may take 30 s of it is a
 #: pre-flight that turns a slow core into "server failed to connect".
 DISCOVERY_TIMEOUT_SECONDS = 3
+#: The argument names a waiting tools/call carries its wait in.
+WAIT_ARGUMENTS = ("timeout_s", "wake_timeout_s", "wait_s")
+#: Tools that wait by default when the caller names no wait
+#: (`ChatSendParams.wait_s`), keyed by both spellings of the tool name.
+DEFAULT_TOOL_WAITS = {"chat.send": 60, "chat_send": 60}
 
 #: (url, headers, body) -> (status, body). Injected in tests; urllib live.
 Transport = Callable[[str, dict[str, str], bytes], "tuple[int, bytes]"]
@@ -300,10 +305,10 @@ class Bridge:
 def call_timeout(message: Mapping[str, Any]) -> float:
     """How long `_post` may wait for this JSON-RPC message.
 
-    A `tools/call` whose arguments name `timeout_s` or `wake_timeout_s` as an
-    int waits that long plus the default, capped at
-    `MAX_CALL_TIMEOUT_SECONDS`. Anything else — including a non-int — keeps
-    the default, and never raises.
+    A `tools/call` whose arguments name a `WAIT_ARGUMENTS` key as an int
+    (or a tool in `DEFAULT_TOOL_WAITS` that names none) waits that long plus
+    the default, capped at `MAX_CALL_TIMEOUT_SECONDS`. Anything else —
+    including a non-int — keeps the default, and never raises.
     """
     if message.get("method") != "tools/call":
         return float(DEFAULT_TIMEOUT_SECONDS)
@@ -311,12 +316,18 @@ def call_timeout(message: Mapping[str, Any]) -> float:
     arguments = params.get("arguments") if isinstance(params, Mapping) else None
     if not isinstance(arguments, Mapping):
         return float(DEFAULT_TIMEOUT_SECONDS)
-    for key in ("timeout_s", "wake_timeout_s"):
+    wait: int | None = None
+    for key in WAIT_ARGUMENTS:
         value = arguments.get(key)
         if isinstance(value, bool) or not isinstance(value, int):
             continue
-        return float(min(value + DEFAULT_TIMEOUT_SECONDS, MAX_CALL_TIMEOUT_SECONDS))
-    return float(DEFAULT_TIMEOUT_SECONDS)
+        wait = value
+        break
+    if wait is None and not any(key in arguments for key in WAIT_ARGUMENTS):
+        wait = DEFAULT_TOOL_WAITS.get(str(params.get("name")))
+    if wait is None:
+        return float(DEFAULT_TIMEOUT_SECONDS)
+    return float(min(wait + DEFAULT_TIMEOUT_SECONDS, MAX_CALL_TIMEOUT_SECONDS))
 
 
 def read_token(path: str | None) -> str | None:
