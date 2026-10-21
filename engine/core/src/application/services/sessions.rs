@@ -1594,9 +1594,14 @@ where
         )?;
     }
     let verdict = if confirming {
-        confirm_delivery(engine, &engine_id, before.as_deref())
+        confirm_delivery(
+            engine,
+            &engine_id,
+            before.as_deref(),
+            (!text.is_empty()).then_some(text.as_str()),
+        )
     } else {
-        delivery::judge(submitted, None, &[])
+        delivery::judge(submitted, None, &[], None)
     };
     let entity = found
         .session
@@ -2512,6 +2517,7 @@ where
         autopilot,
         read_only,
         params.review_of.is_some(),
+        params.purpose.as_deref() == Some("implement"),
     ));
     spec.companion = (!subject.brief.companion.is_empty()).then(|| subject.brief.companion.clone());
     spec.env = Some(session_env(
@@ -2533,6 +2539,7 @@ fn brief_with_task(
     autopilot: bool,
     read_only: bool,
     review: bool,
+    implement: bool,
 ) -> String {
     let mut text = brief.to_string();
     if autopilot {
@@ -2546,8 +2553,18 @@ fn brief_with_task(
         let heading = if review { "## Also asked" } else { "## Task" };
         text = format!("{}\n\n{heading}\n\n{task}\n", text.trim_end());
     }
+    if implement {
+        // Every agent template, Claude and Codex alike: a worker that polls
+        // CI or picks up a second item re-reads its whole context each turn
+        // (WI-2035).
+        text = format!("{}\n\n{IMPLEMENT_FOOTER}\n", text.trim_end());
+    }
     text
 }
+
+/// Said at the foot of every implement brief (WI-2035).
+pub const IMPLEMENT_FOOTER: &str = "Stop when your branch is pushed: do not wait for or poll CI, \
+                                    oversight lands it. One work item per session.";
 
 /// Add the branch a session will use to the item's overlay, idempotently.
 fn record_declared_branch(
@@ -3004,6 +3021,7 @@ fn confirm_delivery(
     engine: &EngineClient,
     engine_id: &str,
     before: Option<&str>,
+    pending: Option<&str>,
 ) -> delivery::Verdict {
     let mut seen = Vec::new();
     for _ in 0..CONFIRM_READS {
@@ -3022,7 +3040,7 @@ fn confirm_delivery(
             break;
         }
     }
-    delivery::judge(true, before, &seen)
+    delivery::judge(true, before, &seen, pending)
 }
 
 /// The engine id to relay as `overseer` when the caller is a session the
@@ -3706,6 +3724,15 @@ mod tests {
     use crate::errors::VogtError;
     use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
     use crate::with_ctx;
+
+    #[test]
+    fn an_implement_brief_ends_with_the_stop_at_push_footer() {
+        let text = super::brief_with_task("brief", Some("do it"), false, false, false, true);
+        assert!(text.ends_with(&format!("{}\n", super::IMPLEMENT_FOOTER)));
+        assert!(text.contains("## Task\n\ndo it"));
+        let other = super::brief_with_task("brief", Some("do it"), false, false, false, false);
+        assert!(!other.contains(super::IMPLEMENT_FOOTER));
+    }
 
     use super::{
         answers_as_person, hibernate, input, relayed_overseer, remove_session_op,
