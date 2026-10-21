@@ -1,0 +1,5 @@
+{
+  "name": "vogt-lsp",
+  "version": "1.0.0",
+  "description": "Python, Rust and Java language servers for Claude Code's LSP tool, started through the vogt-lsp launcher (root resolution, sanitized environment)"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "vogt",
+  "owner": { "name": "Vogt" },
+  "plugins": [
+    {
+      "name": "vogt-lsp",
+      "source": "./vogt-lsp",
+      "description": "Python, Rust and Java language servers through /usr/local/bin/vogt-lsp"
+    }
+  ]
+}

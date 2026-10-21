@@ -104,6 +104,11 @@ known-local-folder = ["tests"]
 # A frozen table of 64-character migration checksums: the id + hash literals
 # necessarily exceed the line length.
 "tests/test_migration_freeze.py" = ["E501"]
+# Embeds a fake language server and CLI shims as script text, one frame per line.
+"tests/test_vogt_lsp.py" = ["E501"]
+# A stdlib JSON-RPC bridge (WI-887): every message is parsed JSON, so `Any`
+# is the honest annotation.
+"engine/deploy/vogt-lsp.py" = ["ANN401"]
 # These four handle arbitrary JSON-shaped data by design: a digest over any
 # payload, a renderer over any result, argparse specs over any field
 # annotation, and settings overrides. `Any` is the honest annotation.

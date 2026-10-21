@@ -1,22 +1,6 @@
 #!/usr/bin/env bash
+# Deprecated alias, kept for one release (WI-887): `vogt-lsp mcp rust` serves the
+# same purpose, finds the crate root per call and is registered with Codex by
+# vogt-mcp-bootstrap. Remove after the next release.
 set -euo pipefail
-
-workspace_root="${VOGT_ENGINE_RUST_ANALYZER_WORKSPACE:-}"
-
-if [[ -z "${workspace_root}" ]]; then
-  probe_dir="${PWD}"
-  while [[ "${probe_dir}" != "/" ]]; do
-    if [[ -f "${probe_dir}/Cargo.toml" ]]; then
-      workspace_root="${probe_dir}"
-      break
-    fi
-    probe_dir="$(dirname "${probe_dir}")"
-  done
-fi
-
-if [[ -z "${workspace_root}" ]]; then
-  workspace_root="${PWD}"
-fi
-
-cd "${workspace_root}"
-exec rust-analyzer-mcp
+exec /usr/local/bin/vogt-lsp mcp rust

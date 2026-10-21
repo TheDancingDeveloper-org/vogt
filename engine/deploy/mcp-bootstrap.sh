@@ -1142,6 +1142,72 @@ _codex_link_skills() {
     ln -s "$target" "$link" 2>/dev/null || true
 }
 
+# Language servers (WI-887, docs/design/shared-language-servers.md §6).
+#
+# Claude Code gets the Vogt-owned `vogt-lsp` plugin from the local marketplace
+# the image ships at /opt/vogt/claude-plugins; its .lsp.json starts every server
+# through the `vogt-lsp` launcher. `claude plugin install` copies the plugin into
+# a per-version cache, so "already installed" means the installed version is the
+# shipped plugin.json's and the plugin is enabled — read from the config files,
+# not the CLI, which starts node on every call.
+readonly VOGT_LSP="${VOGT_LSP:-/usr/local/bin/vogt-lsp}"
+readonly VOGT_PLUGINS="${VOGT_CLAUDE_PLUGINS:-/opt/vogt/claude-plugins}"
+readonly VOGT_LSP_LANGS=(python rust java)
+
+claude_lsp_plugin_current() {
+    local dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" version
+    command -v jq >/dev/null 2>&1 || return 1
+    version="$(jq -r '.version' "$VOGT_PLUGINS/vogt-lsp/.claude-plugin/plugin.json" 2>/dev/null)" || return 1
+    jq -e --arg v "$version" '.plugins["vogt-lsp@vogt"] // [] | any(.version == $v)' \
+        "$dir/plugins/installed_plugins.json" >/dev/null 2>&1 || return 1
+    jq -e '.enabledPlugins["vogt-lsp@vogt"] == true' "$dir/settings.json" >/dev/null 2>&1
+}
+
+install_lsp_claude() {
+    command -v claude >/dev/null 2>&1 || return 0
+    [[ -x "$VOGT_LSP" && -f "$VOGT_PLUGINS/.claude-plugin/marketplace.json" ]] || return 0
+    claude_lsp_plugin_current && return 0
+    local dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    if grep -qsF '"vogt"' "$dir/plugins/known_marketplaces.json"; then
+        claude plugin marketplace update vogt >/dev/null 2>&1 || true
+    else
+        claude plugin marketplace add "$VOGT_PLUGINS" >/dev/null
+    fi
+    # A path marketplace loads in place, but an older recorded version is
+    # re-recorded with `update`; `install` only reports it as already present.
+    if grep -qsF '"vogt-lsp@vogt"' "$dir/plugins/installed_plugins.json"; then
+        claude plugin update vogt-lsp@vogt --scope user >/dev/null
+    else
+        claude plugin install vogt-lsp@vogt --scope user >/dev/null
+    fi
+    claude plugin enable vogt-lsp@vogt --scope user >/dev/null 2>&1 || true
+}
+
+# Codex has no LSP client, so it gets one stdio MCP server per language,
+# `vogt-lsp mcp <lang>`, registered only where that language's server can start
+# (`vogt-lsp check`). The root comes from the file each call names, so one
+# global registration serves every project. An entry this script wrote for a
+# language that can no longer start is removed; anything else under the name
+# is left alone.
+install_lsp_codex() {
+    command -v codex >/dev/null 2>&1 || return 0
+    [[ -x "$VOGT_LSP" ]] || return 0
+    local lang name registered
+    for lang in "${VOGT_LSP_LANGS[@]}"; do
+        name="vogt-lsp-$lang"
+        registered="$(codex mcp get "$name" 2>/dev/null || true)"
+        if ! "$VOGT_LSP" check "$lang" >/dev/null 2>&1; then
+            if grep -qF "$VOGT_LSP" <<<"$registered"; then
+                codex mcp remove "$name" >/dev/null 2>&1 || true
+            fi
+            continue
+        fi
+        [[ -z "$registered" ]] || continue
+        codex mcp add "$name" -- "$VOGT_LSP" mcp "$lang" >/dev/null \
+            || printf 'mcp-bootstrap: codex registration of %s failed\n' "$name" >&2
+    done
+}
+
 # Vogt registrations are best-effort: a failure here must not cost an agent its
 # git/gh credentials.
 install_vogt_bridge
@@ -1160,6 +1226,8 @@ if command -v codex >/dev/null 2>&1; then
         || printf 'mcp-bootstrap: could not write the Codex driven-session bundle\n' >&2
 fi
 install_readonly_servers
+install_lsp_claude || printf 'mcp-bootstrap: claude vogt-lsp plugin install failed\n' >&2
+install_lsp_codex || printf 'mcp-bootstrap: codex vogt-lsp registration failed\n' >&2
 
 # stderr, like every other message in this script, because of who calls it.
 #

@@ -194,7 +194,8 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-agent-cli-install` | `deploy/agent-cli-install.sh` | applies the runtime agent-CLI pin at boot and on `POST /api/agent-clis/{tool}` (§5) | only with agent CLIs present |
 | `vogt-mcp-bootstrap` | `deploy/mcp-bootstrap.sh` | registers Vogt's MCP server with the agent CLIs present in the image, and the read-only third-party servers whose tokens the session holds (§4) | optional — without it an agent registers MCP servers by hand |
 | `vogt-mcp` | `deploy/vogt-mcp-auth.sh` | stdio bridge to Vogt's `/mcp` for clients that cannot take a bearer directly; uses the session's own token | optional |
-| `vogt-rust-analyzer-mcp` | `deploy/rust-analyzer-mcp.sh` | starts `rust-analyzer-mcp` anchored to the nearest `Cargo.toml` | optional |
+| `vogt-lsp` | `deploy/vogt-lsp.py` | language-server launcher for Claude Code's LSP plugin and the Codex MCP bridge (`vogt-lsp mcp <lang>`) (§4) | optional |
+| `vogt-rust-analyzer-mcp` | `deploy/rust-analyzer-mcp.sh` | deprecated alias for `vogt-lsp mcp rust`, kept for one release | optional |
 | `vogt-readonly-mcp` | `deploy/readonly-mcp.sh` | starts the GitHub, Grafana or Gitea/Forgejo MCP server in read-only mode with the session's token (§4) | optional — registered only when its token is present |
 | `vogt-klaudia-mcp` | `deploy/klaudia-mcp.sh` | `set [-e KEY=VALUE]…`/`remove` a stdio server in Klaudia's `.mcp.json` (`~/.klaudia`, or `KLAUDIA_CONFIG_DIR`), which Klaudia has no `mcp` command to write; `vogt-mcp-bootstrap` uses it, and a derivative image's bootstrap may (§4) | only with `klaudia` present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
@@ -353,18 +354,40 @@ Gitea/Forgejo forge, read-only.
 Everything in this section is about the *image*; a from-source engine has
 none of it and loses nothing the engine's own routes provide.
 
-**Rust LSP.** `vogt-rust-analyzer-mcp` wraps `rust-analyzer-mcp` and
-starts it from the nearest parent directory containing a `Cargo.toml`, which
-keeps the analyzer anchored to the active workspace when an agent launches it
-from a subdirectory.
+**Language servers (WI-887).** `vogt-lsp` (`deploy/vogt-lsp.py`) is the one
+entry point for Python, Rust and Java language servers
+(docs/design/shared-language-servers.md). `vogt-lsp <python|rust|java>` starts
+the server over stdio from the nearest project marker (`pyproject.toml`,
+`Cargo.toml` — the outermost `[workspace]` wins — or a Gradle/Maven file),
+never above the git toplevel, with `VIRTUAL_ENV`, `PYTHONPATH` and `UV_*`
+removed. Python uses `basedpyright-langserver` (else `pyright-langserver`;
+`VOGT_LSP_PYTHON=ty` selects `ty server`) at `typeCheckingMode=standard`; Rust
+uses `/opt/rust-analyzer/bin/rust-analyzer` when present, else `rust-analyzer`
+on `PATH`, with `cargo.targetDir=true`. Java stays off until the shared hub
+lands (`VOGT_LSP_JAVA=1` opts in; jdtls gets a per-root `-data` dir under
+`~/.cache/vogt-lsp/jdtls`). `vogt-lsp check <lang>` exits 0 when that
+language's server can start.
 
-```bash
-codex mcp add rust-analyzer -- vogt-rust-analyzer-mcp
-claude mcp add --scope project rust-analyzer -- vogt-rust-analyzer-mcp
-```
+`vogt-mcp-bootstrap` wires it into the agents:
 
-Set `VOGT_ENGINE_RUST_ANALYZER_WORKSPACE` for that MCP entry if a client launches
-it from a non-Rust directory.
+- **Claude Code** gets the `vogt-lsp` plugin from the local marketplace `vogt`
+  at `/opt/vogt/claude-plugins` (`deploy/claude-plugins`). Its `.lsp.json` maps
+  `.py`/`.pyi`, `.rs` and `.java` to `vogt-lsp`, with Java's `startupTimeout`
+  at 120000 and no `requestTimeout`. Bootstrap installs and enables it at user
+  scope, and does nothing when the installed version already matches. Verified
+  live on CLI 2.1.293 inside an engine PTY: the `LSP` tool appears and answers
+  without `ENABLE_LSP_TOOL`.
+- **Codex** has no LSP client, so it gets one stdio MCP server per language,
+  `vogt-lsp-<lang>` → `vogt-lsp mcp <lang>`, registered only where
+  `vogt-lsp check` passes and removed when it stops passing. The tools —
+  `definition`, `references`, `hover`, `document_symbols`, `workspace_symbol`
+  and `diagnostics` — take a `file` plus a 1-based `line` and `character`, the
+  shapes of msp-klaudia's LSP tools. Each call picks its root from the file it
+  names, so one registration serves every project.
+
+Until the hub lands, each agent process spawns its own servers.
+`vogt-rust-analyzer-mcp` is now an alias for `vogt-lsp mcp rust`, kept for one
+release.
 
 **GitHub, Grafana, Gitea/Forgejo — optional, read-only.** The image carries
 three third-party MCP servers at exact versions, each tarball checked against a

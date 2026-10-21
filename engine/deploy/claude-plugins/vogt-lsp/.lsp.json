@@ -1,0 +1,26 @@
+{
+  "python": {
+    "command": "/usr/local/bin/vogt-lsp",
+    "args": ["python"],
+    "extensionToLanguage": { ".py": "python", ".pyi": "python" },
+    "settings": { "basedpyright": { "analysis": { "typeCheckingMode": "standard" } } },
+    "restartOnCrash": true,
+    "maxRestarts": 3
+  },
+  "rust": {
+    "command": "/usr/local/bin/vogt-lsp",
+    "args": ["rust"],
+    "extensionToLanguage": { ".rs": "rust" },
+    "initializationOptions": { "cargo": { "targetDir": true }, "cachePriming": { "enable": false } },
+    "restartOnCrash": true,
+    "maxRestarts": 3
+  },
+  "java": {
+    "command": "/usr/local/bin/vogt-lsp",
+    "args": ["java"],
+    "extensionToLanguage": { ".java": "java" },
+    "startupTimeout": 120000,
+    "restartOnCrash": true,
+    "maxRestarts": 3
+  }
+}
