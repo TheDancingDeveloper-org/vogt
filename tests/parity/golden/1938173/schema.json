@@ -88,6 +88,18 @@
       "sql": "CREATE INDEX idx_session_grants_target ON session_grants (target_engine_session_id)",
       "table": "session_grants"
     },
+    "index:idx_session_reports_created": {
+      "sql": "CREATE INDEX idx_session_reports_created ON session_reports (created_at)",
+      "table": "session_reports"
+    },
+    "index:idx_session_reports_session": {
+      "sql": "CREATE INDEX idx_session_reports_session\n    ON session_reports (engine_session_id, created_at)",
+      "table": "session_reports"
+    },
+    "index:idx_session_reports_work_item": {
+      "sql": "CREATE INDEX idx_session_reports_work_item ON session_reports (work_item_id)",
+      "table": "session_reports"
+    },
     "index:idx_sessions_item": {
       "sql": "CREATE INDEX idx_sessions_item ON coding_sessions (work_item_id, started_at)",
       "table": "coding_sessions"
@@ -115,6 +127,14 @@
     "index:idx_tokens_live": {
       "sql": "CREATE INDEX idx_tokens_live ON tokens (revoked_at)",
       "table": "tokens"
+    },
+    "index:idx_watches_state": {
+      "sql": "CREATE INDEX idx_watches_state ON watches (state, created_at)",
+      "table": "watches"
+    },
+    "index:idx_watches_target": {
+      "sql": "CREATE INDEX idx_watches_target ON watches (target_session)",
+      "table": "watches"
     },
     "index:idx_work_item_labels_label": {
       "sql": "CREATE INDEX idx_work_item_labels_label ON work_item_labels (label_id)",
@@ -260,6 +280,22 @@
       [
         "0024_session_started_by",
         "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9"
+      ],
+      [
+        "0025_charters",
+        "39c513695672864f65465500b0db7d9ecd09728be5bb251bd805cfe5c977ab69"
+      ],
+      [
+        "0026_watches",
+        "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df"
+      ],
+      [
+        "0027_session_reports",
+        "cd0c625480c5ffa4d0b07287e8e8ab19e71f72a27ab5f6e56d21d1fee0f8d01a"
+      ],
+      [
+        "0028_session_cold_wake",
+        "8a6b44c9d25f06e23605b47f667d11b312511b37ba25759a040f95cb985b4a1a"
       ]
     ],
     "pragma:user_version": 0,
@@ -279,8 +315,12 @@
       "sql": "CREATE TABLE auth_decisions (\n    id           TEXT PRIMARY KEY NOT NULL,\n    at           TEXT NOT NULL,\n    decision     TEXT NOT NULL CHECK (decision IN ('allow', 'deny')),\n    reason_code  TEXT NOT NULL,\n    operation    TEXT NOT NULL,\n    scope        TEXT,\n    actor_id     TEXT REFERENCES actors (id),\n    token_id     TEXT REFERENCES tokens (id),\n    identity_ref TEXT,\n    transport    TEXT NOT NULL,\n    detail       TEXT\n)",
       "table": "auth_decisions"
     },
+    "table:charters": {
+      "sql": "CREATE TABLE charters (\n    scope_kind      TEXT NOT NULL\n        CHECK (scope_kind IN ('workspace', 'project', 'initiative')),\n    scope_id        TEXT NOT NULL,\n    version         INTEGER NOT NULL CHECK (version >= 1),\n    body            TEXT NOT NULL,\n    author_actor_id TEXT NOT NULL REFERENCES actors (id),\n    created_at      TEXT NOT NULL,\n    reason          TEXT NOT NULL,\n    PRIMARY KEY (scope_kind, scope_id, version)\n)",
+      "table": "charters"
+    },
     "table:coding_sessions": {
-      "sql": "CREATE TABLE coding_sessions (\n    id                TEXT PRIMARY KEY NOT NULL,\n    \n    \n    \n    \n    engine_session_id TEXT NOT NULL UNIQUE,\n    project_id        TEXT NOT NULL REFERENCES projects (id),\n    work_item_id      TEXT REFERENCES work_items (id),\n    \n    \n    \n    actor_id          TEXT NOT NULL REFERENCES actors (id),\n    \n    \n    \n    cwd               TEXT NOT NULL,\n    template          TEXT,\n    reason            TEXT NOT NULL,\n    started_at        TEXT NOT NULL,\n    stopped_at        TEXT\n, model  TEXT, effort TEXT, purpose TEXT, started_by_session TEXT, started_by_kind TEXT)",
+      "sql": "CREATE TABLE coding_sessions (\n    id                TEXT PRIMARY KEY NOT NULL,\n    \n    \n    \n    \n    engine_session_id TEXT NOT NULL UNIQUE,\n    project_id        TEXT NOT NULL REFERENCES projects (id),\n    work_item_id      TEXT REFERENCES work_items (id),\n    \n    \n    \n    actor_id          TEXT NOT NULL REFERENCES actors (id),\n    \n    \n    \n    cwd               TEXT NOT NULL,\n    template          TEXT,\n    reason            TEXT NOT NULL,\n    started_at        TEXT NOT NULL,\n    stopped_at        TEXT\n, model  TEXT, effort TEXT, purpose TEXT, started_by_session TEXT, started_by_kind TEXT, cold_wake_opt_out INTEGER NOT NULL DEFAULT 0)",
       "table": "coding_sessions"
     },
     "table:comments": {
@@ -347,6 +387,10 @@
       "sql": "CREATE TABLE session_grants (\n    id                       TEXT PRIMARY KEY,\n    target_engine_session_id TEXT NOT NULL,\n    kind                     TEXT NOT NULL CHECK (kind IN ('credential', 'capability')),\n    var                      TEXT,\n    project_id               TEXT,\n    secret_name              TEXT,\n    capability               TEXT,\n    uses                     TEXT NOT NULL CHECK (uses IN ('once', 'ttl')),\n    ttl_seconds              INTEGER NOT NULL CHECK (ttl_seconds BETWEEN 60 AND 86400),\n    reason                   TEXT NOT NULL,\n    requested_by             TEXT NOT NULL REFERENCES actors (id),\n    requested_at             TEXT NOT NULL,\n    state                    TEXT NOT NULL\n        CHECK (state IN ('pending', 'approved', 'denied', 'revoked')),\n    decided_by               TEXT REFERENCES actors (id),\n    decided_at               TEXT,\n    decision_reason          TEXT,\n    expires_at               TEXT,\n    revoked_by               TEXT REFERENCES actors (id),\n    revoked_at               TEXT,\n    CHECK (kind <> 'credential' OR (var IS NOT NULL AND project_id IS NOT NULL\n                                    AND secret_name IS NOT NULL))\n)",
       "table": "session_grants"
     },
+    "table:session_reports": {
+      "sql": "CREATE TABLE session_reports (\n    id                TEXT PRIMARY KEY,\n    actor_id          TEXT NOT NULL REFERENCES actors (id),\n    engine_session_id TEXT,\n    work_item_id      TEXT REFERENCES work_items (id),\n    kind              TEXT NOT NULL\n        CHECK (kind IN ('progress', 'result', 'question', 'blocker')),\n    summary           TEXT NOT NULL CHECK (length(trim(summary)) > 0),\n    data              TEXT NOT NULL DEFAULT '{}',\n    created_at        TEXT NOT NULL\n)",
+      "table": "session_reports"
+    },
     "table:suppressions": {
       "sql": "CREATE TABLE suppressions (\n    id                     TEXT PRIMARY KEY NOT NULL,\n    match_kind             TEXT NOT NULL CHECK (match_kind IN ('exact', 'pattern')),\n    subject_key_or_pattern TEXT NOT NULL CHECK (\n        length(trim(subject_key_or_pattern)) > 0\n    ),\n    scope_project_id       TEXT REFERENCES projects (id),\n    actor_id               TEXT NOT NULL REFERENCES actors (id),\n    reason                 TEXT NOT NULL CHECK (length(trim(reason)) > 0),\n    created_at             TEXT NOT NULL,\n    revoked_at             TEXT,\n    revoked_by_actor_id    TEXT REFERENCES actors (id),\n    revoked_reason         TEXT\n)",
       "table": "suppressions"
@@ -354,6 +398,10 @@
     "table:tokens": {
       "sql": "CREATE TABLE tokens (\n    id           TEXT PRIMARY KEY NOT NULL,\n    actor_id     TEXT NOT NULL REFERENCES actors (id),\n    name         TEXT NOT NULL,\n    token_hash   TEXT NOT NULL UNIQUE,\n    scopes       TEXT NOT NULL,\n    created_at   TEXT NOT NULL,\n    expires_at   TEXT,\n    last_used_at TEXT,\n    revoked_at   TEXT,\n    revoked_reason TEXT\n, kind TEXT NOT NULL DEFAULT 'api')",
       "table": "tokens"
+    },
+    "table:watches": {
+      "sql": "CREATE TABLE watches (\n    id                TEXT PRIMARY KEY,\n    owner_actor_id    TEXT NOT NULL REFERENCES actors (id),\n    target_session    TEXT NOT NULL,\n    kind              TEXT NOT NULL,\n    trigger_json      TEXT NOT NULL,\n    note              TEXT NOT NULL DEFAULT '',\n    state             TEXT NOT NULL\n        CHECK (state IN ('active', 'fired', 'failed', 'cancelled', 'expired')),\n    created_at        TEXT NOT NULL,\n    expires_at        TEXT NOT NULL,\n    fired_at          TEXT,\n    outcome_json      TEXT,\n    attempts          INTEGER NOT NULL DEFAULT 0,\n    last_error        TEXT,\n    reason            TEXT NOT NULL\n)",
+      "table": "watches"
     },
     "table:work_item_labels": {
       "sql": "CREATE TABLE work_item_labels (\n    work_item_id TEXT NOT NULL REFERENCES work_items (id),\n    label_id     TEXT NOT NULL REFERENCES labels (id),\n    PRIMARY KEY (work_item_id, label_id)\n)",

@@ -233,6 +233,26 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9",
             "id": "0024_session_started_by"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "39c513695672864f65465500b0db7d9ecd09728be5bb251bd805cfe5c977ab69",
+            "id": "0025_charters"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df",
+            "id": "0026_watches"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "cd0c625480c5ffa4d0b07287e8e8ab19e71f72a27ab5f6e56d21d1fee0f8d01a",
+            "id": "0027_session_reports"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "8a6b44c9d25f06e23605b47f667d11b312511b37ba25759a040f95cb985b4a1a",
+            "id": "0028_session_cold_wake"
           }
         ],
         "tokens": [
@@ -353,13 +373,13 @@
         "work_items": 0
       },
       "data_dir": "<volatile>",
-      "declared_schema_version": 24,
+      "declared_schema_version": 28,
       "disk": null,
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "principal": "local:parity",
       "revision": 2,
-      "vogt_version": "0.7.17"
+      "vogt_version": "0.7.22"
     },
     "exit": 0,
     "operation": "status"
@@ -367,8 +387,8 @@
   {
     "body": {
       "data_dir": "<volatile>",
-      "declared_schema_expected": 24,
-      "declared_schema_version": 24,
+      "declared_schema_expected": 28,
+      "declared_schema_version": 28,
       "migrations_applied": [],
       "observed_schema_expected": 6,
       "observed_schema_version": 6
@@ -1553,6 +1573,26 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9",
             "id": "0024_session_started_by"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "39c513695672864f65465500b0db7d9ecd09728be5bb251bd805cfe5c977ab69",
+            "id": "0025_charters"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df",
+            "id": "0026_watches"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "cd0c625480c5ffa4d0b07287e8e8ab19e71f72a27ab5f6e56d21d1fee0f8d01a",
+            "id": "0027_session_reports"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "8a6b44c9d25f06e23605b47f667d11b312511b37ba25759a040f95cb985b4a1a",
+            "id": "0028_session_cold_wake"
           }
         ],
         "projects": [
@@ -1790,7 +1830,7 @@
     "body": {
       "backlog_total_considered": 0,
       "drift_present": false,
-      "generated_at": "2026-01-02T03:04:08Z",
+      "generated_at": "2026-01-02T03:04:09Z",
       "inbox_active": 0,
       "inbox_active_unfiltered": 0,
       "inbox_filter": null,
@@ -2019,6 +2059,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2053,6 +2094,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2087,6 +2129,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2164,6 +2207,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2215,6 +2259,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2249,6 +2294,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -2291,6 +2337,7 @@
   {
     "body": {
       "branches": [],
+      "claim_check": null,
       "comments": [],
       "git": null,
       "item": {
@@ -3880,7 +3927,7 @@
   },
   {
     "body": {
-      "declared_schema_version": 24,
+      "declared_schema_version": 28,
       "engine_state": "not configured",
       "import_root": "<root>/instance/repos",
       "instance_id": "ins_0001",
@@ -3907,7 +3954,7 @@
   },
   {
     "body": {
-      "declared_schema_version": 24,
+      "declared_schema_version": 28,
       "engine_state": "not in this backup",
       "import_root_now": "<root>/instance/repos",
       "import_root_then": "<root>/instance/repos",

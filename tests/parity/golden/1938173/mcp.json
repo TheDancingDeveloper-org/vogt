@@ -233,6 +233,26 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9",
             "id": "0024_session_started_by"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "39c513695672864f65465500b0db7d9ecd09728be5bb251bd805cfe5c977ab69",
+            "id": "0025_charters"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df",
+            "id": "0026_watches"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "cd0c625480c5ffa4d0b07287e8e8ab19e71f72a27ab5f6e56d21d1fee0f8d01a",
+            "id": "0027_session_reports"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "8a6b44c9d25f06e23605b47f667d11b312511b37ba25759a040f95cb985b4a1a",
+            "id": "0028_session_cold_wake"
           }
         ],
         "tokens": [
@@ -351,12 +371,12 @@
         "work_items": 0
       },
       "data_dir": "<volatile>",
-      "declared_schema_version": 24,
+      "declared_schema_version": 28,
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "principal": "local:parity",
       "revision": 2,
-      "vogt_version": "0.7.17"
+      "vogt_version": "0.7.22"
     },
     "is_error": false,
     "operation": "status"
@@ -364,8 +384,8 @@
   {
     "body": {
       "data_dir": "<volatile>",
-      "declared_schema_expected": 24,
-      "declared_schema_version": 24,
+      "declared_schema_expected": 28,
+      "declared_schema_version": 28,
       "migrations_applied": [],
       "observed_schema_expected": 6,
       "observed_schema_version": 6
@@ -1482,6 +1502,26 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9",
             "id": "0024_session_started_by"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "39c513695672864f65465500b0db7d9ecd09728be5bb251bd805cfe5c977ab69",
+            "id": "0025_charters"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df",
+            "id": "0026_watches"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "cd0c625480c5ffa4d0b07287e8e8ab19e71f72a27ab5f6e56d21d1fee0f8d01a",
+            "id": "0027_session_reports"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "8a6b44c9d25f06e23605b47f667d11b312511b37ba25759a040f95cb985b4a1a",
+            "id": "0028_session_cold_wake"
           }
         ],
         "projects": [
@@ -1703,7 +1743,7 @@
     "body": {
       "backlog_total_considered": 0,
       "drift_present": false,
-      "generated_at": "2026-01-02T03:04:25Z",
+      "generated_at": "2026-01-02T03:04:26Z",
       "inbox_active": 0,
       "inbox_active_unfiltered": 0,
       "projects_total": 2,
@@ -1731,12 +1771,12 @@
     "body": {
       "initiative": {
         "body": "",
-        "created_at": "2026-01-02T03:04:26Z",
+        "created_at": "2026-01-02T03:04:27Z",
         "id": "ini_0001",
         "slug": "platform",
         "state": "open",
         "title": "Platform",
-        "updated_at": "2026-01-02T03:04:26Z",
+        "updated_at": "2026-01-02T03:04:27Z",
         "weight": 0
       }
     },
@@ -1748,12 +1788,12 @@
       "initiatives": [
         {
           "body": "",
-          "created_at": "2026-01-02T03:04:26Z",
+          "created_at": "2026-01-02T03:04:27Z",
           "id": "ini_0001",
           "slug": "platform",
           "state": "open",
           "title": "Platform",
-          "updated_at": "2026-01-02T03:04:26Z",
+          "updated_at": "2026-01-02T03:04:27Z",
           "weight": 0
         }
       ]
@@ -1765,12 +1805,12 @@
     "body": {
       "initiative": {
         "body": "",
-        "created_at": "2026-01-02T03:04:26Z",
+        "created_at": "2026-01-02T03:04:27Z",
         "id": "ini_0001",
         "slug": "platform",
         "state": "open",
         "title": "Platform work",
-        "updated_at": "2026-01-02T03:04:28Z",
+        "updated_at": "2026-01-02T03:04:29Z",
         "weight": 0
       }
     },
@@ -1805,7 +1845,7 @@
     "body": {
       "preference": {
         "key": "inbox.filter",
-        "updated_at": "2026-01-02T03:04:31Z",
+        "updated_at": "2026-01-02T03:04:32Z",
         "value": {
           "actor": "any",
           "sources": [
@@ -1895,7 +1935,7 @@
       "github_scope": "registered projects only",
       "high_water": {},
       "instance_scope": "registered projects only",
-      "snapshot_at": "2026-01-02T03:04:33Z"
+      "snapshot_at": "2026-01-02T03:04:34Z"
     },
     "is_error": false,
     "operation": "inbox.list"
@@ -1930,7 +1970,7 @@
       "comments": [],
       "item": {
         "body": "",
-        "created_at": "2026-01-02T03:04:35Z",
+        "created_at": "2026-01-02T03:04:39Z",
         "id": "wrk_0001",
         "kind": "chore",
         "labels": [],
@@ -1941,7 +1981,7 @@
         "state": "open",
         "title": "parity item",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:35Z"
+        "updated_at": "2026-01-02T03:04:39Z"
       },
       "live_sessions": [],
       "sessions": [],
@@ -1956,7 +1996,7 @@
       "comments": [],
       "item": {
         "body": "",
-        "created_at": "2026-01-02T03:04:35Z",
+        "created_at": "2026-01-02T03:04:39Z",
         "id": "wrk_0001",
         "kind": "chore",
         "labels": [],
@@ -1967,7 +2007,7 @@
         "state": "open",
         "title": "parity item renamed",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:37Z"
+        "updated_at": "2026-01-02T03:04:41Z"
       },
       "live_sessions": [],
       "sessions": [],
@@ -2023,7 +2063,7 @@
       "comments": [],
       "item": {
         "body": "",
-        "created_at": "2026-01-02T03:04:35Z",
+        "created_at": "2026-01-02T03:04:39Z",
         "id": "wrk_0001",
         "kind": "chore",
         "labels": [],
@@ -2034,7 +2074,7 @@
         "state": "open",
         "title": "parity item renamed",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:37Z"
+        "updated_at": "2026-01-02T03:04:41Z"
       },
       "live_sessions": [],
       "sessions": [],
@@ -2049,7 +2089,7 @@
         "actor_display_name": "parity",
         "actor_id": "act_0001",
         "body": "parity note",
-        "created_at": "2026-01-02T03:04:42Z",
+        "created_at": "2026-01-02T03:04:46Z",
         "id": "cmt_0001",
         "kind": "note",
         "work_item_id": "wrk_0001"
@@ -2065,7 +2105,7 @@
       "comments": [],
       "item": {
         "body": "",
-        "created_at": "2026-01-02T03:04:35Z",
+        "created_at": "2026-01-02T03:04:39Z",
         "id": "wrk_0001",
         "kind": "chore",
         "labels": [],
@@ -2076,7 +2116,7 @@
         "state": "in_progress",
         "title": "parity item renamed",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:45Z"
+        "updated_at": "2026-01-02T03:04:49Z"
       },
       "live_sessions": [],
       "sessions": [],
@@ -2121,8 +2161,8 @@
         "": 1
       },
       "revision": 17,
-      "snapshot": "eyJmaW5nZXJwcmludCI6InNoYTI1Njo2N2JkMGQ3MTUxN2JlYThkM2VkNmJjYWE0ZTFmZTY2YzYyNTM5MGRkNjg2ODI3MjM1Njk4MTUxMDg2ZDc0MDYzIiwiaGlnaF93YXRlciI6WyIyMDI2LTAxLTAyVDAzOjA0OjM1KzAwOjAwIiwiV0ktMSJdLCJraW5kIjoic25hcHNob3QiLCJyZXZpc2lvbiI6MTcsInNuYXBzaG90X2F0IjoiMjAyNi0wMS0wMlQwMzowNDo0NyswMDowMCJ9",
-      "snapshot_at": "2026-01-02T03:04:47Z",
+      "snapshot": "eyJmaW5nZXJwcmludCI6InNoYTI1Njo2N2JkMGQ3MTUxN2JlYThkM2VkNmJjYWE0ZTFmZTY2YzYyNTM5MGRkNjg2ODI3MjM1Njk4MTUxMDg2ZDc0MDYzIiwiaGlnaF93YXRlciI6WyIyMDI2LTAxLTAyVDAzOjA0OjM5KzAwOjAwIiwiV0ktMSJdLCJraW5kIjoic25hcHNob3QiLCJyZXZpc2lvbiI6MTcsInNuYXBzaG90X2F0IjoiMjAyNi0wMS0wMlQwMzowNDo1MSswMDowMCJ9",
+      "snapshot_at": "2026-01-02T03:04:51Z",
       "total": 1
     },
     "is_error": false,
@@ -2150,7 +2190,7 @@
           "state": "in_progress",
           "title": "parity item renamed",
           "trust_state": "unverified",
-          "updated_at": "2026-01-02T03:04:45Z"
+          "updated_at": "2026-01-02T03:04:49Z"
         }
       ],
       "observed": 0,
@@ -2218,7 +2258,7 @@
   {
     "body": {
       "applied": false,
-      "base": "2026-01-02T03:04:54Z",
+      "base": "2026-01-02T03:04:58Z",
       "base_source": "an export of this same instance: its exported_at",
       "by_entity": {
         "actor": {
@@ -2313,7 +2353,7 @@
         "root_path": "<root>/proj",
         "slug": "parity",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:56Z",
+        "updated_at": "2026-01-02T03:05:00Z",
         "write_back": "full"
       }
     },
@@ -2325,7 +2365,7 @@
       "actions": [
         {
           "action": "comment",
-          "at": "2026-01-02T03:04:43Z",
+          "at": "2026-01-02T03:04:47Z",
           "detail": "write-back is off for this project",
           "id": "wbk_0001",
           "outcome": "skipped",
@@ -2342,7 +2382,7 @@
       "actions": [
         {
           "action": "comment",
-          "at": "2026-01-02T03:04:43Z",
+          "at": "2026-01-02T03:04:47Z",
           "detail": "write-back is off for this project",
           "id": "wbk_0001",
           "outcome": "skipped",
@@ -2534,7 +2574,7 @@
       "items": [
         {
           "body": "",
-          "created_at": "2026-01-02T03:04:35Z",
+          "created_at": "2026-01-02T03:04:39Z",
           "id": "wrk_0001",
           "kind": "chore",
           "labels": [],
@@ -2545,7 +2585,7 @@
           "state": "in_progress",
           "title": "parity item renamed",
           "trust_state": "unverified",
-          "updated_at": "2026-01-02T03:04:45Z"
+          "updated_at": "2026-01-02T03:04:49Z"
         }
       ],
       "mode": "full",
@@ -2588,7 +2628,7 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:58Z",
+          "at": "2026-01-02T03:05:02Z",
           "entity_id": "prj_0001",
           "entity_kind": "project",
           "id": "aud_0020",
@@ -2601,7 +2641,7 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:57Z",
+          "at": "2026-01-02T03:05:01Z",
           "entity_id": "prj_0001",
           "entity_kind": "project",
           "id": "aud_0019",
@@ -2614,12 +2654,12 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:46Z",
+          "at": "2026-01-02T03:04:50Z",
           "entity_id": "wrk_0001",
           "entity_kind": "work_item",
           "id": "aud_0018",
           "operation": "work.transition",
-          "payload_digest": "sha256:939b83a6dc5267e90a0a3a2a14a555a9e3f4e2aef4ad639c6cce2926b340b433",
+          "payload_digest": "sha256:7ba307e03e3d718dbf5cf7381386fad17d7f004be915431cc9420f498028317e",
           "reason": "parity",
           "revision": 17,
           "txn_id": "txn_0019"
@@ -2627,12 +2667,12 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:44Z",
+          "at": "2026-01-02T03:04:48Z",
           "entity_id": "cmt_0001",
           "entity_kind": "comment",
           "id": "aud_0017",
           "operation": "work.comment",
-          "payload_digest": "sha256:99be8e34fd97a59c4231a9a0486189f35b99c0ffe966b6ef8b063cb25178d164",
+          "payload_digest": "sha256:b991aa92219b17b3da7dee664aed8c8a7da191502b9d1af72605fe1d90ec7931",
           "reason": "parity",
           "revision": 16,
           "txn_id": "txn_0018"
@@ -2640,12 +2680,12 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:38Z",
+          "at": "2026-01-02T03:04:42Z",
           "entity_id": "wrk_0001",
           "entity_kind": "work_item",
           "id": "aud_0016",
           "operation": "work.update",
-          "payload_digest": "sha256:bb461bbf55ff1118209c5b8a84ee0c9282ea3d25cb9db35ab8b07f3a62770b98",
+          "payload_digest": "sha256:c254e76790199646ce61ea84653fa2c7ebea55ae2d2deca12b487d64ea05430c",
           "reason": "parity",
           "revision": 15,
           "txn_id": "txn_0017"
@@ -2686,7 +2726,7 @@
           "test_recipe": ""
         },
         "compliance_status": "not_checked",
-        "created_at": "2026-01-02T03:05:01Z",
+        "created_at": "2026-01-02T03:05:05Z",
         "exclusions": [
           ".venv/",
           "node_modules/",
@@ -2703,7 +2743,7 @@
         "root_path": "<root>/instance/repos/broken",
         "slug": "broken",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:05:01Z",
+        "updated_at": "2026-01-02T03:05:05Z",
         "write_back": "none"
       }
     },
@@ -2730,7 +2770,7 @@
       },
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
       "rows": [],
-      "swept_at": "2026-01-02T03:05:04Z"
+      "swept_at": "2026-01-02T03:05:08Z"
     },
     "is_error": false,
     "operation": "session.sweep"
@@ -2881,7 +2921,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "kind": "dep_scan",
             "observation_id": "obs_0001",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0003",
             "promoted": 0,
@@ -2893,7 +2933,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "kind": "dep_scan",
             "observation_id": "obs_0002",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -2905,7 +2945,7 @@
             "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
             "kind": "dep_scan",
             "observation_id": "obs_0003",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -2917,7 +2957,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "kind": "git.checkout",
             "observation_id": "obs_0004",
-            "observed_at": "2026-01-02T03:05:09+00:00",
+            "observed_at": "2026-01-02T03:05:13+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -2929,7 +2969,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "kind": "git.checkout",
             "observation_id": "obs_0005",
-            "observed_at": "2026-01-02T03:05:09+00:00",
+            "observed_at": "2026-01-02T03:05:13+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -2996,7 +3036,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "id": "obs_0001",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0003",
             "promoted": 0,
@@ -3009,7 +3049,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "id": "obs_0002",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -3022,7 +3062,7 @@
             "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
             "id": "obs_0003",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -3035,7 +3075,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "id": "obs_0004",
             "kind": "git.checkout",
-            "observed_at": "2026-01-02T03:05:09+00:00",
+            "observed_at": "2026-01-02T03:05:13+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -3048,7 +3088,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "id": "obs_0005",
             "kind": "git.checkout",
-            "observed_at": "2026-01-02T03:05:09+00:00",
+            "observed_at": "2026-01-02T03:05:13+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -3061,51 +3101,51 @@
           {
             "collector": "dep-refs",
             "detail": null,
-            "finished_at": "2026-01-02T03:05:07+00:00",
+            "finished_at": "2026-01-02T03:05:11+00:00",
             "id": "swp_0001",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:05:05+00:00",
+            "started_at": "2026-01-02T03:05:09+00:00",
             "stats": "{\"projects\": 3, \"new\": 3, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "git-local",
             "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
-            "finished_at": "2026-01-02T03:05:10+00:00",
+            "finished_at": "2026-01-02T03:05:14+00:00",
             "id": "swp_0002",
             "outcome": "partial",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:05:08+00:00",
+            "started_at": "2026-01-02T03:05:12+00:00",
             "stats": "{\"projects\": 3, \"new\": 2, \"unchanged\": 0, \"failed_projects\": 1}"
           },
           {
             "collector": "mirrored-source",
             "detail": null,
-            "finished_at": "2026-01-02T03:05:13+00:00",
+            "finished_at": "2026-01-02T03:05:17+00:00",
             "id": "swp_0003",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:05:11+00:00",
+            "started_at": "2026-01-02T03:05:15+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "source-markers",
             "detail": null,
-            "finished_at": "2026-01-02T03:05:16+00:00",
+            "finished_at": "2026-01-02T03:05:20+00:00",
             "id": "swp_0004",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:05:14+00:00",
+            "started_at": "2026-01-02T03:05:18+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "git-local",
             "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
-            "finished_at": "2026-01-02T03:05:23+00:00",
+            "finished_at": "2026-01-02T03:05:27+00:00",
             "id": "swp_0005",
             "outcome": "partial",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:05:21+00:00",
+            "started_at": "2026-01-02T03:05:25+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 2, \"failed_projects\": 1}"
           }
         ]
@@ -3574,7 +3614,7 @@
   },
   {
     "body": {
-      "declared_schema_version": 24,
+      "declared_schema_version": 28,
       "engine_state": "not configured",
       "import_root": "<root>/instance/repos",
       "instance_id": "ins_0001",
@@ -3603,7 +3643,7 @@
   },
   {
     "body": {
-      "declared_schema_version": 24,
+      "declared_schema_version": 28,
       "engine_state": "not in this backup",
       "import_root_now": "<root>/instance/repos",
       "import_root_then": "<root>/instance/repos",
@@ -4160,7 +4200,7 @@
           "label": "Merge",
           "note": "reviewed"
         },
-        "answered_at": "2026-01-02T03:04:36Z",
+        "answered_at": "2026-01-02T03:04:37Z",
         "answered_by": "local:parity",
         "asker": "local:parity",
         "context": "CI is green.",
@@ -4239,7 +4279,7 @@
             "label": "Merge",
             "note": "reviewed"
           },
-          "answered_at": "2026-01-02T03:04:36Z",
+          "answered_at": "2026-01-02T03:04:37Z",
           "answered_by": "local:parity",
           "asker": "local:parity",
           "context": "CI is green.",
@@ -4316,7 +4356,7 @@
       "github_scope": "registered projects only",
       "high_water": {},
       "instance_scope": "registered projects only",
-      "snapshot_at": "2026-01-02T03:04:44Z"
+      "snapshot_at": "2026-01-02T03:04:45Z"
     },
     "is_error": false,
     "operation": "inbox.list"
@@ -4342,7 +4382,7 @@
       "preferences": [
         {
           "key": "inbox.filter",
-          "updated_at": "2026-01-02T03:04:31Z",
+          "updated_at": "2026-01-02T03:04:32Z",
           "value": {
             "actor": "any",
             "sources": [
@@ -4418,7 +4458,7 @@
       "detail": "README.md is recorded as unmeetable by parity; it is reported, and not counted as a failure",
       "exemptions": [
         {
-          "declared_at": "2026-01-02T03:04:47Z",
+          "declared_at": "2026-01-02T03:04:49Z",
           "declared_by": "local:parity",
           "reason": "parity harness exemption",
           "rule": "required_file",
@@ -4454,7 +4494,7 @@
   },
   {
     "body": {
-      "checked_at": "2026-01-02T03:04:49Z",
+      "checked_at": "2026-01-02T03:04:51Z",
       "contract_version": "v1",
       "criteria": [
         {
@@ -4541,7 +4581,7 @@
   {
     "body": {
       "adopted": true,
-      "adopted_at": "2026-01-02T03:04:55Z",
+      "adopted_at": "2026-01-02T03:04:57Z",
       "detail": "the contract applies to this project from now on; `contract check` evaluates it",
       "project": "parity",
       "status": "not_checked"
@@ -4557,7 +4597,7 @@
           "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
           "id": "obs_0004",
           "kind": "git.checkout",
-          "observed_at": "2026-01-02T03:05:09Z",
+          "observed_at": "2026-01-02T03:05:13Z",
           "payload": {
             "detail": "no .git directory; this project is a plain folder",
             "is_git_repository": false
@@ -4572,7 +4612,7 @@
           "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
           "id": "obs_0005",
           "kind": "git.checkout",
-          "observed_at": "2026-01-02T03:05:09Z",
+          "observed_at": "2026-01-02T03:05:13Z",
           "payload": {
             "detail": "no .git directory; this project is a plain folder",
             "is_git_repository": false
@@ -4587,7 +4627,7 @@
           "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
           "id": "obs_0001",
           "kind": "dep_scan",
-          "observed_at": "2026-01-02T03:05:06Z",
+          "observed_at": "2026-01-02T03:05:10Z",
           "payload": {
             "manifests_read": 0,
             "references": 0,
@@ -4605,7 +4645,7 @@
           "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
           "id": "obs_0002",
           "kind": "dep_scan",
-          "observed_at": "2026-01-02T03:05:06Z",
+          "observed_at": "2026-01-02T03:05:10Z",
           "payload": {
             "manifests_read": 0,
             "references": 0,
@@ -4623,7 +4663,7 @@
           "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
           "id": "obs_0003",
           "kind": "dep_scan",
-          "observed_at": "2026-01-02T03:05:06Z",
+          "observed_at": "2026-01-02T03:05:10Z",
           "payload": {
             "manifests_read": 0,
             "references": 0,
@@ -4641,7 +4681,7 @@
           "content_digest": "<path-bearing>",
           "id": "obs_0006",
           "kind": "contract.check",
-          "observed_at": "2026-01-02T03:04:49Z",
+          "observed_at": "2026-01-02T03:04:51Z",
           "payload": {
             "contract_version": "v1",
             "evaluated": [
@@ -4708,7 +4748,7 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "created_at": "2026-01-02T03:04:57Z",
+          "created_at": "2026-01-02T03:04:59Z",
           "id": "sup_0001",
           "match_kind": "exact",
           "reason": "parity harness",
@@ -4732,11 +4772,11 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "created_at": "2026-01-02T03:04:57Z",
+          "created_at": "2026-01-02T03:04:59Z",
           "id": "sup_0001",
           "match_kind": "exact",
           "reason": "parity harness",
-          "revoked_at": "2026-01-02T03:04:59Z",
+          "revoked_at": "2026-01-02T03:05:01Z",
           "revoked_reason": "parity harness",
           "subject_key_or_pattern": "git:parity"
         }
@@ -4776,13 +4816,13 @@
         "age_seconds": 13,
         "collectors": {
           "contract-checker": "13s ago (ok)",
-          "dep-refs": "-4s ago (ok)",
-          "git-local": "-20s ago (partial)",
-          "mirrored-source": "-10s ago (ok)",
-          "source-markers": "-13s ago (ok)"
+          "dep-refs": "-6s ago (ok)",
+          "git-local": "-22s ago (partial)",
+          "mirrored-source": "-12s ago (ok)",
+          "source-markers": "-15s ago (ok)"
         },
         "detail": "at least one collector reported a partial or failed sweep",
-        "oldest_relevant_sweep": "2026-01-02T03:04:50Z",
+        "oldest_relevant_sweep": "2026-01-02T03:04:52Z",
         "status": "partial"
       },
       "human_gated": {
@@ -4814,11 +4854,11 @@
         "suppressions": [
           {
             "actor_id": "act_0001",
-            "created_at": "2026-01-02T03:04:57+00:00",
+            "created_at": "2026-01-02T03:04:59+00:00",
             "id": "sup_0001",
             "match_kind": "exact",
             "reason": "parity harness",
-            "revoked_at": "2026-01-02T03:04:59+00:00",
+            "revoked_at": "2026-01-02T03:05:01+00:00",
             "revoked_by_actor_id": "act_0001",
             "revoked_reason": "parity harness",
             "scope_project_id": null,
@@ -4833,7 +4873,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "kind": "dep_scan",
             "observation_id": "obs_0001",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0003",
             "promoted": 0,
@@ -4845,7 +4885,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "kind": "dep_scan",
             "observation_id": "obs_0002",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -4857,7 +4897,7 @@
             "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
             "kind": "dep_scan",
             "observation_id": "obs_0003",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -4869,7 +4909,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "kind": "git.checkout",
             "observation_id": "obs_0004",
-            "observed_at": "2026-01-02T03:05:09+00:00",
+            "observed_at": "2026-01-02T03:05:13+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -4881,7 +4921,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "kind": "git.checkout",
             "observation_id": "obs_0005",
-            "observed_at": "2026-01-02T03:05:09+00:00",
+            "observed_at": "2026-01-02T03:05:13+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -4893,7 +4933,7 @@
             "content_digest": "<path-bearing>",
             "kind": "contract.check",
             "observation_id": "obs_0006",
-            "observed_at": "2026-01-02T03:04:49+00:00",
+            "observed_at": "2026-01-02T03:04:51+00:00",
             "payload": "{\"contract_version\": \"v1\", \"evaluated\": [{\"rule\": \"path.exists\", \"satisfied\": true, \"target\": \"<root>/proj\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"AGENTS.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"README.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"LICENSE\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"docs\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"design\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"src\", \"tracked\": null}], \"failing\": [], \"status\": \"compliant\"}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -4907,7 +4947,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "id": "obs_0001",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0003",
             "promoted": 0,
@@ -4920,7 +4960,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "id": "obs_0002",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -4933,7 +4973,7 @@
             "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
             "id": "obs_0003",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:05:06+00:00",
+            "observed_at": "2026-01-02T03:05:10+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -4946,7 +4986,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "id": "obs_0004",
             "kind": "git.checkout",
-            "observed_at": "2026-01-02T03:05:09+00:00",
+            "observed_at": "2026-01-02T03:05:13+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -4959,7 +4999,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "id": "obs_0005",
             "kind": "git.checkout",
-            "observed_at": "2026-01-02T03:05:09+00:00",
+            "observed_at": "2026-01-02T03:05:13+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -4972,7 +5012,7 @@
             "content_digest": "<path-bearing>",
             "id": "obs_0006",
             "kind": "contract.check",
-            "observed_at": "2026-01-02T03:04:49+00:00",
+            "observed_at": "2026-01-02T03:04:51+00:00",
             "payload": "{\"contract_version\": \"v1\", \"evaluated\": [{\"rule\": \"path.exists\", \"satisfied\": true, \"target\": \"<root>/proj\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"AGENTS.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"README.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"LICENSE\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"docs\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"design\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"src\", \"tracked\": null}], \"failing\": [], \"status\": \"compliant\"}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -4985,61 +5025,61 @@
           {
             "collector": "dep-refs",
             "detail": null,
-            "finished_at": "2026-01-02T03:05:07+00:00",
+            "finished_at": "2026-01-02T03:05:11+00:00",
             "id": "swp_0001",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:05:05+00:00",
+            "started_at": "2026-01-02T03:05:09+00:00",
             "stats": "{\"projects\": 3, \"new\": 3, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "git-local",
             "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
-            "finished_at": "2026-01-02T03:05:10+00:00",
+            "finished_at": "2026-01-02T03:05:14+00:00",
             "id": "swp_0002",
             "outcome": "partial",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:05:08+00:00",
+            "started_at": "2026-01-02T03:05:12+00:00",
             "stats": "{\"projects\": 3, \"new\": 2, \"unchanged\": 0, \"failed_projects\": 1}"
           },
           {
             "collector": "mirrored-source",
             "detail": null,
-            "finished_at": "2026-01-02T03:05:13+00:00",
+            "finished_at": "2026-01-02T03:05:17+00:00",
             "id": "swp_0003",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:05:11+00:00",
+            "started_at": "2026-01-02T03:05:15+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "source-markers",
             "detail": null,
-            "finished_at": "2026-01-02T03:05:16+00:00",
+            "finished_at": "2026-01-02T03:05:20+00:00",
             "id": "swp_0004",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:05:14+00:00",
+            "started_at": "2026-01-02T03:05:18+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "git-local",
             "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
-            "finished_at": "2026-01-02T03:05:23+00:00",
+            "finished_at": "2026-01-02T03:05:27+00:00",
             "id": "swp_0005",
             "outcome": "partial",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:05:21+00:00",
+            "started_at": "2026-01-02T03:05:25+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 2, \"failed_projects\": 1}"
           },
           {
             "collector": "contract-checker",
             "detail": null,
-            "finished_at": "2026-01-02T03:04:50+00:00",
+            "finished_at": "2026-01-02T03:04:52+00:00",
             "id": "swp_0006",
             "outcome": "ok",
             "scope": "[\"prj_0001\"]",
-            "started_at": "2026-01-02T03:04:49+00:00",
+            "started_at": "2026-01-02T03:04:51+00:00",
             "stats": "{\"projects\": 1, \"new\": 1, \"unchanged\": 0}"
           }
         ]
