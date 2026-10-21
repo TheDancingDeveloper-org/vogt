@@ -566,7 +566,8 @@ impl SessionRegistry {
 
         // The workspace the policy check judges against (WI-1326), captured
         // before the child runs so its own edits are not in the baseline. A
-        // wake keeps what the first start captured: the record carries it.
+        // wake keeps what the first start captured, or nothing if it captured
+        // nothing: never the dirt the session itself left behind.
         {
             let cwd = spec
                 .cwd
@@ -574,7 +575,8 @@ impl SessionRegistry {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| self.cfg.default_cwd.clone());
             let worktree = cut.0.is_some();
-            spec.policy = crate::policy::with_workspace(spec.policy.take(), &cwd, worktree);
+            let wake = matches!(creating, Creating::Wake(_));
+            spec.policy = crate::policy::with_workspace(spec.policy.take(), &cwd, worktree, wake);
         }
 
         // Scratch builds share one Cargo target per repository (WI-1810):

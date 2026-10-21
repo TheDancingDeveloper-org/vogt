@@ -1240,7 +1240,8 @@ cut or a linked worktree given as `cwd`, else `checkout`), `workspace_path`
 (the worktree toplevel) and `discard_baseline` (the paths `git status` reports
 dirty; empty for a worktree cut for this start) into the session's policy,
 and the record keeps them, so a wake judges against the first start's
-baseline. vogt-core adds `protected_checkouts`, every registered project's
+baseline. A wake never recaptures: a record with no workspace (one from
+before this rule) wakes without these rules. vogt-core adds `protected_checkouts`, every registered project's
 root, on a `worktree` or `cwd` start. A repo is resolved with `git rev-parse
 --show-toplevel` from the command's `-C` or the cwd:
 

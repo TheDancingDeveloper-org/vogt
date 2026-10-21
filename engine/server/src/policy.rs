@@ -431,16 +431,18 @@ const BASELINE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `policy` with the session's workspace filled in (WI-1326): its kind, its
 /// toplevel and the paths already dirty in it. A worktree cut for this start
-/// (`worktree`) has an empty baseline. A policy that already names a workspace — a
-/// wake's, from the record — is returned as it is, and so is one whose `cwd`
-/// is not in a repository. A `git status` that fails leaves the baseline
+/// (`worktree`) has an empty baseline. A wake (`wake`) returns the policy as
+/// it is, whatever the record holds: recapturing then would make the
+/// session's own edits its baseline. So is a policy that already names a
+/// workspace, and one whose `cwd` is not in a repository. A `git status` that fails leaves the baseline
 /// empty: the guard is then a no-op, never a blanket refusal.
 pub fn with_workspace(
     policy: Option<SessionPolicy>,
     cwd: &Path,
     worktree: bool,
+    wake: bool,
 ) -> Option<SessionPolicy> {
-    if policy.as_ref().is_some_and(|p| p.workspace_path.is_some()) {
+    if wake || policy.as_ref().is_some_and(|p| p.workspace_path.is_some()) {
         return policy;
     }
     let Some(top) = toplevel(cwd) else {
@@ -1516,7 +1518,7 @@ mod tests {
         std::fs::create_dir_all(root.join("scratch")).unwrap();
         std::fs::write(root.join("scratch/n"), "x").unwrap();
         std::fs::write(root.join("new.txt"), "x").unwrap();
-        let p = with_workspace(None, &root, false).unwrap();
+        let p = with_workspace(None, &root, false, false).unwrap();
         assert_eq!(p.workspace_kind.as_deref(), Some("checkout"));
         assert_eq!(
             p.workspace_path,
@@ -1524,26 +1526,42 @@ mod tests {
         );
         assert_eq!(p.discard_baseline, ["f", "new.txt", "scratch/"]);
         // A worktree starts clean whatever git says; a wake keeps the record's.
-        let wt = with_workspace(None, &root, true).unwrap();
+        let wt = with_workspace(None, &root, true, false).unwrap();
         assert_eq!(wt.workspace_kind.as_deref(), Some("worktree"));
         assert!(wt.discard_baseline.is_empty());
         assert_eq!(
-            with_workspace(Some(p.clone()), Path::new("/"), true),
+            with_workspace(Some(p.clone()), Path::new("/"), true, false),
             Some(p)
         );
         // Outside a repo nothing is added.
         let plain = std::env::temp_dir().join(format!("vogt-policy-norepo-{}", std::process::id()));
         std::fs::create_dir_all(&plain).unwrap();
-        assert_eq!(with_workspace(None, &plain, false), None);
+        assert_eq!(with_workspace(None, &plain, false, false), None);
         std::fs::remove_dir_all(&plain).ok();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_wake_with_no_recorded_workspace_does_not_recapture() {
+        // A record from before WI-1326, or one whose first start was outside a
+        // repo: the session's own edits must not become its baseline.
+        let (main, wt) = checkout_and_worktree("wake");
+        std::fs::write(wt.join("f"), "edited by the session").unwrap();
+        assert_eq!(with_workspace(None, &wt, false, true), None);
+        let bare = SessionPolicy::default();
+        assert_eq!(
+            with_workspace(Some(bare.clone()), &wt, false, true),
+            Some(bare)
+        );
+        std::fs::remove_dir_all(&wt).ok();
+        std::fs::remove_dir_all(&main).ok();
     }
 
     #[test]
     fn an_existing_linked_worktree_is_a_worktree_with_its_dirt_kept() {
         let (main, wt) = checkout_and_worktree("linked");
         std::fs::write(wt.join("f"), "edited").unwrap();
-        let p = with_workspace(None, &wt, false).unwrap();
+        let p = with_workspace(None, &wt, false, false).unwrap();
         assert_eq!(p.workspace_kind.as_deref(), Some("worktree"));
         assert_eq!(p.discard_baseline, ["f"]);
         std::fs::remove_dir_all(&wt).ok();
