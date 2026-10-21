@@ -26,6 +26,7 @@ import {
   saveTerminalCache,
   type TerminalCacheEntry,
 } from "./terminalCache";
+import { createReplayReplyGuard } from "./terminalReplyGuard";
 import {
   createReplayQueue,
   prepareReplayTail,
@@ -354,6 +355,8 @@ const TerminalView: Component<Props> = (props) => {
     refocusTerminal();
   };
 
+  const replyGuard = createReplayReplyGuard();
+
   const sendToPty = (data: string | ArrayBuffer) => {
     if (terminalInputTooLarge(data)) {
       props.onNotify?.(
@@ -468,6 +471,9 @@ const TerminalView: Component<Props> = (props) => {
   };
 
   const dispatchInput = (data: string | ArrayBuffer) => {
+    // WI-991: replies xterm generates for queries found in replayed bytes
+    // must not reach the program as typed input.
+    if (replyGuard.shouldDrop(data)) return;
     // Sticky Ctrl/Alt from the phone modkey row lands here for soft-keyboard
     // characters: `Ctrl` armed + `r` typed → `^R`.
     const next = applyStickyMods(data);
@@ -1139,7 +1145,7 @@ const TerminalView: Component<Props> = (props) => {
           done();
           return;
         }
-        term.write(chunk, done);
+        replyGuard.write((d, cb) => term?.write(d, cb), chunk, done);
       },
       {
         kind: "cache",
@@ -1167,7 +1173,7 @@ const TerminalView: Component<Props> = (props) => {
         onDone();
         return;
       }
-      term.write(restored, () => {
+      replyGuard.write((d, cb) => term?.write(d, cb), restored, () => {
         if (destroyed) return;
         term?.scrollToBottom();
         onDone();
@@ -1271,7 +1277,7 @@ const TerminalView: Component<Props> = (props) => {
                   done();
                   return;
                 }
-                term.write(chunk, done);
+                replyGuard.write((d, cb) => term?.write(d, cb), chunk, done);
               },
               { kind: "snapshot" },
             );
@@ -1482,7 +1488,7 @@ const TerminalView: Component<Props> = (props) => {
       props.sessionId,
       (chunk, done) => {
         if (!term) { done(); return; }
-        term.write(chunk, done);
+        replyGuard.write((d, cb) => term?.write(d, cb), chunk, done);
       },
       { kind: "cache" },
     );
