@@ -194,7 +194,9 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-agent-cli-install` | `deploy/agent-cli-install.sh` | applies the runtime agent-CLI pin at boot and on `POST /api/agent-clis/{tool}` (§5) | only with agent CLIs present |
 | `vogt-mcp-bootstrap` | `deploy/mcp-bootstrap.sh` | registers Vogt's MCP server with the agent CLIs present in the image, and the read-only third-party servers whose tokens the session holds (§4) | optional — without it an agent registers MCP servers by hand |
 | `vogt-mcp` | `deploy/vogt-mcp-auth.sh` | stdio bridge to Vogt's `/mcp` for clients that cannot take a bearer directly; uses the session's own token | optional |
-| `vogt-rust-analyzer-mcp` | `deploy/rust-analyzer-mcp.sh` | starts `rust-analyzer-mcp` anchored to the nearest `Cargo.toml` | optional |
+| `vogt-rust-analyzer-mcp` | `deploy/rust-analyzer-mcp.sh` | starts `rust-analyzer-mcp` anchored to the nearest `Cargo.toml`, through `vogt-lsp-guard` | optional |
+| `vogt-lsp-guard` | `deploy/lsp-guard.sh` | runs a language server with the PTY sanitizer's secret stripping and a trust gate: build scripts, proc macros and check-on-save (and, for a jdtls launcher reading `VOGT_LSP_MODE`, Gradle/Maven import) only for a root trusted by `VOGT_LSP_TRUST=trusted\|opt-in` or `VOGT_LSP_TRUSTED_ROOTS`; `--check ROOT` exits 3 for a static root, so prewarmers skip it | optional |
+| `vogt-lsp-gc` | `deploy/lsp-gc.sh` | removes jdtls `-data` dirs under `~/.cache/vogt-lsp/jdtls` whose `.vogt-root` names a root that is gone | optional |
 | `vogt-readonly-mcp` | `deploy/readonly-mcp.sh` | starts the GitHub, Grafana or Gitea/Forgejo MCP server in read-only mode with the session's token (§4) | optional — registered only when its token is present |
 | `vogt-klaudia-mcp` | `deploy/klaudia-mcp.sh` | `set [-e KEY=VALUE]…`/`remove` a stdio server in Klaudia's `.mcp.json` (`~/.klaudia`, or `KLAUDIA_CONFIG_DIR`), which Klaudia has no `mcp` command to write; `vogt-mcp-bootstrap` uses it, and a derivative image's bootstrap may (§4) | only with `klaudia` present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
@@ -364,7 +366,9 @@ claude mcp add --scope project rust-analyzer -- vogt-rust-analyzer-mcp
 ```
 
 Set `VOGT_ENGINE_RUST_ANALYZER_WORKSPACE` for that MCP entry if a client launches
-it from a non-Rust directory.
+it from a non-Rust directory. The analyzer runs build scripts and proc macros
+only when the root is trusted (`VOGT_LSP_TRUST`, `VOGT_LSP_TRUSTED_ROOTS`);
+otherwise `vogt-lsp-guard` gives it a static config (WI-889).
 
 **GitHub, Grafana, Gitea/Forgejo — optional, read-only.** The image carries
 three third-party MCP servers at exact versions, each tarball checked against a

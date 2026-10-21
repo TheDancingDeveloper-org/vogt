@@ -638,6 +638,8 @@ COPY engine/deploy/vogt-mcp-auth.sh /usr/local/bin/vogt-mcp
 COPY engine/deploy/mcp-bootstrap.sh /usr/local/bin/vogt-mcp-bootstrap
 COPY engine/deploy/git-askpass.sh /usr/local/bin/vogt-git-askpass
 COPY engine/deploy/rust-analyzer-mcp.sh /usr/local/bin/vogt-rust-analyzer-mcp
+COPY engine/deploy/lsp-guard.sh /usr/local/bin/vogt-lsp-guard
+COPY engine/deploy/lsp-gc.sh /usr/local/bin/vogt-lsp-gc
 COPY engine/deploy/readonly-mcp.sh /usr/local/bin/vogt-readonly-mcp
 COPY engine/deploy/klaudia-mcp.sh /usr/local/bin/vogt-klaudia-mcp
 COPY engine/deploy/claude-profile.sh /usr/local/bin/claude-profile
@@ -655,6 +657,8 @@ RUN chmod +x \
     /usr/local/bin/vogt-mcp-bootstrap \
     /usr/local/bin/vogt-git-askpass \
     /usr/local/bin/vogt-rust-analyzer-mcp \
+    /usr/local/bin/vogt-lsp-guard \
+    /usr/local/bin/vogt-lsp-gc \
     /usr/local/bin/vogt-readonly-mcp \
     /usr/local/bin/vogt-klaudia-mcp \
     /usr/local/bin/claude-profile \

@@ -18,5 +18,7 @@ if [[ -z "${workspace_root}" ]]; then
   workspace_root="${PWD}"
 fi
 
-cd "${workspace_root}"
-exec rust-analyzer-mcp
+
+# Build scripts and proc macros run only for a trusted root (WI-889).
+guard="$(command -v vogt-lsp-guard || echo "$(dirname "$0")/lsp-guard.sh")"
+exec "${guard}" --root "${workspace_root}" -- rust-analyzer-mcp
