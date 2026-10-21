@@ -1015,6 +1015,12 @@ components:
         work_item:
           type: string
           description: The work item the session serves (WI-998); absent when bound to none.
+        workspace:
+          description: >-
+            The git tree the session runs in (WI-1324), taken at the first
+            start and kept across a wake; null when its directory is in no repo.
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/Workspace" }]
         resources: { $ref: "#/components/schemas/SessionResources" }
         budget: { $ref: "#/components/schemas/SessionBudget" }
         template:
@@ -1038,6 +1044,26 @@ components:
         turns: { type: integer, minimum: 1 }
         context_tokens: { type: integer, minimum: 1 }
         wall_clock_minutes: { type: integer, minimum: 1 }
+    Workspace:
+      type: object
+      required: [kind, path, repo_root, branch, created_at, baseline_dirty, build_dirs]
+      properties:
+        kind: { type: string, enum: [worktree, checkout] }
+        path: { type: string, description: The tree's toplevel. }
+        repo_root: { type: string, description: The main checkout (equals path for a checkout). }
+        branch: { type: string, description: The branch checked out, or `detached`. }
+        base_ref: { type: string, description: The ref an engine-cut worktree was made from. }
+        base_sha: { type: string, description: What base_ref resolved to when the worktree was cut. }
+        created_at: { type: string, format: date-time }
+        baseline_dirty:
+          type: array
+          items: { type: string }
+          description: Repo-relative paths dirty before the session started, rename sources included.
+        build_dirs:
+          type: array
+          items: { type: string }
+          description: Build-output directory names a worktree cleanup removes.
+        cleaned_at: { type: string, format: date-time }
     SessionResources:
       type: object
       required: [rss_bytes, cpu_pct, processes, sampled_at]

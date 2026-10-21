@@ -848,6 +848,25 @@ than these routes.
   `✦ WI-n` chip. Requires `sessions`. This is an additive field on
   `SessionSpec`/`SessionSummary`, the same shape as `role`; WI-956 slice 2's
   `supervisor` is to be added beside it the same way.
+- `SessionSummary.workspace` (WI-1324): the git tree the session runs in,
+  for every session whose directory is inside a repo; `null` otherwise.
+  `{kind: "worktree" | "checkout", path, repo_root, branch, base_ref?,
+  base_sha?, created_at, baseline_dirty: [path], build_dirs: [name],
+  cleaned_at?}`. `kind` is `worktree` for a linked worktree (an engine-cut
+  one or any other) and `checkout` for a main checkout; `path` is the
+  toplevel, `repo_root` the main checkout (`== path` for a checkout),
+  `branch` the symbolic ref or `detached`. `base_ref`/`base_sha` are set only
+  for a worktree the engine cut (`SessionSpec.worktree`). `baseline_dirty` is
+  every repo-relative path `git status --porcelain=v1 -z
+  --untracked-files=normal` named before the session started, rename and copy
+  sources included; `build_dirs` the directory names a worktree cleanup
+  removes (none for a checkout). The block is taken once, at the first start,
+  kept in the hibernation record, and reused by a wake, so the baseline never
+  grows to include what the session itself changed. The session's
+  environment carries `VOGT_ENGINE_WORKSPACE=<kind>` and
+  `VOGT_ENGINE_WORKSPACE_PATH=<path>` exactly when the block exists, at start
+  and at wake. vogt-core shows `workspace_kind` and `workspace_path` on the
+  full `session.list` summary.
 - `SessionSpec.worktree` `{"branch": "...", "base_ref": "..."}` (WI-1298),
   sent by vogt-core when `session.start` is called with `worktree: true`.
   The engine creates a git worktree of `cwd` as a sibling directory named

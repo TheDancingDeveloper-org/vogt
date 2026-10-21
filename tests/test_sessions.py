@@ -1946,6 +1946,36 @@ def test_a_stopped_row_carries_who_stopped_it(
     assert (row.stopped_by, row.stop_reason) == ("agent:session:ses_parent", "ingested")
 
 
+# -- WI-1324: the engine's workspace record reaches the summary ---------------
+
+
+def test_a_row_in_a_git_tree_carries_its_workspace_kind_and_path() -> None:
+    from vogt.adapters.engine.client import EngineSession
+    from vogt.application.services.sessions import _live_fields
+
+    base = {"id": "eng-9", "name": "w", "activity": "idle", "cwd": ROOT}
+    row = EngineSession.from_payload(
+        {
+            **base,
+            "workspace": {
+                "kind": "worktree",
+                "path": "/w/vogt-wi-1",
+                "repo_root": "/w/vogt",
+                "branch": "wi-1",
+                "baseline_dirty": [],
+            },
+        }
+    )
+    fields = _live_fields(row)
+    assert (fields["workspace_kind"], fields["workspace_path"]) == (
+        "worktree",
+        "/w/vogt-wi-1",
+    )
+    for payload in ({**base}, {**base, "workspace": None}):
+        plain = EngineSession.from_payload(payload)
+        assert (plain.workspace_kind, plain.workspace_path) == (None, None)
+
+
 # -- WI-926: an engine-started agent session gets an agent identity --------------
 
 

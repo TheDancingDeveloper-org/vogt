@@ -4920,6 +4920,8 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "account": engine_session.account,
         "stopped_by": engine_session.stopped_by,
         "stop_reason": engine_session.stop_reason,
+        "workspace_kind": engine_session.workspace_kind,
+        "workspace_path": engine_session.workspace_path,
         "budget": _budget_params(engine_session.budget),
     }
 

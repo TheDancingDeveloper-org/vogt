@@ -195,6 +195,10 @@ class EngineSession:
     #: Who asked the session to stop, and why (WI-913).
     stopped_by: str | None = None
     stop_reason: str | None = None
+    #: The git tree it runs in (WI-1324): `worktree` or `checkout`, and its
+    #: top level. Both `None` for a session in no repo.
+    workspace_kind: str | None = None
+    workspace_path: str | None = None
     #: The engine's live reading of the agent transcript (WI-1245), when its
     #: tailer has one. `None` from an engine that predates it, or one that
     #: has not read the transcript yet.
@@ -245,6 +249,12 @@ class EngineSession:
             else None,
             stop_reason=_optional_str((payload.get("stop") or {}).get("reason"))
             if isinstance(payload.get("stop"), dict)
+            else None,
+            workspace_kind=_optional_str((payload.get("workspace") or {}).get("kind"))
+            if isinstance(payload.get("workspace"), dict)
+            else None,
+            workspace_path=_optional_str((payload.get("workspace") or {}).get("path"))
+            if isinstance(payload.get("workspace"), dict)
             else None,
             economics=payload.get("economics")
             if isinstance(payload.get("economics"), dict)
