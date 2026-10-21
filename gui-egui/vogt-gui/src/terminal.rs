@@ -283,6 +283,11 @@ impl TerminalModel {
         self.attach = AttachState::Waiting { retry_at, attempt };
         self.seen = None;
         self.ping_at = None;
+        if self.in_snapshot {
+            // `pos` is the end of a snapshot the grid only partly holds: a
+            // warm resume from there would skip the rest. Start cold.
+            self.pos = None;
+        }
         self.in_snapshot = false;
     }
 
@@ -444,6 +449,62 @@ mod tests {
         snapshot(&mut t, retry_at, 8, false, b"two\n");
         assert_eq!(t.pos, Some(8));
         assert!(text(&t.grid).contains("one") && text(&t.grid).contains("two"));
+    }
+
+    #[test]
+    fn a_drop_mid_snapshot_reattaches_cold() {
+        let (mut t, now) = opened();
+        snapshot(&mut t, now, 4, true, b"one\n");
+        // A warm resume delta starts, then the socket drops part-way.
+        t.apply_attach(1, AttachEvent::Closed("reset".into()), now);
+        let retry = now + t.next_wake(now).unwrap();
+        assert!(matches!(
+            &t.tick(retry)[..],
+            [Command::Attach {
+                resume_from: Some(4),
+                ..
+            }]
+        ));
+        t.apply_attach(
+            2,
+            AttachEvent::Control(AttachControl::SnapshotStart {
+                scrollback_pos: 100,
+                reset: false,
+                cols: Some(20),
+                rows: Some(4),
+            }),
+            retry,
+        );
+        t.apply_attach(2, AttachEvent::Bytes(b"par".to_vec()), retry);
+        t.apply_attach(2, AttachEvent::Closed("reset".into()), retry);
+        let again = retry + t.next_wake(retry).unwrap();
+        assert!(matches!(
+            &t.tick(again)[..],
+            [Command::Attach { resume_from: None, .. }]
+        ));
+    }
+
+    #[test]
+    fn a_stale_attach_mid_snapshot_reattaches_cold() {
+        let (mut t, now) = opened();
+        t.apply_attach(
+            1,
+            AttachEvent::Control(AttachControl::SnapshotStart {
+                scrollback_pos: 100,
+                reset: true,
+                cols: Some(20),
+                rows: Some(4),
+            }),
+            now,
+        );
+        // Not live yet, so the stale watchdog does not apply; a close does.
+        t.apply_attach(1, AttachEvent::Bytes(b"part".to_vec()), now);
+        t.apply_attach(1, AttachEvent::Closed("timeout".into()), now);
+        let retry = now + t.next_wake(now).unwrap();
+        assert!(matches!(
+            &t.tick(retry)[..],
+            [Command::Attach { resume_from: None, .. }]
+        ));
     }
 
     #[test]
