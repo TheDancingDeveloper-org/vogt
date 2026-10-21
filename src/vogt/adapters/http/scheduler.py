@@ -124,9 +124,82 @@ class CollectorSchedule:
 
     def _sweep(self) -> None:
         from vogt.application.services import sweep
+        from vogt.application.services.budget_handoff import settle_budget_stops
 
         ctx = self._context_factory()
-        sweep(ctx, SweepParams(reason=SCHEDULED_REASON))
+        try:
+            sweep(ctx, SweepParams(reason=SCHEDULED_REASON))
+        finally:
+            # A budget-stopped session is handed off (and restarted within
+            # the cap) whether or not the collectors succeeded (WI-1833).
+            settle_budget_stops(ctx)
+
+
+class WatchSchedule:
+    """Evaluates armed watches on a short interval (WI-2036).
+
+    Separate from the collector schedule because the two run at different
+    cadences: a sweep reads the forge every fifteen minutes, while a watch on
+    a work item or a session should fire within a minute. Same three
+    properties as `CollectorSchedule`: one pass at a time, a failed pass
+    never stops the loop, and it runs as the machine.
+    """
+
+    def __init__(
+        self,
+        context_factory: Callable[[], AppContext],
+        *,
+        interval_seconds: int,
+    ) -> None:
+        self._context_factory = context_factory
+        self._interval = interval_seconds
+        self._task: asyncio.Task[None] | None = None
+        self._stopping = asyncio.Event()
+        self.completed = 0
+        self.failed = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self._interval > 0
+
+    async def start(self) -> None:
+        if not self.enabled:
+            logger.info("watch schedule disabled (watch_interval_seconds=0)")
+            return
+        self._stopping.clear()
+        self._task = asyncio.create_task(self._loop(), name="vogt-watch-schedule")
+        logger.info("watch schedule started; every %ss", self._interval)
+
+    async def stop(self) -> None:
+        self._stopping.set()
+        if self._task is None:
+            return
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+        self._task = None
+
+    async def _loop(self) -> None:
+        while not self._stopping.is_set():
+            await self.run_once()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stopping.wait(), timeout=self._interval)
+
+    async def run_once(self) -> None:
+        try:
+            await asyncio.to_thread(self._evaluate)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.failed += 1
+            logger.warning("watch pass failed: %s", error)
+        else:
+            self.completed += 1
+
+    def _evaluate(self) -> None:
+        from vogt.application.services.watches import evaluate_watches
+
+        evaluate_watches(self._context_factory())
 
 
 @contextlib.asynccontextmanager
@@ -139,4 +212,4 @@ async def scheduled(schedule: CollectorSchedule) -> AsyncIterator[CollectorSched
         await schedule.stop()
 
 
-__all__ = ["SCHEDULED_REASON", "CollectorSchedule", "scheduled"]
+__all__ = ["SCHEDULED_REASON", "CollectorSchedule", "WatchSchedule", "scheduled"]

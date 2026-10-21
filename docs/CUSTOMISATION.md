@@ -390,7 +390,7 @@ pattern: a Dockerfile a few lines long that starts `FROM` the published
 `vogt-stack` digest and adds what your sessions need. Keep it in your fork,
 build it in your CI, deploy it by digest.
 
-The core image (`ghcr.io/thedancingdeveloper-org/vogt:0.7.17`) is a build
+The core image (`ghcr.io/thedancingdeveloper-org/vogt:0.7.22`) is a build
 input to the stack image rather than something to deploy on its own. It is
 also built to be a base — `USER root`, install, `USER 1000:0`, keeping
 `ENTRYPOINT ["vogt"]` and the `root:0`-owned data directory — so extend it
@@ -408,7 +408,7 @@ it adds, never in the mechanism. CI builds and boots the example with no
 private integrations, so the contract stays honest.
 
 **Derive from the published digest.** An extending image starts `FROM` the
-signed release, by digest, not by tag:
+release, by digest, not by tag:
 
 ```dockerfile
 FROM ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>

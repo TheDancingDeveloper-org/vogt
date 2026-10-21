@@ -28,8 +28,18 @@ name: Runner policy
 
 on:
   pull_request:
+  # Required on `main`, so the merge queue must get a result too (WI-1886).
+  merge_group:
   push:
     branches: [main]
+
+concurrency:
+  # The gate reads the whole tree, so a newer run covers a superseded one.
+  group: runner-policy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   runner-policy:

@@ -117,6 +117,17 @@ class GrantRefused(VogtError):
     http_status = 403
 
 
+class ReportRefused(VogtError):
+    """A session tried to post a report as another session (WI-2039).
+
+    A report is a session's own account of itself; one agent may not put
+    words in another's row. Refused by who is asking.
+    """
+
+    code = "report_refused"
+    http_status = 403
+
+
 class EngineOnly(VogtError):
     """An operation only the session engine's own credential may call.
 
@@ -347,6 +358,12 @@ class PreferenceVersionConflict(Conflict):
     """A preference write named a version that is no longer current."""
 
     code = "preference_version_conflict"
+
+
+class CharterVersionConflict(Conflict):
+    """A charter write named a version that is no longer current."""
+
+    code = "charter_version_conflict"
 
 
 class InvalidPreference(InvalidRequest):

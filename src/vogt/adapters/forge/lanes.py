@@ -168,7 +168,8 @@ class DeployLanesCollector:
     def _get(self, url: str) -> tuple[int, bytes]:
         headers = {"Accept": "application/json", "User-Agent": "vogt-deploy-lanes"}
         if self._transport is not None:
-            return self._transport(url, headers, b"", "GET")
+            answer = self._transport(url, headers, b"", "GET")
+            return answer[0], answer[1]
         if not url.startswith(("https://", "http://")):  # pragma: no cover
             msg = "version_url must be http(s)"
             raise OSError(msg)

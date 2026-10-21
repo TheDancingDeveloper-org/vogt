@@ -205,7 +205,18 @@ again. Together they are the overseer's loop: wait, read, act.
 `session.report_blocked` / `session.report_unblocked`
 (`work.write`, audited) let an agent say it is blocked on a person; the report
 shows as `blocked` on `session.list` and `session.screen`, raises an Inbox
-`session.blocked` entry and a push. `session.start` takes `autopilot` (see
+`session.blocked` entry and a push. `session.report` (`work.write`, audited)
+is a session's own short typed report — `kind` `progress`, `result`,
+`question` or `blocker`, with `summary`, `branch`, `sha`, `pr`, `checks`,
+`blockers` and `next_step` (WI-2039). The newest one rides on every
+`session.list`/`session.sweep` row as `latest_report` and on
+`session.digest`; in digest mode it replaces `last_reply_excerpt` with a
+one-line `report`. It raises an Inbox `session.report.<kind>` entry (the
+newest per session) and is left as a note on the work item: the session's
+bound item, or the one `work_item` names. A session reports only for
+itself. With `autopilot_done_requires_result_report` on (off by default), the
+sweep reads an `AUTOPILOT: DONE` with no `result` report this turn as
+`waiting`. `session.start` takes `autopilot` (see
 [`AGENT_GUIDE.md`](AGENT_GUIDE.md)).
 
 Rows of `session.list` and `session.sweep` carry `running`. It holds the
@@ -350,7 +361,34 @@ is ready (`wake_timeout_s`, default 120) and then types; the result says
 "hibernated"` and the kept screen. `session.keep_awake` pins a session
 against the engine's idle policy. A session hibernated by hand, or one whose
 work was handed on, is not brought back when the engine restarts; one the
-idle or shutdown policy hibernated still is. `session.set_role` (`work.write`, audited)
+idle or shutdown policy hibernated still is. `session.hibernate` also takes `wake_on`, a watch trigger (below): the watch
+is armed before the session sleeps, and cancelled if the hibernate fails.
+
+`watch.create` (`work.write`, audited) arms a **watch** (WI-2036): a stored
+trigger and the session to wake — the caller's own unless `session` names
+another. `trigger.kind` is `pr` (`project`, `number`; fires when the PR reads
+one of `on`, default `merged` and `closed`), `ci` (`project`, one of `sha`
+or `pr`, and `checks`, the required check names; fires when each has been
+observed and concluded on that revision — Vogt does not read branch
+protection, so the caller names the gating checks), `work_item` (fires when it
+is in one of `states`, default a terminal state) or `session` (fires when
+another session has exited, hibernated or stopped; `until: "done"` also when
+it declared itself done). The core's watch loop (`watch_interval_seconds`,
+default 60) evaluates active watches against what Vogt already holds — the
+forge observations the sweep collected, the item, the engine's session list
+— so a forge trigger fires within a sweep of the event. A fired watch is
+delivered through `session.input`: a hibernated session is woken (never
+forced) and a one-line `[vogt] watch fired: …` notice, with the watch's
+`note`, is typed. A refused delivery is retried with backoff (1, 2, 4, 8 minutes;
+each wake waits at most 30 s), five attempts in all, then the watch reads
+`failed` with `last_error`. Watches live in the declared store,
+so they survive a restart; past `ttl_seconds` (default 24 h, at most 14 d)
+one reads `expired`. `watch.list` reads them by `state` or `session`, with
+each `outcome` and `delivered`; `watch.cancel` disarms one (a person, its
+owner, or the session it wakes). The merge queue is not observed, so a PR
+leaving the queue without merging is not a trigger yet.
+
+`session.set_role` (`work.write`, audited)
 nominates a session as `oversight` — the one supervising the others — or
 makes it a `worker` again; `session.start` takes the same `role`. **It is a
 person's nomination**: an agent principal gets `403 role_refused`, because
@@ -426,6 +464,18 @@ asking session may. `decision.list` (`read`) filters by `state` (`pending`,
 `expired` is a pending decision past `expires_at`, computed on read; it cannot
 be answered and implies no answer. Nothing is applied when a decision is
 answered. The design is `design/agent-harness-services.md` §2.3.
+
+`charter.set` (`work.write`, audited; the `workspace` scope is a person's only, `403 person_required` for any agent, because it reaches every session) sets the standing instructions of a
+scope (WI-2038): `scope` is `workspace`, `project` or `initiative`, `ref` the
+project or initiative slug (none for the workspace), `body` Markdown (≤ 8000;
+empty clears), optional `expected_version` (0 for never set; a stale one is
+refused `409 charter_version_conflict`). Each set appends the next version,
+recording who set it and why. `charter.get` (`read`) returns `current` and,
+with `history: true`, earlier versions newest first. Every session brief
+carries the charters of its scope in a `## Charters` section, broadest first
+(workspace, then project, then initiative, then the rest of the brief); a
+cleared or absent charter adds nothing. The same section is sent to the engine
+as `charter`, which appends it to a Codex session's `developer_instructions`.
 
 Only a session whose conversation id the
 engine knows can hibernate: Claude Code started by Vogt, or any `resume`. A
@@ -516,10 +566,14 @@ docker exec <core-container> \
   person_required`), and `session.start` reads the newest person's write.
   `dispatch.profiles` is `{"<purpose>": {field: value}}` and overrides only
   the fields it names (`template`, `model`, `effort`, `budget_turns`,
-  `budget_wall_clock_minutes`, `worktree`, `repo_map`, `autopilot`,
-  `read_only`). `dispatch.max_workers_per_overseer` (default 5),
-  `dispatch.escalate_after_failed_reviews` (2) and
-  `dispatch.review_by_oversight_only` (true) are each `{"value": …}`. Each
+  `budget_turns_by_model`, `budget_wall_clock_minutes`, `worktree`,
+  `repo_map`, `autopilot`, `read_only`). `budget_turns_by_model` sizes the
+  turn budget by the model the start runs (`implement` gives `haiku` 200).
+  `dispatch.max_workers_per_overseer` (default 5),
+  `dispatch.escalate_after_failed_reviews` (2),
+  `dispatch.review_by_oversight_only` (true) and
+  `dispatch.budget_restarts_per_item` (1; `0` turns automatic restarts off)
+  are each `{"value": …}`. Each
   key is validated against its own shape, and any other `dispatch.*` key is
   refused.
 - **`place.metrics`** — `inbox_active` is the badge: the count under the
@@ -609,6 +663,14 @@ store. Without roots the collector is not registered, and both reads say so in
   `ci_watch_notify_sessions` is off, types a one-line notice plus Enter into
   each live session started for the item. Subscribe to the event feed to wake
   on it; nothing needs to poll a forge.
+- **`usage.board`** (`GET /api/usage-board`, `vogt usage board`, MCP
+  `usage_board`; `read`) — each `usage_accounts` entry's reported limit
+  windows (Codex `primary`/`secondary` with `used_percent` and `resets_at`;
+  a Claude limit-hit with its reset), `limited`, and Claude `tokens_5h`;
+  each `usage_litellm_keys` key's `/key/info` spend (never the key), and
+  `alerts` for keys with a one-day budget window at or over their day
+  threshold. Read on request; nothing is stored. An unreadable source says
+  why in `detail`.
 - **`deployed.versions`** (`GET /api/deployed-versions`, `vogt
   deployed-versions`, MCP `deployed_versions`; `read`) — one row per lane in
   `deploy_lanes`: `name` (the configured lane name; also echoed as `lane`),
@@ -705,11 +767,19 @@ fits in context.
   `landing` (`base_branch`, `branch_pattern` with `{n}` for the work item
   number, `worker_lands_by` of `push_branch` or `open_pr`, `merge_by` of
   `oversight` or `operator`, `merge_mode` of `fast_forward` or `rebase`,
-  `linear_history`, `deploy_by`), `review` (`template`, `model`, `effort`,
+  `linear_history`, `deploy_by`, `initiative_bases`, `long_lived_branches`),
+  `review` (`template`, `model`, `effort`,
   `never_models`, `budget_turns`) and `verification` (`required_for_done`,
   `lanes`). `branch_pattern` must compile as a regex once `{n}` is a number,
   and `merge_mode` of `merge` is refused; both refusals name the field.
   `project.get` returns the blocks as stored. Nothing enforces them yet.
+  `initiative_bases` maps an initiative id or slug to the base its items cut
+  from and land onto (the Rust port on `rust-core`), and a session start's
+  task that names a branch from `long_lived_branches` (or an initiative base)
+  as its base is taken at its word. The brief, the worktree's `base_ref` and
+  `session.start`'s `effective_policy` all carry the resolved base. An
+  oversight session's own `mechanical` start, on a project where oversight
+  merges, is not told "do not merge".
 
 ## Deploy diagnostics
 

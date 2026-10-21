@@ -285,6 +285,13 @@ pub struct Config {
     /// Set `VOGT_CODEX_SESSION_ID=false` when the binary is stock npm Codex,
     /// which refuses an unknown flag and would not start.
     pub codex_session_id: bool,
+    /// Codex's `approval_policy` for a driven session's default and
+    /// accept-edits postures (`ENGINE_CODEX_APPROVAL_POLICY`, WI-2028): one of
+    /// `untrusted`, `on-failure`, `on-request`, `never`. `never` unless the
+    /// deployment says otherwise, so a worker runs the commands its task
+    /// needs instead of stopping for a person to approve each one; set
+    /// `on-request` to restore per-command prompts.
+    pub codex_approval_policy: String,
     /// `ENGINE_AGENT_AUTH_SECRETS`, parsed: what a deployment declared for
     /// sessions, and therefore the policy the on-demand secret broker
     /// enforces. Empty when nothing is declared, which turns the
@@ -474,11 +481,33 @@ pub struct Config {
     /// summary (`resources`). Unset flags nothing; usage is reported either
     /// way.
     pub session_rss_warn_bytes: Option<u64>,
-    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` (off by default): when a session
-    /// is hibernated or stopped and its directory is a linked git worktree,
-    /// remove regenerable build output there (`worktree_clean`). Never a
-    /// repo's main checkout.
+    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` set true: a hibernation also
+    /// removes regenerable build output from the session's linked worktree
+    /// (`worktree_clean`). Off by default: a hibernated session is woken to
+    /// carry on, and every engine shutdown hibernates every live session.
     pub worktree_clean_on_hibernate: bool,
+    /// On by default (WI-1750), off when `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`
+    /// is false: stopping or removing a session whose directory is a linked
+    /// git worktree removes regenerable build output there. Never a repo's
+    /// main checkout.
+    pub worktree_clean_on_stop: bool,
+    /// `ENGINE_SCRATCH_PRUNE_GB` (2): with cleanup on, a hibernation drops
+    /// Cargo `target` dirs from the session's Claude scratchpad and any
+    /// top-level entry there larger than this; a stop removes the scratchpad
+    /// (`session_scratch`, WI-1810).
+    pub scratch_prune_bytes: u64,
+    /// `ENGINE_MIN_FREE_PERCENT` (10): a new session is refused while the
+    /// workspace or temp volume has less free than this. 0 turns it off.
+    pub min_free_percent: u8,
+    /// `ENGINE_SHARED_CARGO_TARGET_DIR` (`<tmp>/claude-<uid>/cargo-target`;
+    /// `off` disables): Cargo builds inside a session's Claude scratch
+    /// directory use `<this>/<repo>`, one target per repository, instead of
+    /// a fresh one per scratch worktree. The session's own worktree is not
+    /// affected (`session_scratch::write_scratch_cargo_config`).
+    pub shared_cargo_target_dir: Option<std::path::PathBuf>,
+    /// `ENGINE_SHARED_CARGO_TARGET_MAX_GB` (40): a repository's shared
+    /// scratch target over this is removed when a session stops.
+    pub shared_cargo_target_max_bytes: u64,
     /// `ENGINE_DISK_WARN_PERCENT` (85): the workspace volume's used percent
     /// above which sweep and status carry a needs-attention disk row.
     pub disk_warn_percent: u8,
@@ -522,6 +551,7 @@ struct FileConfig {
     auto_agent_auth: Option<bool>,
     agent_auth_helper: Option<String>,
     codex_session_id: Option<bool>,
+    codex_approval_policy: Option<String>,
     session_templates: Option<Vec<SessionTemplate>>,
     assistant_api_key: Option<String>,
     assistant_base_url: Option<String>,
@@ -694,6 +724,13 @@ pub fn load(
     .or(from_file.codex_session_id)
     .unwrap_or(true);
 
+    let codex_approval_policy = crate::agent_cli::parse_codex_approval_policy(
+        engine_env("ENGINE_CODEX_APPROVAL_POLICY")
+            .ok()
+            .as_deref()
+            .or(from_file.codex_approval_policy.as_deref()),
+    )?;
+
     let auto_agent_auth = match engine_env("ENGINE_AUTO_AGENT_AUTH") {
         Ok(v) => Some(parse_bool_env("ENGINE_AUTO_AGENT_AUTH", &v)?),
         Err(std::env::VarError::NotPresent) => None,
@@ -803,6 +840,11 @@ pub fn load(
         ));
     }
 
+    let worktree_clean = parse_worktree_clean(
+        engine_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE")
+            .ok()
+            .as_deref(),
+    )?;
     let config = Config {
         bind,
         token,
@@ -852,6 +894,7 @@ pub fn load(
         auto_agent_auth,
         agent_auth_helper,
         codex_session_id,
+        codex_approval_policy,
         agent_auth_secrets,
         agent_grant_projects: engine_env("ENGINE_AGENT_GRANT_PROJECTS")
             .map(|text| {
@@ -1001,10 +1044,25 @@ pub fn load(
             }
             _ => None,
         },
-        worktree_clean_on_hibernate: parse_worktree_clean(
-            engine_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE")
+        worktree_clean_on_hibernate: worktree_clean.hibernate,
+        worktree_clean_on_stop: worktree_clean.stop,
+        scratch_prune_bytes: parse_gib(
+            "ENGINE_SCRATCH_PRUNE_GB",
+            engine_env("ENGINE_SCRATCH_PRUNE_GB").ok().as_deref(),
+            2,
+        )?,
+        min_free_percent: parse_min_free_percent(
+            engine_env("ENGINE_MIN_FREE_PERCENT").ok().as_deref(),
+        )?,
+        shared_cargo_target_dir: parse_shared_cargo_target_dir(
+            engine_env("ENGINE_SHARED_CARGO_TARGET_DIR").ok().as_deref(),
+        ),
+        shared_cargo_target_max_bytes: parse_gib(
+            "ENGINE_SHARED_CARGO_TARGET_MAX_GB",
+            engine_env("ENGINE_SHARED_CARGO_TARGET_MAX_GB")
                 .ok()
                 .as_deref(),
+            40,
         )?,
         disk_warn_percent: parse_disk_warn_percent(
             engine_env("ENGINE_DISK_WARN_PERCENT").ok().as_deref(),
@@ -1203,12 +1261,81 @@ fn engine_env(name: &str) -> std::result::Result<String, std::env::VarError> {
     std::env::var(name)
 }
 
-/// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`: off unless set to a true value.
-/// Unset or blank is off; this removes files, so it is never on by accident.
-fn parse_worktree_clean(raw: Option<&str>) -> Result<bool> {
+/// When worktree build output is cleaned (`ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorktreeClean {
+    stop: bool,
+    hibernate: bool,
+}
+
+/// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`. Unset or blank cleans on stop and
+/// remove only (WI-1750): a stopped worker's build output otherwise piles up
+/// on the host, while a hibernated one is woken to carry on and would pay a
+/// full rebuild. True adds hibernation; false turns cleanup off. Cleanup still
+/// fails closed, so it only removes regenerable output from a linked worktree
+/// no live session is using.
+fn parse_worktree_clean(raw: Option<&str>) -> Result<WorktreeClean> {
     match raw {
-        Some(v) if !v.trim().is_empty() => parse_bool_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE", v),
-        _ => Ok(false),
+        Some(v) if !v.trim().is_empty() => {
+            let on = parse_bool_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE", v)?;
+            Ok(WorktreeClean {
+                stop: on,
+                hibernate: on,
+            })
+        }
+        _ => Ok(WorktreeClean {
+            stop: true,
+            hibernate: false,
+        }),
+    }
+}
+
+/// A positive whole number of GiB in `name`, `default` GiB when unset; bytes.
+fn parse_gib(name: &str, raw: Option<&str>, default: u64) -> Result<u64> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(default << 30),
+        Some(v) => v
+            .parse::<u64>()
+            .ok()
+            .filter(|&gb| gb > 0)
+            .and_then(|gb| gb.checked_mul(1 << 30))
+            .ok_or_else(|| {
+                ApiError::Config(format!(
+                    "{name} must be a positive whole number of GiB, got {v:?}"
+                ))
+            }),
+    }
+}
+
+/// `ENGINE_SHARED_CARGO_TARGET_DIR`: a directory, `off`/`0`/`false` for none,
+/// `cargo-target` under the first scratch root when unset.
+fn parse_shared_cargo_target_dir(raw: Option<&str>) -> Option<std::path::PathBuf> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v)
+            if matches!(
+                v.to_ascii_lowercase().as_str(),
+                "off" | "0" | "false" | "no"
+            ) =>
+        {
+            None
+        }
+        Some(v) => Some(std::path::PathBuf::from(v)),
+        None => crate::session_scratch::roots()
+            .into_iter()
+            .next()
+            .map(|r| r.join("cargo-target")),
+    }
+}
+
+/// `ENGINE_MIN_FREE_PERCENT`: a whole percent from 0 (off) to 99, 10 when unset.
+fn parse_min_free_percent(raw: Option<&str>) -> Result<u8> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(10),
+        Some(v) => v.parse::<u8>().ok().filter(|&p| p < 100).ok_or_else(|| {
+            ApiError::Config(format!(
+                "ENGINE_MIN_FREE_PERCENT must be a whole percent from 0 to 99, got {v:?}"
+            ))
+        }),
     }
 }
 
@@ -1960,17 +2087,51 @@ mod tests {
 mod prefix_tests {
     use super::*;
 
-    /// Worktree cleanup deletes files, so only an explicit true turns it on.
+    /// Worktree cleanup on stop is on by default (WI-1750); hibernation joins
+    /// only on an explicit true, and an explicit false keeps build output.
     #[test]
-    fn worktree_clean_is_off_unless_asked_for() {
-        assert!(!parse_worktree_clean(None).unwrap());
-        assert!(!parse_worktree_clean(Some("")).unwrap());
-        assert!(!parse_worktree_clean(Some("  ")).unwrap());
-        assert!(!parse_worktree_clean(Some("0")).unwrap());
-        assert!(!parse_worktree_clean(Some("false")).unwrap());
-        assert!(parse_worktree_clean(Some("1")).unwrap());
-        assert!(parse_worktree_clean(Some("true")).unwrap());
+    fn worktree_clean_defaults_to_stop_only() {
+        let stop_only = WorktreeClean {
+            stop: true,
+            hibernate: false,
+        };
+        let both = WorktreeClean {
+            stop: true,
+            hibernate: true,
+        };
+        let off = WorktreeClean {
+            stop: false,
+            hibernate: false,
+        };
+        assert_eq!(parse_worktree_clean(None).unwrap(), stop_only);
+        assert_eq!(parse_worktree_clean(Some("")).unwrap(), stop_only);
+        assert_eq!(parse_worktree_clean(Some("  ")).unwrap(), stop_only);
+        assert_eq!(parse_worktree_clean(Some("1")).unwrap(), both);
+        assert_eq!(parse_worktree_clean(Some("true")).unwrap(), both);
+        assert_eq!(parse_worktree_clean(Some("0")).unwrap(), off);
+        assert_eq!(parse_worktree_clean(Some("false")).unwrap(), off);
         assert!(parse_worktree_clean(Some("maybe")).is_err());
+    }
+
+    #[test]
+    fn scratch_and_free_space_settings() {
+        assert_eq!(parse_gib("X", None, 2).unwrap(), 2 << 30);
+        assert_eq!(parse_gib("X", Some(" 5 "), 2).unwrap(), 5 << 30);
+        assert!(parse_gib("X", Some("0"), 2).is_err());
+        assert!(parse_gib("X", Some("x"), 2).is_err());
+        assert!(parse_shared_cargo_target_dir(None)
+            .unwrap()
+            .ends_with("cargo-target"));
+        assert_eq!(parse_shared_cargo_target_dir(Some("off")), None);
+        assert_eq!(
+            parse_shared_cargo_target_dir(Some("/srv/t")),
+            Some(std::path::PathBuf::from("/srv/t"))
+        );
+        assert_eq!(parse_min_free_percent(None).unwrap(), 10);
+        assert_eq!(parse_min_free_percent(Some("0")).unwrap(), 0);
+        assert_eq!(parse_min_free_percent(Some("25")).unwrap(), 25);
+        assert!(parse_min_free_percent(Some("100")).is_err());
+        assert!(parse_min_free_percent(Some("-1")).is_err());
     }
 
     #[test]
@@ -2049,6 +2210,7 @@ mod prefix_tests {
             std::env::remove_var("ENGINE_TOKEN");
             std::env::remove_var("ENGINE_BIND");
             std::env::remove_var("VOGT_CODEX_SESSION_ID");
+            std::env::remove_var("ENGINE_CODEX_APPROVAL_POLICY");
         };
         clear();
 
@@ -2083,6 +2245,16 @@ mod prefix_tests {
         unsafe { std::env::set_var("VOGT_CODEX_SESSION_ID", "false") };
         let cfg = load(Some(&cfg_path), None, None).unwrap();
         assert!(!cfg.codex_session_id, "stock npm Codex opts out explicitly");
+
+        // WI-2028: driven Codex workers do not stop for approval unless the
+        // deployment asks for the per-command prompts back. A value Codex does
+        // not accept is a startup error, never handed to the CLI.
+        assert_eq!(cfg.codex_approval_policy, "never");
+        unsafe { std::env::set_var("ENGINE_CODEX_APPROVAL_POLICY", "on-request") };
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert_eq!(cfg.codex_approval_policy, "on-request");
+        unsafe { std::env::set_var("ENGINE_CODEX_APPROVAL_POLICY", "sometimes") };
+        assert!(load(Some(&cfg_path), None, None).is_err());
 
         clear();
     }

@@ -202,9 +202,18 @@ The table is the deployment's, not yours. A person overrides fields with
 `preference_set` on `dispatch.profiles` (for example
 `{"implement": {"model": "grok-4.8"}}` changes only that one field). The same
 store holds `dispatch.max_workers_per_overseer` (`{"value": 5}`),
-`dispatch.escalate_after_failed_reviews` (`{"value": 2}`) and
-`dispatch.review_by_oversight_only` (`{"value": true}`). An agent cannot set
+`dispatch.escalate_after_failed_reviews` (`{"value": 2}`),
+`dispatch.review_by_oversight_only` (`{"value": true}`) and
+`dispatch.budget_restarts_per_item` (`{"value": 1}`). An agent cannot set
 any `dispatch.*` key.
+
+A session the engine stops at its budget always leaves a hand-off (WI-1833).
+If the agent wrote none after the soft warning, the scheduled sweep writes a
+minimal one from its git state (branch, head, uncommitted paths). Then, up to
+`dispatch.budget_restarts_per_item` times per item and only when nothing else
+has started on the item since, it starts a fresh worker with
+`from_handoff`, using the stopped session's purpose. Each restart leaves a
+`[vogt] budget restart:` note on the item.
 
 Every session records `purpose`, `started_by_session` (the engine id of the
 session that started it) and `started_by_kind` (`person`, or the starter's
@@ -477,6 +486,21 @@ Rules:
   they work, so `running` with a recent `last_output_at` is a long turn; a
   `last_output_at` many minutes old is worth a look.
 
+#### Reporting progress and results
+
+Post a short typed report with `session_report` instead of leaving your
+driver to read your transcript: `kind` (`progress`, `result`, `question` or
+`blocker`), a one- or two-sentence `summary`, and what applies of `branch`,
+`sha`, `pr`, `checks` (one per entry, with the outcome), `blockers` and
+`next_step`, plus a `reason`. Omit `id` from inside a session Vogt started.
+The report shows as `latest_report` on your `session_list` and
+`session_sweep` row, raises an Inbox entry and is left as a note on your work
+item. Post a `result` when the deliverable is done — a pushed branch, a
+review verdict — before you print `AUTOPILOT: DONE`; a deployment may require
+one before it takes DONE as done. Never paste a credential or raw command
+output into a report: credential-shaped text is redacted before it is
+stored, but that is a safety net, not a licence.
+
 #### When you, or a session you drive, need a person
 
 If you cannot go on without a person — a decision, a credential, an action
@@ -503,6 +527,15 @@ is yours to decide. `decision_withdraw` takes back one you no longer need.
 Nothing is applied when a decision is answered: act on the answer through the
 op that checks the action.
 
+**Charters.** Standing instructions that apply to every session on a scope
+(commit identity, forbidden names, the delivery footer) belong in a charter,
+not in each brief: `charter_set` with `scope` (`workspace`, `project`,
+`initiative`), `ref` (the slug) and `body`; The workspace charter is a person's to set: an agent gets
+`person_required`. `charter_get` reads it, with
+`history: true` for earlier versions. Every brief on that scope carries them
+under `## Charters`, workspace first, then project, then initiative, then the
+brief. A later one refines an earlier one.
+
 **Autopilot.** `session_start` with `autopilot: true` adds an Autopilot
 section to the brief: when the agent's next step needs no person, it carries
 on in the same turn instead of ending it to announce the next item, and
@@ -515,6 +548,18 @@ prompt with work left the engine tells it to carry on, until that line or a
 cap (`autopilot` and `autopilot_nudges` on `session_list`). A driver need not
 re-prompt an autopilot session — wait for it to be blocked or done. The flag
 is recorded on the start's audit row.
+
+**Done claims are checked.** A `done` row on `session_sweep` for a session
+bound to a work item carries `claim_check`: the worktree's branch and HEAD,
+whether HEAD is pushed, how many commits it gained since the session started,
+and the observed pull requests the reply names or that come from that branch
+(state, merge time, CI). `mismatches` names each disagreement in words, for
+example a claimed PR that merged before the session started, or no new
+commits. The row's `attention_reason` repeats them, so the digest shows them.
+When a session moves its own item to `review` or `done`, `work_transition`
+returns the same check and records any mismatch as a note on the item. The
+check never refuses anything. Facts it could not read are listed under
+`unchecked`, so an empty `mismatches` does not mean the claim was verified.
 
 **Klaudia owns its own loop.** `session_start(template="klaudia")` runs
 Klaudia in its TUI like the other agents (model, resume, permission posture
@@ -540,7 +585,13 @@ the Inbox as "asking for approval".
 an agent's `session_answer` to one is refused with `403 person_required`,
 and so is any `session_input` while it shows — on a modal dialog every
 keystroke, `esc` included, is an answer. Nothing is typed (WI-983). If you
-are an overseer and a worker is waiting on one, do not try to get round it:
+are an oversight session (role `oversight`), you may answer a worker's
+`permission` prompt with `session_answer` or `session_input` keys: read the
+command first and answer as its supervisor. The engine checks your role and
+audits each answer as you, with the command (WI-2028); `read-outside-cwd`
+prompts stay a person's. Driven Codex workers launch with `-a never` by
+default, so they rarely ask. Otherwise, as a non-oversight session, if a
+worker is waiting on one, do not try to get round it:
 it is already in the Inbox as "asking for approval"; if you cannot go on
 until it is answered, report that with `session_report_blocked`, naming the
 session and the command. A person answers it from the Inbox or with
@@ -622,6 +673,22 @@ Two things worth knowing about that edge: it is **observed, never typed in** —
 `work_relate` refuses `implemented_by` — and it **only informs**. Unlike
 `depends_on`, an open `implemented_by` PR does not block the item from completing;
 it feeds the item's phase and its ranking, nothing more.
+
+### Wait on CI and merges with a watch, not a poll
+
+Don't spend turns polling a PR or CI. Hibernate with a trigger and Vogt wakes
+you with the outcome:
+
+```text
+session_hibernate(id=<your ses_ id>, reason="wait for review and merge",
+                  wake_on={kind: "pr", project: "vogt", number: 42})
+session_hibernate(..., wake_on={kind: "ci", project: "vogt", pr: 42,
+                  checks: ["build", "test"]})
+```
+
+`watch_create` arms the same trigger without sleeping (an overseer can name
+the session to wake; `kind: "session"` waits for a worker to end),
+`watch_list` shows what is armed and what fired, `watch_cancel` disarms one.
 
 ### The git story that results
 

@@ -173,10 +173,10 @@ def github_collectors(
     deployment rather than a degraded one.
     """
     from vogt.adapters.forge import token_file_for
+    from vogt.adapters.github.app_auth import github_client_for
 
-    client = GitHubClient.from_token_file(
-        token_file_for(config, "github.com"), transport=transport
-    )
+    token_file = token_file_for(config, "github.com")
+    client = github_client_for(config, token_file, transport=transport)
     if client is None:
         return []
     from vogt.adapters.github.notifications import GitHubNotificationCollector
@@ -185,12 +185,21 @@ def github_collectors(
     # Issues and PRs are the incremental `forge-issues`/`forge-prs` sync now
     # (adapters/forge/sync.py); these four are the read-only surface still
     # scraped per sweep, until Phase 4 moves them behind the provider too.
-    return [
+    collectors: list[Collector] = [
         GitHubActionsCollector(client),
         GitHubReleaseCollector(client),
         GitHubPostureCollector(client),
-        GitHubNotificationCollector(client),
     ]
+    # Notifications belong to a user; an App installation cannot read them,
+    # so that collector stays on the token file even when the App is set.
+    pat = (
+        client
+        if client.token_provider is None
+        else GitHubClient.from_token_file(token_file, transport=transport)
+    )
+    if pat is not None:
+        collectors.append(GitHubNotificationCollector(pat))
+    return collectors
 
 
 __all__ = [

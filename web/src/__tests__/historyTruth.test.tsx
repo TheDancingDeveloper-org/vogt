@@ -104,6 +104,13 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
+/** A control by its exact label, without a role query over every row. */
+function button(label: string): HTMLButtonElement {
+  const found = screen.getByText(label, { selector: "button, button *" }).closest("button");
+  if (!found) throw new Error(`no button labelled ${label}`);
+  return found;
+}
+
 describe("History read truth", () => {
   it("keeps a failed initial read distinct from a successful empty archive and retries", async () => {
     vi.spyOn(api, "operationalStatus").mockResolvedValue(status(0));
@@ -145,9 +152,11 @@ describe("History read truth", () => {
     expect(container.querySelector(".history-list.stale")).not.toBeNull();
   });
 
-  // Two hundred rendered rows and a second page of them: slow enough on a
-  // loaded machine to exceed the default budget without anything being wrong.
-  it("loads a continuation page without losing filters, selection, or pins", { timeout: 20_000 }, async () => {
+  // Two hundred rendered rows and a second page of them. A role query computes
+  // the accessible name of every one of those row buttons, which on a loaded
+  // runner took this test past 20 s (PR #1111, WI-1886); the controls are
+  // found by their text instead, and the budget leaves room for a busy pool.
+  it("loads a continuation page without losing filters, selection, or pins", { timeout: 45_000 }, async () => {
     const firstPage = Array.from({ length: 200 }, (_, index) => archive(index));
     const lastPage = [archive(200)];
     vi.spyOn(api, "operationalStatus").mockResolvedValue(status(201));
@@ -163,19 +172,19 @@ describe("History read truth", () => {
     expect(chosen).not.toBeNull();
     await fireEvent.click(chosen!);
     expect(await screen.findByRole("heading", { name: "archive-12" })).toBeVisible();
-    await fireEvent.click(screen.getByRole("button", { name: "Pin" }));
+    await fireEvent.click(button("Pin"));
     const filter = screen.getByRole("searchbox", { name: "Filter loaded sessions" });
     await fireEvent.input(filter, { target: { value: "archive" } });
 
-    await fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await fireEvent.click(button("Load more"));
 
     expect(await screen.findByText("201 of 201 archived sessions loaded")).toBeVisible();
     expect(list).toHaveBeenLastCalledWith(200, 200);
     expect(filter).toHaveValue("archive");
     expect(screen.getByRole("heading", { name: "archive-12" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Unpin" })).toBeVisible();
+    expect(button("Unpin")).toBeVisible();
     expect(screen.getByText("1 pinned")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Load more")).not.toBeInTheDocument();
   });
 
   it("does not imply completeness when the total is unknown", async () => {

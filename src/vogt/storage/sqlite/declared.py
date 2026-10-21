@@ -24,6 +24,7 @@ from vogt.core.entities import (
     ActorPreference,
     AuditRecord,
     AuthDecision,
+    Charter,
     CodingSession,
     Comment,
     ContractExemption,
@@ -42,8 +43,11 @@ from vogt.core.entities import (
     Relation,
     RelationKind,
     SessionGrant,
+    SessionReport,
+    SessionReportFields,
     Suppression,
     Token,
+    Watch,
     WorkItem,
     WorkKind,
     WorkLink,
@@ -1073,6 +1077,26 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_drift(row) for row in rows]
 
+    # -- charters (WI-2038) -------------------------------------------------
+
+    def charter(self, *, scope_kind: str, scope_id: str) -> Charter | None:
+        row = self._conn.execute(
+            "SELECT * FROM charters WHERE scope_kind = ? AND scope_id = ? "
+            "ORDER BY version DESC LIMIT 1",
+            (scope_kind, scope_id),
+        ).fetchone()
+        return None if row is None else _row_to_charter(row)
+
+    def charter_history(
+        self, *, scope_kind: str, scope_id: str, limit: int = 50
+    ) -> list[Charter]:
+        rows = self._conn.execute(
+            "SELECT * FROM charters WHERE scope_kind = ? AND scope_id = ? "
+            "ORDER BY version DESC LIMIT ?",
+            (scope_kind, scope_id, limit),
+        ).fetchall()
+        return [_row_to_charter(row) for row in rows]
+
     # -- actor preferences --------------------------------------------------
 
     def actor_preference(self, *, actor_id: str, key: str) -> ActorPreference | None:
@@ -1240,6 +1264,37 @@ class SqliteReadView:
         ).fetchone()
         return None if row is None else _row_to_session_grant(row)
 
+    def watch(self, watch_id: str) -> Watch | None:
+        row = self._conn.execute(
+            "SELECT * FROM watches WHERE id = ?", (watch_id,)
+        ).fetchone()
+        return None if row is None else _row_to_watch(row)
+
+    def list_watches(
+        self,
+        *,
+        state: str | None = None,
+        target_session: str | None = None,
+        owner_actor_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Watch]:
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("state", state),
+            ("target_session", target_session),
+            ("owner_actor_id", owner_actor_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM watches {where}ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [_row_to_watch(row) for row in rows]
+
     def decision(self, decision_id: str) -> Decision | None:
         row = self._conn.execute(
             "SELECT * FROM decisions WHERE id = ?", (decision_id,)
@@ -1270,6 +1325,55 @@ class SqliteReadView:
             (*params, limit),
         ).fetchall()
         return [_row_to_decision(row) for row in rows]
+
+    def latest_session_reports(
+        self, engine_session_ids: list[str]
+    ) -> dict[str, SessionReport]:
+        wanted = sorted(set(engine_session_ids))
+        found: dict[str, SessionReport] = {}
+        # Chunked under SQLite's host-parameter limit; one indexed read per
+        # chunk, the newest row per session picked by the window.
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start : start + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                "SELECT * FROM (SELECT r.*, ROW_NUMBER() OVER ("
+                "PARTITION BY engine_session_id ORDER BY created_at DESC, id DESC"
+                ") AS rn FROM session_reports r "
+                f"WHERE engine_session_id IN ({placeholders})) WHERE rn = 1",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                report = _row_to_session_report(row)
+                if report.engine_session_id is not None:
+                    found[report.engine_session_id] = report
+        return found
+
+    def list_session_reports(
+        self,
+        *,
+        engine_session_id: str | None = None,
+        work_item_id: str | None = None,
+        kind: str | None = None,
+        limit: int = 200,
+    ) -> list[SessionReport]:
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("engine_session_id", engine_session_id),
+            ("work_item_id", work_item_id),
+            ("kind", kind),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM session_reports {where}"
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [_row_to_session_report(row) for row in rows]
 
     def list_session_grants(
         self,
@@ -2081,6 +2185,23 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def insert_session_report(self, report: SessionReport) -> None:
+        self._conn.execute(
+            "INSERT INTO session_reports (id, actor_id, engine_session_id, "
+            "work_item_id, kind, summary, data, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                report.id,
+                report.actor_id,
+                report.engine_session_id,
+                report.work_item_id,
+                report.kind,
+                report.summary,
+                json.dumps(report.fields.model_dump(mode="json")),
+                to_iso(report.created_at),
+            ),
+        )
+
     def insert_decision(self, decision: Decision) -> None:
         self._conn.execute(
             "INSERT INTO decisions (id, asker_actor_id, asker_session, "
@@ -2118,6 +2239,44 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def insert_watch(self, watch: Watch) -> None:
+        self._conn.execute(
+            "INSERT INTO watches (id, owner_actor_id, target_session, kind, "
+            "trigger_json, note, state, created_at, expires_at, fired_at, "
+            "outcome_json, attempts, last_error, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                watch.id,
+                watch.owner_actor_id,
+                watch.target_session,
+                watch.kind,
+                json.dumps(watch.trigger, sort_keys=True),
+                watch.note,
+                watch.state,
+                to_iso(watch.created_at),
+                to_iso(watch.expires_at),
+                _iso_or_none(watch.fired_at),
+                None if watch.outcome is None else json.dumps(watch.outcome),
+                watch.attempts,
+                watch.last_error,
+                watch.reason,
+            ),
+        )
+
+    def update_watch(self, watch: Watch) -> None:
+        self._conn.execute(
+            "UPDATE watches SET state = ?, fired_at = ?, outcome_json = ?, "
+            "attempts = ?, last_error = ? WHERE id = ?",
+            (
+                watch.state,
+                _iso_or_none(watch.fired_at),
+                None if watch.outcome is None else json.dumps(watch.outcome),
+                watch.attempts,
+                watch.last_error,
+                watch.id,
+            ),
+        )
+
     def update_session_grant(self, grant: SessionGrant) -> None:
         self._conn.execute(
             "UPDATE session_grants SET state = ?, decided_by = ?, decided_at = ?, "
@@ -2139,8 +2298,9 @@ class SqliteWriteTxn(SqliteReadView):
         self._conn.execute(
             "INSERT INTO coding_sessions (id, engine_session_id, project_id, "
             "work_item_id, actor_id, cwd, template, model, effort, reason, "
-            "purpose, started_by_session, started_by_kind, started_at, stopped_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "purpose, started_by_session, started_by_kind, started_at, stopped_at, "
+            "cold_wake_opt_out) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session.id,
                 session.engine_session_id,
@@ -2157,7 +2317,14 @@ class SqliteWriteTxn(SqliteReadView):
                 session.started_by_kind,
                 to_iso(session.started_at),
                 None if session.stopped_at is None else to_iso(session.stopped_at),
+                int(session.cold_wake_opt_out),
             ),
+        )
+
+    def set_session_cold_wake_opt_out(self, session_id: str, *, opt_out: bool) -> None:
+        self._conn.execute(
+            "UPDATE coding_sessions SET cold_wake_opt_out = ? WHERE id = ?",
+            (int(opt_out), session_id),
         )
 
     def set_session_work_item(self, session_id: str, work_item_id: str | None) -> None:
@@ -2191,6 +2358,21 @@ class SqliteWriteTxn(SqliteReadView):
                 json.dumps(proposal.proposed_change, default=str),
                 proposal.status,
                 to_iso(proposal.opened_at),
+            ),
+        )
+
+    def insert_charter(self, charter: Charter) -> None:
+        self._conn.execute(
+            "INSERT INTO charters (scope_kind, scope_id, version, body, "
+            "author_actor_id, created_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                charter.scope_kind,
+                charter.scope_id,
+                charter.version,
+                charter.body,
+                charter.author_actor_id,
+                to_iso(charter.created_at),
+                charter.reason,
             ),
         )
 
@@ -2875,6 +3057,51 @@ def _decision_answer_json(decision: Decision) -> str | None:
     return json.dumps(decision.answer.model_dump(mode="json"))
 
 
+def _row_to_charter(row: sqlite3.Row) -> Charter:
+    return Charter(
+        scope_kind=row["scope_kind"],
+        scope_id=str(row["scope_id"]),
+        version=int(row["version"]),
+        body=str(row["body"]),
+        author_actor_id=str(row["author_actor_id"]),
+        created_at=from_iso(str(row["created_at"])),
+        reason=str(row["reason"]),
+    )
+
+
+def _row_to_watch(row: sqlite3.Row) -> Watch:
+    outcome = row["outcome_json"]
+    return Watch(
+        id=str(row["id"]),
+        owner_actor_id=str(row["owner_actor_id"]),
+        target_session=str(row["target_session"]),
+        kind=str(row["kind"]),
+        trigger=json.loads(str(row["trigger_json"])),
+        note=str(row["note"]),
+        state=row["state"],
+        created_at=from_iso(str(row["created_at"])),
+        expires_at=from_iso(str(row["expires_at"])),
+        fired_at=_opt_time(row, "fired_at"),
+        outcome=None if outcome is None else json.loads(str(outcome)),
+        attempts=int(row["attempts"]),
+        last_error=_opt(row, "last_error"),
+        reason=str(row["reason"]),
+    )
+
+
+def _row_to_session_report(row: sqlite3.Row) -> SessionReport:
+    return SessionReport(
+        id=str(row["id"]),
+        actor_id=str(row["actor_id"]),
+        engine_session_id=row["engine_session_id"],
+        work_item_id=row["work_item_id"],
+        kind=row["kind"],
+        summary=str(row["summary"]),
+        fields=SessionReportFields.model_validate_json(str(row["data"])),
+        created_at=from_iso(str(row["created_at"])),
+    )
+
+
 def _row_to_decision(row: sqlite3.Row) -> Decision:
     answer = row["answer_json"]
     return Decision(
@@ -2943,6 +3170,7 @@ def _row_to_session(row: sqlite3.Row) -> CodingSession:
         started_by_kind=_opt(row, "started_by_kind"),  # type: ignore[arg-type]
         started_at=from_iso(str(row["started_at"])),
         stopped_at=None if stopped is None else from_iso(str(stopped)),
+        cold_wake_opt_out=bool(row["cold_wake_opt_out"]),
     )
 
 

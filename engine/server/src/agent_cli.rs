@@ -113,6 +113,13 @@ pub struct LaunchRequest<'a> {
     /// The deployment's opencode driven-session policy (an opencode config
     /// with a `permission` block), for the default posture (WI-932).
     pub opencode_config: Option<&'a str>,
+    /// Codex's `approval_policy` for the `default` and `accept-edits`
+    /// postures: `-a <this>` (WI-2028). `"never"` by default, so a driven
+    /// worker does not stop on every command, matching Claude Code's bypassed
+    /// workers; a deployment can set `ENGINE_CODEX_APPROVAL_POLICY=on-request`
+    /// to have a person (or an oversight session) answer each command.
+    /// `bypass` ignores it, and `codex exec` rejects `-a`.
+    pub codex_approval_policy: &'a str,
 }
 
 impl<'a> LaunchRequest<'a> {
@@ -130,6 +137,7 @@ impl<'a> LaunchRequest<'a> {
             settings_file: None,
             add_dirs: &[],
             opencode_config: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT,
         }
     }
 }
@@ -172,17 +180,45 @@ pub fn permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
     }
 }
 
-/// A permission posture as Codex flags (WI-1143).
+/// The `approval_policy` a driven Codex starts with when the deployment names
+/// none (WI-2028). `never` matches the Claude Code workers, whose permissions
+/// are bypassed: a worker runs the commands its task needs instead of stopping
+/// at `-a on-request` for a person, or an oversight session, to answer.
+pub const CODEX_APPROVAL_DEFAULT: &str = "never";
+
+/// The `-a` values Codex accepts. The deployment's value is passed through
+/// unchanged; anything else is refused at startup rather than handed to a CLI
+/// that would fail to launch (or read as a different policy).
+pub const CODEX_APPROVAL_POLICIES: [&str; 4] = ["untrusted", "on-failure", "on-request", "never"];
+
+/// Check `ENGINE_CODEX_APPROVAL_POLICY` (or the config file's key): one of
+/// [`CODEX_APPROVAL_POLICIES`], `never` when unset or blank.
+pub fn parse_codex_approval_policy(raw: Option<&str>) -> Result<String> {
+    let said = raw.map(str::trim).filter(|value| !value.is_empty());
+    let Some(said) = said else {
+        return Ok(CODEX_APPROVAL_DEFAULT.to_string());
+    };
+    if CODEX_APPROVAL_POLICIES.contains(&said) {
+        return Ok(said.to_string());
+    }
+    Err(ApiError::Config(format!(
+        "ENGINE_CODEX_APPROVAL_POLICY {said:?} is not one of {}",
+        CODEX_APPROVAL_POLICIES.join(", ")
+    )))
+}
+
+/// A permission posture as Codex flags (WI-1143, WI-2028).
 ///
 /// The pod is the isolation boundary and cannot create a user namespace, so
 /// `workspace-write` (and `--approve-for-me`, which hard-wires it) would fail
-/// the launch. Every posture therefore uses `-s danger-full-access`. Default
-/// still asks (`-a on-request`). Accept-edits pins the same `-a on-request`,
-/// so a user's `~/.codex/config.toml` with `approval_policy = "never"` cannot
-/// turn approvals off under `danger-full-access`, and then routes those asks
-/// through Codex's automatic reviewer (`-c approvals_reviewer="auto_review"`)
-/// without changing the sandbox. Bypass drops both approvals and the sandbox
-/// and is a person's grant only.
+/// the launch. Every posture therefore uses `-s danger-full-access`. The
+/// default and accept-edits postures pin `-a <approval>`, where `approval` is
+/// the deployment's [`CODEX_APPROVAL_DEFAULT`] (`never` unless it says
+/// otherwise): a driven worker runs without asking. A deployment that restores
+/// `on-request` gets the old behaviour, and accept-edits then also routes those
+/// asks through Codex's automatic reviewer (`-c
+/// approvals_reviewer="auto_review"`), without changing the sandbox. Bypass
+/// drops both approvals and the sandbox and is a person's grant only.
 ///
 /// `exec` is a `codex exec` launch. That subcommand rejects `-a`, so the
 /// approval pin is left off; the sandbox, and for accept-edits the reviewer,
@@ -191,12 +227,16 @@ pub fn permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
 /// `None` means the caller did not ask for a posture. That is not the default
 /// posture: the wrapper used to force bypass, and a launch that omitted the
 /// flags would look like it had applied one.
-pub fn codex_permission_flags(mode: Option<&str>, exec: bool) -> Result<Option<Vec<String>>> {
+pub fn codex_permission_flags(
+    mode: Option<&str>,
+    exec: bool,
+    approval: &str,
+) -> Result<Option<Vec<String>>> {
     let sandbox = ["-s".to_string(), "danger-full-access".to_string()];
-    let ask = if exec {
+    let ask = if exec || approval.trim().is_empty() {
         Vec::new()
     } else {
-        vec!["-a".to_string(), "on-request".to_string()]
+        vec!["-a".to_string(), approval.trim().to_string()]
     };
     match mode.map(str::trim).filter(|m| !m.is_empty()) {
         None => Ok(None),
@@ -289,7 +329,8 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
         let (idx, binary) = agent_binary(c);
         binary == "codex" && c.get(idx + 1).is_some_and(|arg| arg == "exec")
     });
-    let codex_permission = codex_permission_flags(req.permission_mode, codex_exec)?;
+    let codex_permission =
+        codex_permission_flags(req.permission_mode, codex_exec, req.codex_approval_policy)?;
     let asked = model.is_some()
         || effort.is_some()
         || resume.is_some()
@@ -439,7 +480,7 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             // never dropped onto that default. `codex exec` rejects `-a`, so
             // that launch keeps the sandbox and the reviewer but not the pin.
             let flags = codex_permission.unwrap_or_else(|| {
-                codex_permission_flags(Some("default"), codex_exec)
+                codex_permission_flags(Some("default"), codex_exec, req.codex_approval_policy)
                     .ok()
                     .flatten()
                     .unwrap_or_default()
@@ -633,6 +674,70 @@ pub fn with_codex_guidance(
     Some(out)
 }
 
+/// Linux caps one argv entry at 128 KiB; a charter that would push Codex's
+/// `developer_instructions` past this stays in the brief alone.
+const MAX_CHARTER_ARG_BYTES: usize = 120 * 1024;
+/// Largest charter text inlined into `developer_instructions`, which rides on
+/// every Codex request (WI-2035 trimmed it to a few KiB). A larger one is
+/// replaced by [`CHARTER_POINTER`]: the brief carries the full text.
+const MAX_CHARTER_INLINE_BYTES: usize = 4 * 1024;
+const CHARTER_POINTER: &str = "## Charters\n\nThis scope has standing instructions \
+(charters) too long to repeat here. They are in the `## Charters` section of \
+the session brief; follow them as if they were written here.";
+
+/// `command` with the scope's charters (WI-2038) appended to Codex's
+/// `developer_instructions`, or `None` when it is not a Codex launch, there is
+/// no charter, or the result cannot be built. Runs after
+/// [`with_codex_guidance`]: an override already present is decoded and
+/// extended, otherwise one is added right after the Codex binary. A charter
+/// over [`MAX_CHARTER_INLINE_BYTES`] is appended as a pointer to the brief.
+pub fn with_codex_charter(command: &[String], charter: &str) -> Option<Vec<String>> {
+    const PREFIX: &str = "developer_instructions=";
+    let charter = charter.trim();
+    if charter.is_empty() || agent_name(command).as_deref() != Some("codex") {
+        return None;
+    }
+    let charter = if charter.len() > MAX_CHARTER_INLINE_BYTES {
+        tracing::info!(
+            bytes = charter.len(),
+            "charter over the inline cap; Codex gets a pointer to the brief"
+        );
+        CHARTER_POINTER
+    } else {
+        charter
+    };
+    let mut out = command.to_vec();
+    let encode = |body: &str| format!("{PREFIX}{}", crate::codex_guidance::toml_basic_string(body));
+    match out.iter().position(|arg| arg.starts_with(PREFIX)) {
+        Some(pos) => {
+            let parsed: Option<String> =
+                toml::from_str::<toml::Table>(&format!("v = {}", &out[pos][PREFIX.len()..]))
+                    .ok()
+                    .and_then(|t| t.get("v").and_then(|v| v.as_str()).map(str::to_owned));
+            let Some(existing) = parsed else {
+                tracing::warn!(
+                    "codex developer_instructions did not parse; charter left to the brief"
+                );
+                return None;
+            };
+            out[pos] = encode(&format!("{}\n\n{charter}", existing.trim_end()));
+            if out[pos].len() > MAX_CHARTER_ARG_BYTES {
+                tracing::warn!(
+                    bytes = out[pos].len(),
+                    "codex developer_instructions with charter over the argv cap; charter left to the brief"
+                );
+                return None;
+            }
+        }
+        None => {
+            let value = encode(charter);
+            let (idx, _) = agent_binary(command);
+            out.splice(idx + 1..idx + 1, ["-c".to_string(), value]);
+        }
+    }
+    Some(out)
+}
+
 /// A conversation id becomes an argument to the agent CLI, so it is held to a
 /// narrower vocabulary than a model id: Claude Code and Codex ids are UUIDs,
 /// OpenCode's are `ses_…`, and a Codex session *name* is a plain word. No `/`
@@ -710,6 +815,54 @@ mod tests {
         let claude = vec!["claude".to_string()];
         assert!(with_codex_guidance(&claude, &repo, Some(&home)).is_none());
     }
+
+    fn instructions(arg: &str) -> String {
+        let value = arg.strip_prefix("developer_instructions=").unwrap();
+        let parsed: toml::Table = toml::from_str(&format!("v = {value}")).unwrap();
+        parsed["v"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn codex_charter_extends_the_guidance_override_after_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let repo = home.join("Working").join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join("CLAUDE.md"), "WS \"quoted\"").unwrap();
+        let command: Vec<String> = ["/usr/bin/codex", "--yolo"].map(String::from).to_vec();
+        let guided = with_codex_guidance(&command, &repo, Some(&home)).unwrap();
+        let out = with_codex_charter(&guided, "## Charters\n\nNo brand names.").unwrap();
+        assert_eq!(
+            out.len(),
+            guided.len(),
+            "extended in place, not a second -c"
+        );
+        let body = instructions(&out[2]);
+        assert!(body.contains("WS \"quoted\""));
+        assert!(body.ends_with("## Charters\n\nNo brand names."));
+        assert!(body.find("WS").unwrap() < body.find("No brand names.").unwrap());
+    }
+
+    #[test]
+    fn codex_charter_adds_an_override_when_there_is_no_guidance() {
+        let command: Vec<String> = ["env", "--", "codex"].map(String::from).to_vec();
+        let out = with_codex_charter(&command, "Stop at push.").unwrap();
+        assert_eq!(out[3], "-c");
+        assert_eq!(instructions(&out[4]), "Stop at push.");
+        // Other agents, and an empty charter, are left alone.
+        assert!(with_codex_charter(&["claude".to_string()], "x").is_none());
+        assert!(with_codex_charter(&command, "  ").is_none());
+        // Over the inline cap: a pointer to the brief, not the text.
+        let big = with_codex_charter(&command, &"x".repeat(MAX_CHARTER_INLINE_BYTES + 1)).unwrap();
+        assert_eq!(instructions(&big[4]), CHARTER_POINTER);
+        // An existing override already near the argv cap: left alone.
+        let huge = format!(
+            "developer_instructions={}",
+            crate::codex_guidance::toml_basic_string(&"y".repeat(MAX_CHARTER_ARG_BYTES))
+        );
+        let near: Vec<String> = vec!["codex".into(), "-c".into(), huge];
+        assert!(with_codex_charter(&near, "Stop at push.").is_none());
+    }
     use super::*;
 
     fn cmd(parts: &[&str]) -> Vec<String> {
@@ -757,7 +910,7 @@ mod tests {
                 "-c",
                 "model_reasoning_effort=medium",
                 "-a",
-                "on-request",
+                "never",
                 "-s",
                 "danger-full-access",
                 "-c",
@@ -806,7 +959,7 @@ mod tests {
                 "-m",
                 "gpt-5.6",
                 "-a",
-                "on-request",
+                "never",
                 "-s",
                 "danger-full-access",
                 "-c",
@@ -923,7 +1076,7 @@ mod tests {
         // (WI-1145).
         assert_eq!(codex.len(), 13);
         assert!(codex[12].contains(BRIEF));
-        assert!(codex.windows(2).any(|w| w == ["-a", "on-request"]));
+        assert!(codex.windows(2).any(|w| w == ["-a", "never"]));
         assert!(codex.windows(2).any(|w| w == ["-s", "danger-full-access"]));
         assert!(codex
             .windows(2)
@@ -1006,7 +1159,7 @@ mod tests {
                     "-m",
                     "m1",
                     "-a",
-                    "on-request",
+                    "never",
                     "-s",
                     "danger-full-access",
                     "-c",
@@ -1030,7 +1183,7 @@ mod tests {
                 "-m",
                 "m1",
                 "-a",
-                "on-request",
+                "never",
                 "-s",
                 "danger-full-access",
                 "-c",
@@ -1141,7 +1294,7 @@ mod tests {
                 protected("codex"),
                 cmd(&[
                     "-a",
-                    "on-request",
+                    "never",
                     "-s",
                     "danger-full-access",
                     "-c",
@@ -1178,7 +1331,7 @@ mod tests {
                 protected("codex"),
                 cmd(&[
                     "-a",
-                    "on-request",
+                    "never",
                     "-s",
                     "danger-full-access",
                     "-c",
@@ -1381,17 +1534,21 @@ mod permission_tests {
             Some(cmd(&["--dangerously-skip-permissions"]))
         );
         assert!(permission_flags(Some("yolo")).is_err());
-        assert!(codex_permission_flags(Some("yolo"), false).is_err());
-        assert_eq!(codex_permission_flags(None, false).unwrap(), None);
+        assert!(codex_permission_flags(Some("yolo"), false, "never").is_err());
+        assert_eq!(codex_permission_flags(None, false, "never").unwrap(), None);
         assert_eq!(
-            codex_permission_flags(Some("default"), false).unwrap(),
+            codex_permission_flags(Some("default"), false, "never").unwrap(),
+            Some(cmd(&["-a", "never", "-s", "danger-full-access"]))
+        );
+        // A deployment that restores asking gets `on-request`, and
+        // accept-edits pins it too so the asks the reviewer is meant to
+        // answer cannot be dropped.
+        assert_eq!(
+            codex_permission_flags(Some("default"), false, "on-request").unwrap(),
             Some(cmd(&["-a", "on-request", "-s", "danger-full-access"]))
         );
-        // Accept-edits pins `-a on-request` too, so a user config of
-        // `approval_policy = "never"` cannot drop the asks the reviewer is
-        // meant to answer.
         assert_eq!(
-            codex_permission_flags(Some("accept_edits"), false).unwrap(),
+            codex_permission_flags(Some("accept_edits"), false, "on-request").unwrap(),
             Some(cmd(&[
                 "-a",
                 "on-request",
@@ -1402,16 +1559,27 @@ mod permission_tests {
             ]))
         );
         assert_eq!(
-            codex_permission_flags(Some("bypass"), false).unwrap(),
+            codex_permission_flags(Some("accept_edits"), false, "never").unwrap(),
+            Some(cmd(&[
+                "-a",
+                "never",
+                "-c",
+                "approvals_reviewer=\"auto_review\"",
+                "-s",
+                "danger-full-access"
+            ]))
+        );
+        assert_eq!(
+            codex_permission_flags(Some("bypass"), false, "never").unwrap(),
             Some(cmd(&["--dangerously-bypass-approvals-and-sandbox"]))
         );
         // `codex exec` rejects `-a`. The sandbox and the reviewer stay.
         assert_eq!(
-            codex_permission_flags(Some("default"), true).unwrap(),
+            codex_permission_flags(Some("default"), true, "on-request").unwrap(),
             Some(cmd(&["-s", "danger-full-access"]))
         );
         assert_eq!(
-            codex_permission_flags(Some("accept-edits"), true).unwrap(),
+            codex_permission_flags(Some("accept-edits"), true, "on-request").unwrap(),
             Some(cmd(&[
                 "-c",
                 "approvals_reviewer=\"auto_review\"",
@@ -1419,6 +1587,21 @@ mod permission_tests {
                 "danger-full-access"
             ]))
         );
+    }
+
+    #[test]
+    fn the_deployment_chooses_codex_approvals_and_never_is_the_default() {
+        assert_eq!(parse_codex_approval_policy(None).unwrap(), "never");
+        assert_eq!(parse_codex_approval_policy(Some("  ")).unwrap(), "never");
+        for policy in CODEX_APPROVAL_POLICIES {
+            assert_eq!(parse_codex_approval_policy(Some(policy)).unwrap(), policy);
+        }
+        assert_eq!(
+            parse_codex_approval_policy(Some(" on-request ")).unwrap(),
+            "on-request"
+        );
+        assert!(parse_codex_approval_policy(Some("yes-please")).is_err());
+        assert!(parse_codex_approval_policy(Some("auto")).is_err());
     }
 
     #[test]
@@ -1479,7 +1662,7 @@ mod permission_tests {
         .unwrap()
         .command
         .unwrap();
-        assert!(edits.windows(2).any(|w| w == ["-a", "on-request"]));
+        assert!(edits.windows(2).any(|w| w == ["-a", "never"]));
         assert!(edits
             .windows(2)
             .any(|w| w == ["-c", "approvals_reviewer=\"auto_review\""]));
@@ -1501,7 +1684,7 @@ mod permission_tests {
             cmd(&[
                 "codex",
                 "-a",
-                "on-request",
+                "never",
                 "-s",
                 "danger-full-access",
                 "-c",

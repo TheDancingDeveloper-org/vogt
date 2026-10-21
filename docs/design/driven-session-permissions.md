@@ -187,3 +187,44 @@ prompt.
 Whether the classifier honours the new exceptions is judged at run time.
 The engine's unit tests pin the file's shape, and the verdicts need a
 check on vogt-dev.
+
+## Worker-loop allow list and scoped oversight answers (WI-1831, 2026-10-18)
+
+Haiku workers do not run in auto mode, so every command the pattern rules do
+not allow raises a prompt, and on 2026-10-18 they stalled on `git fetch &&
+git log` and `git checkout origin/rust-core` until a person tapped the
+prompt. The shipped policy now carries `permissions.allow` rules for the
+routine loop only: read-only git and `gh` inspection, `git fetch`, checkout
+of a remote ref or new branch, `git rebase origin/*` and its
+continue/abort/skip, `git push` of the checked-out branch (`origin HEAD`,
+optionally `-u` or `--force-with-lease`), cargo/pnpm/uv build and test, and
+the Vogt tools a session reports itself with (`work_comment`,
+`session_report_blocked`, `session_report_unblocked`). `permissions.deny`
+closes the code-execution holes those patterns would otherwise open
+(`--upload-pack`, `--output`, `rebase --exec`/`-x`/`-i`, cargo
+`--manifest-path`/`--config`). Merges, other pushes, destruction and secrets
+still go to the classifier, as the pinning tests check.
+
+Pushing the checked-out branch relies on the worktree being on the session's
+own branch. A worker in the shared checkout on `main` would push `main`, which
+the forge's branch protection refuses.
+
+For prompts these rules do not cover, an oversight session may now answer
+`Yes` through `session_answer` when the command is one-line, in the same
+classes, and runs in the worker's own linked worktree. The engine decides
+this (`oversight_answer.rs`), not the core, and audits both answers and
+refusals. Before this change the core relayed any oversight answer as a
+person's, so nothing limited what an overseer could approve. `session_input`
+stays person-only while a permission prompt shows.
+
+**Superseded by WI-2028 (2026-10-20).** The operator removed the allow-list
+limit on oversight answers: an oversight session may answer any `permission`
+prompt, through `session_answer` or `session_input` keys, audited as the
+oversight session with the command excerpt. Non-oversight callers still get
+`person_required`, and `read-outside-cwd` stays a person's. Driven Codex
+workers now launch with `-a never` by default (`ENGINE_CODEX_APPROVAL_POLICY`
+restores `on-request` per stack), so they stop prompting at all.
+
+Deployments that replace this file (the ops overlay's
+`/run/vogt/driven-session-settings.json`) must copy the new `permissions`
+block to get the worker-loop allow list.

@@ -156,6 +156,9 @@ class EngineSession:
     #: `None` from an engine that predates them.
     turn_started_at: str | None = None
     last_output_at: str | None = None
+    #: When the agent declared itself done under autopilot this turn
+    #: (WI-1518); `None` when it has not, or from an engine that predates it.
+    done_at: str | None = None
     #: The permission dialog on screen, while `activity` is
     #: `awaiting-approval`.
     approval: EngineApproval | None = None
@@ -221,6 +224,7 @@ class EngineSession:
             alive=bool(alive) if isinstance(alive, bool) else exit_code is None,
             turn_started_at=_optional_str(payload.get("turn_started_at")),
             last_output_at=_optional_str(payload.get("last_output_at")),
+            done_at=_optional_str(payload.get("done_at")),
             approval=EngineApproval.from_payload(payload.get("approval")),
             command=_optional_str(payload.get("command")),
             blocked=EngineBlocked.from_payload(payload.get("blocked")),
@@ -772,6 +776,7 @@ class EngineClient:
         policy: dict[str, Any] | None = None,
         budget: dict[str, Any] | None = None,
         worktree: dict[str, str] | None = None,
+        charter: str | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -835,6 +840,11 @@ class EngineClient:
             # The standing guide written beside the brief (WI-1243). The
             # brief points at it by name; the engine writes the text.
             spec["companion"] = companion
+        if charter:
+            # The scope's charters (WI-2038), already in the brief. The engine
+            # also hands them to an agent CLI that keeps standing instructions
+            # apart from its first prompt (Codex `developer_instructions`).
+            spec["charter"] = charter
         if policy:
             # The project's agent policy (WI-1243), enforced by the session's
             # hook. Sent only when the project states one, so a project
@@ -1057,7 +1067,13 @@ class EngineClient:
         return EngineSessionLog.from_payload(payload)
 
     def send_input(
-        self, session_id: str, text: str, *, submit: bool = False, person: bool = False
+        self,
+        session_id: str,
+        text: str,
+        *,
+        submit: bool = False,
+        person: bool = False,
+        overseer: str | None = None,
     ) -> bool:
         """Write `text` to a session's PTY (`submit` appends a carriage return).
 
@@ -1066,12 +1082,17 @@ class EngineClient:
         the limit rather than an HTTP status. `person` says whether the
         principal behind the input is a person: the engine refuses anyone
         else's input while a permission prompt is showing (WI-983), raised
-        here as `PersonRequired`.
+        here as `PersonRequired`. `overseer` is the engine id of the oversight
+        session relayed, which the engine lets answer a permission prompt
+        (WI-2028).
         """
+        body: dict[str, Any] = {"text": text, "submit": submit, "person": person}
+        if overseer is not None:
+            body["overseer"] = overseer
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/input",
             method="POST",
-            payload={"text": text, "submit": submit, "person": person},
+            payload=body,
             allow_missing=True,
         )
         return payload is not None
@@ -1216,12 +1237,17 @@ class EngineClient:
         label: str | None,
         expect_question: str | None,
         person: bool = False,
+        overseer: str | None = None,
     ) -> dict[str, Any] | None:
         """Choose an option of the dialog on screen; the engine's
         `AnswerResult`, or `None` on a 404. A dialog that is gone, changed,
         or lacks the option is a `Conflict` naming why; a permission prompt
-        answered without `person` is `PersonRequired` (WI-983)."""
+        answered without `person` is `PersonRequired` (WI-983), unless
+        `overseer` names the oversight session answering, which the engine
+        lets answer a permission prompt (WI-2028)."""
         body: dict[str, Any] = {"person": person}
+        if overseer is not None:
+            body["overseer"] = overseer
         if option is not None:
             body["option"] = option
         if label is not None:
@@ -1278,11 +1304,16 @@ class EngineClient:
         *,
         env: dict[str, str] | None = None,
         force: bool = False,
+        fresh_prompt: str | None = None,
     ) -> EngineSession | None:
         """Start a hibernated session again under its own id, resuming its
         conversation, with `env` set on top of what the engine recorded (which
         never holds a secret). A live session comes back as it is. `None` on
         a 404.
+
+        With `fresh_prompt` (a cold-wake compaction, WI-2037) the engine does
+        not resume: it starts a new conversation whose first prompt is this
+        summary, followed by the session's git facts and original brief.
         """
         body: dict[str, Any] = {}
         if env:
@@ -1291,6 +1322,8 @@ class EngineClient:
         # when it changes what the wake does.
         if force:
             body["force"] = True
+        if fresh_prompt:
+            body["fresh_prompt"] = fresh_prompt
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/wake",
             method="POST",

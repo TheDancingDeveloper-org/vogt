@@ -51,7 +51,7 @@ const BORDER: &[char] = &[
 /// because a TUI may position words with cursor moves rather than spaces.
 static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
     regex::bytes::Regex::new(
-        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow|grant|send)|allow\s*(?:command|.{1,80}?to\s*run\s*tool)|press\s*\S+\s*to\s*confirm\s*or\s*\S+\s*to\s*cancel|field\s*\d+\s*/\s*\d+|needs\s*your\s*approval|approve\s*network|grant\s*these\s*permissions|send\s*input\s*to|automatically\s*den|requires\s*approval|trust\s*the\s*files|trust\s*this\s*folder|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director|\(y\)\s*es\s*/\s*\(n\)\s*o",
+        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow|grant|send)|allow\s*(?:command|.{1,80}?to\s*run\s*tool)|press\s*\S+\s*to\s*confirm\s*or\s*\S+\s*to\s*cancel|field\s*\d+\s*/\s*\d+|needs\s*your\s*approval|approve\s*network|grant\s*these\s*permissions|send\s*input\s*to|automatically\s*den|requires\s*approval|trust\s*the\s*files|trust\s*this\s*folder|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director|\(y\)\s*es\s*/\s*\(n\)\s*o|enter\s*to\s*select",
     )
     .expect("approval prefilter compiles")
 });
@@ -98,6 +98,25 @@ static CODEX_OVERLAY_TITLE: Lazy<Regex> = Lazy::new(|| {
     )
     .expect("codex overlay title compiles")
 });
+
+/// The footer of Claude Code's question menu (its AskUserQuestion tool,
+/// WI-1871): "Enter to select · ↑/↓ to navigate · Esc to cancel", "Enter to
+/// select · Tab/Arrow keys to navigate · Esc to cancel". Anchored at both
+/// ends so output drawn under an answered menu does not keep it live.
+static CLAUDE_QUESTION_FOOTER: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^enter to select\b.*\bto navigate\b(?:.*\bto cancel)?$")
+        .expect("question footer compiles")
+});
+
+/// A question menu's checkbox: "[ ] Label", "[✔] Label" (multi-select).
+static CHECKBOX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\[[ ✔✓xX×]\]\s*").expect("checkbox regex compiles"));
+
+/// The header row above a question menu: one tab ("☐ Approach") or the tab
+/// bar of several ("←  ☐ Approach  ✔ Library  ✔ Submit  →").
+fn is_question_header(line: &str) -> bool {
+    line.starts_with(['☐', '☒', '✔', '✓', '←', '□', '■'])
+}
 
 /// What the overlay is taken to ask when its title has scrolled out of
 /// reach (a command taller than the screen and the scrollback read).
@@ -293,9 +312,100 @@ fn is_rule(line: &str) -> bool {
 /// excerpt may reach up into the scrollback.
 pub fn detect(visible: &[String], scrollback: &[String]) -> Option<Detected> {
     detect_codex(visible, scrollback)
+        .or_else(|| detect_claude_question(visible, scrollback))
         .or_else(|| detect_numbered(visible, scrollback))
         .or_else(|| detect_opencode(visible))
         .or_else(|| detect_klaudia(visible, scrollback))
+}
+
+/// Claude Code's question menu (AskUserQuestion, WI-1871): the agent asks
+/// the person a question and waits.
+///
+/// ```text
+///  ☐ Approach
+///
+/// Which approach should we take?
+///
+/// ❯ 1. Narrow fix
+///      Ship the classifier change only
+///   2. Rewrite
+///      Rework the sweep
+///   3. Type something.
+/// ─────────────────────────────
+///   4. Chat about this
+///
+/// Enter to select · ↑/↓ to navigate · Esc to cancel
+/// ```
+///
+/// Live only while its footer is the last thing on the screen. Options may
+/// carry a multi-select checkbox ("1. [ ] Narrow fix"), dropped from the
+/// label; a description under an option is not part of it. Reported with
+/// kind `question`, which is not a person-only kind, so a driver may answer
+/// it by choice.
+fn detect_claude_question(visible: &[String], scrollback: &[String]) -> Option<Detected> {
+    let last_visible = visible.iter().rposition(|l| !strip(l).trim().is_empty())?;
+    let all: Vec<&str> = scrollback
+        .iter()
+        .chain(visible.iter())
+        .map(String::as_str)
+        .collect();
+    let last = scrollback.len() + last_visible;
+    let footer = (last.saturating_sub(2)..=last)
+        .find(|&start| CLAUDE_QUESTION_FOOTER.is_match(&join_stripped(&all[start..=last])))?;
+    let from = footer.saturating_sub(MAX_CONTEXT_LINES);
+    let first = from
+        + all[from..footer]
+            .iter()
+            .rposition(|l| OPTION.is_match(strip(l).trim()))?;
+    let mut options: Vec<MenuOption> = Vec::new();
+    for raw in &all[first..footer] {
+        let line = strip(raw).trim();
+        if let Some(c) = ANY_OPTION.captures(line) {
+            let number: u32 = c[2].parse().unwrap_or(0);
+            if number as usize == options.len() + 1 {
+                let text = CHECKBOX.replace(&c[3], "");
+                options.push(MenuOption {
+                    number,
+                    label: label_part(&text).to_string(),
+                    selected: c.get(1).is_some(),
+                });
+            }
+        }
+    }
+    // The question is the paragraph above the menu; the header tab, when
+    // shown, above that.
+    let mut end = first;
+    while end > from && strip(all[end - 1]).trim().is_empty() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > from {
+        let line = strip(all[start - 1]).trim();
+        if line.is_empty() || is_rule(all[start - 1]) || is_question_header(line) {
+            break;
+        }
+        start -= 1;
+    }
+    let question = join_stripped(&all[start..end]);
+    if question.is_empty() {
+        return None;
+    }
+    let header = all[start.saturating_sub(3)..start]
+        .iter()
+        .map(|l| strip(l).trim())
+        .rfind(|l| is_question_header(l));
+    let command_excerpt = match header {
+        Some(h) => format!("{h}\n{question}"),
+        None => question.clone(),
+    };
+    Some(Detected {
+        question,
+        command_excerpt,
+        deadline_seconds: None,
+        kind: "question",
+        options,
+        horizontal: false,
+    })
 }
 
 /// Klaudia's person-only prompts (WI-1279): a `RequestHostChange` card
@@ -769,6 +879,80 @@ mod tests {
 
     fn lines(text: &str) -> Vec<String> {
         text.lines().map(str::to_string).collect()
+    }
+
+    /// The screen of WI-1852's stall: a worker at an AskUserQuestion menu.
+    const QUESTION_MENU: &str = "\
+● I need a decision before going on.
+
+──────────────────────────────────────────────────────────
+ ☐ Approach
+
+Which approach should the sweep fix take?
+
+❯ 1. Narrow fix
+     Recognise the menu in the engine only
+  2. Full rewrite
+     Rework the attention classifier
+  3. Type something.
+──────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel";
+
+    #[test]
+    fn claude_question_menu_is_a_question_with_its_options() {
+        let screen = lines(QUESTION_MENU);
+        assert!(mentions_approval(QUESTION_MENU.as_bytes()));
+        let d = detect(&screen, &[]).expect("question menu detected");
+        assert_eq!(d.kind, "question");
+        assert_eq!(d.question, "Which approach should the sweep fix take?");
+        assert_eq!(
+            d.command_excerpt,
+            "☐ Approach\nWhich approach should the sweep fix take?"
+        );
+        let labels: Vec<&str> = d.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Narrow fix",
+                "Full rewrite",
+                "Type something.",
+                "Chat about this"
+            ]
+        );
+        assert!(d.options[0].selected && !d.options[1].selected);
+        assert!(!crate::person_gate::needs_person(d.kind));
+    }
+
+    #[test]
+    fn multi_select_question_menu_drops_checkboxes() {
+        let screen = lines(
+            "←  ☒ Scope  ☐ Gates  ✔ Submit  →\n\
+             \n\
+             Which gates should run?\n\
+             \n\
+             ❯ 1. [ ] cargo test\n\
+             \x20 2. [✔] pytest\n\
+             \x20 3. Submit\n\
+             \n\
+             Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        );
+        let d = detect(&screen, &[]).expect("question menu detected");
+        assert_eq!(d.kind, "question");
+        assert_eq!(d.question, "Which gates should run?");
+        assert!(d.command_excerpt.starts_with("←  ☒ Scope"), "{d:?}");
+        let labels: Vec<&str> = d.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["cargo test", "pytest", "Submit"]);
+    }
+
+    #[test]
+    fn an_answered_question_menu_is_gone() {
+        // The footer scrolled up under later output: not live.
+        let screen = lines(&format!(
+            "{QUESTION_MENU}\n● Going with the narrow fix.\n> "
+        ));
+        assert_eq!(detect(&screen, &[]), None);
     }
 
     #[test]

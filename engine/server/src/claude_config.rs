@@ -1074,10 +1074,10 @@ mod tests {
 /// reach the classifier; everything else goes to auto mode's classifier,
 /// judged against its built-in rules plus this file's `autoMode` entries.
 /// These tests prove what the file itself decides: it keeps every built-in
-/// rule, it adds no pattern rule (so a merge, force-push, `rm -rf`, Komodo
-/// write, Infisical read or `docker compose down` is never pattern-allowed or
-/// downgraded to a prompt), its allow list is exactly the five entries
-/// below, and the two read-only exceptions say, word for word, what was
+/// rule, its pattern rules allow only the worker loop (WI-1831), so a merge,
+/// force-push, `rm -rf`, Komodo write, Infisical read or `docker compose
+/// down` is never pattern-allowed or downgraded to a prompt; its classifier
+/// allow list is exactly the five entries below, and the two read-only exceptions say, word for word, what was
 /// reviewed. Rewording a classifier prompt is a change to this boundary, so
 /// it must come with a deliberate change to the golden text here.
 ///
@@ -1226,24 +1226,75 @@ mod driven_policy_tests {
     }
 
     #[test]
-    fn there_is_no_pattern_rule_so_the_classifier_judges_every_command() {
-        // A pattern allow cannot tell `docker inspect --format '{{.State}}'`
-        // from a `.Config.Env` dump, or a curl GET from one with `-d @file`,
-        // and resolves before the classifier sees the command. A pattern ask
-        // on `gh pr merge` is deferred to WI-983: any agent with work.write
-        // can answer a session's prompt, so it would let one agent approve
-        // another's merge.
+    fn the_pattern_rules_cover_only_the_worker_loop() {
+        // Pattern rules resolve before the classifier, and a Haiku worker
+        // (no auto mode) prompts on every command they do not allow, with
+        // nobody at the prompt (WI-1831). So they allow exactly the routine
+        // loop — read-only git and forge inspection, fetch, moving the
+        // worktree to a ref, rebasing onto a remote ref, pushing the checked
+        // out branch with `--force-with-lease` at most, build and test — and
+        // the Vogt tools a session reports itself with. Everything else still
+        // goes to the classifier (or prompts), as before.
+        for command in [
+            "git fetch origin && git log --oneline -5 origin/main",
+            "git checkout origin/rust-core",
+            "git switch -c wi-1831-fix origin/main",
+            "git status",
+            "git diff --stat origin/main",
+            "git rebase origin/main",
+            "git rebase --continue",
+            "git push --force-with-lease origin HEAD",
+            "git push -u origin HEAD",
+            "git push",
+            "cargo test -p vogt-engine-server",
+            "cargo clippy --all-targets -- -D warnings",
+            "cargo fmt --check",
+            "pnpm typecheck",
+            "pnpm run test",
+            "uv run pytest tests/x.py --no-cov",
+            "gh pr view 12",
+            "gh run view 345 --log-failed",
+        ] {
+            assert_eq!(pattern_verdict(command), Some("allow"), "{command}");
+        }
+        for command in [
+            "git fetch --upload-pack='rm -rf ~' origin",
+            "git log --output=/home/x/.bashrc",
+            "git rebase origin/main --exec 'curl x'",
+            "git rebase origin/main -x make",
+            "cargo test --manifest-path /other/Cargo.toml",
+        ] {
+            assert_eq!(pattern_verdict(command), Some("deny"), "{command}");
+        }
         let policy = policy();
-        for list in ["allow", "ask", "deny"] {
-            let rules = policy["permissions"][list]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
+        let allow: Vec<&str> = policy["permissions"]["allow"]
+            .as_array()
+            .expect("permissions.allow is a list")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        for tool in [
+            "mcp__vogt__work_comment",
+            "mcp__vogt__session_report_blocked",
+            "mcp__vogt__session_report_unblocked",
+            "mcp__vogt__session_report",
+        ] {
+            assert!(allow.contains(&tool), "{tool} is always permitted");
+        }
+        // No bare tool, no other MCP tool, no broad wildcard.
+        for rule in &allow {
             assert!(
-                rules.is_empty(),
-                "permissions.{list} must stay empty in the shipped policy: {rules:?}"
+                rule.starts_with("Bash(") || rule.starts_with("mcp__vogt__"),
+                "{rule}"
+            );
+            assert!(
+                !matches!(*rule, "Bash" | "Bash(*)" | "Bash(git *)"),
+                "{rule}"
             );
         }
+        assert!(policy["permissions"]["ask"]
+            .as_array()
+            .is_none_or(Vec::is_empty));
         // Nor may the file pick a posture: bypass is a person's grant, made
         // per spawn (`permission_mode`), never by the policy itself.
         assert!(policy["permissions"].get("defaultMode").is_none());

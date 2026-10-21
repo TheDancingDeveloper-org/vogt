@@ -102,6 +102,10 @@ pub struct Record {
     /// On autopilot (WI-949); a wake keeps it on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autopilot: bool,
+    /// When the agent last declared itself done under autopilot (WI-1518); a
+    /// wake keeps it until the next turn starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<String>,
     /// The project policy it enforces (WI-1243); a wake keeps it. Absent on a
     /// record written before the field existed, which wakes without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +153,11 @@ pub struct Record {
     /// Absent on a record written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<vogt_engine_contract::BlockedReport>,
+    /// Set only for the length of a compacting wake (WI-2037): the id the
+    /// new conversation is pinned to, so it does not collide with the one
+    /// it replaces. Never written.
+    #[serde(skip)]
+    pub fresh_conversation: Option<Uuid>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -176,6 +185,7 @@ impl Record {
             brief_file: None,
             keep_awake: false,
             autopilot: false,
+            done_at: None,
             policy: None,
             budget: None,
             budget_soft_sent: false,
@@ -189,6 +199,7 @@ impl Record {
             rows: None,
             cols: None,
             blocked: None,
+            fresh_conversation: None,
         }
     }
 }

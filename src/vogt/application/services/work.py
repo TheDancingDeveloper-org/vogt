@@ -51,8 +51,12 @@ from vogt.application.models import (
 )
 from vogt.application.services import _resolve, upstream, writeback
 from vogt.application.services.branches import branch_views_for
+from vogt.application.services.claims import check_claim, record_claim_check
 from vogt.application.services.git_story import git_story_for
-from vogt.application.services.sessions import list_sessions
+from vogt.application.services.sessions import (
+    _caller_engine_session_id,
+    list_sessions,
+)
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import (
@@ -974,7 +978,41 @@ def transition_work(ctx: AppContext, params: TransitionWorkParams) -> WorkResult
     result = (
         _walk_transition(ctx, params) if params.walk else _transition_once(ctx, params)
     )
-    return _warn_live_sessions(ctx, result)
+    return _check_session_claim(ctx, params, _warn_live_sessions(ctx, result))
+
+
+#: The states a session's move into is a completion claim (WI-1835).
+_CLAIM_STATES = frozenset({"review", "done"})
+
+
+def _check_session_claim(
+    ctx: AppContext, params: TransitionWorkParams, result: WorkResult
+) -> WorkResult:
+    """Check a session's move to review or done against git and the forge.
+
+    Only a session's own move is checked: a person closing an item is not
+    claiming work. A mismatch is recorded on the item as a note, and the
+    check rides on the result. Nothing is refused (WI-1835).
+    """
+    if params.to_state not in _CLAIM_STATES:
+        return result
+    engine_id = _caller_engine_session_id(ctx)
+    if engine_id is None:
+        return result
+    sessions = list_sessions(
+        ctx, ListSessionsParams(mode="full", work_item=result.item.ref)
+    ).sessions
+    summary = next(
+        (row for row in sessions if row.engine_session_id == engine_id), None
+    )
+    if summary is None:
+        return result
+    text = "\n".join(
+        part for part in (params.reason, summary.last_reply_excerpt) if part
+    )
+    check = check_claim(ctx, summary, claim=params.to_state, text=text)
+    record_claim_check(ctx, check)
+    return result.model_copy(update={"claim_check": check})
 
 
 def _warn_live_sessions(ctx: AppContext, result: WorkResult) -> WorkResult:

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from vogt.core.oversight import ORDER, classify
+from vogt.core.oversight import NEEDS_YOU, ORDER, classify
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 
@@ -34,6 +34,9 @@ def verdict(**over: object) -> tuple[str, str]:
         ({"activity": "running", "blocker": "needs a token"}, "blocked"),
         ({"activity": "waiting-for-input"}, "waiting"),
         ({"activity": "idle", "ready": True}, "waiting"),
+        ({"activity": "waiting-for-input", "done_at": NOW}, "done"),
+        ({"activity": "idle", "ready": True, "done_at": NOW}, "done"),
+        ({"activity": "running", "done_at": NOW}, "running"),
         ({"activity": "idle"}, "idle"),
         ({"activity": "running"}, "running"),
         (
@@ -63,10 +66,11 @@ def test_a_dialog_outranks_a_blocked_report_and_says_what_it_asks() -> None:
 
 
 def test_the_order_puts_what_needs_a_person_first() -> None:
-    assert sorted(ORDER, key=ORDER.__getitem__)[:4] == [
+    assert sorted(ORDER, key=ORDER.__getitem__)[:5] == [
         "approval",
         "blocked",
         "waiting",
+        "done",
         "stalled",
     ]
 
@@ -79,3 +83,39 @@ def test_a_startup_gate_is_named_as_one() -> None:
     )
     assert attention == "approval"
     assert reason.startswith("stopped at a startup gate (folder trust)")
+
+
+@pytest.mark.parametrize("activity", ["waiting-for-input", "idle"])
+def test_a_session_idle_since_its_first_turn_is_awaiting_task(activity: str) -> None:
+    """WI-1854: a worker that only read its brief is waiting on a task."""
+    attention, reason = verdict(activity=activity, ready=True, turns=2)
+    assert attention == "waiting"
+    assert reason.startswith("awaiting task")
+
+
+@pytest.mark.parametrize("turns", [None, 0, 40])
+def test_a_session_that_did_work_or_was_never_metered_is_not_awaiting_task(
+    turns: int | None,
+) -> None:
+    _, reason = verdict(activity="waiting-for-input", turns=turns)
+    assert not reason.startswith("awaiting task")
+    attention, _ = verdict(activity="idle", turns=turns)
+    assert attention == "idle"
+
+
+def test_a_done_session_is_not_awaiting_task() -> None:
+    attention, _ = verdict(activity="waiting-for-input", turns=2, done_at=NOW)
+    assert attention == "done"
+
+
+def test_a_question_menu_needs_you_not_idle() -> None:
+    """WI-1871: an agent at an AskUserQuestion menu is not resting."""
+    attention, reason = verdict(
+        activity="idle",
+        approval_question="Which approach should the sweep fix take?",
+        approval_kind="question",
+    )
+    assert attention == "approval"
+    assert attention in NEEDS_YOU
+    assert reason.startswith("asking a question (answer with session_answer)")
+    assert "Which approach" in reason

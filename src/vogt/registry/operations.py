@@ -40,6 +40,11 @@ from vogt.application.models import (
     BoardListParams,
     BoardListResult,
     BugsParams,
+    CancelWatchParams,
+    CharterGetParams,
+    CharterGetResult,
+    CharterSetParams,
+    CharterSetResult,
     ChatApprovalView,
     ChatArchiveParams,
     ChatCreateParams,
@@ -81,6 +86,7 @@ from vogt.application.models import (
     CreateProjectParams,
     CreateProjectResult,
     CreateUserParams,
+    CreateWatchParams,
     CreateWorkParams,
     DecideGrantParams,
     DecisionResult,
@@ -153,6 +159,8 @@ from vogt.application.models import (
     ListSessionsParams,
     ListSuppressionsParams,
     ListTokensParams,
+    ListWatchesParams,
+    ListWatchesResult,
     ListWorkParams,
     LogoutParams,
     LogoutResult,
@@ -218,6 +226,8 @@ from vogt.application.models import (
     SessionLastReplyParams,
     SessionLastReplyResult,
     SessionListResult,
+    SessionReportParams,
+    SessionReportResult,
     SessionResult,
     SessionScreenParams,
     SessionScreenResult,
@@ -247,10 +257,13 @@ from vogt.application.models import (
     UpdateInitiativeParams,
     UpdateProjectParams,
     UpdateWorkParams,
+    UsageBoardParams,
+    UsageBoardResult,
     UserListParams,
     UserListResult,
     UserResult,
     WakeSessionParams,
+    WatchResult,
     WhoamiParams,
     WhoamiResult,
     WhyParams,
@@ -1087,7 +1100,8 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "session_screen first and never send a blind Enter: at a "
                 "menu it accepts whatever is highlighted (dismiss with esc). "
                 "While a permission prompt shows, only a person's input is "
-                "typed: an agent's is refused (403 person_required). "
+                "typed: an agent's is refused (403 person_required), "
+                "except an oversight session's on a permission prompt. "
                 "On a hibernated session it wakes first, and that wake is "
                 "never forced: a session handed to a successor, or whose work "
                 "item is already live in the same directory, is refused (409). "
@@ -1135,7 +1149,10 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "(Claude Code started by Vogt, or any resume); a shell needs "
                 "allow_shell and wakes fresh. superseded_by names the session "
                 "taking over the work (ses_… or the engine UUID); a later wake "
-                "is then refused unless forced. Takes either id."
+                "is then refused unless forced. wake_on arms a watch first "
+                "(see watch_create), so the session is woken with the outcome "
+                "when it fires — hibernate until PR #N merges instead of "
+                "polling. Takes either id."
             ),
             scope="work.write",
             mutating=True,
@@ -1331,6 +1348,58 @@ def build_operations() -> list[Operation[Any, Any]]:
             cli=CliBinding(("session", "grants")),
         ),
         Operation(
+            name="watch.create",
+            summary=(
+                "Wait on an event instead of polling (WI-2036): arm a watch, "
+                "then hibernate, and Vogt wakes the session and types the "
+                "outcome when the trigger fires. Triggers: pr (project, "
+                "number; on merged/closed), ci (project, sha or pr, and checks: "
+                "the required check names, each observed and concluded — Vogt "
+                "does not read branch protection), "
+                "work_item (reaches a state, default terminal), session "
+                "(another session ended, or also declared done). The watch "
+                "is stored, so it survives a restart. Wakes your own session "
+                "unless `session` names another. session_hibernate's wake_on "
+                "arms one in the same call."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=CreateWatchParams,
+            result_model=WatchResult,
+            handler=services.create_watch,
+            route=HttpRoute("POST", "/watches"),
+            cli=CliBinding(("watch", "create")),
+        ),
+        Operation(
+            name="watch.list",
+            summary=(
+                "Watches, newest first, by state (active, fired, failed, "
+                "cancelled, expired) or by the session they wake, with each "
+                "one's outcome and whether its wake message was delivered."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=ListWatchesParams,
+            result_model=ListWatchesResult,
+            handler=services.list_watches,
+            route=HttpRoute("GET", "/watches"),
+            cli=CliBinding(("watch", "list")),
+        ),
+        Operation(
+            name="watch.cancel",
+            summary=(
+                "Cancel an active watch. A person, the watch's owner or the "
+                "session it would wake may."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=CancelWatchParams,
+            result_model=WatchResult,
+            handler=services.cancel_watch,
+            route=HttpRoute("POST", "/watches/cancel"),
+            cli=CliBinding(("watch", "cancel")),
+        ),
+        Operation(
             name="decision.ask",
             summary=(
                 "Ask a person to decide (WI-1321): a question, 2-4 options "
@@ -1401,6 +1470,9 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "answer; a permission prompt (approval.kind permission or "
                 "read-outside-cwd) only a person's — an agent is refused "
                 "(403 person_required) and should leave it for the Inbox. "
+                "One exception: an oversight session may answer a "
+                "worker's permission prompt (not read-outside-cwd); the "
+                "engine checks its role and audits it with the command. "
                 "Pass expect_question = approval.question so a stale answer "
                 "is refused. Audited. Takes either id."
             ),
@@ -1575,6 +1647,30 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.report_blocked,
             route=HttpRoute("POST", "/sessions/blocked"),
             cli=CliBinding(("session", "blocked")),
+        ),
+        # A session's own typed report (WI-2039): progress, result, question
+        # or blocker, with the facts oversight would otherwise scrape from its
+        # transcript. `work.write`, as for report_blocked: the agent's own
+        # account of its own session, audited with the text.
+        Operation(
+            name="session.report",
+            summary=(
+                "Post this session's short typed report — kind progress, "
+                "result, question or blocker — with summary, branch/sha/pr, "
+                "checks run, blockers and next step. Shown as the latest "
+                "report on session_list/session_sweep/session_digest, raised "
+                "in the Inbox and left as a note on the work item (the "
+                "session's bound item unless `work_item` names one). Post a "
+                "`result` when the deliverable is done. Omit `id` from inside "
+                "a session Vogt started."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=SessionReportParams,
+            result_model=SessionReportResult,
+            handler=services.report_session,
+            route=HttpRoute("POST", "/sessions/report"),
+            cli=CliBinding(("session", "report")),
         ),
         Operation(
             name="session.report_unblocked",
@@ -2075,6 +2171,21 @@ def build_operations() -> list[Operation[Any, Any]]:
             cli=CliBinding(("deployed-versions",)),
         ),
         Operation(
+            name="usage.board",
+            summary="Usage board: each configured provider account's reported "
+            "rate-limit windows, limit hits and reset times (Claude, Codex), "
+            "each LiteLLM key's spend, and the keys at or over their day-spend "
+            "alert. Read now from the accounts' transcripts and LiteLLM "
+            "/key/info; nothing is stored.",
+            scope="read",
+            mutating=False,
+            params_model=UsageBoardParams,
+            result_model=UsageBoardResult,
+            handler=services.usage_board_read,
+            route=HttpRoute("GET", "/usage-board"),
+            cli=CliBinding(("usage", "board")),
+        ),
+        Operation(
             name="inbox.list",
             summary="List the normalized attention Inbox with coverage.",
             scope="read",
@@ -2117,6 +2228,44 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.restore_inbox,
             route=HttpRoute("POST", "/inbox/restore"),
             cli=CliBinding(("inbox", "restore")),
+        ),
+        # -- charters (WI-2038) ---------------------------------------------
+        #
+        # Standing instructions per scope, carried into every session brief
+        # started there: workspace, then project, then initiative, then the
+        # brief. `work.write`, because a charter steers every worker started
+        # on the scope; versioned and audited.
+        Operation(
+            name="charter.get",
+            summary=(
+                "Read the charter (standing instructions injected into every "
+                "session brief) of the workspace, a project or an initiative "
+                "(scope + ref slug). history=true adds earlier versions."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=CharterGetParams,
+            result_model=CharterGetResult,
+            handler=services.get_charter,
+            route=HttpRoute("GET", "/charters"),
+            cli=CliBinding(("charter", "get")),
+        ),
+        Operation(
+            name="charter.set",
+            summary=(
+                "Set the charter of the workspace, a project or an initiative: "
+                "Markdown injected into every session brief started there "
+                "(workspace, then project, then initiative, then the brief) "
+                "and into Codex developer_instructions. Writes the next "
+                "version; empty body clears; optional expected_version."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=CharterSetParams,
+            result_model=CharterSetResult,
+            handler=services.set_charter,
+            route=HttpRoute("POST", "/charters"),
+            cli=CliBinding(("charter", "set")),
         ),
         # -- per-actor preferences ------------------------------------------
         #

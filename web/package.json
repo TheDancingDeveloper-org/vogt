@@ -1,6 +1,6 @@
 {
   "name": "vogt-web",
-  "version": "0.7.17",
+  "version": "0.7.22",
   "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",

@@ -627,6 +627,10 @@ export interface SessionSummary {
   alive?: boolean | null;
   /** `oversight` or `worker` (WI-957); null when the engine was not asked. */
   role?: SessionRole | null;
+  /** The engine session id of the session that started this one (WI-1323);
+   *  null for a person's start. The rail nests workers under it (WI-1736). */
+  started_by_session?: string | null;
+  started_by_kind?: "person" | "oversight" | "worker" | null;
 }
 
 /** One branch bound to a work item.
@@ -1102,7 +1106,14 @@ export const listSessions = (
   params: Record<string, unknown> = {},
   signal?: AbortSignal,
 ) =>
-  call<{ sessions: SessionSummary[]; engine?: string | null }>(
+  call<{
+    sessions: SessionSummary[];
+    engine?: string | null;
+    /** More links match than this page returned (WI-1736). */
+    truncated?: boolean;
+    /** How many the engine left out of its default list (WI-1289). */
+    hidden_count?: number;
+  }>(
     "session.list",
     { mode: "full", ...params },
     "GET",
