@@ -6,8 +6,11 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::{Backend, Reply, login_reply};
-use crate::api::{ApiError, Auth, LoginResult, ServerEvent, SessionListBody, WorkDetail, encode_query, normalise_base};
+use super::{Backend, DiffRequest, Reply, login_reply};
+use crate::api::{
+    ApiError, Auth, GitDiff, GitStatus, LoginResult, OperationalStatus, ServerEvent, SessionListBody, WorkDetail,
+    encode_query, normalise_base,
+};
 use crate::sse::SseParser;
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -106,6 +109,42 @@ impl Backend for HttpBackend {
         let reference = reference.to_owned();
         ehttp::fetch(request, move |result| {
             sink.push(Reply::WorkItem(reference, decode::<WorkDetail>(result).map(Box::new)))
+        });
+    }
+
+    fn fetch_workspace_root(&mut self, auth: &Auth) {
+        let request = authed(ehttp::Request::get(format!("{}/api/status", auth.base)), auth);
+        let sink = self.sink();
+        ehttp::fetch(request, move |result| {
+            sink.push(Reply::WorkspaceRoot(
+                decode::<OperationalStatus>(result).map(|s| s.storage.workspace_root),
+            ));
+        });
+    }
+
+    fn fetch_git_status(&mut self, auth: &Auth, repo: &str) {
+        let url = format!("{}/api/git/status?repo={}", auth.base, encode_query(repo));
+        let request = authed(ehttp::Request::get(url), auth);
+        let sink = self.sink();
+        let repo = repo.to_owned();
+        ehttp::fetch(request, move |result| {
+            sink.push(Reply::GitStatus(repo, decode::<GitStatus>(result)))
+        });
+    }
+
+    fn fetch_git_diff(&mut self, auth: &Auth, request: &DiffRequest) {
+        let url = format!(
+            "{}/api/git/diff?repo={}&path={}&staged={}",
+            auth.base,
+            encode_query(&request.repo),
+            encode_query(&request.path),
+            request.staged
+        );
+        let http = authed(ehttp::Request::get(url), auth);
+        let sink = self.sink();
+        let request = request.clone();
+        ehttp::fetch(http, move |result| {
+            sink.push(Reply::GitDiff(request, decode::<GitDiff>(result)))
         });
     }
 

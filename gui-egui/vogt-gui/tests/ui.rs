@@ -125,3 +125,37 @@ fn work_item_detail_renders_markdown_and_comments() {
     harness.run_steps(4);
     assert!(harness.query_by_label_contains("Could not read").is_some());
 }
+
+#[test]
+fn git_screen_lists_changes_and_shows_a_diff_both_ways() {
+    let (mut harness, fixture) = harness();
+    // One session, so its "Changes" button is the only one.
+    fixture.borrow_mut().sessions.retain(|s| s.id == "s2");
+    sign_in(&mut harness);
+    harness.get_by_label("Changes").click();
+    harness.run_steps(4);
+    assert_eq!(harness.state().model.screen, Screen::Git);
+    harness.get_by_label("Changes in WI-1806");
+    harness.get_by_label("wi-1806-gui");
+    harness.get_by_label("src/app.rs");
+    harness.get_by_label("notes.txt");
+    harness.get_by_label("Select a file to see its diff.");
+
+    harness.get_by_label("README.md").click();
+    harness.run_steps(4);
+    harness.get_by_label("Diff of README.md: 2 additions, 0 removals");
+    harness.get_by_label("+2 −0");
+    assert!(harness.state().model.git.side_by_side);
+
+    // Inline mode draws the same diff in one column.
+    harness.get_by_label("Side by side").click();
+    harness.run_steps(2);
+    assert!(!harness.state().model.git.side_by_side);
+    harness.get_by_label("Diff of README.md: 2 additions, 0 removals");
+
+    let calls = fixture.borrow().calls.clone();
+    assert!(calls.iter().any(|c| c == "git status WI-1806"));
+    assert!(calls.iter().any(|c| c == "git diff WI-1806 README.md"));
+    // Read-only: the screen sends no git operation.
+    assert!(!calls.iter().any(|c| c.starts_with("git op")));
+}

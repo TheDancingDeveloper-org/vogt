@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use web_time::Instant;
 
-use crate::api::{ApiError, Auth, ServerEvent, Session, WorkDetail, normalise_base};
-use crate::backend::{Backend, Reply};
+use crate::api::{ApiError, Auth, GitDiff, GitStatus, ServerEvent, Session, WorkDetail, normalise_base, repo_for_cwd};
+use crate::backend::{Backend, DiffRequest, Reply};
 use crate::backoff::Backoff;
 
 /// How long a live stream may go silent before it is treated as dead. The
@@ -33,6 +33,12 @@ pub enum Command {
     FetchSessions,
     /// Read a work item.
     FetchWorkItem(String),
+    /// Read the engine's workspace root.
+    FetchWorkspaceRoot,
+    /// Read a repository's changed files.
+    FetchGitStatus(String),
+    /// Read one file's diff.
+    FetchGitDiff(DiffRequest),
     /// Open the event stream as this generation.
     OpenEvents(u64),
     /// Close the event stream.
@@ -48,6 +54,8 @@ pub enum Screen {
     Sessions,
     /// One work item.
     WorkItem,
+    /// A session's changed files and their diffs.
+    Git,
 }
 
 /// The state of the live event stream.
@@ -98,6 +106,66 @@ pub enum WorkView {
     Failed(String, String),
 }
 
+/// The changed-file list on the Git page.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum GitListView {
+    /// No session chosen.
+    #[default]
+    Empty,
+    /// Waiting for the workspace root or the status.
+    Loading,
+    /// The session's directory is outside the workspace, so the engine cannot
+    /// read it.
+    Outside,
+    /// The directory is not in a Git repository.
+    NotRepo,
+    /// Loaded.
+    Loaded(GitStatus),
+    /// The read failed.
+    Failed(String),
+}
+
+/// The diff pane on the Git page.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum DiffPane {
+    /// No file selected.
+    #[default]
+    Empty,
+    /// Waiting for this file.
+    Loading(DiffRequest),
+    /// Loaded.
+    Loaded(DiffRequest, GitDiff),
+    /// The read failed.
+    Failed(DiffRequest, String),
+}
+
+impl DiffPane {
+    /// The file this pane is for, if any.
+    pub fn request(&self) -> Option<&DiffRequest> {
+        match self {
+            Self::Empty => None,
+            Self::Loading(r) | Self::Loaded(r, _) | Self::Failed(r, _) => Some(r),
+        }
+    }
+}
+
+/// The read-only Git page for one session.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GitPage {
+    /// The session's name.
+    pub session: String,
+    /// The session's working directory.
+    pub cwd: String,
+    /// Its `repo` parameter, once the workspace root is known.
+    pub repo: Option<String>,
+    /// The changed files.
+    pub list: GitListView,
+    /// The selected file's diff.
+    pub diff: DiffPane,
+    /// Show the diff side by side rather than inline.
+    pub side_by_side: bool,
+}
+
 /// The whole app state.
 #[derive(Debug)]
 pub struct Model {
@@ -123,6 +191,10 @@ pub struct Model {
     pub work_ref: String,
     /// The work-item page.
     pub work: WorkView,
+    /// The Git page.
+    pub git: GitPage,
+    /// The engine's workspace root, once read.
+    pub workspace_root: Option<String>,
     generation: u64,
     backoff: Backoff,
     /// When the current stream last delivered anything.
@@ -147,6 +219,11 @@ impl Model {
             stream: StreamState::Off,
             work_ref: String::new(),
             work: WorkView::Empty,
+            git: GitPage {
+                side_by_side: true,
+                ..GitPage::default()
+            },
+            workspace_root: None,
             generation: 0,
             backoff: Backoff::default(),
             stream_seen: None,
@@ -195,6 +272,11 @@ impl Model {
         self.sessions.clear();
         self.sessions_read_at = None;
         self.work = WorkView::Empty;
+        self.git = GitPage {
+            side_by_side: self.git.side_by_side,
+            ..GitPage::default()
+        };
+        self.workspace_root = None;
         self.stream = StreamState::Off;
         self.screen = Screen::Login;
         self.login.busy = false;
@@ -213,6 +295,74 @@ impl Model {
         self.work_ref = reference.clone();
         self.work = WorkView::Loading(reference.clone());
         vec![Command::FetchWorkItem(reference)]
+    }
+
+    /// Open the Git page for session `id`. The engine reads repositories by
+    /// their path under its workspace root, so the root is read first if it
+    /// is not known yet.
+    pub fn open_git(&mut self, id: &str) -> Vec<Command> {
+        let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
+            return Vec::new();
+        };
+        self.screen = Screen::Git;
+        self.git = GitPage {
+            session: session.name.clone(),
+            cwd: session.cwd.clone(),
+            side_by_side: self.git.side_by_side,
+            list: GitListView::Loading,
+            ..GitPage::default()
+        };
+        match self.workspace_root.clone() {
+            Some(root) => self.resolve_repo(&root),
+            None => vec![Command::FetchWorkspaceRoot],
+        }
+    }
+
+    /// Re-read the Git page's file list and the open diff.
+    pub fn refresh_git(&mut self) -> Vec<Command> {
+        let Some(repo) = self.git.repo.clone() else {
+            return Vec::new();
+        };
+        self.git.list = GitListView::Loading;
+        let mut commands = vec![Command::FetchGitStatus(repo)];
+        if let Some(request) = self.git.diff.request().cloned() {
+            self.git.diff = DiffPane::Loading(request.clone());
+            commands.push(Command::FetchGitDiff(request));
+        }
+        commands
+    }
+
+    /// Show the diff of the changed file at `path`.
+    pub fn select_file(&mut self, path: &str) -> Vec<Command> {
+        let (Some(repo), GitListView::Loaded(status)) = (&self.git.repo, &self.git.list) else {
+            return Vec::new();
+        };
+        let Some(entry) = status.entries.iter().find(|e| e.path == path) else {
+            return Vec::new();
+        };
+        let request = DiffRequest {
+            repo: repo.clone(),
+            path: entry.path.clone(),
+            staged: entry.is_staged(),
+        };
+        if self.git.diff.request() == Some(&request) && !matches!(self.git.diff, DiffPane::Failed(..)) {
+            return Vec::new();
+        }
+        self.git.diff = DiffPane::Loading(request.clone());
+        vec![Command::FetchGitDiff(request)]
+    }
+
+    fn resolve_repo(&mut self, root: &str) -> Vec<Command> {
+        match repo_for_cwd(root, &self.git.cwd) {
+            Some(repo) => {
+                self.git.repo = Some(repo.clone());
+                vec![Command::FetchGitStatus(repo)]
+            }
+            None => {
+                self.git.list = GitListView::Outside;
+                Vec::new()
+            }
+        }
     }
 
     /// Show the session list.
@@ -298,6 +448,63 @@ impl Model {
                     }
                     Err(error) => self.refused(&error).unwrap_or_else(|| {
                         self.work = WorkView::Failed(reference, error.to_string());
+                        Vec::new()
+                    }),
+                }
+            }
+            Reply::WorkspaceRoot(result) => match result {
+                Ok(root) => {
+                    self.workspace_root = Some(root.clone());
+                    if self.git.list == GitListView::Loading && self.git.repo.is_none() {
+                        self.resolve_repo(&root)
+                    } else {
+                        Vec::new()
+                    }
+                }
+                Err(error) => self.refused(&error).unwrap_or_else(|| {
+                    if self.git.repo.is_none() && self.git.list == GitListView::Loading {
+                        self.git.list = GitListView::Failed(format!("Could not read the workspace root: {error}"));
+                    }
+                    Vec::new()
+                }),
+            },
+            Reply::GitStatus(repo, result) => {
+                if self.git.repo.as_deref() != Some(repo.as_str()) {
+                    return Vec::new(); // another session's page
+                }
+                match result {
+                    Ok(status) if !status.is_repo => {
+                        self.git.list = GitListView::NotRepo;
+                        self.git.diff = DiffPane::Empty;
+                        Vec::new()
+                    }
+                    Ok(status) => {
+                        // Drop the open diff if its file is no longer changed.
+                        if let Some(request) = self.git.diff.request()
+                            && !status.entries.iter().any(|e| e.path == request.path)
+                        {
+                            self.git.diff = DiffPane::Empty;
+                        }
+                        self.git.list = GitListView::Loaded(status);
+                        Vec::new()
+                    }
+                    Err(error) => self.refused(&error).unwrap_or_else(|| {
+                        self.git.list = GitListView::Failed(error.to_string());
+                        Vec::new()
+                    }),
+                }
+            }
+            Reply::GitDiff(request, result) => {
+                if self.git.diff != DiffPane::Loading(request.clone()) {
+                    return Vec::new(); // the user has moved on
+                }
+                match result {
+                    Ok(diff) => {
+                        self.git.diff = DiffPane::Loaded(request, diff);
+                        Vec::new()
+                    }
+                    Err(error) => self.refused(&error).unwrap_or_else(|| {
+                        self.git.diff = DiffPane::Failed(request, error.to_string());
                         Vec::new()
                     }),
                 }
@@ -446,6 +653,21 @@ pub fn run(commands: Vec<Command>, model: &Model, backend: &mut dyn Backend) {
             Command::FetchWorkItem(reference) => {
                 if let Some(auth) = &model.auth {
                     backend.fetch_work_item(auth, &reference);
+                }
+            }
+            Command::FetchWorkspaceRoot => {
+                if let Some(auth) = &model.auth {
+                    backend.fetch_workspace_root(auth);
+                }
+            }
+            Command::FetchGitStatus(repo) => {
+                if let Some(auth) = &model.auth {
+                    backend.fetch_git_status(auth, &repo);
+                }
+            }
+            Command::FetchGitDiff(request) => {
+                if let Some(auth) = &model.auth {
+                    backend.fetch_git_diff(auth, &request);
                 }
             }
             Command::OpenEvents(generation) => {
@@ -685,5 +907,124 @@ mod tests {
         let _ = model.open_work_item("WI-2");
         model.apply(Reply::WorkItem("WI-1".into(), Ok(Box::default())), now);
         assert_eq!(model.work, WorkView::Loading("WI-2".into()));
+    }
+
+    fn open_git(model: &mut Model, backend: &mut FixtureBackend, now: Instant, id: &str) {
+        let commands = model.open_git(id);
+        run(commands, model, backend);
+        settle(model, backend, now);
+    }
+
+    #[test]
+    fn git_page_lists_changed_files_of_the_session() {
+        let (mut model, mut backend, now) = signed_in();
+        let before = backend.calls.len();
+        open_git(&mut model, &mut backend, now, "s2");
+        assert_eq!(model.screen, Screen::Git);
+        assert_eq!(backend.calls[before..], ["status", "git status WI-1806"]);
+        assert_eq!(model.git.repo.as_deref(), Some("WI-1806"));
+        let GitListView::Loaded(status) = &model.git.list else {
+            panic!("{:?}", model.git.list)
+        };
+        let paths: Vec<_> = status.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["src/app.rs", "README.md", "notes.txt"]);
+
+        // The root is read once.
+        let before = backend.calls.len();
+        open_git(&mut model, &mut backend, now, "s1");
+        assert_eq!(backend.calls[before..], ["git status oversight"]);
+        assert_eq!(model.git.list, GitListView::NotRepo);
+    }
+
+    #[test]
+    fn selecting_a_file_loads_its_diff_staged_or_not() {
+        let (mut model, mut backend, now) = signed_in();
+        open_git(&mut model, &mut backend, now, "s2");
+        let commands = model.select_file("README.md");
+        assert_eq!(
+            commands,
+            vec![Command::FetchGitDiff(DiffRequest {
+                repo: "WI-1806".into(),
+                path: "README.md".into(),
+                staged: true,
+            })]
+        );
+        run(commands, &model, &mut backend);
+        settle(&mut model, &mut backend, now);
+        let DiffPane::Loaded(request, diff) = &model.git.diff else {
+            panic!("{:?}", model.git.diff)
+        };
+        assert!(request.staged);
+        assert_eq!(diff.head, "# Vogt\n");
+        // Selecting it again does not re-read.
+        assert!(model.select_file("README.md").is_empty());
+        // Unknown paths are ignored.
+        assert!(model.select_file("nope").is_empty());
+
+        let commands = model.select_file("src/app.rs");
+        run(commands, &model, &mut backend);
+        settle(&mut model, &mut backend, now);
+        assert!(matches!(&model.git.diff, DiffPane::Loaded(r, d) if !r.staged && d.current.contains("Vogt")));
+    }
+
+    #[test]
+    fn late_diff_for_another_file_is_dropped() {
+        let (mut model, mut backend, now) = signed_in();
+        open_git(&mut model, &mut backend, now, "s2");
+        let _ = model.select_file("src/app.rs");
+        let stale = DiffRequest {
+            repo: "WI-1806".into(),
+            path: "README.md".into(),
+            staged: true,
+        };
+        model.apply(Reply::GitDiff(stale, Ok(GitDiff::default())), now);
+        assert!(matches!(&model.git.diff, DiffPane::Loading(r) if r.path == "src/app.rs"));
+    }
+
+    #[test]
+    fn refresh_drops_a_diff_whose_file_is_clean_now() {
+        let (mut model, mut backend, now) = signed_in();
+        open_git(&mut model, &mut backend, now, "s2");
+        let commands = model.select_file("notes.txt");
+        run(commands, &model, &mut backend);
+        settle(&mut model, &mut backend, now);
+        if let Some(status) = backend.git.get_mut("WI-1806") {
+            status.entries.retain(|e| e.path != "notes.txt");
+        }
+        backend.diffs.clear();
+        let commands = model.refresh_git();
+        run(commands, &model, &mut backend);
+        settle(&mut model, &mut backend, now);
+        assert_eq!(model.git.diff, DiffPane::Empty);
+        assert!(matches!(&model.git.list, GitListView::Loaded(s) if s.entries.len() == 2));
+    }
+
+    #[test]
+    fn session_outside_the_workspace_is_said_so() {
+        let (mut model, mut backend, now) = signed_in();
+        backend.workspace_root = "/elsewhere".into();
+        open_git(&mut model, &mut backend, now, "s2");
+        assert_eq!(model.git.list, GitListView::Outside);
+        assert!(model.git.repo.is_none());
+    }
+
+    #[test]
+    fn git_401_signs_out() {
+        let (mut model, mut backend, now) = signed_in();
+        open_git(&mut model, &mut backend, now, "s2");
+        let commands = model.apply(
+            Reply::GitStatus(
+                "WI-1806".into(),
+                Err(ApiError {
+                    status: Some(401),
+                    message: "no".into(),
+                }),
+            ),
+            now,
+        );
+        assert_eq!(commands, vec![Command::CloseEvents]);
+        assert_eq!(model.screen, Screen::Login);
+        assert_eq!(model.git.list, GitListView::Empty);
+        assert!(model.workspace_root.is_none());
     }
 }

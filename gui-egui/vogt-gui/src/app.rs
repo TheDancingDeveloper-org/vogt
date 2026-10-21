@@ -3,12 +3,14 @@
 
 use egui::{Align, Layout, RichText, Ui};
 use fluent2_egui::controls::{Appearance, Button};
+use fluent2_egui::data::diff::{DiffMode, DiffModel, DiffView};
 use fluent2_egui::data::markdown::{Document, LinkTarget, MarkdownView, default_link_policy};
-use fluent2_egui::{Badge, BadgeAppearance, BadgeColor, Card, Divider, Field, Input, Theme};
+use fluent2_egui::{Badge, BadgeAppearance, BadgeColor, Card, Divider, Field, Input, Switch, Theme};
 use web_time::Instant;
 
-use crate::backend::Backend;
-use crate::model::{self, Command, Model, Screen, StreamState, WorkView};
+use crate::api::GitEntry;
+use crate::backend::{Backend, DiffRequest};
+use crate::model::{self, Command, DiffPane, GitListView, Model, Screen, StreamState, WorkView};
 
 /// Parsed markdown for the loaded work item, so it is not re-parsed each frame.
 struct Docs {
@@ -23,6 +25,8 @@ pub struct VogtApp {
     pub model: Model,
     backend: Box<dyn Backend>,
     docs: Option<Docs>,
+    /// The diff of the open file, built once per load rather than each frame.
+    diff: Option<(DiffRequest, DiffModel)>,
     theme_installed: bool,
 }
 
@@ -36,6 +40,7 @@ impl VogtApp {
             model: Model::new(base),
             backend,
             docs: None,
+            diff: None,
             theme_installed: false,
         }
     }
@@ -76,6 +81,7 @@ impl VogtApp {
                 egui::Panel::top("vogt-top").show(ui, |ui| self.top_bar(ui, now));
                 egui::CentralPanel::default().show(ui, |ui| match self.model.screen {
                     Screen::Sessions => self.sessions_screen(ui),
+                    Screen::Git => self.git_screen(ui),
                     _ => self.work_item_screen(ui),
                 });
             }
@@ -147,6 +153,16 @@ impl VogtApp {
             if ui.add(work).clicked() {
                 self.model.screen = Screen::WorkItem;
             }
+            if !self.model.git.session.is_empty() {
+                let git = Button::new("Git").appearance(if self.model.screen == Screen::Git {
+                    Appearance::Primary
+                } else {
+                    Appearance::Subtle
+                });
+                if ui.add(git).clicked() {
+                    self.model.screen = Screen::Git;
+                }
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add(Button::new("Sign out").appearance(Appearance::Subtle)).clicked() {
                     commands = self.model.sign_out(None);
@@ -178,6 +194,7 @@ impl VogtApp {
             ui.label("No sessions.");
         }
         let mut open_ref = None;
+        let mut open_git = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for session in &self.model.sessions {
                 ui.horizontal(|ui| {
@@ -191,6 +208,9 @@ impl VogtApp {
                         ui.weak(format!("exit {code}"));
                     }
                     ui.weak(&session.cwd);
+                    if ui.add(Button::new("Changes").appearance(Appearance::Subtle)).clicked() {
+                        open_git = Some(session.id.clone());
+                    }
                     if let Some(reference) = work_ref_in(&session.name)
                         && ui
                             .add(Button::new(format!("Open {reference}")).appearance(Appearance::Subtle))
@@ -204,6 +224,9 @@ impl VogtApp {
         });
         if let Some(reference) = open_ref {
             commands = self.model.open_work_item(&reference);
+        }
+        if let Some(id) = open_git {
+            commands = self.model.open_git(&id);
         }
         self.run(commands);
     }
@@ -301,6 +324,133 @@ impl VogtApp {
     }
 }
 
+impl VogtApp {
+    /// A session's changed files, and the selected one's diff. Read-only.
+    fn git_screen(&mut self, ui: &mut Ui) {
+        let mut commands = Vec::new();
+        let mut refresh = false;
+        let page = &mut self.model.git;
+        ui.horizontal(|ui| {
+            ui.heading(format!("Changes in {}", page.session));
+            if let GitListView::Loaded(status) = &page.list {
+                ui.add(Badge::new(status.branch.as_str()).appearance(BadgeAppearance::Tint));
+                if status.ahead > 0 || status.behind > 0 {
+                    ui.weak(format!("↑{} ↓{}", status.ahead, status.behind));
+                }
+            }
+            ui.add(Switch::new(&mut page.side_by_side, "Side by side"));
+            refresh = ui.add(Button::new("Refresh").appearance(Appearance::Subtle)).clicked();
+        });
+        if refresh {
+            commands = self.model.refresh_git();
+        }
+        ui.weak(&self.model.git.cwd);
+        ui.add_space(8.0);
+
+        let mut selected = None;
+        let page = &self.model.git;
+        match &page.list {
+            GitListView::Empty => {
+                ui.label("Pick a session's Changes on the Sessions page.");
+            }
+            GitListView::Loading => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Reading git status…");
+                });
+            }
+            GitListView::Outside => {
+                ui.label("This session works outside the engine's workspace, so its changes cannot be read.");
+            }
+            GitListView::NotRepo => {
+                ui.label("This session's directory is not in a Git repository.");
+            }
+            GitListView::Failed(error) => {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Could not read git status: {error}"),
+                );
+            }
+            GitListView::Loaded(status) if status.entries.is_empty() => {
+                ui.label("No changes.");
+            }
+            GitListView::Loaded(status) => {
+                let open = page.diff.request().map(|r| r.path.as_str());
+                egui::Panel::left("git-files")
+                    .resizable(true)
+                    .default_size(260.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for entry in &status.entries {
+                                ui.horizontal(|ui| {
+                                    let (mark, color) = change_mark(entry);
+                                    ui.add(Badge::new(mark).appearance(BadgeAppearance::Tint).color(color));
+                                    if ui
+                                        .selectable_label(open == Some(entry.path.as_str()), &entry.path)
+                                        .clicked()
+                                    {
+                                        selected = Some(entry.path.clone());
+                                    }
+                                });
+                            }
+                        });
+                    });
+                self.diff_pane(ui);
+            }
+        }
+        if let Some(path) = selected {
+            commands = self.model.select_file(&path);
+        }
+        self.run(commands);
+    }
+
+    fn diff_pane(&mut self, ui: &mut Ui) {
+        let page = &self.model.git;
+        match &page.diff {
+            DiffPane::Empty => {
+                self.diff = None;
+                ui.label("Select a file to see its diff.");
+            }
+            DiffPane::Loading(request) => {
+                self.diff = None;
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("Loading {}…", request.path));
+                });
+            }
+            DiffPane::Failed(request, error) => {
+                self.diff = None;
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Could not read the diff of {}: {error}", request.path),
+                );
+            }
+            DiffPane::Loaded(request, diff) => {
+                if self.diff.as_ref().is_none_or(|(r, _)| r != request) {
+                    self.diff = Some((request.clone(), DiffModel::new(&diff.head, &diff.current)));
+                }
+                let Some((_, model)) = &self.diff else { return };
+                ui.horizontal(|ui| {
+                    ui.strong(&request.path);
+                    if request.staged {
+                        ui.weak("staged");
+                    }
+                    ui.weak(format!("+{} −{}", model.additions(), model.removals()));
+                });
+                let mode = if page.side_by_side {
+                    DiffMode::SideBySide
+                } else {
+                    DiffMode::Inline
+                };
+                DiffView::new(("git-diff", &request.path))
+                    .mode(mode)
+                    .label(format!("Diff of {}", request.path))
+                    .show(ui, model);
+            }
+        }
+    }
+}
+
 impl eframe::App for VogtApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.frame(ui);
@@ -330,6 +480,18 @@ fn activity_color(activity: &str) -> BadgeColor {
         "awaiting-approval" | "blocked" => BadgeColor::Warning,
         "exited" => BadgeColor::Subtle,
         _ => BadgeColor::Informative,
+    }
+}
+
+/// The short mark and colour for a changed file.
+fn change_mark(entry: &GitEntry) -> (&'static str, BadgeColor) {
+    match entry.kind.as_str() {
+        "untracked" => ("new", BadgeColor::Success),
+        "staged" => ("staged", BadgeColor::Brand),
+        "deleted" => ("deleted", BadgeColor::Danger),
+        "renamed" => ("renamed", BadgeColor::Informative),
+        "conflicted" => ("conflict", BadgeColor::Warning),
+        _ => ("modified", BadgeColor::Informative),
     }
 }
 

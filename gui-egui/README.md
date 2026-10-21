@@ -18,6 +18,14 @@ Slice 1 (WI-2003) covers:
   and comments render through fluent2's `MarkdownView`. The page re-reads when
   the stream reports a `vogt-changed` for the item.
 
+The Git diff screen (WI-2008) is read-only. The **Changes** button on a
+session row reads `GET /api/git/status` for the session's working directory.
+The engine takes `repo` relative to its workspace root, which the app reads
+once from `GET /api/status`. A directory outside the workspace is reported as
+such, not requested. Selecting a file reads `GET /api/git/diff` (the staged
+diff for a staged file) and shows it in fluent2's `DiffView`, side by side or
+inline.
+
 The remaining screens are child items of WI-1806 (WI-2004 to WI-2015).
 
 ## Layout

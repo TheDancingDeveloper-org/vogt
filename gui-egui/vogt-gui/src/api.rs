@@ -120,6 +120,88 @@ pub struct WorkDetail {
     pub comments: Vec<Comment>,
 }
 
+/// The part of `GET /api/status` this app reads.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct OperationalStatus {
+    pub(crate) storage: StorageStatus,
+}
+
+/// Where the engine keeps its files.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct StorageStatus {
+    /// The root every `repo` and `path` parameter is relative to.
+    pub(crate) workspace_root: String,
+}
+
+/// One changed file in `GET /api/git/status`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitEntry {
+    /// Path relative to the repository.
+    pub path: String,
+    /// The index column of `git status --porcelain`.
+    pub index: String,
+    /// The worktree column.
+    pub worktree: String,
+    /// `untracked`, `modified`, `staged`, `conflicted`, `renamed` or `deleted`.
+    pub kind: String,
+}
+
+impl GitEntry {
+    /// The change is in the index, so its diff is index against HEAD.
+    pub fn is_staged(&self) -> bool {
+        self.kind == "staged"
+    }
+}
+
+/// The reply to `GET /api/git/status`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitStatus {
+    /// The repository, relative to the workspace root.
+    pub repo: String,
+    /// False when the directory is not in a Git repository.
+    #[serde(default = "yes")]
+    pub is_repo: bool,
+    /// The current branch.
+    pub branch: String,
+    /// Commits ahead of upstream.
+    pub ahead: u32,
+    /// Commits behind upstream.
+    pub behind: u32,
+    /// The changed files.
+    pub entries: Vec<GitEntry>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The reply to `GET /api/git/diff`: the file at HEAD and as it is now.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitDiff {
+    /// Path relative to the repository.
+    pub path: String,
+    /// The text at HEAD (empty for a new file).
+    pub head: String,
+    /// The text now: the index for a staged diff, else the worktree.
+    pub current: String,
+}
+
+/// The `repo` parameter for a session working in `cwd`: its path relative to
+/// the engine's workspace root, or `None` when `cwd` is outside it.
+pub fn repo_for_cwd(root: &str, cwd: &str) -> Option<String> {
+    let root = root.trim_end_matches('/');
+    let rest = cwd.strip_prefix(root)?;
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return None; // `/work2` is not under `/work`
+    }
+    Some(rest.trim_matches('/').to_owned())
+}
+
 /// One event on `GET /api/events`. Kinds this slice does not use decode to
 /// [`ServerEvent::Other`] instead of failing.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -297,6 +379,27 @@ mod tests {
         );
         assert_eq!(ApiError::from_status(502, b"<html>").message, "HTTP 502");
         assert!(ApiError::from_status(401, b"").is_unauthorized());
+    }
+
+    #[test]
+    fn repo_is_cwd_relative_to_the_root() {
+        assert_eq!(repo_for_cwd("/work", "/work/vogt").as_deref(), Some("vogt"));
+        assert_eq!(repo_for_cwd("/work/", "/work/a/b/").as_deref(), Some("a/b"));
+        assert_eq!(repo_for_cwd("/work", "/work").as_deref(), Some(""));
+        assert_eq!(repo_for_cwd("/work", "/work2/x"), None);
+        assert_eq!(repo_for_cwd("/work", "/home/x"), None);
+    }
+
+    #[test]
+    fn git_status_decodes_and_defaults_to_a_repo() {
+        let status: GitStatus = serde_json::from_str(
+            r#"{"repo":"vogt","branch":"main","ahead":1,"behind":0,"entries":[{"path":"a.rs","index":"M","worktree":" ","kind":"staged"}]}"#,
+        )
+        .unwrap();
+        assert!(status.is_repo);
+        assert!(status.entries[0].is_staged());
+        let plain: GitStatus = serde_json::from_str(r#"{"repo":"x","is_repo":false}"#).unwrap();
+        assert!(!plain.is_repo && plain.entries.is_empty());
     }
 
     #[test]

@@ -11,7 +11,7 @@ mod http;
 pub use fixture::{FixtureBackend, session};
 pub use http::HttpBackend;
 
-use crate::api::{ApiError, Auth, LoginResult, ServerEvent, Session, WorkDetail};
+use crate::api::{ApiError, Auth, GitDiff, GitStatus, LoginResult, ServerEvent, Session, WorkDetail};
 
 /// An answer from the backend.
 #[derive(Clone, Debug, PartialEq)]
@@ -31,6 +31,12 @@ pub enum Reply {
     Sessions(Result<Vec<Session>, ApiError>),
     /// A work item, by the reference it was asked for under.
     WorkItem(String, Result<Box<WorkDetail>, ApiError>),
+    /// The engine's workspace root.
+    WorkspaceRoot(Result<String, ApiError>),
+    /// Git status, by the `repo` it was asked for under.
+    GitStatus(String, Result<GitStatus, ApiError>),
+    /// One file's diff, by the request it answers.
+    GitDiff(DiffRequest, Result<GitDiff, ApiError>),
     /// The event stream with this generation opened.
     StreamOpened(u64),
     /// An event arrived on stream `generation`.
@@ -39,6 +45,17 @@ pub enum Reply {
     StreamAlive(u64),
     /// The stream with this generation ended or failed to open.
     StreamClosed(u64, ApiError),
+}
+
+/// Which file diff to read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiffRequest {
+    /// The repository, relative to the workspace root.
+    pub repo: String,
+    /// The file, relative to the repository.
+    pub path: String,
+    /// Index against HEAD rather than worktree against HEAD.
+    pub staged: bool,
 }
 
 /// A source of Vogt data. Every call returns at once; results come back
@@ -50,6 +67,12 @@ pub trait Backend {
     fn fetch_sessions(&mut self, auth: &Auth);
     /// Read one work item, with its comments.
     fn fetch_work_item(&mut self, auth: &Auth, reference: &str);
+    /// Read the engine's workspace root (`GET /api/status`).
+    fn fetch_workspace_root(&mut self, auth: &Auth);
+    /// Read the changed files of `repo`.
+    fn fetch_git_status(&mut self, auth: &Auth, repo: &str);
+    /// Read one file's diff.
+    fn fetch_git_diff(&mut self, auth: &Auth, request: &DiffRequest);
     /// Open the event stream as `generation`. Opening a new generation closes
     /// the previous one; replies tagged with an older generation are stale.
     fn open_events(&mut self, auth: &Auth, generation: u64);
