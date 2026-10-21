@@ -476,7 +476,9 @@ Rules:
   itself. Nothing is granted until a person approves it in the Inbox; you can
   never approve one yourself. Once it is approved, the target runs `vogt-agent-auth
   grants` to see it (with the reason it was approved for) and `vogt-agent-auth
-  fetch VAR` to use it, for that reason only. Ask for one item, for the
+  fetch VAR` to use it, for that reason only. For a command that reads the
+  token from its environment, run `vogt-agent-auth with VAR=GH_TOKEN -- gh …`
+  instead, so the value never passes through your shell. Ask for one item, for the
   shortest time that will do, with `uses=once` unless the task needs it
   repeatedly — a `once` grant is spent by its first fetch even if the fetch
   fails, so ask again rather than retry.

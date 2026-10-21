@@ -4482,6 +4482,19 @@ operator only: the stack secret, the break-glass token or an `admin`-scoped
 token; a `work.write` token, which every session holds, gets 403, because
 which secrets another session was granted is not every session's to read.
 
+**Using a grant with a command that reads its environment (WI-1343).**
+`gh` reads `GH_TOKEN` from its environment, so `fetch` alone would put the
+value through the agent's shell. `vogt-agent-auth with VAR[=ENVNAME] [VAR2...]
+-- <command> [args...]` fetches every VAR through the same broker route (a
+manifest entry or a live grant), exports each into the environment under
+ENVNAME (default VAR), and `exec`s the command: `vogt-agent-auth with
+GRANT_VERSENT_GH=GH_TOKEN -- gh pr create …`. All VARs are fetched before
+anything runs, so a refusal exits 1 with the broker's reason and runs nothing;
+`--` is required. The value never reaches argv, a file or a log line; stderr
+names the VARs and the command's first word, and each fetch is audited as
+usual. A grant meant for this should carry a `reason` such as
+`gh:Versent/<repo> pr create …`, so the use it was approved for is explicit.
+
 Grants live in memory. The session ending or hibernating, or the engine
 restarting, drops them, which fails closed. Every apply and revoke is audited
 as `event=session.grant`. The driven-session policy carries one allow rule,

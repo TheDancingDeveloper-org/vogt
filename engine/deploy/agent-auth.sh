@@ -277,6 +277,7 @@ Usage:
   vogt-agent-auth set <VAR>     (value on stdin)
   vogt-agent-auth store <VAR>   (value on stdin)
   vogt-agent-auth grants
+  vogt-agent-auth with VAR[=ENVNAME] [VAR2...] -- <command> [args...]
 
 Commands:
   check  Fetch credentials and validate secrets-manager access, any configured
@@ -297,6 +298,11 @@ Commands:
   grants (session-side) List the credential grants a person approved for this
          session (WI-973): VAR, secret, uses, expiry, grant id and the reason
          it was approved for. Never a value. Fetch one with `fetch VAR`.
+  with   (session-side) Fetch each VAR as `fetch` does (manifest entry or a
+         live grant), export it into the command's environment under ENVNAME
+         (default VAR), then exec the command. `GRANT_X=GH_TOKEN` hands a
+         grant to `gh`. The value never reaches argv or a file; a refused VAR
+         runs nothing and exits 1.
 EOF
 }
 
@@ -651,6 +657,54 @@ fetch_one() {
         403) die "secret broker refused $var (HTTP 403): ${body:-not in the manifest}" ;;
         *) die "secret broker failed for $var (HTTP $status): ${body:-<empty body>}" ;;
     esac
+}
+
+# `with VAR[=ENVNAME]... -- CMD`: run one command with broker-fetched
+# secrets in its environment (WI-1343). Every VAR is fetched before anything
+# runs, so a refusal (fetch_one's die, in its subshell) runs nothing. The
+# values go into this process's environment only at the point of `exec`, so
+# they reach the command's environment and never its argv, a file, or a log:
+# stderr names the VARs and the command's first word, never a value.
+with_cmd() {
+    local spec var envname value
+    local -a names=() envnames=() values=()
+    local arg found=0
+    for arg in "$@"; do
+        [[ "$arg" == "--" ]] && { found=1; break; }
+    done
+    [[ "$found" == "1" ]] || die "with requires -- before the command"
+    while [[ $# -gt 0 && "$1" != "--" ]]; do
+        spec="$1"
+        shift
+        var="${spec%%=*}"
+        envname="$var"
+        [[ "$spec" == *=* ]] && envname="${spec#*=}"
+        [[ "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "with: not a variable name: $var"
+        [[ "$envname" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "with: not a variable name: $envname"
+        names+=("$var")
+        envnames+=("$envname")
+    done
+    [[ "${1:-}" == "--" ]] || die "with requires -- before the command"
+    shift
+    [[ ${#names[@]} -gt 0 ]] || die "with requires at least one VAR"
+    [[ $# -gt 0 ]] || die "with requires a command after --"
+    local i
+    for i in "${!names[@]}"; do
+        value="$(fetch_one "${names[$i]}")" || exit 1
+        [[ -n "$value" ]] || die "secret broker returned an empty value for ${names[$i]}"
+        values+=("$value")
+    done
+    local logged=""
+    for i in "${!names[@]}"; do
+        logged+="${logged:+ }${names[$i]}"
+        [[ "${envnames[$i]}" != "${names[$i]}" ]] && logged+="=${envnames[$i]}"
+    done
+    printf 'vogt-agent-auth: with %s -- %s\n' "$logged" "$1" >&2
+    for i in "${!names[@]}"; do
+        export "${envnames[$i]}=${values[$i]}"
+    done
+    unset value values
+    exec "$@"
 }
 
 # `grants`: the session's half of an approved grant (WI-973). Lists what a
@@ -1026,6 +1080,10 @@ main() {
             ;;
         grants)
             list_grants
+            ;;
+        with)
+            shift
+            with_cmd "$@"
             ;;
         -h|--help|help)
             usage
