@@ -485,6 +485,59 @@ stays pinned and the bypass posture stays person-only.
 Any further MCP server an agent should reach is registered by hand inside the
 session, the way the Rust LSP entry above shows.
 
+### 4.1 Agent CLI adapter contract
+
+The engine drives four agent CLIs (Claude Code, Klaudia, the Codex fork and
+opencode) through a thin per-CLI adapter. The table lists what each CLI must
+supply for the engine to launch it, read its state, gate its commands and hear
+from it. Everything outside the table belongs to the engine or the core, and a
+CLI that duplicates it is the one to change.
+
+Each cell names the file that implements the row. **gap** marks a row the
+CLI does not yet have; the cell says what is missing. The Codex column is the
+WI-1127 fork the image bakes in. Stock Codex ignores the title override and
+mints its own conversation id, so the rows that depend on the fork say so.
+Paths are relative to
+the repository root; the installed command names come from
+`engine/Dockerfile`.
+
+| # | Contract | Claude Code | Klaudia | Codex (fork) | opencode |
+| --- | --- | --- | --- | --- | --- |
+| A1 | **Launch**: cwd, model and effort, a pinned conversation id or a resume by id, the brief as the first prompt | `agent_cli.rs` `launch`: `--model`, `--effort`, `--session-id` or `--resume`, the permission flags, `--settings=` (driven-session policy), `--add-dir=`, brief as the positional prompt | `agent_cli.rs` `launch`: `--model`, `--session-id` or `--resume` (`--new-session` when a bare launch has no engine id), `--add-dir=`, brief as `--prompt-interactive=`. **gap**: no effort and no `--settings`, both refused by the engine | `agent_cli.rs` `launch`: `resume` subcommand, `-m`, `-c model_reasoning_effort=`, approval and sandbox flags, `--session-id` when `codex_session_id` is set, brief as the positional prompt | `agent_cli.rs` `launch`: `--model`, `--session` for resume, `--prompt` for the brief, posture through `OPENCODE_CONFIG_CONTENT`. **gap**: no effort, refused by the engine; a fresh run gets no pinned id |
+| A2 | **State in the title** (or a screen shape the engine can read) | No title is read. Screen only: `screen.rs` `shows_prompt`, and the permission dialog in `approval.rs` `detect`. **gap**: no title contract | `screen.rs` `klaudia_title` (`agent_title`) reads `klaudia: ready \| working \| awaiting approval \| goal-loop` (WI-1090). Untitled, `shows_klaudia_prompt` | `-c tui.terminal_title=["agent-state"]` in `agent_cli.rs`; `screen.rs` `agent_title` reads `codex: ready \| working \| awaiting approval` and `[ ! ] Action Required` (WI-1145, WI-1355). Dialogs in `approval.rs` `detect` | `screen.rs` `shows_opencode_prompt` (idle box). No title is read. **gap**: no title contract |
+| A3 | **Pre-command hook**: post each shell command to `POST /api/agent-auth/policy-check`; exit 2 refuses it | PreToolUse runs `vogt-policy-hook` (`engine/deploy/policy-hook.sh`), installed into the user `settings.json` by `install-policy` | `[[hooks]]` runs `vogt-policy-hook`, installed into `~/.klaudia/config.toml` by `install-policy` | **gap**: the managed PreToolUse in `engine/deploy/driven-session-codex-requirements.toml` runs `klaudia hook gitguard`, the local discard guard. It does not call the policy check | **gap**: no hook. `engine/deploy/driven-session-opencode.json` is a pattern allow and deny list only |
+| A4 | **Accept typed input at the prompt** (nudges, notices, the budget line) | Yes, when `screen.rs` `is_ready` says the session is at rest | Yes, when `is_ready` reads `klaudia: ready` and no busy screen | Yes, when `is_ready` reads a `codex:` title it knows. Stock Codex falls back to the screen | Yes, at the idle box. A run ends at each natural stop, so an autopilot nudge waits for the prompt (`autopilot.rs`) |
+| A5 | **Report through MCP**: `work_comment` handoff, `session_report_blocked`, `decision_ask` | The `vogt` MCP server, registered by `install_vogt_claude` in `engine/deploy/mcp-bootstrap.sh` | `vogt-klaudia-mcp` (`engine/deploy/klaudia-mcp.sh`), registered by `install_vogt_klaudia` | The `vogt` MCP server, registered by `install_vogt_codex` | The `vogt` MCP server, registered by `install_vogt_opencode` |
+| A6 | **Conversation link**: the engine learns which conversation runs (needed for a CLI a person starts in a shell) | Engine launches are pinned with `--session-id`. A `claude` a person types into a shell is linked by `vogt-claude-session-hook` (`engine/deploy/claude-session-hook.sh`) on SessionStart and SessionEnd | Pinned with `--session-id` (`agent_cli.rs` `conversation`). No hook; a Klaudia a person types in a shell is not linked | Pinned only when `codex_session_id` is set (the fork). **gap**: stock Codex's own id is not known to the engine | **gap**: a fresh run's id is not known (`conversation()` returns none). Resume by id works through `--session` |
+| A7 | **Path semantics**: tools resolve paths against the session cwd and say so; Grep returns content by default | CLI built-in. Not implemented in this repository | **gap**: Grep defaults to file names only (WI-1311). The fix lives in Klaudia, not here | CLI built-in. Not implemented in this repository | CLI built-in. Not implemented in this repository |
+
+**Engine-side: do not re-implement these per CLI.** A CLI supplies the rows
+above and nothing more. These rules run in the engine, and a CLI that
+carries its own copy will drift from it:
+
+- **Budgets**: `engine/server/src/budget.rs`. The soft and hard limits, the
+  one typed soft line at the prompt, and the `budget` change. Per-CLI budget
+  prose is retired (design §7).
+- **Autopilot**: `engine/server/src/autopilot.rs`. The brief that carries the
+  session on to its next item, and the rule that an autopilot session paused
+  between items is not hibernated by the idle policy.
+- **Policy-check rules**: `engine/server/src/policy.rs`, served at
+  `POST /api/agent-auth/policy-check`. A CLI calls the hook and honours
+  exit 2; it does not decide. If the engine cannot answer, the hook refuses
+  a git or gh command rather than letting it pass.
+- **Permission prompts**: only a person answers them. See
+  [Driving a session](#driving-a-session).
+- **Verdict and verification records**: not on `main` yet. `CommentKind` is
+  `note | handoff` (`src/vogt/core/entities.py`). The `verdict` and
+  `verification` kinds are planned under WI-1319 and will be engine-side when
+  they land.
+
+The rows marked **gap** are the work the adapter still owes. A3 is the whole
+of per-command enforcement, so the Codex and opencode gaps there mean their
+commands are not sent to the policy check at all. (Codex still runs its
+local gitguard hook.) A2 is the whole of attention
+correctness: the state the engine reads for those CLIs is only what A2 yields.
+
 ---
 
 ## 5. The wire contract

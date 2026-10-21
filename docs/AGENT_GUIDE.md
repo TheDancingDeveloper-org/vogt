@@ -826,6 +826,11 @@ These are not limitations to route around; they are the shape of the tool.
   explicitly set to auto-approve, and that is recorded as such on the gate.
 - **Vogt never decides to run anything.** Every session and every run traces to a
   person or to a schedule a person created; there is no autonomous work pickup.
+- **The engine owns the rules, not the agent CLI.** Claude Code, Klaudia, Codex
+  and opencode are driven through a thin adapter. Budgets, autopilot, policy
+  checks and verdict or verification records are enforced by the engine, and a
+  CLI must not re-implement them. The per-CLI table, with its gaps, is in
+  [`ENGINE.md`, "Agent CLI adapter contract"](ENGINE.md#41-agent-cli-adapter-contract).
 
 Read those as the reasons you can trust the record: because Vogt cannot quietly
 rewrite git history or an upstream issue, what it reports is what happened.
