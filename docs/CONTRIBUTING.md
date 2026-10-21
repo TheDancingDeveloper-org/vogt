@@ -64,6 +64,12 @@ project space. Security reports go to the channel in
   range is the usual reason a green pull request cannot land. `integrate/vogt-next`
   still holds merge commits from earlier oversight merges; WI-1315 linearises
   it and adds the check.
+- The backstop is `.github/workflows/integrate-linear.yml`. On a pull request
+  into `main` from an `integrate/*` branch, and on every push to `integrate/*`,
+  it fails if `git rev-list --merges origin/main..HEAD` names any commit, and
+  lists those SHAs. Fix it by rebasing the branch onto `origin/main`, never by
+  merging `main` in. The check is not required on `main` unless the operator
+  makes it so in branch protection.
 - A change that does not go through an integration branch, such as a fork pull
   request, branches from `origin/main` and opens its pull request against
   `main`, under the same linear-history rule.

@@ -1,0 +1,54 @@
+name: Integration linear history
+
+# Backstop for the linear-history rule in docs/CONTRIBUTING.md §2. `main` is
+# rebase-only with linear history, so an integration branch whose range over
+# `main` holds a merge commit cannot land: GitHub says "This branch can't be
+# rebased". The rule is enforced at the source by `work.land`; this check
+# catches the merge that got in anyway, and names the SHAs.
+#
+# A separate workflow rather than a job in `ci.yml`: `ci.yml` classifies every
+# push as a change to everything, and an `integrate/*` push trigger there would
+# run the full matrix on each integration push. This job is the only thing it
+# runs. It is not a required check on `main`; that is the operator's call.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ["integrate/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linear-history:
+    name: integration range has no merge commits
+    # A pull request is checked only when it comes from an integration branch.
+    # A push is always an integration branch, by the trigger above.
+    if: ${{ github.event_name == 'push' || startsWith(github.head_ref, 'integrate/') || github.event_name == 'workflow_dispatch' }}
+    # Self-hosted, as every job here (see runner-policy). Labels name no
+    # capability, so any runner in the pool takes it.
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          # The pull request's head, not the synthetic `refs/pull/N/merge`
+          # commit, which is itself a merge and would always fail.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Reject merge commits in origin/main..HEAD
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          merges="$(git rev-list --merges origin/main..HEAD)"
+          if [ -n "$merges" ]; then
+            echo "::error::merge commits in origin/main..HEAD. Rebase the integration branch onto origin/main; never merge main into integrate/*."
+            while read -r sha; do
+              git log -1 --format='  %H %s' "$sha"
+            done <<< "$merges"
+            exit 1
+          fi
+          echo "no merge commits in origin/main..HEAD"
