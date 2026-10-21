@@ -275,6 +275,11 @@ def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:
         raise
 
     for report in reports:
+        # A clean sweep that appended nothing changed nothing: announcing it
+        # would make every quiet 5-second poll a full batch of no-op events
+        # for every subscriber. Failed and partial sweeps still publish.
+        if report.outcome == "ok" and report.new == 0:
+            continue
         ctx.declared.publish_event(
             kind=SWEEP_COMPLETED_EVENT,
             entity_kind="sweep",
