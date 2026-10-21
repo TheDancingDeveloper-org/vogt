@@ -107,6 +107,10 @@ pub struct SessionRegistry {
     /// Sessions running with a credential minted for them, revoked when they
     /// end.
     minted: Arc<DashMap<Uuid, ()>>,
+    /// Person-approved capability grants (WI-979): the posture a session is
+    /// woken into instead of its recorded one. Unlike a credential grant it
+    /// outlives a hibernation, which is how it is applied.
+    capabilities: Arc<crate::capability_grants::CapabilityGrants>,
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -165,11 +169,25 @@ impl SessionRegistry {
             shutting_down: Arc::new(AtomicBool::new(false)),
             core: Arc::new(std::sync::OnceLock::new()),
             minted: Arc::new(DashMap::new()),
+            capabilities: Arc::default(),
         }
     }
 
     pub fn secret_broker(&self) -> &Arc<SecretBroker> {
         &self.secret_broker
+    }
+
+    pub fn capabilities(&self) -> &Arc<crate::capability_grants::CapabilityGrants> {
+        &self.capabilities
+    }
+
+    /// The posture `id` runs in when nothing is granted: the one it was
+    /// started with, from its record. `None` for the default posture, and
+    /// for a session with no record (which cannot be hibernated anyway).
+    pub fn base_posture(&self, id: Uuid) -> Option<String> {
+        self.records
+            .get(&id)
+            .and_then(|r| r.permission_mode.clone())
     }
 
     pub fn create(&self, spec: SessionSpec) -> Result<Arc<Session>> {
@@ -1544,7 +1562,13 @@ impl SessionRegistry {
             prompt: fresh.clone(),
             model: record.model.clone(),
             effort: record.effort.clone(),
-            permission_mode: record.permission_mode.clone(),
+            // A live capability grant (WI-979) wakes it into the granted
+            // posture; the record keeps the base one, so a grant that ends —
+            // or an engine restart that forgets it — wakes it back.
+            permission_mode: self
+                .capabilities
+                .posture(id, time::OffsetDateTime::now_utc())
+                .or_else(|| record.permission_mode.clone()),
             account: record.account.clone(),
             autopilot: record.autopilot,
             policy: record.policy.clone(),
@@ -2263,6 +2287,7 @@ impl SessionRegistry {
         }
         // Forgetting the session forgets its leave to ask the broker.
         self.secret_broker.revoke(id);
+        self.capabilities.forget(id);
         // The brief outlives the child on purpose — a killed session is still
         // inspectable, and an agent may re-read its prompt after a restart —
         // but not the session record. Forgetting the session forgets its

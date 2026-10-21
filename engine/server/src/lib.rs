@@ -15,6 +15,7 @@ pub mod auth;
 pub mod autopilot;
 pub mod budget;
 pub mod call;
+pub mod capability_grants;
 pub mod changes;
 pub mod chat_api;
 pub mod chat_codex;

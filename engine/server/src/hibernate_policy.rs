@@ -120,6 +120,23 @@ pub fn exemption(registry: &SessionRegistry, session: &Session) -> Option<String
     if session.keep_awake() {
         return Some("pinned awake".into());
     }
+    if let Some(busy) = mid_turn(session) {
+        return Some(busy);
+    }
+    if session.blocked().is_some() {
+        return Some("blocked on a person".into());
+    }
+    mid_tool(session)
+}
+
+/// Why `session` is in the middle of a turn — running, at a permission
+/// dialog, or still drawing — or `None` when it sits at its prompt. A
+/// capability grant (WI-979) waits on this before it restarts a session.
+pub fn busy(session: &Session) -> Option<String> {
+    mid_turn(session).or_else(|| mid_tool(session))
+}
+
+fn mid_turn(session: &Session) -> Option<String> {
     match session.activity() {
         ActivityState::Running => return Some("a turn is running".into()),
         ActivityState::AwaitingApproval => return Some("a permission dialog is open".into()),
@@ -146,9 +163,10 @@ pub fn exemption(registry: &SessionRegistry, session: &Session) -> Option<String
             _ => {}
         }
     }
-    if session.blocked().is_some() {
-        return Some("blocked on a person".into());
-    }
+    None
+}
+
+fn mid_tool(session: &Session) -> Option<String> {
     if let Some(pid) = session.pid() {
         if !agent_running(pid) {
             // A shell whose typed-in agent reported its conversation and then

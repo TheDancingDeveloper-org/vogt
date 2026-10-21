@@ -609,6 +609,12 @@ impl Session {
         crate::activity::terminal_state(self.exit_code(), self.stop_requested())
     }
 
+    /// The posture it was started in, as the wire names it; `None` is the
+    /// default one.
+    pub fn permission_mode(&self) -> Option<String> {
+        self.permission_mode.lock().clone()
+    }
+
     pub fn set_permission_mode(&self, mode: Option<String>) {
         *self.permission_mode.lock() = mode;
     }

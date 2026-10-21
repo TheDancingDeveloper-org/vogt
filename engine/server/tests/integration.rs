@@ -11726,6 +11726,140 @@ async fn a_permission_posture_reaches_the_agent_and_survives_a_wake() {
     assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
 }
 
+/// WI-979: a person-approved capability grant restarts a live agent session
+/// into the granted posture — hibernate, then wake resuming the same
+/// conversation — and revoking it restarts the session back into its base
+/// posture. Only vogt-core applies one, and a session a wake could not bring
+/// back (a shell) is refused.
+#[tokio::test]
+async fn a_capability_grant_restarts_the_session_into_its_posture_and_back() {
+    const STACK: &str = "stack-secret-for-capability-grants-123";
+    let (_tmp, mut cfg, stub) = hibernation_sandbox();
+    cfg.vogt_core_token = Some(STACK.into());
+    let (base, _h) = boot_with_config(cfg).await;
+    let operator = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let core = reqwest::Client::builder()
+        .default_headers(auth_for(STACK))
+        .build()
+        .unwrap();
+    let created: Value = operator
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "worker", "command": [stub.to_string_lossy()] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert!(created["permission_mode"].is_null());
+    live_output_containing(&operator, &base, &id, &["helper=["]).await;
+    let in_an_hour = (OffsetDateTime::now_utc() + time::Duration::hours(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let grant = json!({
+        "grant_id": "grt_cap",
+        "capability": "bypass",
+        "uses": "ttl",
+        "expires_at": in_an_hour,
+        "reason": "run the e2e suite unattended",
+    });
+
+    let refused = operator
+        .post(format!("{base}/api/sessions/{id}/grants"))
+        .json(&grant)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 403, "only vogt-core applies a grant");
+
+    let shell = create_session_id(&operator, &base, "a shell").await;
+    let refused = core
+        .post(format!("{base}/api/sessions/{shell}/grants"))
+        .json(&grant)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 409, "a shell cannot be restarted into it");
+
+    let applied = core
+        .post(format!("{base}/api/sessions/{id}/grants"))
+        .json(&grant)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(applied.status(), 200, "{:?}", applied.text().await);
+
+    let posture = |want: Option<&'static str>| {
+        let operator = operator.clone();
+        let base = base.clone();
+        let id = id.clone();
+        async move {
+            for _ in 0..200 {
+                let s: Value = operator
+                    .get(format!("{base}/api/sessions/{id}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if s["summary"]["activity"] != "hibernated"
+                    && s["summary"]["permission_mode"].as_str() == want
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            panic!("the session never reached posture {want:?}");
+        }
+    };
+    posture(Some("bypass")).await;
+    let printed =
+        live_output_containing(&operator, &base, &id, &["arg=[--resume]", "helper=["]).await;
+    let woken = &printed[printed.rfind("arg=[--resume]").unwrap()..];
+    assert!(
+        woken.contains("--dangerously-skip-permissions"),
+        "woken into bypass, resuming its conversation: {woken:?}"
+    );
+    let listed: Value = core
+        .get(format!("{base}/api/sessions/{id}/grants"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let held = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["grant_id"] == "grt_cap")
+        .expect("the capability grant is listed");
+    assert_eq!(held["capability"], "bypass");
+    assert_eq!(held["applied"], true);
+
+    let revoked: Value = core
+        .delete(format!("{base}/api/sessions/{id}/grants/grt_cap"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(revoked["revoked"], true);
+    posture(None).await;
+    let printed = live_output_containing(&operator, &base, &id, &["helper=["]).await;
+    let last = &printed[printed.rfind("arg=[--resume]").unwrap()..];
+    assert!(
+        !last.contains("--dangerously-skip-permissions"),
+        "back in its base posture: {last:?}"
+    );
+}
+
 /// WI-1250: hibernate then wake keeps the posture the session was started
 /// with, even when a later boot of the same state points the deployment at a
 /// different settings file. Covers Claude Code and Klaudia, a model, the

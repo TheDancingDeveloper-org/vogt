@@ -643,18 +643,32 @@ pub enum GrantUses {
 }
 
 /// `POST /api/sessions/{id}/grants`: a person-approved grant of one named
-/// credential to one live session (WI-973). Accepted only from vogt-core's
+/// credential (WI-973), or of one capability (WI-979), to one live session. Accepted only from vogt-core's
 /// own identity (the stack secret), which sends it once a person approved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionGrant {
     /// vogt-core's id for the grant (`grt_…`), named in every audit line.
     pub grant_id: String,
     /// The name the session fetches it under (`vogt-agent-auth fetch VAR`).
+    /// Empty for a capability grant.
+    #[serde(default)]
     pub var: String,
-    /// The secrets-manager project that holds it.
+    /// The secrets-manager project that holds it. Empty for a capability.
+    #[serde(default)]
     pub project_id: String,
-    /// The secret's name in that project.
+    /// The secret's name in that project. Empty for a capability.
+    #[serde(default)]
     pub secret_name: String,
+    /// A capability grant (WI-979) instead of a credential: the posture the
+    /// session is restarted into (`bypass`, `accept-edits`), by hibernating
+    /// it and waking it with that `permission_mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+    /// For a capability grant, as the engine answers: whether the session
+    /// runs in that posture now. `false` while it waits for a running turn
+    /// to finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<bool>,
     #[serde(default)]
     pub uses: GrantUses,
     /// RFC 3339; never honoured after this.

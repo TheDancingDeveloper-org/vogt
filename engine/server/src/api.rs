@@ -528,17 +528,56 @@ pub async fn apply_session_grant(
             "the session has exited; a grant is for a running session".into(),
         ));
     }
+    let refused = |refusal: GrantRefusal| match refusal {
+        GrantRefusal::Invalid(_) => ApiError::BadRequest(refusal.to_string()),
+        GrantRefusal::ProjectNotGrantable(_) => ApiError::Forbidden(refusal.to_string()),
+        GrantRefusal::NoBroker | GrantRefusal::ShadowsManifest(_) | GrantRefusal::VarInUse(_) => {
+            ApiError::Conflict(refusal.to_string())
+        }
+    };
+    if grant.capability.is_some() {
+        // Applied by restarting the session, so it must be one a wake can
+        // bring back: a resumable agent conversation (WI-979).
+        if let Some(why) = state.sessions.hibernate_refusal(&session, false) {
+            return Err(ApiError::Conflict(format!(
+                "a capability grant restarts the session, and this one cannot be: {why}"
+            )));
+        }
+        let base = state.sessions.base_posture(id);
+        let held = state
+            .sessions
+            .capabilities()
+            .apply(
+                id,
+                grant,
+                session.agent().as_deref(),
+                base.as_deref(),
+                time::OffsetDateTime::now_utc(),
+            )
+            .map_err(refused)?;
+        tracing::info!(
+            target: "vogt::audit",
+            event = "session.grant",
+            action = "approved",
+            session_id = %id,
+            grant_id = %held.grant.grant_id,
+            capability = %held.posture(),
+            base = base.as_deref().unwrap_or("default"),
+            expires_at = %held.grant.expires_at,
+            "capability grant held; the session restarts into it once idle"
+        );
+        crate::capability_grants::nudge(&state, id);
+        return Ok(Json(crate::capability_grants::view(
+            &state.sessions,
+            id,
+            &held,
+        )));
+    }
     let held = state
         .sessions
         .secret_broker()
         .apply_grant(id, grant, time::OffsetDateTime::now_utc())
-        .map_err(|refusal| match refusal {
-            GrantRefusal::Invalid(_) => ApiError::BadRequest(refusal.to_string()),
-            GrantRefusal::ProjectNotGrantable(_) => ApiError::Forbidden(refusal.to_string()),
-            GrantRefusal::NoBroker
-            | GrantRefusal::ShadowsManifest(_)
-            | GrantRefusal::VarInUse(_) => ApiError::Conflict(refusal.to_string()),
-        })?;
+        .map_err(refused)?;
     tracing::info!(
         target: "vogt::audit",
         event = "session.grant",
@@ -564,7 +603,12 @@ pub async fn revoke_session_grant(
     identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
 ) -> Result<Json<serde_json::Value>> {
     require_core_identity(identity.as_deref())?;
-    let held = state.sessions.secret_broker().remove_grant(id, &grant_id);
+    let mut held = state.sessions.secret_broker().remove_grant(id, &grant_id);
+    if state.sessions.capabilities().remove(id, &grant_id) {
+        // Reverted by the same restart in reverse, once the session is idle.
+        held = true;
+        crate::capability_grants::nudge(&state, id);
+    }
     tracing::info!(
         target: "vogt::audit",
         event = "session.grant",
@@ -603,15 +647,17 @@ pub async fn list_session_grants(
     }
     state.sessions.get(id)?;
     let now = time::OffsetDateTime::now_utc();
-    Ok(Json(
-        state
-            .sessions
-            .secret_broker()
-            .grants_for(id, now)
-            .iter()
-            .map(grant_view)
-            .collect(),
-    ))
+    let mut grants: Vec<_> = state
+        .sessions
+        .secret_broker()
+        .grants_for(id, now)
+        .iter()
+        .map(grant_view)
+        .collect();
+    if let Some(held) = state.sessions.capabilities().get(id, now) {
+        grants.push(crate::capability_grants::view(&state.sessions, id, &held));
+    }
+    Ok(Json(grants))
 }
 
 /// Let an oversight session answer `dialog` on `session`, or refuse it as

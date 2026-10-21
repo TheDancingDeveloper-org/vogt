@@ -351,6 +351,40 @@ impl HeldGrant {
     }
 }
 
+/// A grant's parsed expiry, checked: in the future, at most
+/// [`MAX_GRANT_TTL`] ahead, and its `reason` within [`MAX_GRANT_REASON_CHARS`].
+/// Shared by credential and capability grants (WI-979).
+pub fn grant_expiry(
+    grant: &vogt_engine_contract::SessionGrant,
+    now: time::OffsetDateTime,
+) -> Result<time::OffsetDateTime, GrantRefusal> {
+    if grant.grant_id.trim().is_empty() || grant.grant_id.len() > 64 {
+        return Err(GrantRefusal::Invalid(
+            "grant_id must be 1-64 characters".into(),
+        ));
+    }
+    let expires_at = time::OffsetDateTime::parse(
+        &grant.expires_at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .map_err(|e| GrantRefusal::Invalid(format!("expires_at is not RFC 3339: {e}")))?;
+    if expires_at <= now {
+        return Err(GrantRefusal::Invalid("expires_at is in the past".into()));
+    }
+    if expires_at - now > MAX_GRANT_TTL {
+        return Err(GrantRefusal::Invalid(format!(
+            "expires_at is more than {} h ahead",
+            MAX_GRANT_TTL.as_secs() / 3600
+        )));
+    }
+    if grant.reason.chars().count() > MAX_GRANT_REASON_CHARS {
+        return Err(GrantRefusal::Invalid(format!(
+            "reason is longer than {MAX_GRANT_REASON_CHARS} characters"
+        )));
+    }
+    Ok(expires_at)
+}
+
 /// Why a grant was not applied. Each says what to change.
 #[derive(Debug, PartialEq, Eq)]
 pub enum GrantRefusal {
@@ -468,25 +502,7 @@ impl SecretBroker {
         if !self.project_grantable(&grant.project_id) {
             return Err(GrantRefusal::ProjectNotGrantable(grant.project_id));
         }
-        let expires_at = time::OffsetDateTime::parse(
-            &grant.expires_at,
-            &time::format_description::well_known::Rfc3339,
-        )
-        .map_err(|e| GrantRefusal::Invalid(format!("expires_at is not RFC 3339: {e}")))?;
-        if expires_at <= now {
-            return Err(GrantRefusal::Invalid("expires_at is in the past".into()));
-        }
-        if expires_at - now > MAX_GRANT_TTL {
-            return Err(GrantRefusal::Invalid(format!(
-                "expires_at is more than {} h ahead",
-                MAX_GRANT_TTL.as_secs() / 3600
-            )));
-        }
-        if grant.reason.chars().count() > MAX_GRANT_REASON_CHARS {
-            return Err(GrantRefusal::Invalid(format!(
-                "reason is longer than {MAX_GRANT_REASON_CHARS} characters"
-            )));
-        }
+        let expires_at = grant_expiry(&grant, now)?;
         let held = HeldGrant { grant, expires_at };
         let mut list = self.session_grants.entry(session).or_default();
         list.retain(|g| g.expires_at > now);
