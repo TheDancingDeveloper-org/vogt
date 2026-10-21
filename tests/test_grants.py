@@ -68,6 +68,7 @@ class GrantEngine:
             "alive": state["alive"],
             "exit_code": None if state["alive"] else 0,
             "role": state["role"],
+            "permission_mode": state.get("permission_mode"),
             "cwd": "/srv",
         }
 
@@ -87,7 +88,7 @@ class GrantEngine:
             if method == "GET" and len(parts) == 3:
                 return 200, json.dumps({"summary": self.summary(engine_id)}).encode()
             if method == "POST" and parts[3:] == ["grants"]:
-                if payload["project_id"] in self.closed_projects:
+                if payload.get("project_id") in self.closed_projects:
                     return 403, json.dumps(
                         {"error": "forbidden: project is not open to grants"}
                     ).encode()
@@ -311,8 +312,6 @@ def test_a_failed_approval_takes_the_grant_back_unless_another_person_approved(
 
 
 def test_a_grant_is_one_named_credential_for_a_live_session(ctx: AppContext) -> None:
-    with pytest.raises(InvalidRequest, match="capability grants are not available"):
-        ask(ctx, kind="capability", capability="bypass")
     with pytest.raises(InvalidRequest, match="names secret_name and project_id"):
         ask(ctx, project_id=None)
     with pytest.raises(InvalidRequest, match="plain names"):

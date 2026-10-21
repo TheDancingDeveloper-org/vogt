@@ -974,8 +974,15 @@ def _grant_entry(
         )
         else f"session {label} ({', '.join(facts)})"
     )
-    item = f"{grant.secret_name} (project {grant.project_id}) as {grant.var}"
-    uses = "one fetch" if grant.uses == "once" else "any number of fetches"
+    if grant.kind == "capability":
+        # A posture, applied by restarting the session into it (WI-979).
+        item = f"the {grant.capability} permission posture"
+        named = str(grant.capability)
+        uses = "the session restarts into it once idle, and back at expiry"
+    else:
+        item = f"{grant.secret_name} (project {grant.project_id}) as {grant.var}"
+        named = str(grant.secret_name)
+        uses = "one fetch" if grant.uses == "once" else "any number of fetches"
     summary = (
         f"{grant.requested_by} asks for {item} for {who}: {uses}, for "
         f"{grant.ttl_seconds // 60} min once approved. Reason: {grant.reason}"
@@ -987,7 +994,7 @@ def _grant_entry(
         kind="session.grant_request",
         occurred_at=grant.requested_at,
         observed_at=None,
-        title=f"Grant request: {grant.secret_name} for session {label}",
+        title=f"Grant request: {named} for session {label}",
         summary=summary,
         project_slug=None if project is None else project.slug,
         session_id=grant.target,
@@ -1013,6 +1020,7 @@ def _grant_entry(
             "var": grant.var,
             "project_id": grant.project_id,
             "secret_name": grant.secret_name,
+            "capability": grant.capability,
             "uses": grant.uses,
             "ttl_seconds": grant.ttl_seconds,
         },

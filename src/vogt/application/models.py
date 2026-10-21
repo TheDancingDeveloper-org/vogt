@@ -5096,8 +5096,9 @@ class RequestGrantParams(Params):
     )
     kind: Literal["credential", "capability"] = Field(
         default="credential",
-        description="`credential` (one named secret). `capability` is not "
-        "available yet (milestone 2).",
+        description="`credential` (one named secret) or `capability` (a "
+        "permission posture: the engine restarts the session into it once "
+        "idle, resuming its conversation, and back at expiry or revoke).",
     )
     secret_name: str | None = Field(
         default=None,
@@ -5114,7 +5115,10 @@ class RequestGrantParams(Params):
         description="The name the session fetches it under "
         "(`vogt-agent-auth fetch VAR`). Defaults to GRANT_<secret name>.",
     )
-    capability: str | None = None
+    capability: str | None = Field(
+        default=None,
+        description="For kind=capability: `bypass` or `accept-edits`.",
+    )
     uses: Literal["once", "ttl"] = Field(
         default="once",
         description="`once`: the first fetch consumes it. `ttl`: any number "

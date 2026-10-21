@@ -1,8 +1,9 @@
 # Approved grants to a session (WI-973)
 
-Status: **design, with milestone 1 implemented**: named-credential grants,
-from request to Inbox approval to engine apply and broker fetch. Milestones 2
-and 3 are proposals. Where this note and [`ENGINE.md`](../ENGINE.md) or
+Status: **design, with milestones 1 and 2 implemented**: named-credential
+grants, from request to Inbox approval to engine apply and broker fetch
+(WI-973), and capability grants applied by hibernate → wake (WI-979).
+Milestone 3 is a proposal. Where this note and [`ENGINE.md`](../ENGINE.md) or
 [`API.md`](../API.md) disagree, those describe what exists. This note
 generalises slice 6a of [oversight sessions](oversight-sessions.md#8-the-permission-gap-slice-6)
 ("pending bypass starts approved in the Inbox") from *bypass at start* to
@@ -62,11 +63,11 @@ MCP `session_grant_request`, operation `session.grant_request`, scope
 | Field | Meaning |
 | --- | --- |
 | `target` | The session the grant is for: a `ses_…` id or an engine UUID. |
-| `kind` | `credential` (milestone 1) or `capability` (milestone 2). |
+| `kind` | `credential` (milestone 1) or `capability` (milestone 2). A capability grant is always `uses: ttl`. |
 | `secret_name` | For a credential: the secret's name in the secrets manager, e.g. `100.109.218.11_SSH`. |
 | `project_id` | For a credential: the secrets-manager project that holds it. Cadastre `lookup` answers which. |
 | `var` | Optional. The name the session fetches it under. Defaults to the secret name made into an environment-variable name, e.g. `GRANT_100_109_218_11_SSH`. |
-| `capability` | For a capability: `bypass`, `accept-edits`, … (milestone 2). |
+| `capability` | For a capability: `bypass` or `accept-edits` (milestone 2). Refused when the target already runs in it. |
 | `uses` | `once` (the first successful fetch consumes the grant) or `ttl` (any number of fetches until it expires). The default is `once`. |
 | `ttl_seconds` | Lifetime once approved. Default 3600, at most 86 400. |
 | `reason` | Why. Shown to the approver verbatim, as untrusted text. |
@@ -190,7 +191,10 @@ session's process only, not the pod. The record keeps the base posture. At
 expiry or revocation the engine does the same in reverse and returns the
 session to its base posture. A session mid-turn is not restarted: the grant
 waits (state `approved`, `applied: false`) until the session is idle, or until
-the person cancels it.
+the person cancels it. The revert waits the same way. Hibernating drops a
+session's credential grants, so the restart puts back the ones it held. A
+woken session whose granted posture will not start is woken again at its
+base posture and the grant is dropped (audited `failed`).
 
 ## Revocation and expiry
 

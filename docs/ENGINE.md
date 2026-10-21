@@ -4491,6 +4491,26 @@ Inbox, approval by a person only) is vogt-core's `session.grant_*`
 ([`API.md`](API.md)). The design and its invariants are
 [`design/oversight-grants.md`](design/oversight-grants.md).
 
+**Capability grants: a posture for a live session (WI-979).** The same
+route with `{grant_id, capability, uses, expires_at, reason}` and no
+credential fields grants a permission posture, `bypass` or `accept-edits`.
+The engine holds it (one per session; a different `grant_id` while one is
+live is 409) and, once the session is at its prompt — no turn running, no
+dialog, no output within the quiet window, no shell below the agent —
+restarts it into that posture: it hibernates the session and wakes it,
+through vogt-core when there is one, resuming the same conversation. A wake
+of a session with a live capability grant always starts it in the granted
+posture; the record keeps the base one. At expiry or on `DELETE` the same
+restart in reverse returns the session to its base posture, again only once
+it is idle. A session a wake cannot bring back (a shell, an agent-task run)
+is refused with 409, and Klaudia is refused `accept-edits`. The credential
+grants a session held are put back after the restart. `GET
+/api/sessions/{id}/grants` lists the capability grant with `applied`: whether
+the session runs in it now. A watcher looks every 15 s. Capability grants
+live in memory: an engine restart forgets them and the session wakes in its
+base posture. Audited as `event=session.grant` (`approved`, `applied`,
+`expired`, `reverted`, `failed`).
+
 **What this is not.** "Only the stack secret may apply a grant" is a check on
 the credential presented, not a uid boundary. The stack secret is in the
 engine's environment and its token file, and sessions run as the engine's

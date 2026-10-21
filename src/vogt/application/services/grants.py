@@ -49,6 +49,9 @@ SESSION_GRANT_REQUESTED_EVENT = "session.grant_requested"
 SESSION_GRANT_DECIDED_EVENT = "session.grant_decided"
 SESSION_GRANT_REVOKED_EVENT = "session.grant_revoked"
 
+#: The postures a person may grant a live session (WI-979).
+CAPABILITIES = ("bypass", "accept-edits")
+
 _PLAIN = re.compile(r"^[A-Za-z0-9._/-]{1,256}$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
@@ -62,12 +65,8 @@ def default_var(secret_name: str) -> str:
 def request_grant(ctx: AppContext, params: RequestGrantParams) -> SessionGrantResult:
     """Ask a person to approve one scoped item for one live session."""
     reason = writes.validate_reason(params.reason)
-    if params.kind != "credential":
-        msg = (
-            "capability grants are not available yet (WI-973 milestone 2); "
-            "ask for a named credential, or report the denied action as blocked"
-        )
-        raise InvalidRequest(msg)
+    if params.kind == "capability":
+        return _request_capability(ctx, params, reason)
     secret = (params.secret_name or "").strip()
     project = (params.project_id or "").strip()
     if not secret or not project:
@@ -143,21 +142,7 @@ def decide_grant(ctx: AppContext, params: DecideGrantParams) -> SessionGrantResu
     expires_at = decided_at + timedelta(seconds=grant.ttl_seconds)
     engine = _engine(ctx)
     # The engine first: the row says approved only once the grant is held.
-    engine.apply_grant(
-        grant.target_engine_session_id,
-        {
-            "grant_id": grant.id,
-            "var": grant.var,
-            "project_id": grant.project_id,
-            "secret_name": grant.secret_name,
-            "uses": grant.uses,
-            "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
-            # The purpose the person is approving, so the session (and the
-            # classifier reading `vogt-agent-auth grants`) sees it. Text, not
-            # a value; the engine caps its length.
-            "reason": grant.reason,
-        },
-    )
+    engine.apply_grant(grant.target_engine_session_id, _engine_body(grant, expires_at))
     try:
         return _record_decision(
             ctx,
@@ -262,6 +247,75 @@ def pending_grants(view: ReadView, ctx: AppContext) -> list[SessionGrantView]:
 
 
 # -- helpers ---------------------------------------------------------------
+
+
+def _request_capability(
+    ctx: AppContext, params: RequestGrantParams, reason: str
+) -> SessionGrantResult:
+    """A posture for a live session (WI-979): the engine applies it by
+    restarting the session into it once idle, and back at expiry."""
+    capability = (params.capability or "").strip().replace("_", "-")
+    if capability not in CAPABILITIES:
+        msg = f"capability must be one of {', '.join(CAPABILITIES)}, not {capability!r}"
+        raise InvalidRequest(msg)
+    if params.secret_name or params.project_id or params.var:
+        msg = "a capability grant names a capability, not a secret"
+        raise InvalidRequest(msg)
+    engine = _engine(ctx)
+    target = _target(ctx, params.target)
+    live = engine.get_session(target.engine_session_id)
+    if live is None or not live.alive:
+        msg = f"session {params.target!r} is not running; a grant is for a live session"
+        raise Conflict(msg)
+    if (live.permission_mode or "default") == capability:
+        msg = f"session {params.target!r} already runs in {capability}"
+        raise Conflict(msg)
+    _check_requester(ctx, target.engine_session_id)
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionGrantResult]:
+        grant = SessionGrant(
+            id=ctx.id_factory("grt"),
+            target_engine_session_id=target.engine_session_id,
+            kind="capability",
+            capability=capability,
+            # A posture stands until it expires or is revoked.
+            uses="ttl",
+            ttl_seconds=params.ttl_seconds,
+            reason=reason,
+            requested_by=actor.id,
+            requested_at=ctx.clock(),
+        )
+        txn.insert_session_grant(grant)
+        return WriteOutcome(
+            result=SessionGrantResult(grant=_view(txn, grant, ctx)),
+            entity_kind="session_grant",
+            entity_id=grant.id,
+            payload=_payload(grant),
+            event_kind=SESSION_GRANT_REQUESTED_EVENT,
+            summary=_summary(grant),
+        )
+
+    return audited_write(ctx, operation=SESSION_GRANT_REQUEST, reason=reason, body=body)
+
+
+def _engine_body(grant: SessionGrant, expires_at: datetime) -> dict[str, object]:
+    """What the engine is sent for an approved grant."""
+    body: dict[str, object] = {
+        "grant_id": grant.id,
+        "uses": grant.uses,
+        "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+        # The purpose the person is approving, so the session (and the
+        # classifier reading `vogt-agent-auth grants`) sees it. Text, not a
+        # value; the engine caps its length.
+        "reason": grant.reason,
+    }
+    if grant.kind == "capability":
+        body["capability"] = grant.capability
+    else:
+        body["var"] = grant.var
+        body["project_id"] = grant.project_id
+        body["secret_name"] = grant.secret_name
+    return body
 
 
 def _check_requester(ctx: AppContext, target_engine_id: str) -> None:
@@ -400,6 +454,7 @@ def _summary(grant: SessionGrant) -> dict[str, object]:
         "var": grant.var,
         "project_id": grant.project_id,
         "secret_name": grant.secret_name,
+        "capability": grant.capability,
         "uses": grant.uses,
         "state": grant.state,
     }
