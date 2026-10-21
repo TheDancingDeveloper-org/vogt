@@ -9,9 +9,10 @@ invariants each check here enforces, are `docs/design/oversight-grants.md`.
 Three rules shape this module:
 
 - **Only a person decides.** `decide_grant` refuses every agent principal —
-  session tokens, `agent:engine:` tokens, the brokered pod token — before
-  anything else. The engine half of the same rule is that it accepts a grant
-  only from the core's own credential.
+  session tokens, `agent:engine:` tokens, the brokered pod token — and the
+  engine's own credential, even when the stack secret is bound to a person
+  (WI-1000), before anything else. The engine half of the same rule is that
+  it accepts a grant only from the core's own credential.
 - **The engine applies before the row says approved.** The engine and SQLite
   cannot share a transaction, so the approval is sent first and recorded only
   once the engine has said yes. A refusal leaves the request pending and says
@@ -36,7 +37,7 @@ from vogt.application.models import (
     SessionGrantResult,
     SessionGrantView,
 )
-from vogt.application.services.sessions import _engine, _target
+from vogt.application.services.sessions import _answers_as_person, _engine, _target
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.entities import Actor, SessionGrant
 from vogt.errors import Conflict, GrantRefused, InvalidRequest, NotFound
@@ -125,10 +126,11 @@ def request_grant(ctx: AppContext, params: RequestGrantParams) -> SessionGrantRe
 def decide_grant(ctx: AppContext, params: DecideGrantParams) -> SessionGrantResult:
     """Approve or deny a pending grant. A person's decision, never an agent's."""
     reason = writes.validate_reason(params.reason)
-    if ctx.principal.kind == "agent":
+    if not _answers_as_person(ctx):
         msg = (
-            "only a person decides a grant, not an agent "
-            f"({ctx.principal.identity_ref}); approve or deny it from the Inbox"
+            "only a person decides a grant, not an agent or the engine's own "
+            f"credential ({ctx.principal.identity_ref}); approve or deny it "
+            "from the Inbox"
         )
         raise GrantRefused(msg)
     grant = _load(ctx, params.id)
