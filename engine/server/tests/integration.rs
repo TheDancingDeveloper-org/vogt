@@ -16288,3 +16288,127 @@ async fn a_launch_with_the_secrets_manager_down_degrades_and_recovers_without_re
     )
     .await;
 }
+
+/// WI-1324: a session in a git tree carries a workspace record — a worktree
+/// with an empty baseline, a dirty checkout with its dirty paths — that a
+/// wake keeps and the session's environment names; a session in no repo has
+/// neither.
+#[tokio::test]
+async fn a_session_in_a_git_tree_carries_its_workspace_record() {
+    let (tmp, cfg, stub) = hibernation_sandbox();
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nprintf 'ws=[%s|%s]\\n' \"${VOGT_ENGINE_WORKSPACE-unset}\" \
+         \"${VOGT_ENGINE_WORKSPACE_PATH-unset}\"\nprintf '> '\nsleep 300\n",
+    )
+    .unwrap();
+    let repo = tmp.path().join("repo");
+    worktree_checkout(&repo);
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let start = |body: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let created = client
+                .post(format!("{base}/api/sessions"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::OK);
+            created.json::<Value>().await.unwrap()
+        }
+    };
+    let command = json!([stub.to_string_lossy()]);
+
+    let worker = start(json!({
+        "name": "ws worktree",
+        "command": command,
+        "cwd": repo.to_string_lossy(),
+        "worktree": { "branch": "wi-1324-worker", "base_ref": "main" },
+    }))
+    .await;
+    let worktree = tmp.path().canonicalize().unwrap().join("wi-1324-worker");
+    let ws = &worker["workspace"];
+    assert_eq!(ws["kind"], "worktree");
+    assert_eq!(ws["path"], worktree.to_string_lossy().as_ref());
+    assert_eq!(ws["branch"], "wi-1324-worker");
+    assert_eq!(ws["base_ref"], "main");
+    assert!(ws["base_sha"].as_str().is_some_and(|s| s.len() == 40));
+    assert_eq!(ws["baseline_dirty"], json!([]));
+    let worker_id = worker["id"].as_str().unwrap().to_string();
+    let printed = live_output_containing(&client, &base, &worker_id, &["> "]).await;
+    assert_eq!(
+        printed_value(&printed, "ws"),
+        format!("worktree|{}", worktree.display())
+    );
+
+    let checkout = start(json!({
+        "name": "ws checkout",
+        "command": command,
+        "cwd": repo.to_string_lossy(),
+    }))
+    .await;
+    let ws = &checkout["workspace"];
+    let repo_canon = repo.canonicalize().unwrap();
+    assert_eq!(ws["kind"], "checkout");
+    assert_eq!(ws["path"], repo_canon.to_string_lossy().as_ref());
+    assert_eq!(ws["repo_root"], ws["path"]);
+    assert_eq!(ws["baseline_dirty"], json!(["f.txt"]));
+    let checkout_id = checkout["id"].as_str().unwrap().to_string();
+    let printed = live_output_containing(&client, &base, &checkout_id, &["> "]).await;
+    assert_eq!(
+        printed_value(&printed, "ws"),
+        format!("checkout|{}", repo_canon.display())
+    );
+
+    // The baseline is the first start's: what the session dirtied since
+    // does not join it on a wake.
+    std::fs::write(repo.join("later.txt"), "x\n").unwrap();
+    let hibernated: Value = client
+        .post(format!("{base}/api/sessions/{checkout_id}/hibernate"))
+        .json(&json!({ "reason": "workspace wake test" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hibernated["workspace"]["baseline_dirty"], json!(["f.txt"]));
+    let woken: Value = client
+        .post(format!("{base}/api/sessions/{checkout_id}/wake"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(woken["workspace"], checkout["workspace"]);
+    let printed = live_output_containing(&client, &base, &checkout_id, &["ws=[checkout"]).await;
+    assert!(printed.contains("ws=[checkout|"), "{printed}");
+
+    let outside = start(json!({
+        "name": "ws none",
+        "command": command,
+        "cwd": plain.to_string_lossy(),
+    }))
+    .await;
+    assert!(outside["workspace"].is_null(), "{outside}");
+    let outside_id = outside["id"].as_str().unwrap().to_string();
+    let printed = live_output_containing(&client, &base, &outside_id, &["> "]).await;
+    assert_eq!(printed_value(&printed, "ws"), "unset|unset");
+
+    for id in [worker_id, checkout_id, outside_id] {
+        let _ = client
+            .delete(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await;
+    }
+}
