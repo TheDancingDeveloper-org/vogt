@@ -277,6 +277,7 @@ Usage:
   vogt-agent-auth set <VAR>     (value on stdin)
   vogt-agent-auth store <VAR>   (value on stdin)
   vogt-agent-auth grants
+  vogt-agent-auth git-credential <HOST>
 
 Commands:
   check  Fetch credentials and validate secrets-manager access, any configured
@@ -297,6 +298,11 @@ Commands:
   grants (session-side) List the credential grants a person approved for this
          session (WI-973): VAR, secret, uses, expiry, grant id and the reason
          it was approved for. Never a value. Fetch one with `fetch VAR`.
+  git-credential
+         (session-side) Ask the broker for a forge token for HOST from a grant
+         whose reason starts with `git:HOST` (WI-1331); print the username and
+         the token on two lines. Exits 1 silently on any refusal. Used by
+         vogt-git-askpass when git prompts.
 EOF
 }
 
@@ -682,6 +688,28 @@ list_grants() {
     rm -f "$response"
 }
 
+# `git-credential HOST`: the session's half of a git grant (WI-1331). Asked by
+# vogt-git-askpass when git prompts, so a grant approved after the session
+# started still reaches it. Prints the username, then the token; any refusal
+# (no broker, no grant, helper failure) exits 1 with nothing printed, so the
+# askpass falls back to git's own failure. The token is never on argv.
+git_credential() {
+    local host="$1" response status
+    [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || exit 1
+    [[ -n "${VOGT_ENGINE_BROKER_URL:-}" && -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] || exit 1
+    command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || exit 1
+    umask 077
+    response="$(mktemp)" || exit 1
+    status="$(curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
+        -H @<(printf 'Authorization: Bearer %s\n' "$VOGT_ENGINE_BROKER_TOKEN") \
+        "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/git-credential?host=$host" 2>/dev/null)" || status="000"
+    if [[ "$status" != "200" ]] || ! jq -er '.username, .token' "$response" 2>/dev/null; then
+        rm -f "$response"
+        exit 1
+    fi
+    rm -f "$response"
+}
+
 # Load every secret named in ENGINE_AGENT_AUTH_SECRETS, export it under its
 # manifest variable, and optionally alias one of them to GH_TOKEN.
 #
@@ -1026,6 +1054,11 @@ main() {
             ;;
         grants)
             list_grants
+            ;;
+        git-credential)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || exit 1
+            git_credential "$1"
             ;;
         -h|--help|help)
             usage

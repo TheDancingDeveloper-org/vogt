@@ -2182,6 +2182,78 @@ exec \"$real\" \"$@\"\n",
     }
 
     #[test]
+    fn the_askpass_asks_the_broker_for_a_git_grant_only_without_a_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let askpass = repo_askpass();
+        let tmp = tempfile::tempdir().unwrap();
+        // A fake `vogt-agent-auth`: answers `git-credential HOST` while a grant
+        // file for that host exists, spending it (a `once` grant), and records
+        // every call.
+        let fake = tmp.path().join("vogt-agent-auth");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> {dir}/calls\n[ \"$1\" = git-credential ] || exit 64\n[ -f {dir}/grant-$2 ] || exit 1\nrm {dir}/grant-$2\nprintf 'x-access-token\\nbrokered-%s\\n' \"$2\"\n",
+                dir = tmp.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = format!("{}:/usr/bin:/bin", tmp.path().display());
+        let run = |prompt: &str, extra: &[(&str, &str)]| -> (bool, String) {
+            let mut cmd = std::process::Command::new(&askpass);
+            cmd.env_clear().env("PATH", &path).arg(prompt);
+            for (k, v) in extra {
+                cmd.env(k, v);
+            }
+            let out = cmd.output().expect("askpass");
+            (
+                out.status.success(),
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+            )
+        };
+        let calls = || std::fs::read_to_string(tmp.path().join("calls")).unwrap_or_default();
+        let broker = [("VOGT_ENGINE_BROKER_URL", "http://127.0.0.1:1")];
+        let gh = "Password for 'https://github.com':";
+
+        // A token in the environment wins; the broker is not asked.
+        std::fs::write(tmp.path().join("grant-github.com"), "").unwrap();
+        let (ok, out) = run(gh, &[broker[0], ("GH_TOKEN", "env-token")]);
+        assert!(ok);
+        assert_eq!(out.trim(), "env-token");
+        // No broker in the environment: today's behaviour, a silent failure.
+        assert_eq!(run(gh, &[]), (false, String::new()));
+        assert_eq!(calls(), "", "the broker was not asked");
+
+        // The username prompt never asks (it would spend a once grant).
+        let (ok, out) = run("Username for 'https://github.com':", &broker);
+        assert!(ok);
+        assert_eq!(out.trim(), "x-access-token");
+        assert_eq!(calls(), "");
+
+        // No token, a live grant: the password is the broker's token.
+        let (ok, out) = run(gh, &broker);
+        assert!(ok, "{out}");
+        assert_eq!(out, "brokered-github.com\n");
+        assert_eq!(calls(), "git-credential github.com\n");
+        // The grant was spent: the next prompt fails silently.
+        assert_eq!(run(gh, &broker), (false, String::new()));
+
+        // Another forge without GIT_AUTH_TOKEN asks for its own host.
+        std::fs::write(tmp.path().join("grant-forge.example"), "").unwrap();
+        let (ok, out) = run(
+            "Password for 'https://user@forge.example:3000/o/r':",
+            &broker,
+        );
+        assert!(ok, "{out}");
+        assert_eq!(out.trim(), "brokered-forge.example");
+    }
+
+    #[test]
     fn github_https_matches_the_host_exactly() {
         // Host matching is exact. A checkout whose origin merely contains the
         // substring github.com is not given the token and is not refused for

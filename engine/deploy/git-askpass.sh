@@ -12,6 +12,15 @@ host=${host##*@}
 host=${host%%:*}
 host=${host%\'}
 host=${host#\'}
+# No token for the host in the environment: ask the engine's broker for one
+# from an approved `git:<host>` grant (WI-1331), at prompt time, so a grant
+# approved after the session started still reaches git. Only the password
+# prompt asks — the username follows from the host — so a `once` grant is
+# spent by one prompt, not two. The value goes straight to stdout.
+brokered_password() {
+  [ -n "${VOGT_ENGINE_BROKER_URL:-}" ] || exit 1
+  vogt-agent-auth git-credential "$host" 2>/dev/null | sed -n 2p | grep . || exit 1
+}
 case "$prompt" in
   *[Uu]sername*)
     if [ "$host" = "github.com" ]; then
@@ -27,13 +36,14 @@ case "$prompt" in
       elif [ -n "${GH_TOKEN:-}" ]; then
         printf '%s\n' "$GH_TOKEN"
       else
-        exit 1
+        brokered_password
       fi
     else
-      if [ -z "${GIT_AUTH_TOKEN:-}" ]; then
-        exit 1
+      if [ -n "${GIT_AUTH_TOKEN:-}" ]; then
+        printf '%s\n' "$GIT_AUTH_TOKEN"
+      else
+        brokered_password
       fi
-      printf '%s\n' "$GIT_AUTH_TOKEN"
     fi
     ;;
   *)

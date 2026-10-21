@@ -4482,6 +4482,23 @@ operator only: the stack secret, the break-glass token or an `admin`-scoped
 token; a `work.write` token, which every session holds, gets 403, because
 which secrets another session was granted is not every session's to read.
 
+**A grant for `git` (WI-1331).** A grant whose `reason` starts with
+`git:<host>` (say `git:github.com push to another org`) also answers git's own
+prompt. `GET /api/agent-auth/git-credential?host=<host>` (broker token, the
+fetch rate limit) picks the session's live grant for that exact host
+(case-insensitive, the soonest to expire first), runs the helper's `get VAR`
+the way a granted fetch does (a `once` grant is spent whether or not the
+helper succeeds) and answers `{username, token}`: `x-access-token` for
+github.com, `git` elsewhere. No such grant is 404, naming the reason to ask
+for. It is audited like a fetch, with the `grant_id` and `host`. On the
+session side, `vogt-agent-auth git-credential <host>` prints the username and
+token on two lines and exits 1 silently on any refusal, and `vogt-git-askpass`
+calls it at a password prompt when the environment holds no token for the
+host (`GH_TOKEN` for github.com, `GIT_AUTH_TOKEN` otherwise) and
+`VOGT_ENGINE_BROKER_URL` is set. Because it asks when git prompts, a grant
+approved after the session started still reaches `git push`, which an
+environment export could not.
+
 Grants live in memory. The session ending or hibernating, or the engine
 restarting, drops them, which fails closed. Every apply and revoke is audited
 as `event=session.grant`. The driven-session policy carries one allow rule,

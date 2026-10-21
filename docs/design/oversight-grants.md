@@ -162,6 +162,13 @@ taken out of the table before the helper runs and never put back, so a
 revoke or a session exit that lands while the helper runs cannot be undone
 by the fetch failing. Each fetch is audited with the grant id.
 
+A grant whose `reason` starts with `git:<host>` also answers git itself
+(WI-1331): `vogt-git-askpass`, at a password prompt for a host with no token
+in the environment, asks `GET /api/agent-auth/git-credential?host=` for that
+session's grant and prints the token. The same fetch path runs, so a `once`
+grant is spent by one prompt, and the audit names the grant and the host. See
+[`ENGINE.md`](../ENGINE.md) §9.
+
 `vogt-agent-auth grants` (session side, `GET /api/agent-auth/grants` with the
 broker token) lists the session's active grants: `var`, secret name, `uses`,
 expiry, grant id and the `reason` it was approved for. Values are never

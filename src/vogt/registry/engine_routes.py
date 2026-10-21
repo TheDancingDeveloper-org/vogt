@@ -231,5 +231,8 @@ ENGINE_ONLY: Mapping[str, str] = {
     "POST /api/agent-auth/conversation": _SESSION_SELF,
     "POST /api/agent-auth/policy-check": _SESSION_SELF,
     "GET /api/agent-auth/grants": _SESSION_SELF,
+    "GET /api/agent-auth/git-credential": (
+        "session-local credential fetch; the MCP counterpart is session.grant_request"
+    ),
     "POST /api/chats/{id}/gate": _CHAT_GATE,
 }
