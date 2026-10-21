@@ -66,6 +66,9 @@ export const ROUTES = {
   "initiative.list": "/initiatives",
   "actor.list": "/actors",
   "auth.logout": "/auth/logout",
+  "auth.whoami": "/auth/whoami",
+  "decision.answer": "/decisions/answer",
+  "decision.withdraw": "/decisions/withdraw",
   "drift.list": "/drift",
   "drift.resolve": "/drift/resolve",
   deps: "/deps",
@@ -350,6 +353,8 @@ export interface InboxEntry {
     subject_key?: string;
     /** A pending grant a person approves or denies (WI-973). */
     grant_id?: string;
+    /** A pending decision a person answers (WI-1321). */
+    decision_id?: string;
   };
   /** Who caused the occurrence (resolved at collect time). Drift, CI and
    *  agent entries are the instance itself: a bot inside the org. */
@@ -1036,6 +1041,32 @@ export const decideGrant = (
   { id, decision, reason },
   "POST",
 );
+
+/** Answer a pending decision an agent asked with one of its option labels
+ *  (WI-1321). A person's answer: the core refuses it from any agent
+ *  (`person_required`). Nothing is applied; the asker reads the answer. */
+export const decisionAnswer = (
+  id: string,
+  label: string,
+  note: string,
+  reason: string,
+) => call<{ decision: { id: string; state: string } }>(
+  "decision.answer",
+  { id, label, note, reason },
+  "POST",
+);
+
+/** Withdraw a pending decision. A person, or the session that asked. */
+export const decisionWithdraw = (id: string, reason: string) =>
+  call<{ decision: { id: string; state: string } }>(
+    "decision.withdraw",
+    { id, reason },
+    "POST",
+  );
+
+/** Who this browser's credential is, as the core decided it. */
+export const whoami = () =>
+  call<{ identity_ref: string; kind?: string }>("auth.whoami");
 
 /** The audit log, narrowed and paged.
  *

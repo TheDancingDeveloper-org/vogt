@@ -7,6 +7,9 @@ import {
   listInbox,
   resolveInboxDrift,
   decideGrant,
+  decisionAnswer,
+  decisionWithdraw,
+  whoami,
   restoreInbox,
   snoozeInbox,
   suppressSubject,
@@ -54,6 +57,8 @@ function localDatetimeIn(days: number): string {
 
 interface Props {
   onError?: (message: string) => void;
+  /** A confirmation worth a toast, such as the label a decision was answered with. */
+  onNotice?: (message: string) => void;
 }
 
 const SOURCES = INBOX_SOURCES;
@@ -146,6 +151,43 @@ interface EntryProps {
     action: DecisionAction,
     reason: string,
   ) => Promise<string | null>;
+  /** Answer the entry's pending decision with an option label and a note. */
+  onAnswer: (entry: InboxEntry, label: string, note: string) => Promise<string | null>;
+  onWithdraw: (entry: InboxEntry) => Promise<string | null>;
+  /** The reader's identity, to offer Withdraw to the asker only. */
+  me: string | null;
+}
+
+interface DecisionOption {
+  label: string;
+  description?: string | null;
+  recommended?: boolean;
+}
+
+/** A pending decision's question, context and options, read from the entry's
+ *  evidence (WI-1321). The asker's text: shown verbatim, never acted on. The
+ *  recommended option is put first whatever order the asker gave. */
+export function decisionOf(entry: InboxEntry): {
+  id: string;
+  question: string;
+  context: string;
+  asker: string | null;
+  options: DecisionOption[];
+} | null {
+  if (entry.kind !== "decision.pending") return null;
+  const evidence = entry.evidence_snapshot ?? {};
+  const id = entry.action?.decision_id ?? (evidence.decision_id as string | undefined);
+  const raw = Array.isArray(evidence.options) ? (evidence.options as DecisionOption[]) : [];
+  const options = raw.filter((option) => typeof option?.label === "string" && option.label);
+  if (!id || options.length === 0) return null;
+  options.sort((a, b) => Number(Boolean(b.recommended)) - Number(Boolean(a.recommended)));
+  return {
+    id,
+    question: typeof evidence.question === "string" ? evidence.question : entry.title,
+    context: typeof evidence.context === "string" ? evidence.context : "",
+    asker: typeof evidence.asker === "string" ? evidence.asker : null,
+    options,
+  };
 }
 
 type DecisionAction = "adopt" | "suppress" | "accept" | "reject" | "approve_grant" | "deny_grant";
@@ -157,12 +199,15 @@ const Entry: Component<EntryProps> = (props) => {
   const [refusal, setRefusal] = createSignal<string | null>(null);
   const [sheetOpen, setSheetOpen] = createSignal(false);
   const [until, setUntil] = createSignal(localDatetimeIn(1));
+  const [note, setNote] = createSignal("");
+  const [answerRefusal, setAnswerRefusal] = createSignal<string | null>(null);
+  const decision = () => (props.entry.triage_state === "active" ? decisionOf(props.entry) : null);
 
   // A composer or an open action sheet is an unsaved edit: while either is
   // open this entry is a reason not to re-read the list under it. The parent
   // guards its live subscription on the sum of these across every entry.
   createEffect(() => {
-    props.onComposerChange(props.entry.entry_key, composing() !== null || sheetOpen());
+    props.onComposerChange(props.entry.entry_key, composing() !== null || sheetOpen() || note().trim() !== "");
   });
   onCleanup(() => props.onComposerChange(props.entry.entry_key, false));
 
@@ -227,6 +272,17 @@ const Entry: Component<EntryProps> = (props) => {
     else if (props.phone) closeSheet();
     else cancel();
   };
+  const answer = async (label: string) => {
+    setAnswerRefusal(null);
+    const error = await props.onAnswer(props.entry, label, note().trim());
+    if (error) setAnswerRefusal(error);
+    else setNote("");
+  };
+  const withdraw = async () => {
+    setAnswerRefusal(null);
+    const error = await props.onWithdraw(props.entry);
+    if (error) setAnswerRefusal(error);
+  };
   const submitAction = async (action: DecisionAction) => {
     const error = await props.onAction(props.entry, action, reason());
     if (error) setRefusal(error);
@@ -255,8 +311,56 @@ const Entry: Component<EntryProps> = (props) => {
           <span class="inbox-source">{props.entry.source}</span>
           <h2>{props.entry.title}</h2>
         </div>
-        <p class="inbox-entry-summary">{props.entry.summary ?? "No summary was provided by the server."}</p>
-        <Show when={props.entry.evidence_snapshot || props.entry.proposed_change}>
+        <Show
+          when={decision()}
+          fallback={<p class="inbox-entry-summary">{props.entry.summary ?? "No summary was provided by the server."}</p>}
+        >
+          {(asked) => (
+            <section class="inbox-decision" aria-label={`Decision ${asked().id}`}>
+              <p class="inbox-decision-question">{asked().question}</p>
+              <Show when={asked().context}>
+                <details class="inbox-decision-context">
+                  <summary>Context</summary>
+                  <p>{asked().context}</p>
+                </details>
+              </Show>
+              <div class="inbox-decision-options" role="group" aria-label="Options">
+                <For each={asked().options}>
+                  {(option) => (
+                    <button
+                      type="button"
+                      class={option.recommended ? "inbox-decision-option recommended" : "inbox-decision-option"}
+                      disabled={props.busy}
+                      title={option.description ?? undefined}
+                      onClick={() => void answer(option.label)}
+                    >
+                      {option.label}
+                      <Show when={option.recommended}>
+                        <span class="inbox-decision-recommended"> (recommended)</span>
+                      </Show>
+                    </button>
+                  )}
+                </For>
+              </div>
+              <label class="inbox-decision-note">
+                <span>Note (optional)</span>
+                <input
+                  value={note()}
+                  maxLength={2000}
+                  onInput={(event) => setNote(event.currentTarget.value)}
+                  placeholder="Anything the asker should know"
+                />
+              </label>
+              <Show when={props.me !== null && props.me === asked().asker}>
+                <button type="button" class="inbox-decision-withdraw" disabled={props.busy} onClick={() => void withdraw()}>
+                  Withdraw
+                </button>
+              </Show>
+              <Show when={answerRefusal()}>{(message) => <p class="inbox-refusal" role="alert">{message()}</p>}</Show>
+            </section>
+          )}
+        </Show>
+        <Show when={!decision() && (props.entry.evidence_snapshot || props.entry.proposed_change)}>
           <details class="inbox-evidence" open={evidenceOpen()}>
             <summary>Evidence</summary>
             <section aria-label="Drift evidence">
@@ -873,6 +977,46 @@ const Inbox: Component<Props> = (props) => {
     }
   };
 
+  // Who is reading, read once and only when a decision is on screen: Withdraw
+  // is offered to the asker alone. Unknown hides it; the core decides anyway.
+  const [me, setMe] = createSignal<string | null>(null);
+  let askedWhoami = false;
+  createEffect(() => {
+    if (askedWhoami || !entries().some((entry) => entry.kind === "decision.pending")) return;
+    askedWhoami = true;
+    whoami().then((who) => setMe(who.identity_ref), () => setMe(null));
+  });
+  // A decided row leaves the list at once; the re-read confirms it.
+  const dropEntry = (key: string) => {
+    setResult((current) =>
+      current ? { ...current, entries: current.entries.filter((entry) => entry.entry_key !== key) } : current,
+    );
+  };
+  const decide = async (entry: InboxEntry, run: (id: string) => Promise<unknown>, notice: string) => {
+    const id = decisionOf(entry)?.id;
+    if (!id) return "Inbox entry names no decision.";
+    setTriaging(entry.entry_key);
+    try {
+      await run(id);
+      dropEntry(entry.entry_key);
+      props.onNotice?.(notice);
+      void reload();
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      setTriaging(null);
+    }
+  };
+  const answerDecision = (entry: InboxEntry, label: string, note: string) =>
+    decide(
+      entry,
+      (id) => decisionAnswer(id, label, note, note || `Answered "${label}" from the Inbox`),
+      `Answered: ${label}`,
+    );
+  const withdrawDecision = (entry: InboxEntry) =>
+    decide(entry, (id) => decisionWithdraw(id, "Withdrawn from the Inbox"), "Decision withdrawn");
+
   return (
     <section class="vogt-surface inbox inbox-surface" aria-label="Inbox">
       <SurfaceHeader
@@ -1113,7 +1257,7 @@ const Inbox: Component<Props> = (props) => {
       </Show>
       <div class="inbox-list" aria-label="Attention stream" aria-live="polite">
         <For each={visibleEntries()}>
-          {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} phone={phone()} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onComposerChange={onComposerChange} onTriage={triage} onAction={action} />}
+          {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} phone={phone()} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onComposerChange={onComposerChange} onTriage={triage} onAction={action} onAnswer={answerDecision} onWithdraw={withdrawDecision} me={me()} />}
         </For>
       </div>
       <Show when={result()?.next_cursor}>

@@ -2405,7 +2405,7 @@ const App: Component = () => {
             <div class="stable-place"><Backlog onError={(msg) => showToast(msg, { kind: "error" })} /></div>
           </Show>
           <Show when={location.pathname === "/inbox"}>
-            <div class="stable-place"><Inbox onError={(msg) => showToast(msg, { kind: "error" })} /></div>
+            <div class="stable-place"><Inbox onError={(msg) => showToast(msg, { kind: "error" })} onNotice={(msg) => showToast(msg)} /></div>
           </Show>
           <Show when={location.pathname === "/projects"}>
             <div class="stable-place"><Projects onError={(msg) => showToast(msg, { kind: "error" })} /></div>
