@@ -4283,9 +4283,31 @@ fn spawn_retry_watcher(
             if session.exit_code().is_some() {
                 break;
             }
+            // Enter over a dialog answers it: on a permission prompt that is an
+            // engine-internal approval (WI-1001). Skip this retry while any
+            // dialog or menu is showing; whoever answers it resumes the run,
+            // and a fresh rate-limit message re-arms the retry.
+            let reading = Arc::clone(&session);
+            let dialog = tokio::task::spawn_blocking(move || reading.current_dialog())
+                .await
+                .ok()
+                .flatten();
+            if !retry_may_press_enter(dialog.as_ref()) {
+                tracing::info!(
+                    session = %session.id,
+                    "agent-task auto-retry skipped: a dialog is showing"
+                );
+                continue;
+            }
             let _ = session.write_input(b"\r");
         }
     });
+}
+
+/// Whether the rate-limit retry may press Enter: only when no dialog or menu
+/// is on screen, since Enter would pick its highlighted option.
+fn retry_may_press_enter(dialog: Option<&crate::approval::Detected>) -> bool {
+    dialog.is_none()
 }
 
 // --- outcomes, conclusion, and schema validation --------------------
@@ -4681,6 +4703,40 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// WI-1001: the rate-limit retry must never press Enter over a
+    /// permission dialog or a menu; Enter would answer it.
+    #[test]
+    fn retry_never_presses_enter_over_a_dialog() {
+        let lines = |t: &str| t.lines().map(str::to_string).collect::<Vec<_>>();
+        let permission = lines(
+            "Bash command\n\
+             \n\
+             \x20 rm -rf build\n\
+             \n\
+             Do you want to proceed?\n\
+             \u{276f} 1. Yes\n\
+             \x20 2. No, and tell Claude what to do (esc)",
+        );
+        let dialog = crate::approval::detect(&permission, &[]).expect("permission dialog");
+        assert!(!retry_may_press_enter(Some(&dialog)));
+
+        let menu = lines(
+            "Which gates should run?\n\
+             \n\
+             \u{276f} 1. cargo test\n\
+             \x20 2. pytest\n\
+             \n\
+             Enter to select \u{b7} Tab/Arrow keys to navigate \u{b7} Esc to cancel",
+        );
+        let dialog = crate::approval::detect(&menu, &[]).expect("menu");
+        assert!(!retry_may_press_enter(Some(&dialog)));
+
+        let rate_limited = lines("API Error: 529 Overloaded\n> ");
+        let none = crate::approval::detect(&rate_limited, &[]);
+        assert!(none.is_none());
+        assert!(retry_may_press_enter(none.as_ref()));
+    }
 
     #[test]
     fn parses_daily_time() {
