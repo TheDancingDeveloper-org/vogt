@@ -342,6 +342,36 @@ fn gather(cwd: &Path, home: Option<&Path>) -> Option<String> {
     Some(body.trim_end().to_string())
 }
 
+/// The guidance files opencode is pointed at through its `instructions` config
+/// (WI-977), in load order and resolved as [`gather`] resolves them. opencode
+/// walks `AGENTS.md` only up to its git root, so the workspace files above the
+/// checkout are named here. The checkout's own `AGENTS.md` and `CLAUDE.md` are
+/// left out: opencode reads the first natively and the second is a pointer to it.
+pub fn instruction_files(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(walk) = plan(cwd, home) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for path in candidates(&walk) {
+        if oversight_only(&path) {
+            continue;
+        }
+        let in_checkout = walk.native_agents.iter().any(|dir| path.starts_with(dir));
+        let name = path.file_name().and_then(|n| n.to_str());
+        if in_checkout && matches!(name, Some("AGENTS.md") | Some("CLAUDE.md")) {
+            continue;
+        }
+        let Some(real) = confined(&path, &walk.allowed) else {
+            continue;
+        };
+        if seen.insert(real.clone()) {
+            out.push(real);
+        }
+    }
+    out
+}
+
 /// `text` as a TOML basic string: quoted, with backslash, quote and every
 /// control character escaped, so the fork's `-c key=value` parser reads back
 /// exactly `text`.
@@ -448,6 +478,35 @@ mod tests {
         assert!(body.contains(&format!("- komodo: {}", skill.display())));
         // Codex reads the checkout's own AGENTS.md natively.
         assert!(!body.contains("REPO_AGENTS"));
+    }
+
+    /// WI-977: opencode is named the workspace files above the checkout and the
+    /// user's own, but not the checkout's AGENTS.md or CLAUDE.md, nor the
+    /// oversight-only rules.
+    #[test]
+    fn opencode_is_named_the_workspace_files_not_the_checkouts_own() {
+        let (_tmp, home, repo) = layout();
+        let ws = home.join("Working");
+        write(&ws.join(".claude/rules/operator-decisions.md"), "OVERSIGHT");
+        let files = instruction_files(&repo, Some(&home));
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        for path in [
+            ws.join("AGENTS.md"),
+            ws.join("CLAUDE.md"),
+            ws.join(".claude/rules/operator.md"),
+            home.join(".claude/CLAUDE.md"),
+            home.join(".claude/rules/user.md"),
+        ] {
+            assert!(files.contains(&canon(&path)), "{path:?} not named");
+        }
+        for path in [
+            repo.join("AGENTS.md"),
+            repo.join("CLAUDE.md"),
+            ws.join(".claude/rules/operator-decisions.md"),
+        ] {
+            assert!(!files.contains(&canon(&path)), "{path:?} named");
+        }
+        assert_eq!(files.len(), files.iter().collect::<HashSet<_>>().len());
     }
 
     /// WI-2035: the body rides on every request, so it must not grow with

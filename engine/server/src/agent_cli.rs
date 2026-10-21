@@ -674,6 +674,47 @@ pub fn with_codex_guidance(
     Some(out)
 }
 
+/// `env` with the workspace guidance files (WI-977) added to opencode's
+/// `instructions` in `OPENCODE_CONFIG_CONTENT`, the way Codex gets its
+/// `developer_instructions`. `None` when it is not an opencode launch, there
+/// are no files, or the config already set is not JSON (a posture is never
+/// overwritten). A file already named is not named twice. The last
+/// `OPENCODE_CONFIG_CONTENT` in `env` is the one that counts, so it is the
+/// one extended.
+pub fn with_opencode_guidance(
+    command: &[String],
+    env: &[(String, String)],
+    files: &[PathBuf],
+) -> Option<Vec<(String, String)>> {
+    const KEY: &str = "OPENCODE_CONFIG_CONTENT";
+    if agent_name(command).as_deref() != Some("opencode") || files.is_empty() {
+        return None;
+    }
+    let mut out = env.to_vec();
+    let at = out.iter().rposition(|(k, _)| k == KEY);
+    let mut config: serde_json::Value = match at {
+        Some(i) => serde_json::from_str(&out[i].1).ok()?,
+        None => serde_json::json!({}),
+    };
+    let list = config
+        .as_object_mut()?
+        .entry("instructions")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()?;
+    for file in files {
+        let named = file.display().to_string();
+        if !list.iter().any(|v| v.as_str() == Some(named.as_str())) {
+            list.push(serde_json::Value::String(named));
+        }
+    }
+    let value = serde_json::to_string(&config).ok()?;
+    match at {
+        Some(i) => out[i].1 = value,
+        None => out.push((KEY.to_string(), value)),
+    }
+    Some(out)
+}
+
 /// Linux caps one argv entry at 128 KiB; a charter that would push Codex's
 /// `developer_instructions` past this stays in the brief alone.
 const MAX_CHARTER_ARG_BYTES: usize = 120 * 1024;
@@ -814,6 +855,50 @@ mod tests {
         assert!(with_codex_guidance(&out, &repo, Some(&home)).is_none());
         let claude = vec!["claude".to_string()];
         assert!(with_codex_guidance(&claude, &repo, Some(&home)).is_none());
+    }
+
+    /// WI-977: opencode gets the guidance files in its `instructions`, merged
+    /// into any posture already in `OPENCODE_CONFIG_CONTENT`.
+    #[test]
+    fn opencode_guidance_is_named_in_its_instructions_beside_the_posture() {
+        let command: Vec<String> = ["opencode", "--model", "x/y"].map(String::from).to_vec();
+        let files = [PathBuf::from("/h/Working/AGENTS.md")];
+        let posture = (
+            "OPENCODE_CONFIG_CONTENT".to_string(),
+            OPENCODE_BYPASS.to_string(),
+        );
+        let out = with_opencode_guidance(&command, std::slice::from_ref(&posture), &files).unwrap();
+        let (_, config) = out
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(config).unwrap();
+        assert_eq!(
+            parsed["instructions"],
+            serde_json::json!(["/h/Working/AGENTS.md"])
+        );
+        assert_eq!(
+            parsed["permission"],
+            serde_json::from_str::<serde_json::Value>(OPENCODE_BYPASS).unwrap()["permission"],
+            "the posture survives"
+        );
+        // Named once, however many starts; a posture that is not JSON is left alone.
+        let again = with_opencode_guidance(&command, &out, &files).unwrap();
+        assert_eq!(again.len(), out.len());
+        let (_, config) = again
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(config).unwrap();
+        assert_eq!(parsed["instructions"].as_array().unwrap().len(), 1);
+        let broken = [(
+            "OPENCODE_CONFIG_CONTENT".to_string(),
+            "not json".to_string(),
+        )];
+        assert!(with_opencode_guidance(&command, &broken, &files).is_none());
+        // Other agents and an empty set of files are untouched.
+        assert!(with_opencode_guidance(&["claude".to_string()], &[], &files).is_none());
+        assert!(with_opencode_guidance(&command, &[], &[]).is_none());
     }
 
     fn instructions(arg: &str) -> String {

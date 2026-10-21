@@ -589,6 +589,19 @@ impl SessionRegistry {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| self.cfg.default_cwd.clone());
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            // WI-977. The same guidance reaches opencode as the files it
+            // loads through `instructions`, since it reads AGENTS.md only up
+            // to its git root and never the workspace above it.
+            if agent_cli::agent_name(command).as_deref() == Some("opencode") {
+                let files = crate::codex_guidance::instruction_files(&cwd, home.as_deref());
+                if let Some(env) = agent_cli::with_opencode_guidance(
+                    command,
+                    spec.env.as_deref().unwrap_or_default(),
+                    &files,
+                ) {
+                    spec.env = Some(env);
+                }
+            }
             if let Some(rewritten) = agent_cli::with_codex_guidance(command, &cwd, home.as_deref())
             {
                 spec.command = Some(rewritten);
