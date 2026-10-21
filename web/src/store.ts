@@ -294,6 +294,13 @@ let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let lastAliveAt = 0;
 /** When the stream was last lost and not yet reopened. */
 let lostAt: number | null = null;
+/**
+ * A drop at least this long re-reads the session list on reconnect; a shorter
+ * one leaves it to the stream (WI-1254).
+ */
+export const RECONNECT_GAP_MS = 10_000;
+/** The settled reopen's verdict, consumed by the next `sse-reconnect` wake. */
+let reconnectGap = false;
 
 /** Show "Disconnected" only once the loss has outlasted the grace period. */
 function markDisconnected(): void {
@@ -418,9 +425,41 @@ export function onVogtChangedEvent(
   return () => vogtEventListeners.delete(listener);
 }
 
+/**
+ * How long a `vogt-changed` waits for the rest of its burst before the
+ * listeners hear it (WI-1254). A transition fans out several core events;
+ * each one re-read every open surface.
+ */
+export const VOGT_CHANGED_COALESCE_MS = 150;
+let vogtTimer: ReturnType<typeof setTimeout> | null = null;
+/** The burst so far: the latest event per entity and kind, in arrival order. */
+const vogtPending = new Map<string, VogtChangedEvent>();
+
 function notifyVogtChanged(event: VogtChangedEvent): void {
-  for (const listener of vogtListeners) listener(event.seq);
-  for (const listener of vogtEventListeners) listener(event);
+  const key = `${event.kind}\u0000${event.entity_kind}\u0000${event.entity_id}`;
+  vogtPending.delete(key);
+  vogtPending.set(key, event);
+  if (vogtTimer === null) vogtTimer = setTimeout(flushVogtChanged, VOGT_CHANGED_COALESCE_MS);
+}
+
+function flushVogtChanged(): void {
+  vogtTimer = null;
+  const events = [...vogtPending.values()];
+  vogtPending.clear();
+  if (events.length === 0) return;
+  // A seq listener re-reads everything it shows, so one nudge per burst.
+  const seq = Math.max(...events.map((e) => e.seq));
+  for (const listener of [...vogtListeners]) listener(seq);
+  // An event listener reads the payload, so it hears each distinct change.
+  for (const event of events) {
+    for (const listener of [...vogtEventListeners]) listener(event);
+  }
+}
+
+function cancelVogtChanged(): void {
+  if (vogtTimer !== null) clearTimeout(vogtTimer);
+  vogtTimer = null;
+  vogtPending.clear();
 }
 
 /** Callers waiting to hear that a session exited (a PTY the engine killed). */
@@ -581,11 +620,16 @@ export function startEventStream(): void {
           settleTimer = null;
           if (!streamSettled()) return;
           reconnectAttempts = 0;
+          const droppedFor = lostAt === null ? 0 : Date.now() - lostAt;
           markConnected();
           lostAt = null;
-          // Any drop, however short: events sent while the stream was down
-          // are gone, so the lists and open surfaces are read again. One wake
-          // for the whole drop; the session-list reconcile covers its refetch.
+          // Events sent while the stream was down are gone, so the open
+          // surfaces are read again: one wake for the whole drop. The session
+          // list is re-read only for a drop long enough to have hidden a
+          // create or remove; a blip (Firefox churns its stream every few
+          // seconds) re-reading the whole list each time was the storm in
+          // WI-1254. A `lagged` still answers a gap the engine reports.
+          reconnectGap = droppedFor >= RECONNECT_GAP_MS;
           noteForeground("sse-reconnect");
         }, STREAM_SETTLE_MS);
       },
@@ -598,6 +642,7 @@ export function stopEventStream(): void {
   streamStarted = false;
   noteStreamGone();
   lostAt = null;
+  reconnectGap = false;
   disarmStaleTimer();
   disarmStallTimer();
   unsubscribeEvents?.();
@@ -614,6 +659,7 @@ export function stopEventStream(): void {
     clearTimeout(laggedTimer);
     laggedTimer = null;
   }
+  cancelVogtChanged();
   reconnectAttempts = 0;
 }
 
@@ -657,5 +703,10 @@ onWake((wake: Wake) => {
 });
 onWake((wake: Wake) => {
   if (wake.reason === "boot" && sessionsStore.ready) return;
+  if (wake.reason === "sse-reconnect") {
+    const gap = reconnectGap;
+    reconnectGap = false;
+    if (!gap && !sessionListPending()) return;
+  }
   void reconcile("sessions", wake, (signal) => refreshSessions(signal));
 });

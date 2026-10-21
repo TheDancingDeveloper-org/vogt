@@ -132,3 +132,61 @@ describe("session list coalescing", () => {
     expect(script.listCalls()).toBe(before);
   });
 });
+
+describe("vogt-changed coalescing (WI-1254)", () => {
+  const change = (seq: number, id = "WI-1", kind = "work.updated") => ({
+    type: "vogt-changed",
+    kind,
+    entity_kind: "work_item",
+    entity_id: id,
+    seq,
+  });
+
+  it("nudges each seq listener once per burst, with the latest seq", async () => {
+    store.startEventStream();
+    await settle();
+    const a = vi.fn();
+    const b = vi.fn();
+    const stopA = store.onVogtChanged(a);
+    const stopB = store.onVogtChanged(b);
+    for (let seq = 1; seq <= 8; seq++) script.feed(change(seq, `WI-${seq % 3}`));
+    await settle();
+    expect(a).not.toHaveBeenCalled();
+    await settle(store.VOGT_CHANGED_COALESCE_MS);
+    expect(a.mock.calls).toEqual([[8]]);
+    expect(b.mock.calls).toEqual([[8]]);
+    stopA();
+    stopB();
+  });
+
+  it("hands event listeners each distinct change once, latest wins", async () => {
+    store.startEventStream();
+    await settle();
+    const seen: Array<[string, string, number]> = [];
+    const stop = store.onVogtChangedEvent((e) => seen.push([e.entity_id, e.kind, e.seq]));
+    script.feed(change(1, "WI-1"));
+    script.feed(change(2, "WI-2"));
+    script.feed(change(3, "WI-1"));
+    script.feed(change(4, "WI-1", "work.transitioned"));
+    await settle(store.VOGT_CHANGED_COALESCE_MS);
+    expect(seen).toEqual([
+      ["WI-2", "work.updated", 2],
+      ["WI-1", "work.updated", 3],
+      ["WI-1", "work.transitioned", 4],
+    ]);
+    stop();
+  });
+
+  it("drops a pending burst when the stream stops", async () => {
+    store.startEventStream();
+    await settle();
+    const a = vi.fn();
+    const stop = store.onVogtChanged(a);
+    script.feed(change(1));
+    await settle();
+    store.stopEventStream();
+    await settle(store.VOGT_CHANGED_COALESCE_MS);
+    expect(a).not.toHaveBeenCalled();
+    stop();
+  });
+});
