@@ -1054,6 +1054,17 @@ components:
         over_threshold:
           type: boolean
           description: At or over ENGINE_SESSION_RSS_WARN; absent when false.
+        cgroup:
+          type: object
+          description: >-
+            The session's own cgroup memory (WI-895); absent when sessions do
+            not run in per-session cgroups.
+          required: [memory_current, oom_kills]
+          properties:
+            memory_current: { type: integer }
+            memory_peak: { type: integer }
+            memory_max: { type: integer, description: Hard cap; absent for none. }
+            oom_kills: { type: integer, description: Processes the cap has OOM-killed. }
     ApprovalOption:
       type: object
       required: [number, label]

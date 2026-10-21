@@ -429,6 +429,24 @@ pub struct SessionResources {
     /// `rss_bytes` is at or over the deployment's `ENGINE_SESSION_RSS_WARN`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub over_threshold: bool,
+    /// The session's own cgroup (WI-895), when the engine runs each session
+    /// in one: memory charged to it now, its high-water mark, its hard cap
+    /// (absent for none) and how many processes that cap has OOM-killed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<SessionCgroup>,
+}
+
+/// A session's cgroup memory (`memory.current`, `memory.peak`, `memory.max`,
+/// `oom_kill` in `memory.events`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCgroup {
+    pub memory_current: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_peak: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_max: Option<u64>,
+    #[serde(default)]
+    pub oom_kills: u64,
 }
 
 /// One session's entry in a `session-resources` event.

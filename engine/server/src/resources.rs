@@ -1,7 +1,8 @@
 //! What each session's process tree is holding (WI-916).
 //!
 //! Visibility, not enforcement — per-session limits are a cgroup's job
-//! (WI-895). The aim is that the session eating the node's memory is
+//! (WI-895, `session_cgroup`); when a session has one, its sample carries
+//! the cgroup's own memory figures too. The aim is that the session eating the node's memory is
 //! identifiable from Vogt, before the host's OOM killer picks something at
 //! random: a Soot run at 50 GiB, a leaking service at 60.
 //!
@@ -22,7 +23,7 @@ use std::{
 };
 
 use uuid::Uuid;
-use vogt_engine_contract::{SessionResources, SessionResourcesSample};
+use vogt_engine_contract::{SessionCgroup, SessionResources, SessionResourcesSample};
 
 use crate::{app::AppState, events::ServerEvent};
 
@@ -167,6 +168,7 @@ pub fn measure(
         processes: pids.len() as u32,
         sampled_at,
         over_threshold: warn_bytes.is_some_and(|w| rss_bytes >= w),
+        cgroup: None,
     })
 }
 
@@ -229,6 +231,10 @@ impl Sampler {
             .retain(|id, _| sessions.iter().any(|(s, _)| s.id == *id));
         self.projects
             .retain(|id, _| sessions.iter().any(|(s, _)| s.id == *id));
+        if let Some(cgroups) = crate::session_cgroup::manager() {
+            let live: Vec<Uuid> = sessions.iter().map(|(s, _)| s.id).collect();
+            cgroups.sweep(&live);
+        }
         let Ok(table) = tokio::task::spawn_blocking(read_table).await else {
             return;
         };
@@ -252,7 +258,7 @@ impl Sampler {
         let mut samples = Vec::with_capacity(sessions.len());
         let mut gauges = Vec::with_capacity(sessions.len());
         for (session, pid) in sessions {
-            let measured = measure(
+            let mut measured = measure(
                 &table,
                 &children,
                 pid,
@@ -263,6 +269,17 @@ impl Sampler {
                 self.warn_bytes,
                 sampled_at.clone(),
             );
+            if let (Some(r), Some(stats)) = (
+                measured.as_mut(),
+                crate::session_cgroup::manager().and_then(|m| m.stats(session.id)),
+            ) {
+                r.cgroup = stats.current.map(|memory_current| SessionCgroup {
+                    memory_current,
+                    memory_peak: stats.peak,
+                    memory_max: stats.max,
+                    oom_kills: stats.oom_kills,
+                });
+            }
             session.set_resources(measured.clone());
             if let Some(resources) = measured {
                 let project = self
@@ -541,6 +558,7 @@ mod tests {
             processes: 3,
             sampled_at: String::new(),
             over_threshold: false,
+            cgroup: None,
         };
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();

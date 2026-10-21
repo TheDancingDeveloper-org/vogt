@@ -291,6 +291,8 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     crate::hibernate_policy::spawn_watcher(Arc::clone(&state));
     crate::autopilot::spawn_watcher(Arc::clone(&state));
     crate::budget::spawn_watcher(Arc::clone(&state));
+    // Per-session cgroups (WI-895) before the sampler reads them.
+    crate::session_cgroup::init();
     crate::resources::spawn_sampler(Arc::clone(&state));
     if !state.config.economics_tick.is_zero() {
         let home = state.config.economics_home.clone().unwrap_or_else(|| {

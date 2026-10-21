@@ -1213,6 +1213,8 @@ pub fn spawn(
         .spawn_command(cmd)
         .map_err(|e| ApiError::Pty(format!("spawn: {e}")))?;
     let pid = child.process_id();
+    // Its own memory cap, so a runaway cannot OOM other sessions (WI-895).
+    crate::session_cgroup::attach(id, pid);
     drop(pair.slave);
 
     let reader = pair
@@ -1517,6 +1519,7 @@ fn spawn_exit_waiter(
             id: session.id,
             exit_code: Some(code),
         });
+        crate::session_cgroup::detach(session.id);
         if let Some(hook) = on_exit {
             hook(&session);
         }
