@@ -48,6 +48,39 @@ pub enum Screen {
     Sessions,
     /// One work item.
     WorkItem,
+    /// API base, who is signed in, theme and sign out.
+    Settings,
+}
+
+/// The colour theme the user picked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemeChoice {
+    /// Follow the operating system.
+    #[default]
+    System,
+    /// Always light.
+    Light,
+    /// Always dark.
+    Dark,
+}
+
+impl ThemeChoice {
+    /// Every choice, in the order the Settings screen lists them.
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    /// The label shown, and the value kept in storage.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    /// Read a stored value; anything unknown is [`ThemeChoice::System`].
+    pub fn parse(value: &str) -> Self {
+        Self::ALL.into_iter().find(|c| c.as_str() == value).unwrap_or_default()
+    }
 }
 
 /// The state of the live event stream.
@@ -123,6 +156,8 @@ pub struct Model {
     pub work_ref: String,
     /// The work-item page.
     pub work: WorkView,
+    /// The colour theme picked in Settings.
+    pub theme: ThemeChoice,
     generation: u64,
     backoff: Backoff,
     /// When the current stream last delivered anything.
@@ -147,6 +182,7 @@ impl Model {
             stream: StreamState::Off,
             work_ref: String::new(),
             work: WorkView::Empty,
+            theme: ThemeChoice::System,
             generation: 0,
             backoff: Backoff::default(),
             stream_seen: None,
@@ -220,6 +256,18 @@ impl Model {
         if self.auth.is_some() {
             self.screen = Screen::Sessions;
         }
+    }
+
+    /// Show the Settings screen.
+    pub fn show_settings(&mut self) {
+        if self.auth.is_some() {
+            self.screen = Screen::Settings;
+        }
+    }
+
+    /// The API base in use, or the one the login form will use.
+    pub fn api_base(&self) -> &str {
+        self.auth.as_ref().map_or(self.login.base.as_str(), |a| a.base.as_str())
     }
 
     /// Re-read the session list now.
@@ -685,5 +733,29 @@ mod tests {
         let _ = model.open_work_item("WI-2");
         model.apply(Reply::WorkItem("WI-1".into(), Ok(Box::default())), now);
         assert_eq!(model.work, WorkView::Loading("WI-2".into()));
+    }
+
+    #[test]
+    fn theme_choice_round_trips_and_defaults_to_system() {
+        for choice in ThemeChoice::ALL {
+            assert_eq!(ThemeChoice::parse(choice.as_str()), choice);
+        }
+        assert_eq!(ThemeChoice::parse("purple"), ThemeChoice::System);
+    }
+
+    #[test]
+    fn settings_needs_a_sign_in_and_survives_sign_out() {
+        let mut model = Model::new("http://dev/");
+        model.show_settings();
+        assert_eq!(model.screen, Screen::Login);
+        assert_eq!(model.api_base(), "http://dev/");
+        model.login.token = "t".into();
+        model.submit_token();
+        model.show_settings();
+        assert_eq!(model.screen, Screen::Settings);
+        assert_eq!(model.api_base(), "http://dev");
+        model.theme = ThemeChoice::Dark;
+        model.sign_out(None);
+        assert_eq!(model.theme, ThemeChoice::Dark);
     }
 }

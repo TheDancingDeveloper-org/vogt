@@ -10,7 +10,7 @@ use egui_kittest::kittest::Queryable;
 use vogt_gui::VogtApp;
 use vogt_gui::api::{ApiError, ServerEvent};
 use vogt_gui::backend::FixtureBackend;
-use vogt_gui::model::{Screen, StreamState};
+use vogt_gui::model::{Screen, StreamState, ThemeChoice};
 
 fn harness() -> (Harness<'static, VogtApp>, Rc<RefCell<FixtureBackend>>) {
     let fixture = Rc::new(RefCell::new(FixtureBackend::demo()));
@@ -124,4 +124,63 @@ fn work_item_detail_renders_markdown_and_comments() {
     harness.get_by_label("Open").click();
     harness.run_steps(4);
     assert!(harness.query_by_label_contains("Could not read").is_some());
+}
+
+/// An in-memory [`eframe::Storage`].
+#[derive(Default)]
+struct MemoryStorage(std::collections::HashMap<String, String>);
+
+impl eframe::Storage for MemoryStorage {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+    fn set_string(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_owned(), value);
+    }
+    fn remove_string(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+    fn flush(&mut self) {}
+}
+
+#[test]
+fn settings_shows_account_switches_theme_and_signs_out() {
+    let (mut harness, _fixture) = harness();
+    sign_in(&mut harness);
+    harness.get_by_label("Settings").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().model.screen, Screen::Settings);
+    harness.get_by_label("http://dev");
+    harness.get_by_label("Signed in as");
+    assert_eq!(harness.query_all_by_label("demo").count(), 2);
+
+    harness.get_by_role_and_label(Role::RadioButton, "Dark").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().model.theme, ThemeChoice::Dark);
+    assert!(harness.ctx.global_style().visuals.dark_mode);
+
+    harness.get_by_role_and_label(Role::RadioButton, "Light").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().model.theme, ThemeChoice::Light);
+    assert!(!harness.ctx.global_style().visuals.dark_mode);
+
+    harness.get_by_label("Sign out of Vogt").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().model.screen, Screen::Login);
+    assert_eq!(harness.state().model.theme, ThemeChoice::Light);
+}
+
+#[test]
+fn settings_persist_through_eframe_storage() {
+    let (mut harness, _fixture) = harness();
+    harness.state_mut().model.theme = ThemeChoice::Dark;
+    harness.state_mut().model.login.base = "https://vogt.example".into();
+    let mut storage = MemoryStorage::default();
+    eframe::App::save(harness.state_mut(), &mut storage);
+    assert!(!storage.0.values().any(|v| v.contains("token")));
+
+    let mut restored = VogtApp::new(Box::new(FixtureBackend::demo()), "http://default");
+    restored.restore(&storage);
+    assert_eq!(restored.model.theme, ThemeChoice::Dark);
+    assert_eq!(restored.model.login.base, "https://vogt.example");
 }

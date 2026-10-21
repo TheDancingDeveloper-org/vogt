@@ -4,11 +4,13 @@
 use egui::{Align, Layout, RichText, Ui};
 use fluent2_egui::controls::{Appearance, Button};
 use fluent2_egui::data::markdown::{Document, LinkTarget, MarkdownView, default_link_policy};
-use fluent2_egui::{Badge, BadgeAppearance, BadgeColor, Card, Divider, Field, Input, Theme};
+use fluent2_egui::{
+    Badge, BadgeAppearance, BadgeColor, Card, Divider, Field, Input, RadioGroup, SystemPreferences, Theme,
+};
 use web_time::Instant;
 
 use crate::backend::Backend;
-use crate::model::{self, Command, Model, Screen, StreamState, WorkView};
+use crate::model::{self, Command, Model, Screen, StreamState, ThemeChoice, WorkView};
 
 /// Parsed markdown for the loaded work item, so it is not re-parsed each frame.
 struct Docs {
@@ -23,11 +25,14 @@ pub struct VogtApp {
     pub model: Model,
     backend: Box<dyn Backend>,
     docs: Option<Docs>,
-    theme_installed: bool,
+    /// The theme last installed; a different `model.theme` reinstalls.
+    theme_installed: Option<ThemeChoice>,
 }
 
 /// Storage key for the last API base (never the token).
 const BASE_KEY: &str = "vogt.base";
+/// Storage key for the theme choice.
+const THEME_KEY: &str = "vogt.theme";
 
 impl VogtApp {
     /// An app on `backend`, with the login form starting at `base`.
@@ -36,7 +41,7 @@ impl VogtApp {
             model: Model::new(base),
             backend,
             docs: None,
-            theme_installed: false,
+            theme_installed: None,
         }
     }
 
@@ -45,8 +50,21 @@ impl VogtApp {
     pub fn from_creation_context(cc: &eframe::CreationContext<'_>, default_base: String) -> Self {
         let ctx = cc.egui_ctx.clone();
         let backend = crate::backend::HttpBackend::new(move || ctx.request_repaint());
-        let base = cc.storage.and_then(|s| s.get_string(BASE_KEY)).unwrap_or(default_base);
-        Self::new(Box::new(backend), base)
+        let mut app = Self::new(Box::new(backend), default_base);
+        if let Some(storage) = cc.storage {
+            app.restore(storage);
+        }
+        app
+    }
+
+    /// Read back what [`eframe::App::save`] kept: the API base and the theme.
+    pub fn restore(&mut self, storage: &dyn eframe::Storage) {
+        if let Some(base) = storage.get_string(BASE_KEY) {
+            self.model.login.base = base;
+        }
+        if let Some(theme) = storage.get_string(THEME_KEY) {
+            self.model.theme = ThemeChoice::parse(&theme);
+        }
     }
 
     fn run(&mut self, commands: Vec<Command>) {
@@ -55,9 +73,10 @@ impl VogtApp {
 
     /// One frame: take replies, advance time, draw.
     pub fn frame(&mut self, ui: &mut Ui) {
-        if !self.theme_installed {
-            fluent2_egui::install(ui.ctx(), &Theme::default());
-            self.theme_installed = true;
+        if self.theme_installed != Some(self.model.theme) {
+            let theme = theme_for(ui.ctx(), self.model.theme);
+            fluent2_egui::install(ui.ctx(), &theme);
+            self.theme_installed = Some(self.model.theme);
         }
         let now = Instant::now();
         for reply in self.backend.poll() {
@@ -76,6 +95,7 @@ impl VogtApp {
                 egui::Panel::top("vogt-top").show(ui, |ui| self.top_bar(ui, now));
                 egui::CentralPanel::default().show(ui, |ui| match self.model.screen {
                     Screen::Sessions => self.sessions_screen(ui),
+                    Screen::Settings => self.settings_screen(ui),
                     _ => self.work_item_screen(ui),
                 });
             }
@@ -147,6 +167,14 @@ impl VogtApp {
             if ui.add(work).clicked() {
                 self.model.screen = Screen::WorkItem;
             }
+            let settings = Button::new("Settings").appearance(if self.model.screen == Screen::Settings {
+                Appearance::Primary
+            } else {
+                Appearance::Subtle
+            });
+            if ui.add(settings).clicked() {
+                self.model.show_settings();
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add(Button::new("Sign out").appearance(Appearance::Subtle)).clicked() {
                     commands = self.model.sign_out(None);
@@ -155,6 +183,43 @@ impl VogtApp {
                 let (text, color) = stream_badge(self.model.stream, now);
                 ui.add(Badge::new(text).appearance(BadgeAppearance::Tint).color(color));
             });
+        });
+        self.run(commands);
+    }
+
+    fn settings_screen(&mut self, ui: &mut Ui) {
+        let mut commands = Vec::new();
+        ui.set_max_width(480.0);
+        ui.heading("Settings");
+        ui.add_space(12.0);
+        Card::new().show(ui, |ui| {
+            ui.strong("Account");
+            ui.horizontal(|ui| {
+                ui.weak("API address");
+                ui.label(self.model.api_base());
+            });
+            ui.horizontal(|ui| {
+                ui.weak("Signed in as");
+                ui.label(&self.model.actor);
+            });
+            ui.add_space(4.0);
+            if ui.add(Button::new("Sign out of Vogt")).clicked() {
+                commands = self.model.sign_out(None);
+            }
+        });
+        ui.add_space(8.0);
+        Card::new().show(ui, |ui| {
+            ui.strong("Appearance");
+            let mut index = ThemeChoice::ALL
+                .iter()
+                .position(|c| *c == self.model.theme)
+                .unwrap_or_default();
+            let mut group = RadioGroup::new(&mut index).label("Theme").horizontal();
+            for choice in ThemeChoice::ALL {
+                group = group.option(choice.as_str());
+            }
+            group.show(ui);
+            self.model.theme = ThemeChoice::ALL.get(index).copied().unwrap_or_default();
         });
         self.run(commands);
     }
@@ -308,7 +373,25 @@ impl eframe::App for VogtApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(BASE_KEY, self.model.login.base.clone());
+        storage.set_string(THEME_KEY, self.model.theme.as_str().to_owned());
     }
+}
+
+/// The Fluent theme for `choice`. System goes through `theme_from_system`; when
+/// the OS reading has no colour scheme, egui's own system theme fills it in.
+pub fn theme_for(ctx: &egui::Context, choice: ThemeChoice) -> Theme {
+    let mut prefs = match choice {
+        ThemeChoice::System => fluent2_egui::system_preferences(),
+        _ => SystemPreferences::default(),
+    };
+    prefs.dark = match choice {
+        ThemeChoice::System => prefs
+            .dark
+            .or_else(|| ctx.system_theme().map(|t| t == egui::Theme::Dark)),
+        ThemeChoice::Light => Some(false),
+        ThemeChoice::Dark => Some(true),
+    };
+    fluent2_egui::theme_from_system(ctx, &prefs)
 }
 
 /// The text and colour of the live-stream badge.
