@@ -1007,6 +1007,12 @@ class ProjectBriefResult(Result):
 # -- work ------------------------------------------------------------------
 
 
+EscalationNeeds = Literal["person", "overseer", "either"]
+EscalationBoundary = Literal[
+    "permission_prompt", "denied_action", "credential", "decision", "other"
+]
+
+
 class SessionBlocked(Result):
     """An agent's own report that it is blocked on a person.
 
@@ -1017,6 +1023,18 @@ class SessionBlocked(Result):
     blocker: str = Field(description="What it is blocked on, in its words.")
     items: list[str] = Field(default=[], description="What the person must do.")
     since: datetime | None = None
+    needs: EscalationNeeds = Field(
+        default="person", description="Who can resolve it (WI-996)."
+    )
+    boundary: EscalationBoundary = Field(
+        default="other", description="What kind of boundary it is (WI-996)."
+    )
+    key: str | None = Field(
+        default=None,
+        description=(
+            "Content key `session:boundary:hash`: the same ask reported again keeps it."
+        ),
+    )
 
 
 class SessionReportView(Result):
@@ -6333,6 +6351,21 @@ class ReportBlockedParams(Params):
         default=[],
         max_length=20,
         description="The concrete things the person has to do, one per entry.",
+    )
+    needs: EscalationNeeds = Field(
+        default="person",
+        description=(
+            "Who can resolve it: `person`, your `overseer`, or `either`. "
+            "A denied action or a missing credential a grant could cover can "
+            "go to your overseer; anything else needs a person."
+        ),
+    )
+    boundary: EscalationBoundary = Field(
+        default="other",
+        description=(
+            "What you hit: `permission_prompt`, `denied_action` (a refused "
+            "tool call or guard), `credential`, `decision`, or `other`."
+        ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
 

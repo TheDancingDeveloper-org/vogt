@@ -170,6 +170,9 @@ pub async fn set_session_blocked(
             since: time::OffsetDateTime::now_utc()
                 .format(&time::format_description::well_known::Rfc3339)
                 .unwrap_or_default(),
+            needs: req.needs,
+            boundary: req.boundary,
+            key: String::new(),
         })
     } else {
         None

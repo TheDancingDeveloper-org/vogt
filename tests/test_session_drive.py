@@ -226,6 +226,10 @@ class Engine:
                         "reason": payload.get("reason"),
                         "items": payload.get("items", []),
                         "since": "2026-10-05T00:00:00Z",
+                        "needs": payload.get("needs", "person"),
+                        "boundary": payload.get("boundary", "other"),
+                        "key": f"{engine_id}:{payload.get('boundary', 'other')}:"
+                        f"{abs(hash(payload.get('reason'))) % 10**8:08d}",
                     }
                     if payload.get("blocked")
                     else None
@@ -821,6 +825,60 @@ def test_a_session_reports_itself_blocked_without_naming_itself(
         for e in list_inbox(wired, InboxListParams()).entries
         if e.kind == "session.blocked"
     ]
+
+
+def test_a_typed_blocked_report_carries_needs_boundary_and_a_content_key(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-996 E0: the report says who can resolve it and what was hit; the
+    Inbox keys it on content, so the same ask re-reported is one entry."""
+    ses_id, engine_id = _started(wired)
+    params = ReportBlockedParams(
+        id=ses_id,
+        blocker="gh pr merge was denied by auto mode",
+        needs="overseer",
+        boundary="denied_action",
+        reason="cannot land without it",
+    )
+    result = report_blocked(wired, params)
+    sent = [row for row in engine.sent if row["path"].endswith("/blocked")][-1]
+    assert sent["body"]["needs"] == "overseer"
+    assert sent["body"]["boundary"] == "denied_action"
+    assert result.blocked is not None
+    assert result.blocked.needs == "overseer"
+    assert result.blocked.boundary == "denied_action"
+    assert result.blocked.key and result.blocked.key.startswith(
+        f"{engine_id}:denied_action:"
+    )
+    first = [
+        e.entry_key
+        for e in list_inbox(wired, InboxListParams()).entries
+        if e.kind == "session.blocked"
+    ]
+    assert f"agent:session:{engine_id}:blocked:{result.blocked.key}" in first
+    report_blocked(wired, params)
+    again = [
+        e.entry_key
+        for e in list_inbox(wired, InboxListParams()).entries
+        if e.kind == "session.blocked"
+    ]
+    assert again == first
+
+
+def test_an_untyped_blocked_report_needs_a_person(
+    wired: AppContext, engine: Engine
+) -> None:
+    ses_id, _ = _started(wired)
+    result = report_blocked(
+        wired, ReportBlockedParams(id=ses_id, blocker="x", reason="old caller")
+    )
+    assert result.blocked is not None
+    assert (result.blocked.needs, result.blocked.boundary) == ("person", "other")
+
+
+def test_a_bad_needs_is_refused() -> None:
+    with pytest.raises(ValueError):
+        ReportBlockedParams(blocker="x", needs="anyone", reason="testing")  # type: ignore[arg-type]
 
 
 def test_a_caller_that_is_not_a_session_must_name_one(wired: AppContext) -> None:

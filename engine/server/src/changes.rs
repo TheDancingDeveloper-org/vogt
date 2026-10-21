@@ -354,6 +354,7 @@ mod tests {
                 reason: "x".repeat(200),
                 items: vec![],
                 since: String::new(),
+                ..Default::default()
             }),
         });
         bus.publish(ServerEvent::SessionBlocked { id, blocked: None });

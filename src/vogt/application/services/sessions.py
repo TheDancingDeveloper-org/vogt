@@ -35,7 +35,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast, get_args
 
 from vogt.adapters import transcripts
 from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
@@ -62,6 +62,8 @@ from vogt.application.models import (
     EffectivePolicy,
     EngineSessionTokenParams,
     EngineSessionTokenResult,
+    EscalationBoundary,
+    EscalationNeeds,
     HibernateSessionParams,
     HistoryListParams,
     HistoryListResult,
@@ -3468,6 +3470,8 @@ def report_blocked(
         reason=reason,
         blocker=params.blocker.strip(),
         items=items,
+        needs=params.needs,
+        boundary=params.boundary,
     )
 
 
@@ -3486,12 +3490,19 @@ def _set_blocked(
     reason: str,
     blocker: str | None,
     items: list[str],
+    needs: str = "person",
+    boundary: str = "other",
 ) -> SessionBlockedResult:
     engine = _engine(ctx)
     target = _target(ctx, session_id or _own_session(ctx))
     engine_id = target.engine_session_id
     updated = engine.set_blocked(
-        engine_id, blocked=blocker is not None, reason=blocker, items=items
+        engine_id,
+        blocked=blocker is not None,
+        reason=blocker,
+        items=items,
+        needs=needs,
+        boundary=boundary,
     )
     if updated is None:
         msg = f"the engine has no live session {engine_id!r}"
@@ -3509,6 +3520,7 @@ def _set_blocked(
             "linked": target.session is not None,
             "blocker": blocker,
             "items": items,
+            **({"needs": needs, "boundary": boundary} if blocker is not None else {}),
         },
         event_kind=SESSION_BLOCKED_EVENT
         if blocker is not None
@@ -4948,6 +4960,20 @@ def _hibernation(hibernation: EngineHibernation | None) -> SessionHibernation | 
     )
 
 
+def _needs(value: str) -> EscalationNeeds:
+    """The engine's `needs`; an unknown value (a newer engine) is a person."""
+    if value in get_args(EscalationNeeds):
+        return cast("EscalationNeeds", value)
+    return "person"
+
+
+def _boundary(value: str) -> EscalationBoundary:
+    """The engine's `boundary`; an unknown value is `other`."""
+    if value in get_args(EscalationBoundary):
+        return cast("EscalationBoundary", value)
+    return "other"
+
+
 def _blocked(blocked: EngineBlocked | None) -> SessionBlocked | None:
     if blocked is None:
         return None
@@ -4955,6 +4981,9 @@ def _blocked(blocked: EngineBlocked | None) -> SessionBlocked | None:
         blocker=blocked.reason,
         items=list(blocked.items),
         since=_parse_engine_timestamp(blocked.since),
+        needs=_needs(blocked.needs),
+        boundary=_boundary(blocked.boundary),
+        key=blocked.key,
     )
 
 
