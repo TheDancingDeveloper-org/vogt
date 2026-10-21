@@ -7368,6 +7368,95 @@ async fn secret_broker_hands_a_session_one_declared_secret_and_only_that() {
 /// `ttl` stands until revoked or expired; and a grant never shadows the
 /// manifest or reaches a project the operator has not opened.
 #[tokio::test]
+async fn a_git_grant_answers_one_git_prompt_for_its_host_only() {
+    const STACK: &str = "stack-secret-for-git-grants-1234567890";
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = broker_config(&tmp, "LATER proj later ondemand\n");
+    let helper = tmp.path().join("git-helper");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\n[ \"$1\" = get ] || exit 64\nprintf 'tok-%s|%s\\n' \"$2\" \"$ENGINE_AGENT_AUTH_SECRETS\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    cfg.agent_auth_helper = helper;
+    cfg.vogt_core_token = Some(STACK.into());
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let operator = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let core = reqwest::Client::builder()
+        .default_headers(auth_for(STACK))
+        .build()
+        .unwrap();
+    let plain = reqwest::Client::new();
+    let target = create_session_id(&operator, &base, "worker").await;
+    let token = state
+        .sessions
+        .secret_broker()
+        .issue(target.parse().unwrap());
+    let ask = |host: &str| {
+        plain
+            .get(format!("{base}/api/agent-auth/git-credential"))
+            .query(&[("host", host)])
+            .bearer_auth(token.clone())
+            .send()
+    };
+    let in_an_hour = (OffsetDateTime::now_utc() + time::Duration::hours(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+
+    // No grant: 404 naming how to ask for one.
+    let none = ask("github.com").await.unwrap();
+    assert_eq!(none.status(), 404);
+    assert!(none.text().await.unwrap().contains("reason=git:github.com"));
+    // No token: 401.
+    assert_eq!(
+        plain
+            .get(format!(
+                "{base}/api/agent-auth/git-credential?host=github.com"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+
+    core.post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&json!({
+            "grant_id": "grt_git",
+            "var": "ORG_GH_TOKEN",
+            "project_id": "proj",
+            "secret_name": "ORG_GITHUB_PAT",
+            "uses": "once",
+            "expires_at": in_an_hour,
+            "reason": "git:github.com x",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    // The wrong host is 404 and does not spend the grant.
+    assert_eq!(ask("github.com.example").await.unwrap().status(), 404);
+    assert_eq!(ask("gitlab.com").await.unwrap().status(), 404);
+
+    let got = ask("GitHub.com").await.unwrap();
+    assert_eq!(got.status(), 200);
+    let body: Value = got.json().await.unwrap();
+    assert_eq!(body["username"], "x-access-token");
+    assert_eq!(
+        body["token"], "tok-ORG_GH_TOKEN|ORG_GH_TOKEN proj ORG_GITHUB_PAT ondemand",
+        "the helper sees exactly the granted line; the trailing newline is dropped"
+    );
+    // `once`: spent by the first prompt.
+    assert_eq!(ask("github.com").await.unwrap().status(), 404);
+}
+
+#[tokio::test]
 async fn an_approved_grant_reaches_only_its_session_until_revoked_or_expired() {
     const STACK: &str = "stack-secret-for-grants-1234567890";
     let tmp = tempfile::tempdir().unwrap();

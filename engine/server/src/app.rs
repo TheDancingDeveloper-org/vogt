@@ -535,6 +535,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         // A session's own approved grants (WI-973): the same caller and the
         // same per-session token.
         .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants))
+        .route(
+            secret_broker::GIT_CREDENTIAL_ROUTE,
+            get(secret_broker::git_credential),
+        )
         // A quick chat's approval gate (WI-1097): its own agent's hook, with
         // the per-process token the engine gave that agent.
         .route(chat_api::GATE_ROUTE, post(chat_api::gate));
