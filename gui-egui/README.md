@@ -18,6 +18,18 @@ Slice 1 (WI-2003) covers:
   and comments render through fluent2's `MarkdownView`. The page re-reads when
   the stream reports a `vogt-changed` for the item.
 
+The read-only terminal (WI-2005) adds:
+
+- **Terminal**: selecting a session name opens its screen in fluent2's
+  `TerminalView`. `GET /api/sessions/{id}/screen` paints it at once; then the
+  `/api/sessions/{id}/attach` WebSocket (bearer in the first frame, never the
+  URL) replaces that with its snapshot and streams live output. A lost attach
+  reconnects with backoff and resumes after the last byte it rendered. A live
+  attach is pinged every 15 s and dropped after 45 s of silence. `activity`
+  and `session-killed` events re-read the screen; a hibernated session shows
+  its last screen until activity wakes it. The view sends no input and never
+  resizes the PTY: the grid keeps the size the server reports.
+
 The remaining screens are child items of WI-1806 (WI-2004 to WI-2015).
 
 ## Layout
@@ -29,6 +41,7 @@ The remaining screens are child items of WI-1806 (WI-2004 to WI-2015).
 | `backoff` | reconnect delays |
 | `backend` | the `Backend` trait; `HttpBackend` (ehttp, native and wasm) and `FixtureBackend` (in memory) |
 | `model` | state and rules with no egui: replies in, commands out |
+| `terminal` | the terminal screen's state: screen paint, attach, resume, reconnect |
 | `app` | the egui shell on fluent2-egui |
 
 The UI never blocks. It asks the backend for something and reads `Reply`

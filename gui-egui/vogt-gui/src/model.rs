@@ -12,6 +12,7 @@ use web_time::Instant;
 use crate::api::{ApiError, Auth, ServerEvent, Session, WorkDetail, normalise_base};
 use crate::backend::{Backend, Reply};
 use crate::backoff::Backoff;
+use crate::terminal::TerminalModel;
 
 /// How long a live stream may go silent before it is treated as dead. The
 /// engine sends a keep-alive every 15 s, so this is three missed beats.
@@ -37,6 +38,21 @@ pub enum Command {
     OpenEvents(u64),
     /// Close the event stream.
     CloseEvents,
+    /// Read a session's rendered screen.
+    FetchScreen(String),
+    /// Attach read-only to a session's terminal.
+    Attach {
+        /// Session id.
+        id: String,
+        /// The attach generation.
+        generation: u64,
+        /// Resume after this output position (a warm reattach).
+        resume_from: Option<u64>,
+    },
+    /// Probe the terminal attach.
+    AttachPing(u64),
+    /// Close the terminal attach.
+    Detach,
 }
 
 /// Which screen is showing.
@@ -48,6 +64,8 @@ pub enum Screen {
     Sessions,
     /// One work item.
     WorkItem,
+    /// One session's terminal, read-only.
+    Terminal,
 }
 
 /// The state of the live event stream.
@@ -123,6 +141,8 @@ pub struct Model {
     pub work_ref: String,
     /// The work-item page.
     pub work: WorkView,
+    /// The terminal screen.
+    pub terminal: TerminalModel,
     generation: u64,
     backoff: Backoff,
     /// When the current stream last delivered anything.
@@ -147,6 +167,7 @@ impl Model {
             stream: StreamState::Off,
             work_ref: String::new(),
             work: WorkView::Empty,
+            terminal: TerminalModel::default(),
             generation: 0,
             backoff: Backoff::default(),
             stream_seen: None,
@@ -200,26 +221,41 @@ impl Model {
         self.login.busy = false;
         self.login.error = why;
         self.generation += 1;
-        vec![Command::CloseEvents]
+        let mut commands = vec![Command::CloseEvents];
+        commands.extend(self.terminal.close());
+        commands
     }
 
     /// Show a screen. Opening the work-item page with a reference loads it.
     pub fn open_work_item(&mut self, reference: &str) -> Vec<Command> {
         let reference = reference.trim().to_owned();
         self.screen = Screen::WorkItem;
+        let mut commands = self.terminal.close();
         if reference.is_empty() {
-            return Vec::new();
+            return commands;
         }
         self.work_ref = reference.clone();
         self.work = WorkView::Loading(reference.clone());
-        vec![Command::FetchWorkItem(reference)]
+        commands.push(Command::FetchWorkItem(reference));
+        commands
     }
 
-    /// Show the session list.
-    pub fn show_sessions(&mut self) {
-        if self.auth.is_some() {
-            self.screen = Screen::Sessions;
+    /// Show the session list, leaving any terminal.
+    pub fn show_sessions(&mut self) -> Vec<Command> {
+        if self.auth.is_none() {
+            return Vec::new();
         }
+        self.screen = Screen::Sessions;
+        self.terminal.close()
+    }
+
+    /// Show a session's terminal, read-only.
+    pub fn open_terminal(&mut self, id: &str) -> Vec<Command> {
+        if self.auth.is_none() {
+            return Vec::new();
+        }
+        self.screen = Screen::Terminal;
+        self.terminal.open(id)
     }
 
     /// Re-read the session list now.
@@ -324,6 +360,11 @@ impl Model {
                 self.wait_to_reconnect(now);
                 Vec::new()
             }
+            Reply::Screen(id, result) => match self.terminal.apply_screen(&id, result) {
+                Ok(()) => Vec::new(),
+                Err(error) => self.refused(&error).unwrap_or_default(),
+            },
+            Reply::Attach(generation, event) => self.terminal.apply_attach(generation, event, now),
             // A reply from a stream this model has already replaced.
             Reply::StreamOpened(_) | Reply::StreamEvent(..) | Reply::StreamAlive(_) | Reply::StreamClosed(..) => {
                 Vec::new()
@@ -350,6 +391,12 @@ impl Model {
     /// Advance time: reconnect when a wait is over, and drop a live stream
     /// that has gone silent (a half-open connection never reports a close).
     pub fn tick(&mut self, now: Instant) -> Vec<Command> {
+        let mut commands = self.terminal.tick(now);
+        commands.extend(self.tick_stream(now));
+        commands
+    }
+
+    fn tick_stream(&mut self, now: Instant) -> Vec<Command> {
         if self.stale_at().is_some_and(|at| now >= at) {
             // Retire this generation so a late chunk from it is ignored.
             self.generation += 1;
@@ -364,10 +411,11 @@ impl Model {
 
     /// How long until [`Model::tick`] has something to do, if anything.
     pub fn next_wake(&self, now: Instant) -> Option<Duration> {
-        match self.stream {
+        let stream = match self.stream {
             StreamState::Waiting { retry_at, .. } => Some(retry_at.saturating_duration_since(now)),
             _ => self.stale_at().map(|at| at.saturating_duration_since(now)),
-        }
+        };
+        [stream, self.terminal.next_wake(now)].into_iter().flatten().min()
     }
 
     fn on_event(&mut self, event: ServerEvent) -> Vec<Command> {
@@ -397,7 +445,7 @@ impl Model {
                     s.activity = "exited".into();
                     s.exit_code = exit_code;
                 }
-                Vec::new()
+                self.terminal.on_activity(&id)
             }
             ServerEvent::Activity {
                 id,
@@ -410,7 +458,7 @@ impl Model {
                         s.activity_changed_at = activity_changed_at;
                     }
                 }
-                Vec::new()
+                self.terminal.on_activity(&id)
             }
             ServerEvent::Lagged { .. } => self.refresh_sessions(),
             ServerEvent::VogtChanged { entity_id, .. } => match &self.work {
@@ -454,6 +502,22 @@ pub fn run(commands: Vec<Command>, model: &Model, backend: &mut dyn Backend) {
                 }
             }
             Command::CloseEvents => backend.close_events(),
+            Command::FetchScreen(id) => {
+                if let Some(auth) = &model.auth {
+                    backend.fetch_screen(auth, &id);
+                }
+            }
+            Command::Attach {
+                id,
+                generation,
+                resume_from,
+            } => {
+                if let Some(auth) = &model.auth {
+                    backend.attach(auth, &id, generation, resume_from);
+                }
+            }
+            Command::AttachPing(id) => backend.attach_ping(id),
+            Command::Detach => backend.detach(),
         }
     }
 }
@@ -677,6 +741,46 @@ mod tests {
         run(commands, &model, &mut backend);
         settle(&mut model, &mut backend, now);
         assert!(matches!(&model.work, WorkView::Failed(r, _) if r == "WI-404"));
+    }
+
+    #[test]
+    fn terminal_follows_attach_activity_and_leaves_cleanly() {
+        let (mut model, mut backend, now) = signed_in();
+        let commands = model.open_terminal("s1");
+        run(commands, &model, &mut backend);
+        settle(&mut model, &mut backend, now);
+        assert_eq!(model.screen, Screen::Terminal);
+        assert_eq!(model.terminal.attach, crate::terminal::AttachState::Live);
+        assert!(model.terminal.grid.visible_text().starts_with("$ cargo test\nok"));
+
+        backend.pty_output("s1", b"done\r\n");
+        settle(&mut model, &mut backend, now);
+        assert!(model.terminal.grid.visible_text().contains("done"));
+
+        let before = backend.calls.len();
+        backend.emit(ServerEvent::Activity {
+            id: "s1".into(),
+            state: "idle".into(),
+            activity_changed_at: None,
+        });
+        settle(&mut model, &mut backend, now);
+        assert_eq!(backend.calls[before..], ["screen s1"]);
+
+        // The attach drops; the reconnect resumes and gets only the gap.
+        backend.drop_attach();
+        backend.pty_output("s1", b"gap\r\n");
+        settle(&mut model, &mut backend, now);
+        let retry = now + model.next_wake(now).unwrap();
+        let commands = model.tick(retry);
+        run(commands, &model, &mut backend);
+        settle(&mut model, &mut backend, retry);
+        assert_eq!(backend.calls.last().map(String::as_str), Some("attach s1 2 from 24"));
+        let text = model.terminal.grid.visible_text();
+        assert!(text.contains("done") && text.contains("gap"));
+
+        let commands = model.show_sessions();
+        assert_eq!(commands, vec![Command::Detach]);
+        assert!(model.terminal.session_id.is_none());
     }
 
     #[test]

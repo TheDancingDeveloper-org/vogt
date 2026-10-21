@@ -1,4 +1,4 @@
-//! Wire types for the parts of the Vogt API this slice reads.
+//! Wire types for the parts of the Vogt API the GUI reads.
 //!
 //! Every struct tolerates fields it does not know and fills ones the server
 //! leaves out, so an older or newer engine still decodes.
@@ -118,6 +118,105 @@ pub struct WorkDetail {
     pub item: WorkItem,
     /// Its comments.
     pub comments: Vec<Comment>,
+}
+
+/// Zero-based cursor position on a [`SessionScreen`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScreenCursor {
+    /// Row from the top.
+    pub row: u16,
+    /// Column from the left.
+    pub col: u16,
+}
+
+/// The reply to `GET /api/sessions/{id}/screen`: the rendered screen as text.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionScreen {
+    /// Session id.
+    pub id: String,
+    /// Width in columns.
+    pub cols: u16,
+    /// Height in rows.
+    pub rows: u16,
+    /// The visible rows, top to bottom, trailing spaces trimmed.
+    pub lines: Vec<String>,
+    /// Where the cursor is.
+    pub cursor: ScreenCursor,
+    /// The window title the program set, if any.
+    pub title: Option<String>,
+    /// The activity state, as on [`Session::activity`].
+    pub activity: String,
+    /// False once the program has exited.
+    pub alive: bool,
+}
+
+/// A text frame on the `/api/sessions/{id}/attach` WebSocket. Binary frames
+/// between them are raw PTY output. Kinds this client does not use decode to
+/// [`AttachControl::Other`].
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum AttachControl {
+    /// A snapshot follows as binary frames, then [`AttachControl::SnapshotDone`].
+    SnapshotStart {
+        /// The absolute output position at the end of the snapshot.
+        #[serde(default)]
+        scrollback_pos: u64,
+        /// Discard the screen first; false means the payload is a resume delta.
+        #[serde(default = "yes")]
+        reset: bool,
+        /// The PTY size the payload is drawn at.
+        #[serde(default)]
+        cols: Option<u16>,
+        /// The PTY size the payload is drawn at.
+        #[serde(default)]
+        rows: Option<u16>,
+    },
+    /// The snapshot is complete; live output follows.
+    SnapshotDone,
+    /// The PTY was resized by some client.
+    Resize {
+        /// Columns.
+        cols: u16,
+        /// Rows.
+        rows: u16,
+    },
+    /// The answer to a ping.
+    Pong {
+        /// The ping's id.
+        #[serde(default)]
+        id: u64,
+        /// The server's output position.
+        #[serde(default)]
+        pos: u64,
+    },
+    /// This client fell too far behind; the server closes and a fresh attach
+    /// is needed.
+    Lag,
+    /// The session is hibernated: the snapshot was its last screen and
+    /// nothing live follows.
+    Hibernated,
+    /// Any other frame (`input-refused` and future kinds).
+    #[serde(other)]
+    Other,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The WebSocket URL for attaching to session `id` on `base`.
+pub fn attach_url(base: &str, id: &str) -> String {
+    let base = normalise_base(base);
+    let ws = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        base
+    };
+    format!("{ws}/api/sessions/{}/attach", encode_query(id))
 }
 
 /// One event on `GET /api/events`. Kinds this slice does not use decode to
@@ -297,6 +396,41 @@ mod tests {
         );
         assert_eq!(ApiError::from_status(502, b"<html>").message, "HTTP 502");
         assert!(ApiError::from_status(401, b"").is_unauthorized());
+    }
+
+    #[test]
+    fn attach_frames_decode() {
+        let start: AttachControl = serde_json::from_str(
+            r#"{"type":"snapshot-start","session_id":"x","scrollback_bytes":3,"scrollback_pos":9,"reset":false,"cols":80,"rows":24}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            start,
+            AttachControl::SnapshotStart {
+                scrollback_pos: 9,
+                reset: false,
+                cols: Some(80),
+                rows: Some(24)
+            }
+        );
+        let old: AttachControl = serde_json::from_str(r#"{"type":"snapshot-start"}"#).unwrap();
+        assert!(matches!(old, AttachControl::SnapshotStart { reset: true, .. }));
+        let lag: AttachControl = serde_json::from_str(r#"{"type":"lag","note":"slow"}"#).unwrap();
+        assert_eq!(lag, AttachControl::Lag);
+        let other: AttachControl = serde_json::from_str(r#"{"type":"input-refused","reason":"r"}"#).unwrap();
+        assert_eq!(other, AttachControl::Other);
+    }
+
+    #[test]
+    fn attach_url_switches_scheme() {
+        assert_eq!(
+            attach_url("https://v.example/", "a-1"),
+            "wss://v.example/api/sessions/a-1/attach"
+        );
+        assert_eq!(
+            attach_url("http://127.0.0.1:8910", "b"),
+            "ws://127.0.0.1:8910/api/sessions/b/attach"
+        );
     }
 
     #[test]

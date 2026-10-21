@@ -2,8 +2,10 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use super::{Backend, Reply};
-use crate::api::{ApiError, Auth, Comment, ServerEvent, Session, WorkDetail, WorkItem};
+use super::{AttachEvent, Backend, Reply};
+use crate::api::{
+    ApiError, AttachControl, Auth, Comment, ScreenCursor, ServerEvent, Session, SessionScreen, WorkDetail, WorkItem,
+};
 
 /// Answers every call from memory and records what it was asked, so a test can
 /// drive the app frame by frame and check both the screen and the traffic.
@@ -23,6 +25,13 @@ pub struct FixtureBackend {
     pub stream: Option<u64>,
     /// When set, `open_events` fails with this error instead of opening.
     pub refuse_stream: Option<ApiError>,
+    /// Rendered screens served, by session id.
+    pub screens: BTreeMap<String, SessionScreen>,
+    /// Each session's whole PTY output, by session id. An attach snapshot is
+    /// cut from it, as the engine cuts one from its scrollback ring.
+    pub pty: BTreeMap<String, Vec<u8>>,
+    /// The open attach as `(generation, session id)`, if any.
+    pub attached: Option<(u64, String)>,
     queue: VecDeque<Reply>,
 }
 
@@ -55,12 +64,48 @@ impl FixtureBackend {
                 }],
             },
         );
+        let mut screens = BTreeMap::new();
+        screens.insert("s1".to_owned(), screen("s1", &["$ cargo test", "ok"], "running"));
+        screens.insert("s2".to_owned(), screen("s2", &["idle prompt", "> "], "idle"));
+        let mut pty = BTreeMap::new();
+        pty.insert("s1".to_owned(), b"$ cargo test\r\nok\r\n".to_vec());
+        pty.insert("s2".to_owned(), b"idle prompt\r\n> ".to_vec());
         Self {
             credentials: ("demo".into(), "demo".into()),
             token: "fixture-token".into(),
             sessions: vec![session("s1", "oversight", "running"), session("s2", "WI-1806", "idle")],
             work_items,
+            screens,
+            pty,
             ..Self::default()
+        }
+    }
+
+    /// The session `id` wrote `bytes`: record them, and stream them to an
+    /// attach on that session.
+    pub fn pty_output(&mut self, id: &str, bytes: &[u8]) {
+        self.pty.entry(id.to_owned()).or_default().extend_from_slice(bytes);
+        if let Some((generation, _)) = self.attached.as_ref().filter(|(_, s)| s == id) {
+            self.queue
+                .push_back(Reply::Attach(*generation, AttachEvent::Bytes(bytes.to_vec())));
+        }
+    }
+
+    /// Send a control frame on the open attach.
+    pub fn attach_control(&mut self, control: AttachControl) {
+        if let Some((generation, _)) = &self.attached {
+            self.queue
+                .push_back(Reply::Attach(*generation, AttachEvent::Control(control)));
+        }
+    }
+
+    /// End the open attach as a dropped connection would.
+    pub fn drop_attach(&mut self) {
+        if let Some((generation, _)) = self.attached.take() {
+            self.queue.push_back(Reply::Attach(
+                generation,
+                AttachEvent::Closed("the connection was reset".into()),
+            ));
         }
     }
 
@@ -97,6 +142,27 @@ impl FixtureBackend {
                 message: "unknown token".into(),
             })
         }
+    }
+}
+
+/// A rendered screen for fixtures, 40 columns by 6 rows, cursor after the
+/// last line.
+pub fn screen(id: &str, lines: &[&str], activity: &str) -> SessionScreen {
+    let rows = 6;
+    let mut all: Vec<String> = lines.iter().map(|l| (*l).to_owned()).collect();
+    all.resize(rows, String::new());
+    SessionScreen {
+        id: id.into(),
+        cols: 40,
+        rows: rows as u16,
+        lines: all,
+        cursor: ScreenCursor {
+            row: lines.len().saturating_sub(1) as u16,
+            col: lines.last().map_or(0, |l| l.len() as u16),
+        },
+        title: Some(format!("{id} title")),
+        activity: activity.into(),
+        alive: true,
     }
 }
 
@@ -167,6 +233,67 @@ impl Backend for FixtureBackend {
         self.stream = None;
     }
 
+    fn fetch_screen(&mut self, auth: &Auth, id: &str) {
+        self.calls.push(format!("screen {id}"));
+        let reply = self.authorised(auth).and_then(|()| {
+            self.screens.get(id).cloned().ok_or_else(|| ApiError {
+                status: Some(404),
+                message: "no such session".into(),
+            })
+        });
+        self.queue.push_back(Reply::Screen(id.to_owned(), reply.map(Box::new)));
+    }
+
+    fn attach(&mut self, auth: &Auth, id: &str, generation: u64, resume_from: Option<u64>) {
+        let resume = resume_from.map_or("cold".to_owned(), |p| format!("from {p}"));
+        self.calls.push(format!("attach {id} {generation} {resume}"));
+        self.attached = None;
+        // The engine closes without a reason the client can read; so does this.
+        let Some(output) = self.pty.get(id).filter(|_| self.authorised(auth).is_ok()) else {
+            self.queue
+                .push_back(Reply::Attach(generation, AttachEvent::Closed("closed".into())));
+            return;
+        };
+        let end = output.len() as u64;
+        // A warm resume inside the buffer gets the delta; anything else the whole lot.
+        let (payload, reset) = match resume_from {
+            Some(from) if from <= end => (output[from as usize..].to_vec(), false),
+            _ => (output.clone(), true),
+        };
+        let (cols, rows) = self.screens.get(id).map_or((40, 6), |s| (s.cols, s.rows));
+        let events = [
+            AttachEvent::Opened,
+            AttachEvent::Control(AttachControl::SnapshotStart {
+                scrollback_pos: end,
+                reset,
+                cols: Some(cols),
+                rows: Some(rows),
+            }),
+            AttachEvent::Bytes(payload),
+            AttachEvent::Control(AttachControl::SnapshotDone),
+        ];
+        for event in events {
+            self.queue.push_back(Reply::Attach(generation, event));
+        }
+        self.attached = Some((generation, id.to_owned()));
+    }
+
+    fn attach_ping(&mut self, id: u64) {
+        self.calls.push(format!("ping {id}"));
+        if let Some((generation, session)) = &self.attached {
+            let pos = self.pty.get(session).map_or(0, |o| o.len() as u64);
+            self.queue.push_back(Reply::Attach(
+                *generation,
+                AttachEvent::Control(AttachControl::Pong { id, pos }),
+            ));
+        }
+    }
+
+    fn detach(&mut self) {
+        self.calls.push("detach".into());
+        self.attached = None;
+    }
+
     fn poll(&mut self) -> Vec<Reply> {
         self.queue.drain(..).collect()
     }
@@ -189,6 +316,18 @@ impl Backend for std::rc::Rc<std::cell::RefCell<FixtureBackend>> {
     }
     fn close_events(&mut self) {
         self.borrow_mut().close_events();
+    }
+    fn fetch_screen(&mut self, auth: &Auth, id: &str) {
+        self.borrow_mut().fetch_screen(auth, id);
+    }
+    fn attach(&mut self, auth: &Auth, id: &str, generation: u64, resume_from: Option<u64>) {
+        self.borrow_mut().attach(auth, id, generation, resume_from);
+    }
+    fn attach_ping(&mut self, id: u64) {
+        self.borrow_mut().attach_ping(id);
+    }
+    fn detach(&mut self) {
+        self.borrow_mut().detach();
     }
     fn poll(&mut self) -> Vec<Reply> {
         self.borrow_mut().poll()

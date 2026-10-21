@@ -8,10 +8,10 @@
 mod fixture;
 mod http;
 
-pub use fixture::{FixtureBackend, session};
+pub use fixture::{FixtureBackend, screen, session};
 pub use http::HttpBackend;
 
-use crate::api::{ApiError, Auth, LoginResult, ServerEvent, Session, WorkDetail};
+use crate::api::{ApiError, AttachControl, Auth, LoginResult, ServerEvent, Session, SessionScreen, WorkDetail};
 
 /// An answer from the backend.
 #[derive(Clone, Debug, PartialEq)]
@@ -39,6 +39,25 @@ pub enum Reply {
     StreamAlive(u64),
     /// The stream with this generation ended or failed to open.
     StreamClosed(u64, ApiError),
+    /// A session's rendered screen, by session id.
+    Screen(String, Result<Box<SessionScreen>, ApiError>),
+    /// Something happened on terminal attach `generation`.
+    Attach(u64, AttachEvent),
+}
+
+/// What a terminal attach socket reported.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttachEvent {
+    /// The socket opened and the backend sent the auth frame.
+    Opened,
+    /// A control frame.
+    Control(AttachControl),
+    /// Raw PTY output.
+    Bytes(Vec<u8>),
+    /// The socket closed or failed. Close codes are not reported (the browser
+    /// socket wrapper drops them), so the model re-reads the screen to learn
+    /// whether the credential or the session is gone.
+    Closed(String),
 }
 
 /// A source of Vogt data. Every call returns at once; results come back
@@ -55,6 +74,16 @@ pub trait Backend {
     fn open_events(&mut self, auth: &Auth, generation: u64);
     /// Close any open event stream.
     fn close_events(&mut self);
+    /// Read a session's rendered screen.
+    fn fetch_screen(&mut self, auth: &Auth, id: &str);
+    /// Attach read-only to session `id` as `generation`, resuming after
+    /// output position `resume_from` when given. Replaces any open attach;
+    /// replies tagged with an older generation are stale. Never sends input.
+    fn attach(&mut self, auth: &Auth, id: &str, generation: u64, resume_from: Option<u64>);
+    /// Send a liveness probe on the open attach.
+    fn attach_ping(&mut self, id: u64);
+    /// Close any open attach.
+    fn detach(&mut self);
     /// Take the replies that arrived since the last call.
     fn poll(&mut self) -> Vec<Reply>;
 }

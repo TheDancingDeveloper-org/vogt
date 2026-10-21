@@ -4,11 +4,13 @@
 use egui::{Align, Layout, RichText, Ui};
 use fluent2_egui::controls::{Appearance, Button};
 use fluent2_egui::data::markdown::{Document, LinkTarget, MarkdownView, default_link_policy};
+use fluent2_egui::data::terminal::TerminalView;
 use fluent2_egui::{Badge, BadgeAppearance, BadgeColor, Card, Divider, Field, Input, Theme};
 use web_time::Instant;
 
 use crate::backend::Backend;
 use crate::model::{self, Command, Model, Screen, StreamState, WorkView};
+use crate::terminal::AttachState;
 
 /// Parsed markdown for the loaded work item, so it is not re-parsed each frame.
 struct Docs {
@@ -76,6 +78,7 @@ impl VogtApp {
                 egui::Panel::top("vogt-top").show(ui, |ui| self.top_bar(ui, now));
                 egui::CentralPanel::default().show(ui, |ui| match self.model.screen {
                     Screen::Sessions => self.sessions_screen(ui),
+                    Screen::Terminal => self.terminal_screen(ui, now),
                     _ => self.work_item_screen(ui),
                 });
             }
@@ -137,7 +140,7 @@ impl VogtApp {
                 Appearance::Subtle
             });
             if ui.add(sessions).clicked() {
-                self.model.show_sessions();
+                commands = self.model.show_sessions();
             }
             let work = Button::new("Work item").appearance(if self.model.screen == Screen::WorkItem {
                 Appearance::Primary
@@ -145,7 +148,7 @@ impl VogtApp {
                 Appearance::Subtle
             });
             if ui.add(work).clicked() {
-                self.model.screen = Screen::WorkItem;
+                commands = self.model.open_work_item("");
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add(Button::new("Sign out").appearance(Appearance::Subtle)).clicked() {
@@ -178,6 +181,7 @@ impl VogtApp {
             ui.label("No sessions.");
         }
         let mut open_ref = None;
+        let mut open_terminal = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for session in &self.model.sessions {
                 ui.horizontal(|ui| {
@@ -186,7 +190,13 @@ impl VogtApp {
                             .appearance(BadgeAppearance::Tint)
                             .color(activity_color(&session.activity)),
                     );
-                    ui.label(RichText::new(&session.name).strong());
+                    // Selecting a session shows its terminal.
+                    if ui
+                        .add(Button::new(RichText::new(&session.name).strong()).appearance(Appearance::Subtle))
+                        .clicked()
+                    {
+                        open_terminal = Some(session.id.clone());
+                    }
                     if let Some(code) = session.exit_code {
                         ui.weak(format!("exit {code}"));
                     }
@@ -204,6 +214,57 @@ impl VogtApp {
         });
         if let Some(reference) = open_ref {
             commands = self.model.open_work_item(&reference);
+        }
+        if let Some(id) = open_terminal {
+            commands = self.model.open_terminal(&id);
+        }
+        self.run(commands);
+    }
+
+    fn terminal_screen(&mut self, ui: &mut Ui, now: Instant) {
+        let mut commands = Vec::new();
+        let terminal = &mut self.model.terminal;
+        let id = terminal.session_id.clone().unwrap_or_default();
+        let name = self
+            .model
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map_or(id.as_str(), |s| s.name.as_str())
+            .to_owned();
+        ui.horizontal_wrapped(|ui| {
+            if ui.add(Button::new("Back").appearance(Appearance::Subtle)).clicked() {
+                commands = self.model.show_sessions();
+            }
+            ui.heading(&name);
+            let terminal = &self.model.terminal;
+            if let Some(screen) = &terminal.screen {
+                ui.add(
+                    Badge::new(screen.activity.as_str())
+                        .appearance(BadgeAppearance::Tint)
+                        .color(activity_color(&screen.activity)),
+                );
+                if let Some(title) = screen.title.as_deref().filter(|t| !t.is_empty()) {
+                    ui.weak(title);
+                }
+            }
+            let (text, color) = attach_badge(terminal.attach, now);
+            ui.add(Badge::new(text).appearance(BadgeAppearance::Outline).color(color));
+            ui.weak("Read-only");
+        });
+        let terminal = &mut self.model.terminal;
+        if let Some(error) = &terminal.screen_error {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("Could not read the screen: {error}"),
+            );
+        }
+        if terminal.session_id.is_some() {
+            ui.add_space(4.0);
+            // The grid keeps the PTY's own size; the view's fit is not sent back.
+            TerminalView::new(("terminal", &id))
+                .label(format!("Terminal {name}"))
+                .show(ui, &mut terminal.grid, &mut terminal.view);
         }
         self.run(commands);
     }
@@ -321,6 +382,21 @@ pub fn stream_badge(state: StreamState, now: Instant) -> (String, BadgeColor) {
             let secs = retry_at.saturating_duration_since(now).as_secs_f32().ceil() as u64;
             (format!("Reconnecting in {secs}s"), BadgeColor::Warning)
         }
+    }
+}
+
+/// The text and colour of the terminal attach badge.
+pub fn attach_badge(state: AttachState, now: Instant) -> (String, BadgeColor) {
+    match state {
+        AttachState::Off => ("Detached".into(), BadgeColor::Subtle),
+        AttachState::Connecting => ("Attaching".into(), BadgeColor::Informative),
+        AttachState::Live => ("Attached".into(), BadgeColor::Success),
+        AttachState::Waiting { retry_at, .. } => {
+            let secs = retry_at.saturating_duration_since(now).as_secs_f32().ceil() as u64;
+            (format!("Reattaching in {secs}s"), BadgeColor::Warning)
+        }
+        AttachState::Hibernated => ("Hibernated".into(), BadgeColor::Subtle),
+        AttachState::Gone => ("Session gone".into(), BadgeColor::Danger),
     }
 }
 

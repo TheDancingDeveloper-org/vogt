@@ -6,11 +6,27 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::{Backend, Reply, login_reply};
-use crate::api::{ApiError, Auth, LoginResult, ServerEvent, SessionListBody, WorkDetail, encode_query, normalise_base};
+use super::{AttachEvent, Backend, Reply, login_reply};
+use crate::api::{
+    ApiError, AttachControl, Auth, LoginResult, ServerEvent, SessionListBody, SessionScreen, WorkDetail, attach_url,
+    encode_query, normalise_base,
+};
 use crate::sse::SseParser;
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
+
+/// A cold attach asks for at most this much trailing output, so the first
+/// paint does not replay the whole scrollback ring.
+const COLD_SNAPSHOT_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The open terminal attach.
+struct Attached {
+    generation: u64,
+    sender: ewebsock::WsSender,
+    /// The first-frame auth, sent once the socket reports it is open. The
+    /// bearer goes in a frame, never in the URL, so it stays out of logs.
+    auth_frame: Option<String>,
+}
 
 /// Talks to a Vogt engine over HTTP.
 pub struct HttpBackend {
@@ -18,6 +34,9 @@ pub struct HttpBackend {
     wake: Wake,
     /// The generation callbacks may still report for; 0 means none.
     live_stream: Arc<AtomicU64>,
+    /// The attach generation callbacks may still report for; 0 means none.
+    live_attach: Arc<AtomicU64>,
+    attached: Option<Attached>,
 }
 
 impl HttpBackend {
@@ -28,6 +47,8 @@ impl HttpBackend {
             queue: Arc::default(),
             wake: Arc::new(wake),
             live_stream: Arc::default(),
+            live_attach: Arc::default(),
+            attached: None,
         }
     }
 
@@ -169,10 +190,97 @@ impl Backend for HttpBackend {
         self.live_stream.store(0, Ordering::SeqCst);
     }
 
+    fn fetch_screen(&mut self, auth: &Auth, id: &str) {
+        let url = format!("{}/api/sessions/{}/screen", auth.base, encode_query(id));
+        let request = authed(ehttp::Request::get(url), auth);
+        let sink = self.sink();
+        let id = id.to_owned();
+        ehttp::fetch(request, move |result| {
+            sink.push(Reply::Screen(id, decode::<SessionScreen>(result).map(Box::new)))
+        });
+    }
+
+    fn attach(&mut self, auth: &Auth, id: &str, generation: u64, resume_from: Option<u64>) {
+        self.detach();
+        self.live_attach.store(generation, Ordering::SeqCst);
+        let mut frame = serde_json::json!({ "type": "auth", "token": auth.token });
+        match resume_from {
+            Some(pos) => frame["resume_from"] = pos.into(),
+            None => frame["snapshot_tail_bytes"] = COLD_SNAPSHOT_TAIL_BYTES.into(),
+        }
+        let sink = self.sink();
+        let live = Arc::clone(&self.live_attach);
+        let on_event = Box::new(move |event: ewebsock::WsEvent| {
+            // A newer attach (or a detach) superseded this one: stop reading.
+            if live.load(Ordering::SeqCst) != generation {
+                return ControlFlow::Break(());
+            }
+            let (event, flow) = match event {
+                ewebsock::WsEvent::Opened => (AttachEvent::Opened, ControlFlow::Continue(())),
+                ewebsock::WsEvent::Message(ewebsock::WsMessage::Binary(bytes)) => {
+                    (AttachEvent::Bytes(bytes), ControlFlow::Continue(()))
+                }
+                ewebsock::WsEvent::Message(ewebsock::WsMessage::Text(text)) => {
+                    match serde_json::from_str::<AttachControl>(&text) {
+                        Ok(control) => (AttachEvent::Control(control), ControlFlow::Continue(())),
+                        Err(e) => {
+                            log::debug!("ignoring malformed attach frame: {e}");
+                            return ControlFlow::Continue(());
+                        }
+                    }
+                }
+                ewebsock::WsEvent::Message(_) => return ControlFlow::Continue(()),
+                ewebsock::WsEvent::Error(message) => (AttachEvent::Closed(message), ControlFlow::Break(())),
+                ewebsock::WsEvent::Closed => (
+                    AttachEvent::Closed("the terminal connection closed".into()),
+                    ControlFlow::Break(()),
+                ),
+            };
+            sink.push(Reply::Attach(generation, event));
+            flow
+        });
+        match ewebsock::ws_connect(attach_url(&auth.base, id), ewebsock::Options::default(), on_event) {
+            Ok(sender) => {
+                self.attached = Some(Attached {
+                    generation,
+                    sender,
+                    auth_frame: Some(frame.to_string()),
+                });
+            }
+            Err(message) => self
+                .sink()
+                .push(Reply::Attach(generation, AttachEvent::Closed(message))),
+        }
+    }
+
+    fn attach_ping(&mut self, id: u64) {
+        if let Some(attached) = &mut self.attached {
+            let ping = serde_json::json!({ "type": "ping", "id": id });
+            attached.sender.send(ewebsock::WsMessage::Text(ping.to_string()));
+        }
+    }
+
+    fn detach(&mut self) {
+        self.live_attach.store(0, Ordering::SeqCst);
+        if let Some(mut attached) = self.attached.take() {
+            attached.sender.close();
+        }
+    }
+
     fn poll(&mut self) -> Vec<Reply> {
-        match self.queue.lock() {
+        let replies = match self.queue.lock() {
             Ok(mut queue) => std::mem::take(&mut *queue),
             Err(_) => Vec::new(),
+        };
+        // Authenticate an attach as soon as its socket is open.
+        if let Some(attached) = &mut self.attached
+            && replies
+                .iter()
+                .any(|r| matches!(r, Reply::Attach(g, AttachEvent::Opened) if *g == attached.generation))
+            && let Some(frame) = attached.auth_frame.take()
+        {
+            attached.sender.send(ewebsock::WsMessage::Text(frame));
         }
+        replies
     }
 }

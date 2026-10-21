@@ -2,8 +2,8 @@
 //!
 //! Layers, from the wire up: [`api`] (types), [`sse`] and [`backoff`] (stream
 //! plumbing), [`backend`] (the [`backend::Backend`] trait with an HTTP and a
-//! fixture implementation), [`model`] (state and rules, no egui) and [`app`]
-//! (the egui shell).
+//! fixture implementation), [`model`] and [`terminal`] (state and rules, no
+//! egui) and [`app`] (the egui shell).
 
 pub mod api;
 pub mod app;
@@ -11,6 +11,7 @@ pub mod backend;
 pub mod backoff;
 pub mod model;
 pub mod sse;
+pub mod terminal;
 
 #[cfg(target_arch = "wasm32")]
 mod web;

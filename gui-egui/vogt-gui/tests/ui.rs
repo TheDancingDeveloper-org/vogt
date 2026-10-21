@@ -125,3 +125,44 @@ fn work_item_detail_renders_markdown_and_comments() {
     harness.run_steps(4);
     assert!(harness.query_by_label_contains("Could not read").is_some());
 }
+
+#[test]
+fn selecting_a_session_shows_its_terminal_read_only() {
+    let (mut harness, fixture) = harness();
+    sign_in(&mut harness);
+    harness.get_by_label("oversight").click();
+    harness.run_steps(4);
+    assert_eq!(harness.state().model.screen, Screen::Terminal);
+    harness.get_by_label("Terminal oversight");
+    harness.get_by_label("Attached");
+    harness.get_by_label("Read-only");
+    harness.get_by_label("s1 title");
+    let text = || harness.state().model.terminal.grid.visible_text();
+    assert!(text().starts_with("$ cargo test\nok"));
+
+    // Live output paints; an activity event re-reads the screen.
+    fixture.borrow_mut().pty_output("s1", b"\x1b[32mgreen\x1b[0m\r\n");
+    fixture.borrow_mut().emit(ServerEvent::Activity {
+        id: "s1".into(),
+        state: "idle".into(),
+        activity_changed_at: None,
+    });
+    harness.run_steps(3);
+    assert!(harness.state().model.terminal.grid.visible_text().contains("green"));
+    assert_eq!(fixture.borrow().calls.iter().filter(|c| *c == "screen s1").count(), 2);
+
+    // A dropped attach reattaches and resumes where it left off.
+    fixture.borrow_mut().drop_attach();
+    harness.run_steps(2);
+    assert!(harness.query_by_label_contains("Reattaching in").is_some());
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    harness.run_steps(3);
+    harness.get_by_label("Attached");
+    assert!(fixture.borrow().calls.iter().any(|c| c == "attach s1 2 from 34"));
+
+    // The view sends nothing: no input or resize call exists, and leaving detaches.
+    harness.get_by_label("Back").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().model.screen, Screen::Sessions);
+    assert!(fixture.borrow().attached.is_none());
+}
