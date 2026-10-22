@@ -16523,15 +16523,16 @@ async fn an_agent_session_gets_a_graft_token_and_its_workspace_closes_when_it_st
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let closes = fake.closes.lock().unwrap();
-    assert_eq!(closes[0].0, "tok-0");
-    assert_eq!(
-        closes[0].1.workspace.as_ref().unwrap().name,
-        "vogt/ses_grafttest"
-    );
+    {
+        let closes = fake.closes.lock().unwrap();
+        assert_eq!(closes[0].0, "tok-0");
+        assert_eq!(
+            closes[0].1.workspace.as_ref().unwrap().name,
+            "vogt/ses_grafttest"
+        );
+    }
 
     // A plain shell is a person, not an agent: no graft token.
-    drop(closes);
     let printed = session_output(
         &base,
         json!({
