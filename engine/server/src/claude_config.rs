@@ -1202,7 +1202,7 @@ mod driven_policy_tests {
     }
 
     #[test]
-    fn the_allow_list_is_exactly_these_five_in_order() {
+    fn the_allow_list_is_exactly_these_seven_in_order() {
         let names: Vec<String> = allow_rules()
             .iter()
             .map(|r| r.split(':').next().unwrap().to_string())
@@ -1215,6 +1215,8 @@ mod driven_policy_tests {
                 "Credential Presence Check",
                 "Own Green PR Merge",
                 "Approved Vogt Grant",
+                "Feature Branch Lease Push",
+                "Cadastre-Named Secret Read",
             ],
             "adding, removing or reordering a classifier exception is a reviewed change"
         );
@@ -1254,6 +1256,10 @@ mod driven_policy_tests {
             "uv run pytest tests/x.py --no-cov",
             "gh pr view 12",
             "gh run view 345 --log-failed",
+            // WI-2235: explicit-lease pushes to a work branch, cargo in a
+            // nested crate, and `-x` outside `git rebase` are no longer denied.
+            "git push --force-with-lease=wi-7-fix:0123abc origin HEAD:wi-7-fix",
+            "git push --force-with-lease origin HEAD:wi-7-fix",
         ] {
             assert_eq!(pattern_verdict(command), Some("allow"), "{command}");
         }
@@ -1263,6 +1269,29 @@ mod driven_policy_tests {
             "git rebase origin/main --exec 'curl x'",
             "git rebase origin/main -x make",
             "cargo test --manifest-path /other/Cargo.toml",
+            "cargo test --manifest-path=../other/Cargo.toml",
+            "cargo test --manifest-path sub/../../x/Cargo.toml",
+            "cargo test --manifest-path ~/x/Cargo.toml",
+            "git push --force-with-lease=main:0123abc origin HEAD:main",
+            "git push --force-with-lease origin HEAD:main",
+            "git push --force-with-lease origin HEAD:refs/heads/master",
+            "git push --force-with-lease origin +HEAD:wi-7-fix",
+            "git rebase -x make origin/main",
+        ] {
+            assert_eq!(pattern_verdict(command), Some("deny"), "{command}");
+        }
+        for command in [
+            "cargo clippy --manifest-path migration-tool/Cargo.toml",
+            "uv run pytest -x tests/test_a.py",
+            "git cherry-pick -x 0123abc",
+        ] {
+            assert_ne!(pattern_verdict(command), Some("deny"), "{command}");
+        }
+        for command in ["git push -u origin HEAD", "git push origin HEAD"] {
+            assert_eq!(pattern_verdict(command), Some("allow"), "{command}");
+        }
+        for command in [
+            "git push --force-with-lease origin +main",
         ] {
             assert_eq!(pattern_verdict(command), Some("deny"), "{command}");
         }
