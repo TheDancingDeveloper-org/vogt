@@ -204,8 +204,9 @@ closes the code-execution holes those patterns would otherwise open
 (`--upload-pack`, `--output`, `rebase --exec`/`-x`/`-i`, cargo `--config`,
 and cargo `--manifest-path` pointing outside the worktree: absolute, `~`, `$VAR`
 or `..` paths). An explicit-lease push (`--force-with-lease=<br>:<sha> origin
-HEAD:<br>`) is allowed to a work branch and denied to `main`/`master` or a `+`
-refspec. Merges, other pushes, destruction and secrets still go to the
+HEAD:<br>`) matches no allow pattern: it goes to the classifier, and the deny
+patterns refuse any push naming `main`/`master` (any spelling or position), a
+`+` refspec, `--force`/`-f` or `--receive-pack`. Merges, other pushes, destruction and secrets still go to the
 classifier, as the pinning tests check.
 
 Two classifier exceptions came out of the WI-2235 audit
@@ -213,8 +214,9 @@ Two classifier exceptions came out of the WI-2235 audit
 (Git Destructive, own work branch only) and **Cadastre-Named Secret Read**
 (Credential Materialization, the one secret Cadastre named for the task, read
 into a variable or 0600 file, never printed; guess-loops stay Credential
-Exploration). Pattern rules ending in `:*` are prefix rules, so a
-`HEAD:<branch>` allow is written `HEAD:**`.
+Exploration). Pattern rules ending in `:*` are prefix rules, and a
+trailing `*` matches any further arguments, so a pattern can't safely allow
+`HEAD:<branch>`.
 
 Pushing the checked-out branch relies on the worktree being on the session's
 own branch. A worker in the shared checkout on `main` would push `main`, which
