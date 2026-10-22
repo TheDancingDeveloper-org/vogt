@@ -1,0 +1,40 @@
+# A static mockup of the whole Vogt GUI on egui and fluent2-egui (WI-2162): fake data, no
+# backend, no network. A workspace of its own, like gui-egui/, so the engine's lockfile and
+# Rust floor stay untouched and the mockup never blocks the live POC (or the other way round).
+[workspace]
+resolver = "3"
+
+[package]
+name = "vogt-gui-mockup"
+description = "Static mockup of the Vogt GUI on egui and fluent2-egui, with fake data (desktop and wasm)"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+rust-version = "1.95"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "warn"
+unwrap_used = "warn"
+
+[features]
+# Pixel screenshots of every screen in both themes, through a wgpu adapter. Off in
+# `cargo test`; see tests/screenshots.rs and scripts/screenshots.sh.
+snapshots = ["egui_kittest/wgpu", "egui_kittest/snapshot"]
+
+[dependencies]
+# Pinned to fluent2-egui main at fddc829 (2026-10-22), after the v0.2.0 tag.
+fluent2-egui = { git = "https://github.com/TheDancingDeveloper-org/fluent2-egui.git", rev = "fddc82911dc3cfe40fea1f6acabd63260239d5a7", features = ["terminal", "diff", "markdown"] }
+egui = "0.36"
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "accesskit", "x11", "wayland"] }
+log = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement"] }
+
+[dev-dependencies]
+egui_kittest = "0.36"
