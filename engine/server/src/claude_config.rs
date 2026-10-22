@@ -1288,6 +1288,7 @@ mod driven_policy_tests {
             "git push --force origin main",
             "git push -f origin main",
             "git push origin +main",
+            "git push --force-with-lease origin +main",
             "cargo test --manifest-path '/other/Cargo.toml'",
             "cargo test --manifest-path=\"/other/Cargo.toml\"",
         ] {
@@ -1312,9 +1313,6 @@ mod driven_policy_tests {
         }
         for command in ["git push -u origin HEAD", "git push origin HEAD"] {
             assert_eq!(pattern_verdict(command), Some("allow"), "{command}");
-        }
-        for command in ["git push --force-with-lease origin +main"] {
-            assert_eq!(pattern_verdict(command), Some("deny"), "{command}");
         }
         let policy = policy();
         let allow: Vec<&str> = policy["permissions"]["allow"]
