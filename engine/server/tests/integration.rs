@@ -16289,3 +16289,258 @@ async fn a_launch_with_the_secrets_manager_down_degrades_and_recovers_without_re
     )
     .await;
 }
+
+// --- graft (WI-2227) ---------------------------------------------------------
+
+/// Just enough of a graft server for the session lifecycle: `MintToken`
+/// (with the service token only) and the workspace RPCs (with a token it
+/// minted only), recording each call.
+mod fake_graft {
+    use std::sync::{Arc, Mutex};
+
+    use graft_proto::pb;
+    use graft_proto::pb::admin_service_server::{AdminService, AdminServiceServer};
+    use graft_proto::pb::workspace_service_server::{WorkspaceService, WorkspaceServiceServer};
+    use graft_proto::ApiError;
+    use tonic::codec::CompressionEncoding;
+    use tonic::{Request, Response, Status};
+
+    pub const SERVICE: &str = "graft-service-token-for-tests";
+
+    #[derive(Clone, Default)]
+    pub struct Fake {
+        pub mints: Arc<Mutex<Vec<pb::MintTokenRequest>>>,
+        pub opens: Arc<Mutex<Vec<(String, pb::OpenWorkspaceRequest)>>>,
+        pub closes: Arc<Mutex<Vec<(String, pb::CloseWorkspaceRequest)>>>,
+    }
+
+    fn bearer<T>(req: &Request<T>) -> String {
+        req.metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("")
+            .to_string()
+    }
+
+    impl Fake {
+        fn minted<T>(&self, req: &Request<T>) -> Result<String, Status> {
+            let b = bearer(req);
+            let n = self.mints.lock().unwrap().len();
+            if (0..n).any(|i| b == format!("tok-{i}")) {
+                Ok(b)
+            } else {
+                Err(ApiError::Unauthenticated.into())
+            }
+        }
+    }
+
+    fn unimplemented<T>() -> Result<Response<T>, Status> {
+        Err(Status::unimplemented("fake"))
+    }
+
+    #[tonic::async_trait]
+    impl AdminService for Fake {
+        async fn create_repo(
+            &self,
+            _: Request<pb::CreateRepoRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            unimplemented()
+        }
+        async fn import_changesets(
+            &self,
+            _: Request<pb::ImportChangesetsRequest>,
+        ) -> Result<Response<pb::CreatedList>, Status> {
+            unimplemented()
+        }
+        async fn gc(&self, _: Request<pb::GcRequest>) -> Result<Response<pb::GcReport>, Status> {
+            unimplemented()
+        }
+        async fn mint_token(
+            &self,
+            req: Request<pb::MintTokenRequest>,
+        ) -> Result<Response<pb::Token>, Status> {
+            if bearer(&req) != SERVICE {
+                return Err(ApiError::Unauthenticated.into());
+            }
+            let mut mints = self.mints.lock().unwrap();
+            let token = format!("tok-{}", mints.len());
+            mints.push(req.into_inner());
+            Ok(Response::new(pb::Token { token }))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl WorkspaceService for Fake {
+        async fn open_workspace(
+            &self,
+            req: Request<pb::OpenWorkspaceRequest>,
+        ) -> Result<Response<pb::WorkspaceView>, Status> {
+            let b = self.minted(&req)?;
+            let msg = req.into_inner();
+            let name = msg.name.clone().unwrap_or_default();
+            self.opens.lock().unwrap().push((b, msg));
+            Ok(Response::new(pb::WorkspaceView {
+                name,
+                ..Default::default()
+            }))
+        }
+        async fn get_workspace(
+            &self,
+            _: Request<pb::WorkspaceRef>,
+        ) -> Result<Response<pb::WorkspaceView>, Status> {
+            unimplemented()
+        }
+        async fn list_workspaces(
+            &self,
+            _: Request<pb::ListWorkspacesRequest>,
+        ) -> Result<Response<pb::WorkspaceViews>, Status> {
+            unimplemented()
+        }
+        async fn renew_lease(
+            &self,
+            req: Request<pb::RenewLeaseRequest>,
+        ) -> Result<Response<pb::WorkspaceView>, Status> {
+            self.minted(&req)?;
+            Ok(Response::new(pb::WorkspaceView::default()))
+        }
+        async fn set_head(
+            &self,
+            _: Request<pb::SetHeadRequest>,
+        ) -> Result<Response<pb::WorkspaceView>, Status> {
+            unimplemented()
+        }
+        async fn sync(&self, _: Request<pb::SyncRequest>) -> Result<Response<pb::Synced>, Status> {
+            unimplemented()
+        }
+        async fn stack(
+            &self,
+            _: Request<pb::StackRequest>,
+        ) -> Result<Response<pb::WorkspaceView>, Status> {
+            unimplemented()
+        }
+        async fn close_workspace(
+            &self,
+            req: Request<pb::CloseWorkspaceRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let b = self.minted(&req)?;
+            self.closes.lock().unwrap().push((b, req.into_inner()));
+            Ok(Response::new(pb::Empty {}))
+        }
+    }
+
+    /// Serve `fake` on a loopback port and return its URL.
+    pub async fn serve(fake: Fake) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(
+                    AdminServiceServer::new(fake.clone())
+                        .accept_compressed(CompressionEncoding::Gzip)
+                        .send_compressed(CompressionEncoding::Gzip),
+                )
+                .add_service(
+                    WorkspaceServiceServer::new(fake)
+                        .accept_compressed(CompressionEncoding::Gzip)
+                        .send_compressed(CompressionEncoding::Gzip),
+                )
+                .serve_with_incoming(incoming),
+        );
+        format!("http://{addr}")
+    }
+}
+
+#[tokio::test]
+async fn an_agent_session_gets_a_graft_token_and_its_workspace_closes_when_it_stops() {
+    let fake = fake_graft::Fake::default();
+    let url = fake_graft::serve(fake.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let token_file = dir.path().join("graft-service-token");
+    std::fs::write(&token_file, fake_graft::SERVICE).unwrap();
+    // An agent CLI, as far as the engine can tell (its file name), that
+    // prints the graft variables it was started with and exits.
+    let agent = dir.path().join("klaudia");
+    std::fs::write(
+        &agent,
+        "#!/bin/sh\nprintf '<%s|%s|%s>' \"$GRAFT_TOKEN\" \"$GRAFT_WORKSPACE\" \"$GRAFT_REPO\"\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let (base, _h) = boot_with_config(Config {
+        graft: Some(vogt_engine_server::graft::GraftConfig {
+            url,
+            repo: "rusttorrent".into(),
+            line: "main".into(),
+            scopes: vec!["repo:rusttorrent:write".into()],
+            token_ttl: Duration::from_secs(3600),
+            lease: Duration::from_secs(600),
+            keep_drafts: false,
+            service_token: vogt_engine_server::graft::ServiceToken::File(token_file),
+        }),
+        ..test_config()
+    })
+    .await;
+
+    let printed = session_output(
+        &base,
+        json!({
+            "name": "graft-agent",
+            "command": [agent.to_string_lossy()],
+            "env": [["VOGT_SESSION_ID", "ses_GRAFTTEST"]],
+            "work_item": "WI-7",
+        }),
+        "<tok-0|vogt/ses_grafttest|rusttorrent>",
+    )
+    .await;
+    assert!(
+        printed.contains("<tok-0|vogt/ses_grafttest|rusttorrent>"),
+        "the agent should see its graft token and workspace; got {printed:?}"
+    );
+    {
+        let mints = fake.mints.lock().unwrap();
+        assert_eq!(mints.len(), 1);
+        assert_eq!(mints[0].subject, "agent:ses_GRAFTTEST");
+        assert_eq!(mints[0].session.as_deref(), Some("ses_GRAFTTEST"));
+        assert_eq!(mints[0].work_item.as_deref(), Some("WI-7"));
+        assert_eq!(mints[0].scopes, vec!["repo:rusttorrent:write"]);
+        let opens = fake.opens.lock().unwrap();
+        assert_eq!(opens[0].0, "tok-0");
+        assert_eq!(opens[0].1.name.as_deref(), Some("vogt/ses_grafttest"));
+    }
+
+    // The session has exited: its workspace is closed, with its own token,
+    // well inside the minute graft's plan allows.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while fake.closes.lock().unwrap().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the stopped session's workspace was not closed"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let closes = fake.closes.lock().unwrap();
+    assert_eq!(closes[0].0, "tok-0");
+    assert_eq!(
+        closes[0].1.workspace.as_ref().unwrap().name,
+        "vogt/ses_grafttest"
+    );
+
+    // A plain shell is a person, not an agent: no graft token.
+    drop(closes);
+    let printed = session_output(
+        &base,
+        json!({
+            "name": "graft-shell",
+            "command": ["/bin/sh", "-c", "printf '<%s>' \"${GRAFT_TOKEN:-none}\""],
+        }),
+        "<none>",
+    )
+    .await;
+    assert!(printed.contains("<none>"), "got {printed:?}");
+    assert_eq!(fake.mints.lock().unwrap().len(), 1);
+}
