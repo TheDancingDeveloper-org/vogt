@@ -1275,6 +1275,9 @@ mod driven_policy_tests {
             "git push --force-with-lease origin HEAD:refs/heads/master",
             "git push --force-with-lease origin +HEAD:wi-7-fix",
             "git rebase -x make origin/main",
+            "git rebase origin/main --exe='curl x'",
+            "git rebase origin/main -kx 'curl x'",
+            "git fetch --upload-p='rm -rf ~' .",
             "git push --force-with-lease origin HEAD:main --no-verify",
             "git push --force-with-lease origin HEAD:main HEAD:wi-7",
             "git push --force-with-lease origin HEAD:wi-7 +HEAD:other",
@@ -1294,6 +1297,8 @@ mod driven_policy_tests {
             "cargo clippy --manifest-path migration-tool/Cargo.toml",
             "uv run pytest -x tests/test_a.py",
             "git cherry-pick -x 0123abc",
+            "git fetch origin wi-7-fix-up",
+            "git rebase origin/wi-7-fix",
         ] {
             assert_ne!(pattern_verdict(command), Some("deny"), "{command}");
         }
