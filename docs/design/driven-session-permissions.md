@@ -201,9 +201,20 @@ optionally `-u` or `--force-with-lease`), cargo/pnpm/uv build and test, and
 the Vogt tools a session reports itself with (`work_comment`,
 `session_report_blocked`, `session_report_unblocked`). `permissions.deny`
 closes the code-execution holes those patterns would otherwise open
-(`--upload-pack`, `--output`, `rebase --exec`/`-x`/`-i`, cargo
-`--manifest-path`/`--config`). Merges, other pushes, destruction and secrets
-still go to the classifier, as the pinning tests check.
+(`--upload-pack`, `--output`, `rebase --exec`/`-x`/`-i`, cargo `--config`,
+and cargo `--manifest-path` pointing outside the worktree: absolute, `~`, `$VAR`
+or `..` paths). An explicit-lease push (`--force-with-lease=<br>:<sha> origin
+HEAD:<br>`) is allowed to a work branch and denied to `main`/`master` or a `+`
+refspec. Merges, other pushes, destruction and secrets still go to the
+classifier, as the pinning tests check.
+
+Two classifier exceptions came out of the WI-2235 audit
+(`notes/permission-blocks-audit-2026-10-22.md`): **Feature Branch Lease Push**
+(Git Destructive, own work branch only) and **Cadastre-Named Secret Read**
+(Credential Materialization, the one secret Cadastre named for the task, read
+into a variable or 0600 file, never printed; guess-loops stay Credential
+Exploration). Pattern rules ending in `:*` are prefix rules, so a
+`HEAD:<branch>` allow is written `HEAD:**`.
 
 Pushing the checked-out branch relies on the worktree being on the session's
 own branch. A worker in the shared checkout on `main` would push `main`, which
