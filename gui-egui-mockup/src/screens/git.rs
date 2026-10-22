@@ -90,10 +90,10 @@ impl GitScreen {
                     ui.add_space(4.0);
                 }
             });
-        let Some((file, model)) = data.changes.get(self.file).zip(self.models.get(self.file))
-        else {
-            return None;
-        };
+        let (file, model) = data
+            .changes
+            .get(self.file)
+            .zip(self.models.get(self.file))?;
         egui::Frame::NONE
             .inner_margin(egui::Margin {
                 left: 12,

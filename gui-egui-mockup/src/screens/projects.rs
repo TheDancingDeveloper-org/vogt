@@ -82,9 +82,7 @@ impl ProjectsScreen {
                         }
                     });
             });
-        let Some(project) = data.projects.get(self.selected) else {
-            return None;
-        };
+        let project = data.projects.get(self.selected)?;
         egui::Frame::NONE
             .inner_margin(egui::Margin {
                 left: 16,
