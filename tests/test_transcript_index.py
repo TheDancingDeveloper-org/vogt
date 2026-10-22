@@ -132,6 +132,10 @@ def test_a_new_codex_file_in_todays_directory_is_found_after_the_ttl(
     # Written into the same day directory: no new month or year appears.
     second = "11111111-2222-4333-8444-555555555555"
     (day / f"rollout-2026-10-14T01-00-00-{second}.jsonl").write_text("{}\n")
+    # Coarse filesystem mtime: move the day directory's stamp on explicitly so
+    # the expired index sees the change (WI-2242).
+    later = day.stat().st_mtime + 10
+    os.utime(day, (later, later))
     assert transcripts._by_id("codex", root, second) is None
     monkeypatch.setattr(transcripts, "_clock", lambda: time.monotonic() + 100)
     found = transcripts._by_id("codex", root, second)
