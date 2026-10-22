@@ -58,6 +58,10 @@ INDEX_TTL_SECONDS = 5.0
 #: How long a conversation id that was not on disk stays a miss, so a list of
 #: sessions with no transcript does not rescan the root once per row.
 NEGATIVE_TTL_SECONDS = 2.0
+#: A stamp this close to the scan's wall-clock time is not trusted: a file
+#: written in the same mtime tick as the scan leaves the stamp unchanged, so an
+#: equal stamp would keep an index that misses it (racy mtime, as in git).
+RACY_STAMP_SECONDS = 2.0
 
 _ID = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,127}$")
 _FLAG_IDS = re.compile(r"(?:--session-id|--resume|--session)[= ]+'?([A-Za-z0-9_.-]+)")
@@ -259,6 +263,8 @@ class _Index:
     #: waits for the TTL.
     root_mtime: float
     by_id: dict[str, Path]
+    #: wall-clock time of the scan, to tell a settled stamp from a racy one.
+    scanned_at: float
     #: conversation id → monotonic time it was found missing.
     negative: dict[str, float]
 
@@ -286,6 +292,10 @@ def _clock() -> float:
     return time.monotonic()
 
 
+def _wall_clock() -> float:
+    return time.time()
+
+
 def _index_for(agent: str, root: Path) -> _Index:
     key = ("claude" if agent in CLAUDE_FORMAT else "codex", str(root))
     now = _clock()
@@ -300,7 +310,8 @@ def _index_for(agent: str, root: Path) -> _Index:
     stamp = _tree_stamp(root)
     with _index_guard:
         current = _indexes.get(key)
-        if current is not None and current.root_mtime == stamp:
+        settled = stamp < current.scanned_at - RACY_STAMP_SECONDS if current else False
+        if current is not None and settled and current.root_mtime == stamp:
             current.built_at = _clock()
             return current
     built = _scan(agent, root, _clock())
@@ -312,6 +323,7 @@ def _index_for(agent: str, root: Path) -> _Index:
 def _scan(agent: str, root: Path, now: float) -> _Index:
     """One pass over the root. The stamp is the newest mtime seen in it."""
     by_id: dict[str, Path] = {}
+    scanned_at = _wall_clock()
     stamp = _mtime(root)
     if agent in CLAUDE_FORMAT:
         for entry in _entries(root):
@@ -340,7 +352,9 @@ def _scan(agent: str, root: Path, now: float) -> _Index:
             conversation = match.group(1) if match else path.stem
             # Newest dates come first, so the first hit is the one a walk finds.
             by_id.setdefault(conversation, path)
-    return _Index(built_at=now, root_mtime=stamp, by_id=by_id, negative={})
+    return _Index(
+        built_at=now, root_mtime=stamp, by_id=by_id, scanned_at=scanned_at, negative={}
+    )
 
 
 def _tree_stamp(root: Path) -> float:

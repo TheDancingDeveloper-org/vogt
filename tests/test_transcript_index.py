@@ -66,12 +66,41 @@ def test_a_new_file_is_found_once_the_index_expires(
     root = _claude_root(tmp_path, sessions=1, decoys=2)
     transcripts._indexes.clear()
     assert transcripts._by_id("claude", root, "conv-00000") is not None
-    (root / "dir-keep" / "conv-new.jsonl").write_text("{}\n")
+    keep = root / "dir-keep"
+    before = keep.stat()
+    (keep / "conv-new.jsonl").write_text("{}\n")
+    # Same mtime tick as the scan, as on a coarse-timestamp filesystem: the
+    # directory stamp does not move, so only the racy-stamp rule finds it.
+    os.utime(keep, ns=(before.st_atime_ns, before.st_mtime_ns))
     # Still inside the TTL: the index stands and the new file is invisible.
     assert transcripts._by_id("claude", root, "conv-new") is None
     monkeypatch.setattr(transcripts, "_clock", lambda: time.monotonic() + 100)
     found = transcripts._by_id("claude", root, "conv-new")
     assert found is not None and found.name == "conv-new.jsonl"
+
+
+def test_a_settled_stamp_keeps_the_index_after_the_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _claude_root(tmp_path, sessions=1, decoys=2)
+    old = time.time() - 60
+    for path in (root, root / "dir-00000", root / "dir-00001", root / "dir-keep"):
+        if path.exists():
+            os.utime(path, (old, old))
+    transcripts._indexes.clear()
+    assert transcripts._by_id("claude", root, "conv-00000") is not None
+    builds = {"n": 0}
+    real_scan = transcripts._scan
+
+    def counting_scan(agent: str, root: Path, now: float) -> transcripts._Index:
+        builds["n"] += 1
+        return real_scan(agent, root, now)
+
+    monkeypatch.setattr(transcripts, "_scan", counting_scan)
+    monkeypatch.setattr(transcripts, "_clock", lambda: time.monotonic() + 100)
+    assert transcripts._by_id("claude", root, "conv-00000") is not None
+    # The stamp is older than the racy window and unchanged: no rebuild.
+    assert builds["n"] == 0
 
 
 def test_a_missing_id_does_not_rescan_within_the_ttl(
@@ -125,7 +154,9 @@ def test_a_new_codex_file_in_todays_directory_is_found_after_the_ttl(
     assert transcripts._by_id("codex", root, first) is not None
     # Written into the same day directory: no new month or year appears.
     second = "11111111-2222-4333-8444-555555555555"
+    before = day.stat()
     (day / f"rollout-2026-10-14T01-00-00-{second}.jsonl").write_text("{}\n")
+    os.utime(day, ns=(before.st_atime_ns, before.st_mtime_ns))
     assert transcripts._by_id("codex", root, second) is None
     monkeypatch.setattr(transcripts, "_clock", lambda: time.monotonic() + 100)
     found = transcripts._by_id("codex", root, second)
