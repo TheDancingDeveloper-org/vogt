@@ -4314,6 +4314,7 @@ service behind it is not there, and exactly which setting turns it on.
 | **GUI streaming** | the GUI tab's live stream of launched processes | `GUI_STREAM_URL` (+ `START_SWAY=1`, and `GUI_STREAM_VERIFIED=1` once an operator has watched it work) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason. |
 | **Agent CLIs** (`codex`, `claude`, `opencode`, `klaudia`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build (on in the published image), or a user-managed install in the pod's home | Sessions are ordinary shells; the "(protected)" templates cannot start. |
 | **Agent service auth** | brokering third-party service credentials (GitHub and others) into a session from a secrets manager | `ENGINE_AUTO_AGENT_AUTH=1` + `ENGINE_AGENT_AUTH_HELPER` naming a helper (the bundled reference helper is auto-selected when its secrets manager's machine identity is present in the environment), configured through the env vars in `agent-auth.sh`'s header | Sessions run without those credentials pre-loaded; nothing in the engine depends on it. **The shipped helper is one pluggable example** — a data-driven reference implementation against one secrets manager; it bakes in no address, project or secret name and is driven by `ENGINE_AGENT_AUTH_SECRETS`/`_PROBES`. A deployment points the variable at a helper of its own that speaks the same subcommands (`check`, `run`, `shell`, `get`, `set`, `fetch`, `store`), or leaves it off. When it *is* on, a session gets exactly the manifest and never the machine identity — see the credential contract below. |
+| **graft** (version-control server, WI-2227) | a graft token of its own for each agent session, and a leased graft workspace | `ENGINE_GRAFT_ENABLED=1` + `ENGINE_GRAFT_URL`, `ENGINE_GRAFT_REPO` and the service token (`ENGINE_GRAFT_SERVICE_TOKEN_FILE` or `ENGINE_GRAFT_SERVICE_SECRET`) — "graft session tokens" below | Sessions get no `GRAFT_*` variables; nothing else changes. With it on, a graft that cannot be reached or refuses is logged and the session starts without them. An enabled integration missing a required setting is a *startup error*. |
 
 **The agent-auth session credential contract.** A session launched under this
 helper gets exactly the manifest — every secret named in
@@ -4501,6 +4502,49 @@ mode lets a group or others read it; keep it `0600`. Until sessions run as a
 separate uid, grants narrow ambient exposure and add an audited,
 person-approved path; they are a boundary only once that uid line exists
 (WI-982).
+
+**graft session tokens (WI-2227; graft decision D10).** With
+`ENGINE_GRAFT_ENABLED` on, an agent session started through `POST
+/api/sessions` (an agent CLI by its command or template; a plain shell is a
+person and gets none) is minted a graft token through graft's `MintToken`
+RPC, presenting the deployment's graft *service* token. graft makes the new
+token a subset of the service token on every axis — scopes, life (capped at
+the service token's remaining life and the server's maximum; the engine asks
+for `ENGINE_GRAFT_TOKEN_TTL`, `12h`, and takes the cap graft names if that is
+less), and identity — so the service token's scopes must include every scope
+in `ENGINE_GRAFT_SCOPES` (default `repo:<repo>:read,repo:<repo>:write`). The
+token's subject is `agent:<session>`, and it carries the Vogt session
+(`VOGT_SESSION_ID`, else the engine id) and the session's work item, so every
+changeset the session makes in graft names both in graft's journal.
+
+The engine then opens the workspace `vogt/<session>` (lowercased) on
+`ENGINE_GRAFT_LINE` (`main`) *with the session's token*, so the session owns
+it, and renews its lease (`ENGINE_GRAFT_LEASE`, `30m`) every third of the
+lease, minting the engine's renewing copy of the token again before it runs
+out. A workspace graft ended while it was out of reach is opened again under
+the same name. The session is started with `GRAFT_TOKEN` (graft's CLI reads
+it), `GRAFT_ENDPOINT`, `GRAFT_REPO` and `GRAFT_WORKSPACE`; a caller that
+passes its own `GRAFT_TOKEN` is left alone. A hibernated session still lives:
+its lease is kept, and a wake mints a new token for the new process (the
+token, like every `*TOKEN*` variable, is not in the hibernation record) and
+finds the same workspace. When the session exits (not a hibernation, not an
+engine shutdown) or a hibernated session is removed, the engine closes the
+workspace with the session's token, retrying for up to a minute; its drafts
+are abandoned unless `ENGINE_GRAFT_KEEP_DRAFTS` is on. If the close fails
+throughout, graft ends the workspace when its lease lapses.
+
+The service token is read from `ENGINE_GRAFT_SERVICE_TOKEN_FILE` (read at each
+mint, so a rotated file is picked up; keep it `0600`), or fetched through the
+agent-auth helper from `ENGINE_GRAFT_SERVICE_SECRET="PROJECT_ID SECRET_NAME"`
+— with the helper's manifest replaced by that one line for the call, the way
+a grant is fetched, so it is never an `ENGINE_AGENT_AUTH_SECRETS` entry a
+session could fetch — and reused for ten minutes. Neither token is logged,
+put in a process's arguments, or written to disk by the engine; the audit log
+names the session, work item, repository and scopes (`event=graft.token.minted`,
+`graft.workspace.closed`). The minted token is not revoked at stop (graft has
+no `RevokeToken` RPC yet); it expires with its TTL, and its workspace is
+already closed. graft state lives in memory: after an engine restart a
+hibernated session's lease is renewed again only once it is woken.
 
 Operator-local notes about a particular deployment belong in the git-ignored
 `docs/local/`, not here.
