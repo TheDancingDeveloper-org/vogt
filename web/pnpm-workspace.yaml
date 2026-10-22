@@ -2,7 +2,9 @@ overrides:
   '@babel/core': 7.29.7
   # GHSA-p98j-92pf-mc4p: `monaco-editor` pins dompurify 3.4.8 transitively;
   # 3.4.13–3.4.15 leave detached-subtree handlers armed. Patched in 3.4.16.
-  dompurify: '>=3.4.16'
+  # GHSA-mrv2-3pqr-j5jr (critical), GHSA-c6gr-qvv4-5v3f (high) and a low
+  # SMIL href advisory, 2026-10-22: patched in 3.4.17.
+  dompurify: '>=3.4.17'
   # GHSA-p6vx-979v-rg4c (critical) and GHSA-jp82-f5mq-hwhp (high), 2026-10-06:
   # solid-js 1.9.15 (the latest 1.x) pins seroval ~1.5.4; only the 2.0 RCs
   # move. seroval is solid-js's SSR serializer and this is a client-only SPA,
