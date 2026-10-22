@@ -1290,9 +1290,7 @@ mod driven_policy_tests {
         for command in ["git push -u origin HEAD", "git push origin HEAD"] {
             assert_eq!(pattern_verdict(command), Some("allow"), "{command}");
         }
-        for command in [
-            "git push --force-with-lease origin +main",
-        ] {
+        for command in ["git push --force-with-lease origin +main"] {
             assert_eq!(pattern_verdict(command), Some("deny"), "{command}");
         }
         let policy = policy();
