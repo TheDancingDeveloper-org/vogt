@@ -880,7 +880,7 @@ pub fn transcript() -> String {
     out.push_str(
         "\x1b[38;5;208m╭──────────────────────────────────────────────────────────╮\x1b[0m\r\n",
     );
-    out.push_str("\x1b[38;5;208m│\x1b[0m \x1b[1m✻ Claude Code\x1b[0m  opus-5.5 · ~/Working/Active/WI-2162       \x1b[38;5;208m│\x1b[0m\r\n");
+    out.push_str("\x1b[38;5;208m│\x1b[0m \x1b[1m* Claude Code\x1b[0m  opus-5.5 · ~/Working/Active/WI-2162       \x1b[38;5;208m│\x1b[0m\r\n");
     out.push_str(
         "\x1b[38;5;208m╰──────────────────────────────────────────────────────────╯\x1b[0m\r\n\r\n",
     );
@@ -891,17 +891,17 @@ pub fn transcript() -> String {
     out.push_str(
         "\x1b[32m●\x1b[0m \x1b[1mBash\x1b[0m(git fetch origin wi-1806-vogt-gui-slice1)\r\n",
     );
-    out.push_str("  ⎿  \x1b[2m * branch  wi-1806-vogt-gui-slice1 -> FETCH_HEAD\x1b[0m\r\n\r\n");
+    out.push_str("  └  \x1b[2m * branch  wi-1806-vogt-gui-slice1 -> FETCH_HEAD\x1b[0m\r\n\r\n");
     out.push_str("\x1b[32m●\x1b[0m \x1b[1mWrite\x1b[0m(gui-egui-mockup/src/fixtures.rs)\r\n");
-    out.push_str("  ⎿  \x1b[2mWrote 612 lines\x1b[0m\r\n\r\n");
+    out.push_str("  └  \x1b[2mWrote 612 lines\x1b[0m\r\n\r\n");
     out.push_str("\x1b[32m●\x1b[0m \x1b[1mBash\x1b[0m(CARGO_BUILD_JOBS=4 cargo clippy --all-targets -- -D warnings)\r\n");
-    out.push_str("  ⎿  \x1b[2m   Compiling fluent2-egui v0.0.0\x1b[0m\r\n");
+    out.push_str("  └  \x1b[2m   Compiling fluent2-egui v0.0.0\x1b[0m\r\n");
     out.push_str("     \x1b[2m   Compiling vogt-gui-mockup v0.1.0\x1b[0m\r\n");
     out.push_str("     \x1b[33mwarning\x1b[0m: unused variable: `row`\r\n");
     out.push_str("       \x1b[34m-->\x1b[0m src/screens/backlog.rs:88:17\r\n\r\n");
     out.push_str("\x1b[37m●\x1b[0m One warning. Fixing the unused binding and re-running.\r\n\r\n");
     out.push_str("\x1b[32m●\x1b[0m \x1b[1mUpdate\x1b[0m(src/screens/backlog.rs)\r\n");
-    out.push_str("  ⎿  \x1b[2mUpdated with \x1b[0m\x1b[32m1 addition\x1b[0m\x1b[2m and \x1b[0m\x1b[31m1 removal\x1b[0m\r\n");
+    out.push_str("  └  \x1b[2mUpdated with \x1b[0m\x1b[32m1 addition\x1b[0m\x1b[2m and \x1b[0m\x1b[31m1 removal\x1b[0m\r\n");
     out.push_str(
         "     \x1b[48;5;52m 88 -        .show(ui, &mut self.grid, |row, ui| {   \x1b[0m\r\n",
     );
@@ -909,7 +909,7 @@ pub fn transcript() -> String {
         "     \x1b[48;5;22m 88 +        .show(ui, &mut self.grid, |cell, ui| {  \x1b[0m\r\n\r\n",
     );
     out.push_str("\x1b[32m●\x1b[0m \x1b[1mBash\x1b[0m(cargo test)\r\n");
-    out.push_str("  ⎿  \x1b[2mrunning 4 tests\x1b[0m\r\n");
+    out.push_str("  └  \x1b[2mrunning 4 tests\x1b[0m\r\n");
     out.push_str("     test every_screen_renders ... \x1b[32mok\x1b[0m\r\n");
     out.push_str("     test palette_opens_on_ctrl_k ... \x1b[32mok\x1b[0m\r\n");
     out.push_str("     test sign_in_reaches_sessions ... \x1b[32mok\x1b[0m\r\n");
@@ -919,7 +919,7 @@ pub fn transcript() -> String {
         "\x1b[37m●\x1b[0m Gates are green. Next: the board's drag between columns.\r\n\r\n",
     );
     out.push_str(
-        "\x1b[38;5;245m✶ Thinking… (48s · ↓ 2.1k tokens · esc to interrupt)\x1b[0m\r\n\r\n",
+        "\x1b[38;5;245m* Thinking… (48s · ↓ 2.1k tokens · esc to interrupt)\x1b[0m\r\n\r\n",
     );
     out.push_str(
         "\x1b[38;5;240m╭──────────────────────────────────────────────────────────╮\x1b[0m\r\n",

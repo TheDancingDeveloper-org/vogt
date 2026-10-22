@@ -3,7 +3,6 @@
 use fluent2_egui::controls::{
     Appearance, Avatar, BadgeColor, Button, Field, RadioGroup, Slider, Switch,
 };
-use fluent2_egui::surfaces::Card;
 use fluent2_egui::theme::{Density, Theme, ThemeKind};
 
 use super::{Action, caption, heading, outline};
@@ -50,8 +49,7 @@ impl SettingsScreen {
             .id_salt("settings_scroll")
             .show(ui, |ui| {
                 ui.set_max_width(640.0);
-                Card::new().id_salt("appearance").show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                super::card(ui, |ui| {
                     ui.label(egui::RichText::new("Appearance").size(18.0).strong());
                     ui.add_space(6.0);
                     let mut look = match theme.kind {
@@ -100,8 +98,7 @@ impl SettingsScreen {
                         });
                 });
                 ui.add_space(10.0);
-                Card::new().id_salt("terminal_settings").show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                super::card(ui, |ui| {
                     ui.label(egui::RichText::new("Terminal").size(18.0).strong());
                     ui.add_space(6.0);
                     Field::new("Font size").show(ui, |ui| {
@@ -109,8 +106,7 @@ impl SettingsScreen {
                     });
                 });
                 ui.add_space(10.0);
-                Card::new().id_salt("notifications").show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                super::card(ui, |ui| {
                     ui.label(egui::RichText::new("Notifications").size(18.0).strong());
                     ui.add_space(6.0);
                     ui.add(Switch::new(
@@ -122,8 +118,7 @@ impl SettingsScreen {
                     ui.add(Switch::new(&mut self.sounds, "Play a sound"));
                 });
                 ui.add_space(10.0);
-                Card::new().id_salt("account").show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                super::card(ui, |ui| {
                     ui.label(egui::RichText::new("Account").size(18.0).strong());
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {

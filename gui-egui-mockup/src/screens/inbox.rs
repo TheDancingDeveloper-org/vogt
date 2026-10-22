@@ -1,7 +1,7 @@
 //! Inbox: notifications from sessions, CI, drift and deploys, with archive and snooze.
 
 use fluent2_egui::controls::{Appearance, BadgeColor, Button};
-use fluent2_egui::surfaces::{Card, TabList};
+use fluent2_egui::surfaces::TabList;
 use fluent2_egui::{Icon, IconName, IconSize};
 
 use super::{Action, caption, heading, outline, tint};
@@ -62,8 +62,7 @@ impl InboxScreen {
                         continue;
                     }
                     shown += 1;
-                    Card::new().id_salt(("inbox", entry.id)).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
+                    super::card(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.add(Icon::new(icon(entry.kind)).size(IconSize::S20));
                             ui.vertical(|ui| {

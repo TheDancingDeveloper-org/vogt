@@ -130,18 +130,10 @@ impl BacklogScreen {
                     .label("Search the backlog")
                     .desired_width(240.0),
             );
-            ui.add(Dropdown::new(
-                "filter_project",
-                &mut self.project,
-                &PROJECTS,
-            ));
-            ui.add(Dropdown::new(
-                "filter_priority",
-                &mut self.priority,
-                &PRIORITIES,
-            ));
-            ui.add(Dropdown::new("filter_state", &mut self.state, &STATES));
-            ui.add(Dropdown::new("filter_kind", &mut self.kind, &KINDS));
+            ui.add(Dropdown::new("filter_project", &mut self.project, &PROJECTS).width(150.0));
+            ui.add(Dropdown::new("filter_priority", &mut self.priority, &PRIORITIES).width(130.0));
+            ui.add(Dropdown::new("filter_state", &mut self.state, &STATES).width(130.0));
+            ui.add(Dropdown::new("filter_kind", &mut self.kind, &KINDS).width(120.0));
             ui.add(fluent2_egui::controls::Switch::new(
                 &mut self.hide_done,
                 "Hide done",

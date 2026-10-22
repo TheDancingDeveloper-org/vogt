@@ -6,7 +6,7 @@ use fluent2_egui::controls::{
     Appearance, Avatar, BadgeColor, Breadcrumb, Button, Link, MenuButton, Textarea,
 };
 use fluent2_egui::data::markdown::{Document, MarkdownView};
-use fluent2_egui::surfaces::{Card, Intent, MenuItem, Toast, Toaster};
+use fluent2_egui::surfaces::{Intent, MenuItem, Toast, Toaster};
 
 use super::{Action, caption, facts, outline, priority, tint, work_state};
 use crate::app::Screen;
@@ -71,27 +71,26 @@ impl WorkItemScreen {
                 ui,
                 format!("score {:.1} · updated {}", item.score, item.updated),
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                MenuButton::new("Transition").show(ui, |ui| {
-                    for state in WorkState::ALL {
-                        if ui.add(MenuItem::new(state.label())).clicked()
-                            && let Some(target) =
-                                data.work.iter_mut().find(|w| w.reference == item.reference)
-                        {
-                            target.state = state;
-                        }
+            ui.add_space(16.0);
+            ui.add(
+                Button::new("Start session")
+                    .icon(IconName::Window)
+                    .appearance(Appearance::Primary),
+            );
+            ui.add(
+                Button::new("Bind branch")
+                    .icon(IconName::Link)
+                    .appearance(Appearance::Subtle),
+            );
+            MenuButton::new("Transition").show(ui, |ui| {
+                for state in WorkState::ALL {
+                    if ui.add(MenuItem::new(state.label())).clicked()
+                        && let Some(target) =
+                            data.work.iter_mut().find(|w| w.reference == item.reference)
+                    {
+                        target.state = state;
                     }
-                });
-                ui.add(
-                    Button::new("Bind branch")
-                        .icon(IconName::Link)
-                        .appearance(Appearance::Subtle),
-                );
-                ui.add(
-                    Button::new("Start session")
-                        .icon(IconName::Window)
-                        .appearance(Appearance::Primary),
-                );
+                }
             });
         });
         ui.add_space(8.0);
@@ -182,8 +181,7 @@ impl WorkItemScreen {
 
 /// The hand-off fields of the latest hand-off comment.
 fn handoff(ui: &mut egui::Ui) {
-    Card::new().id_salt("handoff").show(ui, |ui| {
-        ui.set_width(ui.available_width());
+    super::card(ui, |ui| {
         ui.horizontal(|ui| {
             tint(ui, "Hand-off", BadgeColor::Success);
             ui.strong("wi-2162-fluent-mockup");
@@ -215,8 +213,7 @@ fn handoff(ui: &mut egui::Ui) {
 
 fn side(ui: &mut egui::Ui, data: &Fixtures) -> Option<Action> {
     let mut action = None;
-    Card::new().id_salt("relations").show(ui, |ui| {
-        ui.set_width(ui.available_width());
+    super::card(ui, |ui| {
         ui.strong("Relations");
         ui.add_space(4.0);
         for (relation, reference) in [
@@ -239,8 +236,7 @@ fn side(ui: &mut egui::Ui, data: &Fixtures) -> Option<Action> {
         }
     });
     ui.add_space(8.0);
-    Card::new().id_salt("branches").show(ui, |ui| {
-        ui.set_width(ui.available_width());
+    super::card(ui, |ui| {
         ui.strong("Branches");
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
@@ -260,8 +256,7 @@ fn side(ui: &mut egui::Ui, data: &Fixtures) -> Option<Action> {
         }
     });
     ui.add_space(8.0);
-    Card::new().id_salt("linked_sessions").show(ui, |ui| {
-        ui.set_width(ui.available_width());
+    super::card(ui, |ui| {
         ui.strong("Sessions");
         ui.add_space(4.0);
         for session in data
@@ -278,8 +273,7 @@ fn side(ui: &mut egui::Ui, data: &Fixtures) -> Option<Action> {
         }
     });
     ui.add_space(8.0);
-    Card::new().id_salt("work_facts").show(ui, |ui| {
-        ui.set_width(ui.available_width());
+    super::card(ui, |ui| {
         ui.strong("Details");
         ui.add_space(4.0);
         facts(

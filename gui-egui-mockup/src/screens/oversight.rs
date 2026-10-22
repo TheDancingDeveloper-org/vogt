@@ -2,7 +2,7 @@
 
 use fluent2_egui::IconName;
 use fluent2_egui::controls::{Appearance, BadgeColor, Button, ProgressBar, Sparkline};
-use fluent2_egui::surfaces::{Card, Intent, MessageBar, Toast, Toaster};
+use fluent2_egui::surfaces::{Intent, MessageBar, Toast, Toaster};
 
 use super::{Action, caption, heading, outline, session_state, tint};
 use crate::fixtures::{Fixtures, Role, Session, SessionState};
@@ -35,8 +35,7 @@ impl OversightScreen {
                         .iter()
                         .find(|(id, _)| *id == decision.id)
                         .map(|(_, i)| *i);
-                    Card::new().id_salt(decision.id).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
+                    super::card(ui, |ui| {
                         ui.horizontal(|ui| {
                             tint(ui, "Decision", BadgeColor::Important);
                             ui.strong(decision.session);
@@ -144,8 +143,7 @@ fn summary(ui: &mut egui::Ui, data: &Fixtures) {
     ];
     ui.columns(tiles.len(), |cols| {
         for (col, (label, value, color)) in cols.iter_mut().zip(tiles) {
-            Card::new().id_salt(label).show(col, |ui| {
-                ui.set_width(ui.available_width());
+            super::card(col, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(value).size(26.0).strong());
                     outline(ui, "●", color);
@@ -158,8 +156,7 @@ fn summary(ui: &mut egui::Ui, data: &Fixtures) {
 
 fn worker_card(ui: &mut egui::Ui, session: &Session) -> Option<Action> {
     let mut action = None;
-    Card::new().id_salt(("worker", session.id)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
+    super::card(ui, |ui| {
         ui.horizontal(|ui| {
             ui.strong(session.name);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

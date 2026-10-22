@@ -1,7 +1,7 @@
 //! Login: engine address, username and password, in a card in the middle of the window.
 
 use fluent2_egui::controls::{Appearance, Button, Field, Input, Link, Switch};
-use fluent2_egui::surfaces::{Card, Intent, MessageBar};
+use fluent2_egui::surfaces::{Intent, MessageBar};
 
 use crate::app::LoginForm;
 
@@ -15,8 +15,7 @@ pub fn show(ui: &mut egui::Ui, form: &mut LoginForm) -> bool {
         ui.add_space(20.0);
         ui.scope(|ui| {
             ui.set_max_width(380.0);
-            Card::new().id_salt("login_card").show(ui, |ui| {
-                ui.set_width(ui.available_width());
+            super::card(ui, |ui| {
                 ui.label(egui::RichText::new("Sign in").size(20.0).strong());
                 ui.add_space(8.0);
                 Field::new("Server")

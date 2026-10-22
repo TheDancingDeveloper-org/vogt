@@ -7,7 +7,7 @@ use fluent2_egui::IconName;
 use fluent2_egui::controls::{Appearance, BadgeColor, Button, ProgressBar, SearchBox, Sparkline};
 use fluent2_egui::data::markdown::{Document, MarkdownView};
 use fluent2_egui::data::terminal::{TerminalGrid, TerminalState, TerminalView};
-use fluent2_egui::surfaces::{Card, TabList};
+use fluent2_egui::surfaces::TabList;
 
 use super::{Action, caption, facts, outline, session_state, tint};
 use crate::fixtures::{self, Fixtures, Role, Session, SessionState};
@@ -130,33 +130,28 @@ impl SessionsScreen {
                 &format!("{} · {}", session.agent, session.model),
                 BadgeColor::Brand,
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(
-                    Button::new("Stop")
-                        .icon(IconName::Dismiss)
-                        .appearance(Appearance::Subtle),
-                );
-                ui.add(
-                    Button::new("Hibernate")
-                        .icon(IconName::WeatherMoon)
-                        .appearance(Appearance::Subtle),
-                );
-                if let Some(work) = session.work
-                    && ui
-                        .add(Button::new(format!("Open {work}")).icon(IconName::Document))
-                        .clicked()
-                {
-                    action = Some(Action::OpenWork(work.to_owned()));
-                }
-            });
         });
-        caption(
-            ui,
-            format!(
-                "{} · {} · up {}",
-                session.id, session.branch, session.runtime
-            ),
-        );
+        ui.horizontal_wrapped(|ui| {
+            caption(ui, format!("{} · up {}", session.branch, session.runtime));
+            ui.add_space(12.0);
+            if let Some(work) = session.work
+                && ui
+                    .add(Button::new(format!("Open {work}")).icon(IconName::Document))
+                    .clicked()
+            {
+                action = Some(Action::OpenWork(work.to_owned()));
+            }
+            ui.add(
+                Button::new("Hibernate")
+                    .icon(IconName::WeatherMoon)
+                    .appearance(Appearance::Subtle),
+            );
+            ui.add(
+                Button::new("Stop")
+                    .icon(IconName::Dismiss)
+                    .appearance(Appearance::Subtle),
+            );
+        });
         action
     }
 
@@ -173,14 +168,14 @@ impl SessionsScreen {
                     let _ = MarkdownView::new("session_brief", &self.brief).show(ui);
                     return;
                 }
-                Card::new().id_salt("status_card").show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                super::card(ui, |ui| {
                     ui.strong("Status");
                     ui.add_space(4.0);
                     facts(
                         ui,
                         "session_facts",
                         &[
+                            ("Session", session.id.to_owned()),
                             ("State", session.state.label().to_owned()),
                             ("Work item", session.work.unwrap_or("—").to_owned()),
                             ("Branch", session.branch.to_owned()),
@@ -198,8 +193,7 @@ impl SessionsScreen {
                     ui.add(ProgressBar::new(Some(session.context)));
                 });
                 ui.add_space(8.0);
-                Card::new().id_salt("activity_card").show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                super::card(ui, |ui| {
                     ui.strong("Activity, last 30 minutes");
                     ui.add(
                         Sparkline::new(&session.activity)
@@ -208,8 +202,7 @@ impl SessionsScreen {
                     );
                 });
                 ui.add_space(8.0);
-                Card::new().id_salt("reply_card").show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                super::card(ui, |ui| {
                     ui.strong("Latest reply");
                     ui.label(egui::RichText::new(session.excerpt).italics());
                 });
@@ -306,11 +299,11 @@ fn transcript_for(session: &Session) -> String {
         return out;
     }
     out.push_str(&format!(
-        "\x1b[1m✻ {}\x1b[0m  {} · {}\r\n\r\n",
+        "\x1b[1m* {}\x1b[0m  {} · {}\r\n\r\n",
         session.agent, session.model, session.branch
     ));
     out.push_str("\x1b[32m●\x1b[0m \x1b[1mBash\x1b[0m(git log --oneline -3)\r\n");
-    out.push_str("  ⎿  \x1b[2m4be19c0 feat: first pass\x1b[0m\r\n\r\n");
+    out.push_str("  └  \x1b[2m4be19c0 feat: first pass\x1b[0m\r\n\r\n");
     let colour = match session.state {
         SessionState::Blocked => "31",
         SessionState::NeedsYou => "33",

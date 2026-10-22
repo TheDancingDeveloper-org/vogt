@@ -12,7 +12,7 @@ pub mod settings;
 pub mod work_item;
 
 use fluent2_egui::controls::{Badge, BadgeAppearance, BadgeColor};
-use fluent2_egui::theme::Density;
+use fluent2_egui::theme::{Density, Theme, c};
 
 use crate::app::{Look, Screen};
 use crate::fixtures::{Fixtures, SessionState, WorkState};
@@ -148,7 +148,7 @@ pub fn work_state(ui: &mut egui::Ui, state: WorkState) -> egui::Response {
 /// A priority badge: p0 is filled red, p1 orange, the rest quieter.
 pub fn priority(ui: &mut egui::Ui, priority: &str) -> egui::Response {
     let (appearance, color) = match priority {
-        "p0" => (BadgeAppearance::Filled, BadgeColor::Danger),
+        "p0" => (BadgeAppearance::Tint, BadgeColor::Danger),
         "p1" => (BadgeAppearance::Tint, BadgeColor::Severe),
         "p2" => (BadgeAppearance::Tint, BadgeColor::Informative),
         _ => (BadgeAppearance::Outline, BadgeColor::Subtle),
@@ -173,4 +173,30 @@ pub fn facts(ui: &mut egui::Ui, id: &str, rows: &[(&str, String)]) {
                 ui.end_row();
             }
         });
+}
+
+/// A white (or dark) surface with a hairline stroke and a soft shadow, painted behind its
+/// content. fluent2-egui's `Card` paints its rest shadow over its own fill at fddc829, which
+/// turns resting cards grey, so the mockup draws its cards with a plain `Frame` from the same
+/// tokens.
+pub fn card<R>(
+    ui: &mut egui::Ui,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let theme = Theme::get(ui.ctx());
+    egui::Frame::NONE
+        .fill(c(theme.color.neutral_background_1))
+        .stroke(egui::Stroke::new(1.0, c(theme.color.neutral_stroke_2)))
+        .corner_radius(8.0)
+        .inner_margin(12.0)
+        .shadow(egui::Shadow {
+            offset: [0, 1],
+            blur: 4,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(24),
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.vertical(content).inner
+        })
 }

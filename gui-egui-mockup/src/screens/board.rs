@@ -42,7 +42,7 @@ impl BoardScreen {
                 "Drag a card to another column to change its state (in the mockup only).",
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                ui.add(Dropdown::new("board_project", &mut self.project, &PROJECTS));
+                ui.add(Dropdown::new("board_project", &mut self.project, &PROJECTS).width(180.0));
             });
         });
         let project = self
@@ -50,11 +50,12 @@ impl BoardScreen {
             .filter(|i| *i > 0)
             .and_then(|i| PROJECTS.get(i).copied());
         let mut moved: Option<(&'static str, WorkState)> = None;
+        let width = ((ui.available_width() - 5.0 * 30.0) / 5.0).max(200.0);
+        let height = ui.available_height();
         egui::ScrollArea::horizontal()
             .id_salt("board_scroll")
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    let width = ((ui.available_width() - 4.0 * 12.0) / 5.0).max(220.0);
                     for state in WorkState::ALL {
                         let items: Vec<&WorkItem> = data
                             .work
@@ -68,27 +69,29 @@ impl BoardScreen {
                             .inner_margin(8.0);
                         let (_, dropped) = ui.dnd_drop_zone::<Dragged, ()>(frame, |ui| {
                             ui.set_width(width);
-                            ui.set_min_height(ui.available_height().max(420.0));
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(state.label()).strong());
-                                outline(ui, &items.len().to_string(), work_color(state));
-                            });
-                            ui.add_space(6.0);
-                            for item in &items {
-                                let id = egui::Id::new(("board_card", item.reference));
-                                let response = ui
-                                    .dnd_drag_source(id, Dragged(item.reference), |ui| {
-                                        card(ui, item, width)
-                                    })
-                                    .response;
-                                if response.double_clicked() {
-                                    action = Some(Action::OpenWork(item.reference.to_owned()));
-                                }
+                            ui.set_min_height((height - 24.0).max(420.0));
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(state.label()).strong());
+                                    outline(ui, &items.len().to_string(), work_color(state));
+                                });
                                 ui.add_space(6.0);
-                            }
-                            if items.is_empty() {
-                                caption(ui, "Nothing here.");
-                            }
+                                for item in &items {
+                                    let id = egui::Id::new(("board_card", item.reference));
+                                    let response = ui
+                                        .dnd_drag_source(id, Dragged(item.reference), |ui| {
+                                            card(ui, item, width)
+                                        })
+                                        .response;
+                                    if response.double_clicked() {
+                                        action = Some(Action::OpenWork(item.reference.to_owned()));
+                                    }
+                                    ui.add_space(6.0);
+                                }
+                                if items.is_empty() {
+                                    caption(ui, "Nothing here.");
+                                }
+                            });
                         });
                         if let Some(dragged) = dropped {
                             moved = Some((dragged.0, state));
@@ -127,6 +130,7 @@ fn card(ui: &mut egui::Ui, item: &WorkItem, width: f32) {
         .inner_margin(10.0)
         .show(ui, |ui| {
             ui.set_width(width - 20.0);
+            ui.set_max_width(width - 20.0);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(item.reference).monospace().weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -138,12 +142,15 @@ fn card(ui: &mut egui::Ui, item: &WorkItem, width: f32) {
             ui.horizontal(|ui| {
                 outline(ui, item.project, BadgeColor::Subtle);
                 outline(ui, item.kind, BadgeColor::Informative);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(assignee) = item.assignee {
-                        ui.add(Avatar::new(assignee).size(20.0));
-                    }
-                    caption(ui, item.updated);
-                });
+            });
+            ui.horizontal(|ui| {
+                caption(ui, item.updated);
+                if let Some(assignee) = item.assignee {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(Avatar::new(assignee).size(20.0))
+                            .on_hover_text(assignee);
+                    });
+                }
             });
         });
 }

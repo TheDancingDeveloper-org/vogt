@@ -46,7 +46,7 @@ impl GitScreen {
         }
         heading(ui, "Git", "Read-only diff of a branch against its base.");
         ui.horizontal_wrapped(|ui| {
-            ui.add(Dropdown::new("git_branch", &mut self.branch, &BRANCHES));
+            ui.add(Dropdown::new("git_branch", &mut self.branch, &BRANCHES).width(260.0));
             ui.label("into");
             outline(ui, "main", BadgeColor::Subtle);
             tint(ui, "3 commits ahead", BadgeColor::Brand);
