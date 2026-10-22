@@ -1258,8 +1258,6 @@ mod driven_policy_tests {
             "gh run view 345 --log-failed",
             // WI-2235: explicit-lease pushes to a work branch, cargo in a
             // nested crate, and `-x` outside `git rebase` are no longer denied.
-            "git push --force-with-lease=wi-7-fix:0123abc origin HEAD:wi-7-fix",
-            "git push --force-with-lease origin HEAD:wi-7-fix",
         ] {
             assert_eq!(pattern_verdict(command), Some("allow"), "{command}");
         }
@@ -1277,6 +1275,18 @@ mod driven_policy_tests {
             "git push --force-with-lease origin HEAD:refs/heads/master",
             "git push --force-with-lease origin +HEAD:wi-7-fix",
             "git rebase -x make origin/main",
+            "git push --force-with-lease origin HEAD:main --no-verify",
+            "git push --force-with-lease origin HEAD:main HEAD:wi-7",
+            "git push --force-with-lease origin HEAD:wi-7 +HEAD:other",
+            "git push --force-with-lease=x --receive-pack='sh -c id' origin HEAD:wi",
+            "git push --force-with-lease origin HEAD:heads/main",
+            "git push --force-with-lease origin HEAD:'main'",
+            "git push --force origin HEAD:wi-7",
+            "git push --force origin main",
+            "git push -f origin main",
+            "git push origin +main",
+            "cargo test --manifest-path '/other/Cargo.toml'",
+            "cargo test --manifest-path=\"/other/Cargo.toml\"",
         ] {
             assert_eq!(pattern_verdict(command), Some("deny"), "{command}");
         }
@@ -1286,6 +1296,14 @@ mod driven_policy_tests {
             "git cherry-pick -x 0123abc",
         ] {
             assert_ne!(pattern_verdict(command), Some("deny"), "{command}");
+        }
+        // A lease push to a work branch is left to the classifier, where the
+        // Feature Branch Lease Push exception decides it; no pattern allows it.
+        for command in [
+            "git push --force-with-lease=wi-7-fix:0123abc origin HEAD:wi-7-fix",
+            "git push --force-with-lease origin HEAD:wi-7-fix",
+        ] {
+            assert_eq!(pattern_verdict(command), None, "{command}");
         }
         for command in ["git push -u origin HEAD", "git push origin HEAD"] {
             assert_eq!(pattern_verdict(command), Some("allow"), "{command}");
@@ -1476,9 +1494,6 @@ mod driven_policy_tests {
             "gh pr merge --auto 873",
             "cd /w/repo && gh pr merge 1",
             // Force-push and pushes.
-            "git push --force origin main",
-            "git push -f origin main",
-            "git push origin +main",
             "git push origin --delete main",
             "git push origin feature/x",
             // Destruction.
