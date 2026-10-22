@@ -67,6 +67,12 @@ def test_a_new_file_is_found_once_the_index_expires(
     transcripts._indexes.clear()
     assert transcripts._by_id("claude", root, "conv-00000") is not None
     (root / "dir-keep" / "conv-new.jsonl").write_text("{}\n")
+    # Move the directory's mtime on explicitly. The filesystem's mtime is
+    # coarse, so a file written in the same tick as the first scan leaves the
+    # stamp unchanged and the old index would stand (WI-2242).
+    keep = root / "dir-keep"
+    later = keep.stat().st_mtime + 10
+    os.utime(keep, (later, later))
     # Still inside the TTL: the index stands and the new file is invisible.
     assert transcripts._by_id("claude", root, "conv-new") is None
     monkeypatch.setattr(transcripts, "_clock", lambda: time.monotonic() + 100)
