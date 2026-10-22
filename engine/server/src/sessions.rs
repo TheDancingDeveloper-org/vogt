@@ -107,6 +107,9 @@ pub struct SessionRegistry {
     /// Sessions running with a credential minted for them, revoked when they
     /// end.
     minted: Arc<DashMap<Uuid, ()>>,
+    /// The optional graft integration (WI-2227): an agent session's graft
+    /// token and workspace lease, closed when the session ends.
+    graft: Option<Arc<crate::graft::Graft>>,
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -152,6 +155,10 @@ impl SessionRegistry {
     pub fn new(cfg: Arc<Config>, bus: EventBus, history: Option<Arc<SessionHistory>>) -> Self {
         let secret_broker =
             Arc::new(SecretBroker::new(&cfg).with_grant_projects(cfg.agent_grant_projects.clone()));
+        let graft = cfg
+            .graft
+            .clone()
+            .map(|g| crate::graft::Graft::new(g, Arc::clone(&secret_broker)));
         let records = Arc::new(DashMap::new());
         recover_records(&cfg.state_dir, history.as_deref(), &records);
         Self {
@@ -165,6 +172,7 @@ impl SessionRegistry {
             shutting_down: Arc::new(AtomicBool::new(false)),
             core: Arc::new(std::sync::OnceLock::new()),
             minted: Arc::new(DashMap::new()),
+            graft,
         }
     }
 
@@ -206,7 +214,60 @@ impl SessionRegistry {
             merged.extend(spec.env.take().unwrap_or_default());
             spec.env = Some(merged);
         }
-        self.create_inner(spec, Creating::Fresh(Origin::Api), Some(id))
+        if let Some(env) = self
+            .graft_identity(
+                &spec.command,
+                spec.template.as_deref(),
+                spec.env.as_deref(),
+                spec.work_item.as_deref(),
+                id,
+            )
+            .await
+        {
+            // First, so a variable the caller set still has the last word.
+            let mut merged = env;
+            merged.extend(spec.env.take().unwrap_or_default());
+            spec.env = Some(merged);
+        }
+        let created = self.create_inner(spec, Creating::Fresh(Origin::Api), Some(id));
+        if created.is_err() {
+            // A session that never started holds no workspace.
+            if let Some(graft) = &self.graft {
+                graft.end(id);
+            }
+        }
+        created
+    }
+
+    /// The graft variables for agent session `id` (WI-2227): a token minted
+    /// for it and the workspace opened for it, or `None` — graft off, not an
+    /// agent, a graft token already given, or graft could not be had
+    /// (logged, and the session starts without one). The token names the
+    /// Vogt session (`VOGT_SESSION_ID`, else the engine id) and work item.
+    async fn graft_identity(
+        &self,
+        command: &Option<Vec<String>>,
+        template: Option<&str>,
+        env: Option<&[(String, String)]>,
+        work_item: Option<&str>,
+        id: Uuid,
+    ) -> Option<Vec<(String, String)>> {
+        let graft = self.graft.as_ref()?;
+        self.agent_of(command, template)?;
+        let env = env.unwrap_or_default();
+        if env.iter().any(|(k, _)| k == crate::graft::TOKEN_ENV) {
+            return None;
+        }
+        let session = env
+            .iter()
+            .rev()
+            .find(|(k, v)| k == "VOGT_SESSION_ID" && !v.trim().is_empty())
+            .map(|(_, v)| v.trim().to_string())
+            .unwrap_or_else(|| id.to_string());
+        let work_item = vogt_engine_contract::normalize_work_item(work_item)
+            .ok()
+            .flatten();
+        graft.begin(id, &session, work_item.as_deref()).await
     }
 
     /// The agent CLI a session would run, from its command or its template.
@@ -1145,6 +1206,7 @@ impl SessionRegistry {
         let minted = Arc::clone(&self.minted);
         let core = Arc::clone(&self.core);
         let broker = Arc::clone(&self.secret_broker);
+        let graft = self.graft.clone();
         Box::new(move |session: &Session| {
             // An approved grant is for a running session; whatever stopped it,
             // the grant goes with the process (WI-973).
@@ -1185,6 +1247,10 @@ impl SessionRegistry {
             }
             records.remove(&session.id);
             hibernation::remove(&state_dir, session.id);
+            // Its graft workspace closes with it (WI-2227).
+            if let Some(graft) = &graft {
+                graft.end(session.id);
+            }
             // The session's own credential ends with it (WI-926).
             if minted.remove(&session.id).is_some() {
                 if let (Some(core), Ok(runtime)) =
@@ -1529,6 +1595,19 @@ impl SessionRegistry {
         {
             env.retain(|(k, _)| k != "VOGT_SESSION_ID");
             env.extend(identity);
+        }
+        // Likewise its graft token; the workspace it had is found again.
+        if let Some(graft_env) = self
+            .graft_identity(
+                &command,
+                template.as_deref(),
+                Some(&env),
+                record.work_item.as_deref(),
+                id,
+            )
+            .await
+        {
+            env.extend(graft_env);
         }
         let spec = SessionSpec {
             name: record.name.clone(),
@@ -2263,6 +2342,11 @@ impl SessionRegistry {
         }
         // Forgetting the session forgets its leave to ask the broker.
         self.secret_broker.revoke(id);
+        // A hibernated session's graft lease was kept for its wake; removing
+        // it is its end (a live one's exit already closed it).
+        if let Some(graft) = &self.graft {
+            graft.end(id);
+        }
         // The brief outlives the child on purpose — a killed session is still
         // inspectable, and an agent may re-read its prompt after a restart —
         // but not the session record. Forgetting the session forgets its

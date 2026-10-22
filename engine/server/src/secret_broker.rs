@@ -636,6 +636,27 @@ impl SecretBroker {
         self.fetch_with(entry, None).await
     }
 
+    /// A secret the engine itself uses and no session may ask for (the graft
+    /// service token, WI-2227): fetched with the helper's manifest replaced
+    /// by exactly this one line, the way a grant is, so it never has to be an
+    /// `ENGINE_AGENT_AUTH_SECRETS` entry that sessions could fetch.
+    pub async fn fetch_for_engine(
+        &self,
+        var: &str,
+        project_id: &str,
+        secret_name: &str,
+    ) -> Result<String, FetchFailure> {
+        let entry = ManifestSecret {
+            var: var.to_string(),
+            project_id: project_id.to_string(),
+            secret_name: secret_name.to_string(),
+            policy: ManifestPolicy::OnDemand,
+            writable: false,
+        };
+        let line = format!("{var} {project_id} {secret_name} ondemand");
+        self.fetch_with(&entry, Some(&line)).await
+    }
+
     /// [`Self::fetch`], with the helper's manifest replaced by `manifest` for
     /// this one call: how a granted secret is fetched, so the helper's own
     /// manifest check sees exactly the granted line and nothing more.

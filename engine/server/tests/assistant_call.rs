@@ -270,6 +270,7 @@ fn test_config(stub: &str) -> Config {
         chat: Default::default(),
         economics_tick: std::time::Duration::ZERO,
         economics_home: None,
+        graft: None,
     }
 }
 

@@ -80,6 +80,7 @@ fn test_config() -> Config {
         chat: Default::default(),
         economics_tick: std::time::Duration::ZERO,
         economics_home: None,
+        graft: None,
     }
 }
 

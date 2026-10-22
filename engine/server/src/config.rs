@@ -526,6 +526,10 @@ pub struct Config {
     /// The home the economics tailer reads transcripts under. `None` uses the
     /// process home; tests set it so they never touch the real one.
     pub economics_home: Option<std::path::PathBuf>,
+    /// The optional graft integration (`ENGINE_GRAFT_*`, WI-2227): agent
+    /// sessions are minted a graft token and given a leased workspace.
+    /// `None` (the default, and in a hand-built config) is off.
+    pub graft: Option<crate::graft::GraftConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1081,6 +1085,8 @@ pub fn load(
             None => std::time::Duration::from_secs(15),
         },
         economics_home: None,
+        graft: crate::graft::GraftConfig::from_lookup(|name| engine_env(name).ok())
+            .map_err(ApiError::Config)?,
         vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")
             .ok()
             .map(|value| value.trim().to_string())

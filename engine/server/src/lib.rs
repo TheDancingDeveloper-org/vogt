@@ -31,6 +31,7 @@ pub mod events;
 pub mod files;
 pub mod gates;
 pub mod git;
+pub mod graft;
 pub mod gui;
 pub mod handoff;
 pub mod hibernate_policy;
