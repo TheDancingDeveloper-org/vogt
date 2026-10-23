@@ -299,7 +299,9 @@ token, which is bound to a person, so its agent counted as that person: it
 could grant `bypass`, and its writes were attributed to them (WI-926). A
 plain shell keeps the pod's token, because the person at it is a person.
 
-The posture shows on session rows as `permission_mode`. See
+The posture shows on session rows as `permission_mode`. A row with
+`posture_lost_on_resume: true` was woken without the bypass its screen showed
+before it hibernated (WI-2252); a person re-grants it in the terminal. See
 [`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture).
 
 `session.start` also takes `account`, the name of a Claude Code subscription

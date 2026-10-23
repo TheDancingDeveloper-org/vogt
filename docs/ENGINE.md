@@ -1629,6 +1629,19 @@ checks decide what it can finish on its own (WI-926; the design is
   not the pod's brokered token, which is bound to a person. A plain shell
   keeps the pod's token. An agent a person starts by hand inside such a
   shell inherits the shell's token: the person started it.
+- **A wake replays only the start's posture** (WI-2252). A posture granted
+  after the start (Shift+Tab in Claude Code, or `claude
+  --dangerously-skip-permissions` typed into a plain shell) is not in the
+  record, and is never replayed: the engine cannot tell a person's grant
+  from an agent's. At hibernation the engine reads Claude Code's footer
+  into `observed_permission_mode` on the record. When that was `bypass` and
+  the woken session has no bypass grant, its summary carries
+  `posture_lost_on_resume: true` (and the core's `session_sweep` row says so)
+  until a later hibernation sees the bypass back on the screen; the operator
+  re-grants it in the terminal. The record keeps only the `--settings` file
+  the first launch actually carried: a worker with none falls back to the
+  deployment's, an oversight session with none (or one that began as a
+  plain shell) is woken without the worker driven-session policy.
 - **Codex** (WI-1143) does not take Claude's `--settings` or
   `--permission-mode`. The engine maps the same three postures onto Codex
   flags, and unknown values are `400`:
