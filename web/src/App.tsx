@@ -701,7 +701,9 @@ const App: Component = () => {
     }
     return { needs, running };
   });
-  const waitingSessionList = () =>
+  // Memoised: the rail card, its metric and the header each read this, and
+  // every read walked all 1,278 sessions again on every event (WI-2328).
+  const waitingSessionList = createMemo(() =>
     sessionsStore.ready
       ? sessionsStore.order
           .map((id) => sessionsStore.sessions[id])
@@ -711,7 +713,7 @@ const App: Component = () => {
               s!.exit_code === null &&
               s!.activity === "waiting-for-input",
           )
-      : [];
+      : []);
   const waitingSessionMetric = (): PlaceMetric => ({
     value: sessionsStore.ready ? waitingSessionList().length : null,
     state: sessionMetric().state,
