@@ -332,9 +332,11 @@ jobs:
           docker run -d --name voice-smoke "$CANDIDATE"
           trap 'docker logs voice-smoke || true; docker rm -f voice-smoke >/dev/null 2>&1 || true' EXIT
 
-          # Wait for the baked models to load — /health gates on it.
+          # Wait for the baked models to load — /health gates on it. Up to
+          # 6 min: the ci-runner-1 runners load the models far slower than
+          # node-f and timed out at the old 2 min (2026-10-23).
           ready=""
-          for _ in $(seq 1 60); do
+          for _ in $(seq 1 180); do
             if docker exec voice-smoke curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
               ready=1; break
             fi
