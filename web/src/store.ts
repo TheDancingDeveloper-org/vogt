@@ -286,6 +286,7 @@ function disarmSettleTimer(): void {
 function noteStreamGone(): void {
   streamOpen = false;
   openedAt = null;
+  connectStartedAt = null;
   disarmSettleTimer();
 }
 
@@ -328,6 +329,27 @@ function streamHealthy(): boolean {
     streamOpen
     && unsubscribeEvents !== null
     && Date.now() - lastAliveAt < EVENT_STREAM_QUIET_MS
+  );
+}
+
+/** When the pending connect was started, or null when none is pending. */
+let connectStartedAt: number | null = null;
+
+/**
+ * A connect is out and has not had its answer yet, for less than the quiet
+ * window. A wake leaves it alone: aborting it only starts the same wait over.
+ * That was the WI-2324 loop — a connect held by the browser (a second tab's
+ * stream holding Firefox's cache entry for the URL) never opened, so every
+ * focus edge found the stream "unhealthy", tore the connect down and sent
+ * another, a few seconds apart for as long as the page was used. A connect
+ * that never answers is dropped by the stale timer instead.
+ */
+function streamConnecting(): boolean {
+  return (
+    !streamOpen
+    && unsubscribeEvents !== null
+    && connectStartedAt !== null
+    && Date.now() - connectStartedAt < EVENT_STREAM_QUIET_MS
   );
 }
 
@@ -454,6 +476,7 @@ export function startEventStream(): void {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  connectStartedAt = Date.now();
   unsubscribeEvents = subscribeEvents(
     (ev: ServerEvent) => {
       noteStreamAlive();
@@ -564,6 +587,7 @@ export function startEventStream(): void {
     },
     {
       onOpen: () => {
+        connectStartedAt = null;
         openedAt = null;
         noteStreamAlive();
         disarmSettleTimer();
@@ -592,6 +616,10 @@ export function startEventStream(): void {
       onHeartbeat: noteStreamAlive,
     },
   );
+  // The connect is held to the same deadline as a silent stream: one that
+  // never answers is dropped and sent again, not waited on for good. An open
+  // (or a failure) re-arms or clears this, and the demo opens synchronously.
+  if (unsubscribeEvents !== null && !streamOpen) armStaleTimer();
 }
 
 export function stopEventStream(): void {
@@ -640,22 +668,52 @@ export function forceReconnectEventStream(): void {
   startEventStream();
 }
 
+/**
+ * A page hidden at least this long is read again on its return even while
+ * its stream looks healthy. The stream would have carried every change, so
+ * this is only a backstop for a socket that died quietly within the quiet
+ * window, at one list read per real return rather than one per focus edge.
+ */
+export const RECONCILE_AFTER_HIDDEN_MS = 60_000;
+
+/**
+ * Whether a wake has to read the session list again. The stream patches the
+ * list in place from its events, so while it is healthy the list is current
+ * and a focus edge has nothing to add. A connect in flight is answered by its
+ * own reopen (`sse-reconnect`, or the first-open retry), so a read here would
+ * only be a second copy of that one. Before WI-2324 every focus edge — focus
+ * moving between the page, a terminal and DevTools — re-read the whole list,
+ * 208 KB a time on a busy deployment.
+ */
+function wakeNeedsSessionList(wake: Wake): boolean {
+  if (wake.reason === "boot") return !sessionsStore.ready;
+  if (sessionListPending()) return true;
+  if (wake.reason === "focus" || wake.reason === "visibility") {
+    if (wake.hiddenMs >= RECONCILE_AFTER_HIDDEN_MS) return true;
+    return !(streamHealthy() || streamConnecting());
+  }
+  return true;
+}
+
 // Lifecycle ownership lives in wakeCoordinator: one reconnect and one session
 // reconciliation for a burst of visibility/focus/resume events.
 //
 // A wake is not answered with a forced reconnect when the stream is already
-// healthy, or when the wake is `boot` (the stream was just opened; tearing it
-// down 250 ms later was a second handshake on the startup path). A wake the
-// stream raised about its own loss is never answered with one either: the
-// stream is already retrying on its backoff. The session reconciliation below
-// still runs for every wake except the boot one, which skips it while the
-// list is already loaded.
+// healthy or still connecting, or when the wake is `boot` (the stream was just
+// opened; tearing it down 250 ms later was a second handshake on the startup
+// path). A wake the stream raised about its own loss is never answered with
+// one either: the stream is already retrying on its backoff. Android's silent
+// socket death is still caught: that stream stops speaking, so after the quiet
+// window it is no longer healthy and the first wake reconnects it.
+//
+// The session list is decided after the reconnect, so a focus edge that had
+// to reconnect leaves the read to that reopen's own wake instead of reading
+// the list twice.
 onWake((wake: Wake) => {
-  if (wake.reason === "sse-reconnect" || wake.reason === "boot") return;
-  if (streamHealthy()) return;
-  forceReconnectEventStream();
-});
-onWake((wake: Wake) => {
-  if (wake.reason === "boot" && sessionsStore.ready) return;
+  if (wake.reason !== "sse-reconnect" && wake.reason !== "boot"
+    && !streamHealthy() && !streamConnecting()) {
+    forceReconnectEventStream();
+  }
+  if (!wakeNeedsSessionList(wake)) return;
   void reconcile("sessions", wake, (signal) => refreshSessions(signal));
 });
