@@ -13,6 +13,7 @@
 // into Needs you. The grouping is `buildRailModel`, so the two surfaces cannot
 // drift apart.
 
+import { createRailKeys, createRailRowFields, type RailRowFields } from "./railRowFields";
 import { For, Show, createEffect, createMemo, createSignal, on, type Component } from "solid-js";
 import type { SessionSummary } from "./api";
 import { createNow } from "./viewAge";
@@ -77,6 +78,9 @@ export const SessionList: Component<Props> = (props) => {
     );
   }, []);
 
+  // Keyed rows: see railRowFields.ts (WI-2328).
+  const { byKey, keys } = createRailKeys(entries);
+
   const toggleFolded = (id: string) =>
     setFolded((current) => {
       const next = new Set(current);
@@ -110,10 +114,12 @@ export const SessionList: Component<Props> = (props) => {
     </li>
   );
 
-  const sessionRow = (session: SessionSummary, entry: RailEntry & { kind: "row" }) => (
+  const sessionRow = (row: RailRowFields) => {
+    const session = row.session();
+    return (
     <li>
       <a
-        class={`session-row ${activityClass(session)}${entry.depth === 1 ? " session-row--child" : ""}${entry.section === "pinned" && railFinished(session) ? " session-row--dimmed" : ""}${session.exit_code === null && (session.activity === "waiting-for-input" || session.activity === "awaiting-approval") ? " waiting" : ""}${sessionsStore.ready && !isConnected() ? " session-row--stale" : ""}`}
+        class={`session-row ${activityClass(session)}${row.depth() === 1 ? " session-row--child" : ""}${row.section() === "pinned" && railFinished(session) ? " session-row--dimmed" : ""}${session.exit_code === null && (session.activity === "waiting-for-input" || session.activity === "awaiting-approval") ? " waiting" : ""}${sessionsStore.ready && !isConnected() ? " session-row--stale" : ""}`}
         href={`#/t/${session.id}`}
         aria-label={`${session.name}${isOversight(session) ? ", oversight" : ""}, ${activityLabel(session.activity, session.exit_code)}`}
         title={`${session.name}\ncwd: ${session.cwd}${sessionRuntimeHint(session) ? `\n${sessionRuntimeHint(session)}` : ""}`}
@@ -124,30 +130,30 @@ export const SessionList: Component<Props> = (props) => {
         />
         <div class="session-row-body">
           <span class="name">
-            <Show when={entry.tally}>
+            <Show when={row.tally()}>
               <button
                 type="button"
                 class="session-caret"
-                aria-expanded={entry.expanded === true}
-                aria-label={`${entry.expanded ? "Fold" : "Show"} the sessions started by ${session.name}`}
+                aria-expanded={row.expanded() === true}
+                aria-label={`${row.expanded() ? "Fold" : "Show"} the sessions started by ${session.name}`}
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
                   toggleFolded(session.id);
                 }}
                 onKeyDown={(event) => event.stopPropagation()}
-              >{entry.expanded ? "▾" : "▸"}</button>
+              >{row.expanded() ? "▾" : "▸"}</button>
             </Show>
             <Show when={isOversight(session)}>
               <span class="session-role-badge" title="Oversight session: supervises the others; pinned awake">oversight</span>
             </Show>
-            <Show when={entry.lifted}>
+            <Show when={row.lifted()}>
               {(parent) => (
                 <span class="session-lift" title={`Started by ${parent()}`}>↳ {parent()}</span>
               )}
             </Show>
             {session.name}
-            <Show when={entry.tally}>
+            <Show when={row.tally()}>
               {(tally) => (
                 <span
                   class="session-tally"
@@ -190,7 +196,8 @@ export const SessionList: Component<Props> = (props) => {
         <span class="session-row-chevron" aria-hidden="true">›</span>
       </a>
     </li>
-  );
+    );
+  };
 
   return (
     <Show when={props.sessions.length > 0}>
@@ -215,8 +222,10 @@ export const SessionList: Component<Props> = (props) => {
         />
       </form>
       <ul class="session-list" aria-label={props.label ?? "Running sessions"}>
-        <For each={entries()} fallback={<li class="empty">No sessions match.</li>}>
-          {(entry) => (entry.kind === "head" ? sectionHead(entry) : sessionRow(entry.session, entry))}
+        <For each={keys()} fallback={<li class="empty">No sessions match.</li>}>
+          {(key) => (key.startsWith("head:")
+            ? <Show when={byKey().get(key)} keyed>{(entry) => entry.kind === "head" && sectionHead(entry)}</Show>
+            : sessionRow(createRailRowFields(byKey, key)))}
         </For>
       </ul>
     </Show>

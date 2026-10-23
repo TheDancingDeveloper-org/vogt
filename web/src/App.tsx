@@ -151,6 +151,7 @@ import {
   type RailEntry,
   type RailHeadEntry,
 } from "./sessionRail";
+import { createRailKeys, createRailRowFields } from "./railRowFields";
 import { noteRailSessions, railStarters } from "./railStarters";
 import { setExpanded } from "./fileTreeState";
 import { demoManifest, resetDemoData } from "./runtimeTransport";
@@ -664,6 +665,8 @@ const App: Component = () => {
   }, []);
   // A section's header: a button that folds its rows. The count is the number
   // of sessions in it, so a folded section still says how many it holds.
+  // Keyed rows: see railRowFields.ts (WI-2328).
+  const { byKey: railEntryByKey, keys: railKeys } = createRailKeys(railEntries);
   const railSectionHead = (entry: RailHeadEntry) => (
     <button
       type="button"
@@ -1880,19 +1883,19 @@ const App: Component = () => {
             </form>
             <div class="rail-session-list">
             <For
-              each={railEntries()}
+              each={railKeys()}
               fallback={<div class="empty">{railQuery() ? "No sessions match." : "No sessions yet."}</div>}
             >
-              {(entry) => (entry.kind === "head" ? railSectionHead(entry) : (() => { const s = entry.session;
+              {(key) => (key.startsWith("head:") ? <Show when={railEntryByKey().get(key)} keyed>{(entry) => entry.kind === "head" && railSectionHead(entry)}</Show> : (() => { const row = createRailRowFields(railEntryByKey, key); const s = row.session;
                 return (
                 <>
                 <div
                   role="link"
                   tabIndex={0}
                   draggable={true}
-                  aria-current={tabsStore.active === `term:${s.id}` ? "page" : undefined}
-                  aria-label={`${s.name}${isOversight(s) ? ", oversight" : ""}, ${activityLabel(s.activity, s.exit_code)}`}
-                  class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""} ${s.activity === "waiting-for-input" || entry.section === "needs" ? "waiting" : ""} ${isOversight(s) ? "session-row--oversight" : ""} ${entry.depth === 1 ? "session-row--child" : ""} ${entry.section === "pinned" && railFinished(s) ? "session-row--dimmed" : ""}`}
+                  aria-current={tabsStore.active === `term:${s().id}` ? "page" : undefined}
+                  aria-label={`${s().name}${isOversight(s()) ? ", oversight" : ""}, ${activityLabel(s().activity, s().exit_code)}`}
+                  class={`session-row ${tabsStore.active === `term:${s().id}` ? "active" : ""} ${s().activity === "waiting-for-input" || row.section() === "needs" ? "waiting" : ""} ${isOversight(s()) ? "session-row--oversight" : ""} ${row.depth() === 1 ? "session-row--child" : ""} ${row.section() === "pinned" && railFinished(s()) ? "session-row--dimmed" : ""}`}
                   onDragStart={(event) => {
                     // Drag a session into the terminal workspace to mirror it as
                     // a split. The dedicated mime keeps the workspace from
@@ -1901,70 +1904,70 @@ const App: Component = () => {
                     // "Add to current split" is the no-drag path.
                     if (event.dataTransfer) {
                       event.dataTransfer.effectAllowed = "copy";
-                      event.dataTransfer.setData(SESSION_DND_MIME, s.id);
-                      event.dataTransfer.setData("text/plain", s.id);
+                      event.dataTransfer.setData(SESSION_DND_MIME, s().id);
+                      event.dataTransfer.setData("text/plain", s().id);
                     }
                   }}
                   onClick={() => {
                     setOpenMenuId(null);
-                    clearBell(s.id);
-                    openTerminalTab(s.id, s.name);
-                    navigate(`/t/${s.id}`);
+                    clearBell(s().id);
+                    openTerminalTab(s().id, s().name);
+                    navigate(`/t/${s().id}`);
                   }}
                   onKeyDown={(event) => {
                     if (event.target !== event.currentTarget) return;
                     if (event.key !== "Enter" && event.key !== " ") return;
                     event.preventDefault();
                     setOpenMenuId(null);
-                    clearBell(s.id);
-                    openTerminalTab(s.id, s.name);
-                    navigate(`/t/${s.id}`);
+                    clearBell(s().id);
+                    openTerminalTab(s().id, s().name);
+                    navigate(`/t/${s().id}`);
                   }}
                   onContextMenu={(e) => {
                     // rail-spec.md B2: right-click widens today's rename-only
                     // shortcut into the same menu the `···` trigger opens.
                     e.preventDefault();
-                    setOpenMenuId(s.id);
+                    setOpenMenuId(s().id);
                   }}
-                  title={`${s.name}\ncwd: ${s.cwd}${sessionRuntimeHint(s) ? `\n${sessionRuntimeHint(s)}` : ""}`}
+                  title={`${s().name}\ncwd: ${s().cwd}${sessionRuntimeHint(s()) ? `\n${sessionRuntimeHint(s())}` : ""}`}
                 >
-                  <span class={`activity-dot ${activityClass(s)}${belledSessions().has(s.id) ? " bell" : ""}`} title={activityLabel(s.activity, s.exit_code)} />
+                  <span class={`activity-dot ${activityClass(s())}${belledSessions().has(s().id) ? " bell" : ""}`} title={activityLabel(s().activity, s().exit_code)} />
                   <div class="session-row-body">
                     <span class="name">
-                      <Show when={entry.tally}>
+                      <Show when={row.tally()}>
                         <button
                           type="button"
                           class="session-caret"
-                          aria-expanded={entry.expanded === true}
-                          aria-label={`${entry.expanded ? "Fold" : "Show"} the sessions started by ${s.name}`}
+                          aria-expanded={row.expanded() === true}
+                          aria-label={`${row.expanded() ? "Fold" : "Show"} the sessions started by ${s().name}`}
                           onClick={(event) => {
                             event.stopPropagation();
-                            toggleRailFolded(s.id);
+                            toggleRailFolded(s().id);
                           }}
                           onKeyDown={(event) => event.stopPropagation()}
-                        >{entry.expanded ? "▾" : "▸"}</button>
+                        >{row.expanded() ? "▾" : "▸"}</button>
                       </Show>
-                      <Show when={isOversight(s)}>
+                      <Show when={isOversight(s())}>
                         <span class="session-role-badge" title="Oversight session: supervises the others; pinned awake">oversight</span>
                       </Show>
-                      <Show when={entry.lifted}>
+                      <Show when={row.lifted()}>
                         {(parent) => (
                           <span class="session-lift" title={`Started by ${parent()}`}>↳ {parent()}</span>
                         )}
                       </Show>
-                      {s.name}
-                      <Show when={entry.tally}>
+                      {s().name}
+                      <Show when={row.tally()}>
                         {(tally) => (
                           <span
                             class="session-tally"
-                            title={`${tally().total} started by ${s.name}: ${tally().running} running, ${tally().needs} need you, ${tally().done} done`}
+                            title={`${tally().total} started by ${s().name}: ${tally().running} running, ${tally().needs} need you, ${tally().done} done`}
                           >
                             {tally().running}▶ {tally().needs}? {tally().done}✓
                           </span>
                         )}
                       </Show>
                       <span class="session-badges">
-                        <For each={railBadges(s, railNow())}>
+                        <For each={railBadges(s(), railNow())}>
                           {(badge) => (
                             <span class="session-badge" title={badge.label} aria-label={badge.label}>{badge.glyph}</span>
                           )}
@@ -1973,7 +1976,7 @@ const App: Component = () => {
                       {/* The work item it serves (WI-998): the engine's label,
                           named with the item's title and muted once the item
                           is finished. Opens the item, not the terminal. */}
-                      <Show when={s.work_item}>
+                      <Show when={s().work_item}>
                         {(ref) => {
                           const facts = () => workItemFacts(ref());
                           const finished = () => {
@@ -2003,159 +2006,159 @@ const App: Component = () => {
                           );
                         }}
                       </Show>
-                      <Show when={permissionPostureLabel(s.permission_mode)}>
+                      <Show when={permissionPostureLabel(s().permission_mode)}>
                         {(label) => (
                           <span
-                            class={`session-posture${s.permission_mode === "bypass" ? " session-posture--bypass" : ""}`}
-                            title={s.permission_mode === "bypass" ? "Started with no permission checks" : "Edits auto-accepted"}
+                            class={`session-posture${s().permission_mode === "bypass" ? " session-posture--bypass" : ""}`}
+                            title={s().permission_mode === "bypass" ? "Started with no permission checks" : "Edits auto-accepted"}
                           >
                             {label()}
                           </span>
                         )}
                       </Show>
                     </span>
-                    <span class={`state${s.activity === "waiting-for-input" ? " state--waiting" : ""}`}>
-                      {sessionStateWord(s, railNow(), sessionsStore.ready && !isConnected() ? sessionsStore.lastAnswerAt : null)}
+                    <span class={`state${s().activity === "waiting-for-input" ? " state--waiting" : ""}`}>
+                      {sessionStateWord(s(), railNow(), sessionsStore.ready && !isConnected() ? sessionsStore.lastAnswerAt : null)}
                     </span>
-                    <Show when={s.cwd}><span class="cwd">{s.cwd}</span></Show>
+                    <Show when={s().cwd}><span class="cwd">{s().cwd}</span></Show>
                   </div>
                   <button
                     type="button"
                     class="row-menu"
                     aria-haspopup="menu"
-                    aria-expanded={openMenuId() === s.id}
-                    aria-label={`More actions for ${s.name}`}
+                    aria-expanded={openMenuId() === s().id}
+                    aria-label={`More actions for ${s().name}`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      setOpenMenuId((current) => (current === s.id ? null : s.id));
+                      setOpenMenuId((current) => (current === s().id ? null : s().id));
                     }}
                   >···</button>
                 </div>
                 <div
                   class="row-menu-list"
                   role="menu"
-                  aria-label={`Actions for ${s.name}`}
-                  hidden={openMenuId() !== s.id}
+                  aria-label={`Actions for ${s().name}`}
+                  hidden={openMenuId() !== s().id}
                 >
                   <button
                     type="button"
                     role="menuitem"
                     onClick={() => {
                       setOpenMenuId(null);
-                      openTerminalTab(s.id, s.name);
-                      navigate(`/t/${s.id}`);
+                      openTerminalTab(s().id, s().name);
+                      navigate(`/t/${s().id}`);
                     }}
                   >Attach</button>
                   <button
                     type="button"
                     role="menuitem"
-                    aria-label={`Open files at ${s.cwd || "the workspace"}`}
-                    onClick={() => void onOpenFilesHere(s)}
+                    aria-label={`Open files at ${s().cwd || "the workspace"}`}
+                    onClick={() => void onOpenFilesHere(s())}
                   >Open files here</button>
                   <button
                     type="button"
                     role="menuitem"
-                    aria-label={`Open Git at ${s.cwd || "the workspace"}`}
-                    onClick={() => onGitHere(s)}
+                    aria-label={`Open Git at ${s().cwd || "the workspace"}`}
+                    onClick={() => onGitHere(s())}
                   >Git here</button>
                   <button
                     type="button"
                     role="menuitem"
-                    aria-label={isBookmarked(s.id) ? `Remove bookmark from ${s.name}` : `Bookmark ${s.name}`}
+                    aria-label={isBookmarked(s().id) ? `Remove bookmark from ${s().name}` : `Bookmark ${s().name}`}
                     onClick={() => {
                       setOpenMenuId(null);
-                      toggleBookmark(s.id);
+                      toggleBookmark(s().id);
                     }}
-                  >{isBookmarked(s.id) ? "Remove bookmark" : "Bookmark"}</button>
+                  >{isBookmarked(s().id) ? "Remove bookmark" : "Bookmark"}</button>
                   <button
                     type="button"
                     role="menuitem"
-                    aria-label={`Duplicate ${s.name}`}
+                    aria-label={`Duplicate ${s().name}`}
                     onClick={() => {
                       setOpenMenuId(null);
-                      void onDuplicateSession(s);
+                      void onDuplicateSession(s());
                     }}
                   >Duplicate (same cwd)</button>
                   <button
                     type="button"
                     role="menuitem"
-                    aria-label={`Add ${s.name} to the current split`}
-                    onClick={() => onOpenBesideCurrent(s)}
+                    aria-label={`Add ${s().name} to the current split`}
+                    onClick={() => onOpenBesideCurrent(s())}
                   >Add to current split</button>
                   <button
                     type="button"
                     role="menuitem"
                     onClick={() => {
                       setOpenMenuId(null);
-                      void onRenameSession(s);
+                      void onRenameSession(s());
                     }}
                   >Rename</button>
                   <button
                     type="button"
                     role="menuitem"
-                    aria-label={`Bind ${s.name} to a work item`}
+                    aria-label={`Bind ${s().name} to a work item`}
                     title="Say which work item this session serves; the item then shows it as being worked by it"
-                    onClick={() => onPickWorkItem(s)}
-                  >{s.work_item ? "Bind to another work item…" : "Bind to work item…"}</button>
-                  <Show when={s.work_item}>
+                    onClick={() => onPickWorkItem(s())}
+                  >{s().work_item ? "Bind to another work item…" : "Bind to work item…"}</button>
+                  <Show when={s().work_item}>
                     {(ref) => (
                       <button
                         type="button"
                         role="menuitem"
-                        aria-label={`Unbind ${s.name} from ${ref()}`}
+                        aria-label={`Unbind ${s().name} from ${ref()}`}
                         onClick={() => {
                           setOpenMenuId(null);
-                          void onBindWork(s, null);
+                          void onBindWork(s(), null);
                         }}
                       >Unbind from {ref()}</button>
                     )}
                   </Show>
-                  <Show when={s.activity === "hibernated"}>
+                  <Show when={s().activity === "hibernated"}>
                     <button
                       type="button"
                       role="menuitem"
-                      aria-label={`Wake ${s.name}`}
+                      aria-label={`Wake ${s().name}`}
                       onClick={() => {
                         setOpenMenuId(null);
-                        void onHibernation(s, "wake");
+                        void onHibernation(s(), "wake");
                       }}
                     >Wake</button>
                   </Show>
-                  <Show when={s.conversation && s.exit_code === null && s.activity !== "hibernated"}>
+                  <Show when={s().conversation && s().exit_code === null && s().activity !== "hibernated"}>
                     <button
                       type="button"
                       role="menuitem"
-                      aria-label={`Hibernate ${s.name}`}
+                      aria-label={`Hibernate ${s().name}`}
                       title="Stop its processes to free memory; wake it later into the same conversation"
                       onClick={() => {
                         setOpenMenuId(null);
-                        void onHibernation(s, "hibernate");
+                        void onHibernation(s(), "hibernate");
                       }}
                     >Hibernate</button>
                   </Show>
-                  <Show when={s.conversation && s.exit_code === null}>
+                  <Show when={s().conversation && s().exit_code === null}>
                     <button
                       type="button"
                       role="menuitemcheckbox"
-                      aria-checked={s.keep_awake === true}
-                      aria-label={`Keep ${s.name} awake`}
+                      aria-checked={s().keep_awake === true}
+                      aria-label={`Keep ${s().name} awake`}
                       title="Never hibernate it by policy, and wake it after a restart"
                       onClick={() => {
                         setOpenMenuId(null);
-                        void onHibernation(s, s.keep_awake ? "unpin" : "pin");
+                        void onHibernation(s(), s().keep_awake ? "unpin" : "pin");
                       }}
-                    >{s.keep_awake ? "✓ Keep awake" : "Keep awake"}</button>
+                    >{s().keep_awake ? "✓ Keep awake" : "Keep awake"}</button>
                   </Show>
-                  <Show when={sessionRoleAction(s)}>
+                  <Show when={sessionRoleAction(s())}>
                     {(action) => (
                       <button
                         type="button"
                         role="menuitem"
-                        aria-label={`${action().label}: ${s.name}`}
+                        aria-label={`${action().label}: ${s().name}`}
                         title={action().title}
                         onClick={() => {
                           setOpenMenuId(null);
-                          void onSetRole(s, action().role);
+                          void onSetRole(s(), action().role);
                         }}
                       >{action().label}</button>
                     )}
@@ -2165,12 +2168,12 @@ const App: Component = () => {
                     type="button"
                     role="menuitem"
                     class="danger"
-                    aria-label={s.exit_code !== null ? `Remove ${s.name}` : `Close ${s.name}`}
+                    aria-label={s().exit_code !== null ? `Remove ${s().name}` : `Close ${s().name}`}
                     onClick={() => {
                       setOpenMenuId(null);
-                      void onCloseSession(s);
+                      void onCloseSession(s());
                     }}
-                  >{s.exit_code !== null ? "Remove" : "Kill & remove"}</button>
+                  >{s().exit_code !== null ? "Remove" : "Kill & remove"}</button>
                 </div>
                 </>
                 );
