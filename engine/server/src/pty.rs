@@ -124,6 +124,8 @@ pub struct Session {
     superseded_by: Mutex<Option<String>>,
     /// The permission posture, when not the default (WI-926).
     permission_mode: Mutex<Option<String>>,
+    /// Woken without the bypass it showed before hibernating (WI-2252).
+    posture_lost_on_resume: AtomicBool,
     account: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
     stop: Mutex<Option<vogt_engine_contract::StopRequest>>,
@@ -550,6 +552,7 @@ impl Session {
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
+            posture_lost_on_resume: self.posture_lost_on_resume(),
             account: self.account.lock().clone(),
             stop: self.stop.lock().clone(),
             economics: self.economics_snapshot.lock().clone(),
@@ -611,6 +614,14 @@ impl Session {
 
     pub fn set_permission_mode(&self, mode: Option<String>) {
         *self.permission_mode.lock() = mode;
+    }
+
+    pub fn set_posture_lost_on_resume(&self, lost: bool) {
+        self.posture_lost_on_resume.store(lost, Ordering::Relaxed);
+    }
+
+    pub fn posture_lost_on_resume(&self) -> bool {
+        self.posture_lost_on_resume.load(Ordering::Relaxed)
     }
 
     pub fn set_account(&self, account: Option<String>) {
@@ -1286,6 +1297,7 @@ pub fn spawn(
         work_item: Mutex::new(None),
         superseded_by: Mutex::new(None),
         permission_mode: Mutex::new(None),
+        posture_lost_on_resume: AtomicBool::new(false),
         account: Mutex::new(None),
         stop: Mutex::new(None),
         launcher: if spawning_agent_auth_helper {

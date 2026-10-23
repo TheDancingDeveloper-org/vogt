@@ -328,6 +328,13 @@ pub struct SessionSummary {
     /// (`accept-edits`, `bypass`) (WI-926).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The session showed bypass before it was hibernated, and was woken
+    /// without it (WI-2252): a person granted bypass after the start (Shift+Tab
+    /// in the TUI, or a hand-typed `claude --dangerously-skip-permissions`),
+    /// and a wake only replays the posture a person gave at the start. The
+    /// operator re-grants it in the session's terminal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub posture_lost_on_resume: bool,
     /// The Claude Code account it was started under, when one was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,

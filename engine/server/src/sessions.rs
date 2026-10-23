@@ -455,6 +455,29 @@ impl SessionRegistry {
             base_command.as_deref(),
             &self.cfg.agent_onboarding.codex_policy,
         )?;
+        // A wake replays the posture recorded at the first start. The
+        // deployment's settings may have changed since, and reading them again
+        // would silently move a bypass (or a default) session onto a different
+        // policy (WI-1250). An oversight session gets the worker policy back
+        // only when its first launch carried it (WI-2252).
+        let settings_file = match recorded {
+            Some(record) => wake_settings_file(
+                id,
+                record.role,
+                record.settings_file.as_deref().filter(|_| {
+                    // A hand-typed agent in a plain shell was not launched by
+                    // the engine, so nothing handed it the policy, whatever an
+                    // older record says.
+                    record.conversation.as_ref().is_some_and(|c| {
+                        self.agent_of(&record.command, record.template.as_deref())
+                            .as_deref()
+                            == Some(c.agent.as_str())
+                    })
+                }),
+                self.cfg.agent_onboarding.settings_file.as_deref(),
+            ),
+            None => self.cfg.agent_onboarding.settings_file.as_deref(),
+        };
         let launch = agent_cli::launch(
             spec.command.as_deref(),
             &agent_cli::LaunchRequest {
@@ -467,19 +490,7 @@ impl SessionRegistry {
                 session_id: Some(conversation_pin),
                 codex_session_id: self.cfg.codex_session_id,
                 permission_mode: spec.permission_mode.as_deref(),
-                // A wake replays the posture recorded at the first start. The
-                // deployment's settings may have changed since, and reading
-                // them again would silently move a bypass (or a default)
-                // session onto a different policy (WI-1250). A record from
-                // before the field existed has none, and falls back; so does
-                // one whose file has since been removed, because a missing
-                // `--settings` file stops the agent and no settings at all
-                // would be a silent downgrade.
-                settings_file: wake_settings_file(
-                    id,
-                    recorded.and_then(|record| record.settings_file.as_deref()),
-                    self.cfg.agent_onboarding.settings_file.as_deref(),
-                ),
+                settings_file,
                 add_dirs: recorded.map(|r| r.add_dirs.as_slice()).unwrap_or(&[]),
                 opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
                 codex_approval_policy: self.cfg.codex_approval_policy.as_str(),
@@ -488,6 +499,14 @@ impl SessionRegistry {
         if let Some(rewritten) = launch.command {
             spec.command = Some(rewritten);
         }
+        // The settings file this launch actually carries: none for a shell or
+        // an agent CLI that takes no `--settings`, whatever the deployment has.
+        let applied_settings = settings_file
+            .filter(|file| {
+                let flag = format!("--settings={}", file.display());
+                spec.command.iter().flatten().any(|arg| *arg == flag)
+            })
+            .map(std::path::Path::to_path_buf);
         if !launch.env.is_empty() {
             // Defaults: first, so a template or caller that sets the same
             // variable still has the last word.
@@ -739,6 +758,23 @@ impl SessionRegistry {
             .map(|m| m.replace('_', "-"))
             .filter(|m| !m.is_empty() && m != "default");
         session.set_permission_mode(posture.clone());
+        // A wake replays only the posture a person gave at the start. One the
+        // session showed on screen before it slept and does not have now is
+        // said, so the operator can grant it again (WI-2252).
+        if let Some(record) = recorded {
+            let lost = hibernation::posture_lost(
+                record.observed_permission_mode.as_deref(),
+                posture.as_deref(),
+            );
+            if lost {
+                tracing::warn!(
+                    session = %id,
+                    granted = posture.as_deref().unwrap_or("default"),
+                    "woken without the bypass it showed before hibernating; a person must grant it again"
+                );
+            }
+            session.set_posture_lost_on_resume(lost);
+        }
         session.set_account(account.clone());
         session.set_autopilot(spec.autopilot);
         session.set_policy(spec.policy.clone());
@@ -780,7 +816,7 @@ impl SessionRegistry {
                 record.effort = spec.effort.clone();
                 record.permission_mode = posture.clone();
                 record.account = account.clone();
-                record.settings_file = self.cfg.agent_onboarding.settings_file.clone();
+                record.settings_file = applied_settings.clone();
                 record.add_dirs = prompt_file
                     .as_ref()
                     .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
@@ -1285,6 +1321,21 @@ impl SessionRegistry {
         // back off this record (C4).
         record.blocked = session.blocked();
         record.done_at = session.done_at();
+        // What Claude Code's footer shows now, for the wake to compare against
+        // the posture it replays (WI-2252). Read only, never granted from.
+        if record
+            .conversation
+            .as_ref()
+            .is_some_and(|c| c.agent == "claude")
+        {
+            let shown =
+                crate::screen::claude_posture(&crate::screen::render(&screen, rows, cols).lines);
+            record.observed_permission_mode = hibernation::observed_posture(
+                record.observed_permission_mode.as_deref(),
+                session.posture_lost_on_resume(),
+                shown,
+            );
+        }
         record.rows = Some(rows);
         record.cols = Some(cols);
         // A handoff survives a forced wake and a later hibernation that does
@@ -2437,6 +2488,8 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         resources: None,
         template: record.template.clone(),
         permission_mode: record.permission_mode.clone(),
+        // Hibernated: it has not been resumed yet, so nothing was lost.
+        posture_lost_on_resume: false,
         account: record.account.clone(),
         stop: None,
         // The last reading, so a caller can judge the wake (WI-2037).
@@ -2559,14 +2612,21 @@ fn codex_policy_refusal(
     }
 }
 
-/// The settings file a launch hands the agent (WI-1250). A wake replays the
-/// one recorded at the first start, so a later change to the deployment's
-/// config does not quietly move the session onto another policy. A record
-/// with none, or whose file has since been removed, falls back to the
-/// deployment's: a missing `--settings` file stops the agent, and no settings
-/// at all would be a silent downgrade.
+/// The settings file a wake hands the agent (WI-1250). It replays the one
+/// recorded at the first start, so a later change to the deployment's config
+/// does not quietly move the session onto another policy. A recorded file
+/// that has since been removed falls back to the deployment's: a missing
+/// `--settings` file stops the agent, and no settings at all would be a
+/// silent downgrade.
+///
+/// With none recorded (a record from before the field, or a first launch
+/// that did not carry one) a worker falls back to the deployment's too. An
+/// oversight session does not (WI-2252): the deployment's file is the worker
+/// driven-session policy, and putting it on an overseer that never had it
+/// moved a person-granted posture onto the worker classifier at every boot.
 fn wake_settings_file<'a>(
     id: Uuid,
+    role: SessionRole,
     recorded: Option<&'a std::path::Path>,
     deployment: Option<&'a std::path::Path>,
 ) -> Option<&'a std::path::Path> {
@@ -2580,6 +2640,7 @@ fn wake_settings_file<'a>(
             );
             deployment
         }
+        None if role == SessionRole::Oversight => None,
         None => deployment,
     }
 }
@@ -2621,11 +2682,26 @@ mod tests {
         std::fs::write(&recorded, "{}").unwrap();
         std::fs::write(&deployment, "{}").unwrap();
         let id = uuid::Uuid::nil();
-        let wake = |r| super::wake_settings_file(id, r, Some(deployment.as_path()));
-        assert_eq!(wake(Some(recorded.as_path())), Some(recorded.as_path()));
-        assert_eq!(wake(None), Some(deployment.as_path()));
+        let worker = vogt_engine_contract::SessionRole::Worker;
+        let oversight = vogt_engine_contract::SessionRole::Oversight;
+        let wake = |role, r| super::wake_settings_file(id, role, r, Some(deployment.as_path()));
+        assert_eq!(
+            wake(worker, Some(recorded.as_path())),
+            Some(recorded.as_path())
+        );
+        assert_eq!(wake(worker, None), Some(deployment.as_path()));
+        // WI-2252: an overseer that started without the worker policy is not
+        // given it by a wake; one that started with it keeps it.
+        assert_eq!(wake(oversight, None), None);
+        assert_eq!(
+            wake(oversight, Some(recorded.as_path())),
+            Some(recorded.as_path())
+        );
         std::fs::remove_file(&recorded).unwrap();
-        assert_eq!(wake(Some(recorded.as_path())), Some(deployment.as_path()));
+        assert_eq!(
+            wake(worker, Some(recorded.as_path())),
+            Some(deployment.as_path())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2782,6 +2858,7 @@ mod tests {
             resources: None,
             template: None,
             permission_mode: None,
+            posture_lost_on_resume: false,
             account: None,
             stop: None,
             economics: None,
