@@ -334,7 +334,7 @@ export function flattenRail(
       for (const child of row.children) {
         add({
           kind: "row",
-          key: `row:${child.id}`,
+          key: `row:${row.session.id}/${child.id}`,
           session: child,
           section,
           depth: 1,
@@ -358,7 +358,7 @@ export function flattenRail(
     });
     if (options.open("pinned")) {
       for (const s of model.pinned) {
-        add({ kind: "row", key: `row:${s.id}`, session: s, section: "pinned", depth: 0, lifted: null, tally: null, expanded: null });
+        add({ kind: "row", key: `pin:${s.id}`, session: s, section: "pinned", depth: 0, lifted: null, tally: null, expanded: null });
       }
     }
   }

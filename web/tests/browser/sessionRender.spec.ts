@@ -112,24 +112,36 @@ async function installRoster(page: Page): Promise<void> {
       return realFetch(input, init);
     };
 
-    const counts = { mutations: 0, records: 0, rowsAdded: 0, rowsRemoved: 0 };
+    // A row element seen before and added again is a move (Solid's keyed
+    // <For> reorders nodes); one never seen before is a remount.
+    const seenRows = new WeakSet<Element>();
+    const counts = { mutations: 0, records: 0, rowsAdded: 0, rowsRemoved: 0, rowsMoved: 0 };
     const isRow = (node: Node) =>
       node instanceof Element && (node.matches(".session-row") || node.querySelector(".session-row") !== null);
-    const countRows = (nodes: NodeList) => {
-      let n = 0;
+    const rowsIn = (nodes: NodeList) => {
+      const out: Element[] = [];
       nodes.forEach((node) => {
         if (!(node instanceof Element)) return;
-        if (node.matches(".session-row")) n += 1;
-        n += node.querySelectorAll(".session-row").length;
+        if (node.matches(".session-row")) out.push(node);
+        out.push(...node.querySelectorAll(".session-row"));
       });
-      return n;
+      return out;
+    };
+    const countRows = (nodes: NodeList) => rowsIn(nodes).length;
+    const noteAdded = (nodes: NodeList) => {
+      let fresh = 0;
+      for (const row of rowsIn(nodes)) {
+        if (seenRows.has(row)) counts.rowsMoved += 1;
+        else { seenRows.add(row); fresh += 1; }
+      }
+      return fresh;
     };
     const observer = new MutationObserver((records) => {
       counts.records += records.length;
       for (const record of records) {
         if (record.type === "childList") {
           counts.mutations += record.addedNodes.length + record.removedNodes.length;
-          if ([...record.addedNodes].some(isRow)) counts.rowsAdded += countRows(record.addedNodes);
+          if ([...record.addedNodes].some(isRow)) counts.rowsAdded += noteAdded(record.addedNodes);
           if ([...record.removedNodes].some(isRow)) counts.rowsRemoved += countRows(record.removedNodes);
         } else {
           counts.mutations += 1;
@@ -137,6 +149,7 @@ async function installRoster(page: Page): Promise<void> {
       }
     });
     document.addEventListener("DOMContentLoaded", () => {
+      document.querySelectorAll(".session-row").forEach((row) => seenRows.add(row));
       observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
     });
     (window as unknown as Record<string, unknown>).__wi2328 = { fetches, sse, counts, observer };
@@ -177,6 +190,7 @@ interface Cost {
   mutations: number;
   rowsAdded: number;
   rowsRemoved: number;
+  rowsMoved: number;
   fetches: string[];
   handlerMs: number;
   frameMs: number;
@@ -190,7 +204,7 @@ async function measure(page: Page, events: unknown[], settleMs = 400): Promise<C
     const h = (window as unknown as { __wi2328: {
       fetches: string[];
       sse: { opens: number; aborts: number; push(events: unknown[]): void };
-      counts: { mutations: number; rowsAdded: number; rowsRemoved: number };
+      counts: { mutations: number; rowsAdded: number; rowsRemoved: number; rowsMoved: number };
       observer: MutationObserver;
     } }).__wi2328;
     // Drain anything still queued so it is not charged to this event.
@@ -198,6 +212,7 @@ async function measure(page: Page, events: unknown[], settleMs = 400): Promise<C
     h.counts.mutations = 0;
     h.counts.rowsAdded = 0;
     h.counts.rowsRemoved = 0;
+    h.counts.rowsMoved = 0;
     const fetchStart = h.fetches.length;
     const opens = h.sse.opens;
     const aborts = h.sse.aborts;
@@ -219,6 +234,7 @@ async function measure(page: Page, events: unknown[], settleMs = 400): Promise<C
       mutations: h.counts.mutations + extra,
       rowsAdded: h.counts.rowsAdded,
       rowsRemoved: h.counts.rowsRemoved,
+      rowsMoved: h.counts.rowsMoved,
       fetches: h.fetches.slice(fetchStart),
       handlerMs: Math.round((t1 - t0) * 10) / 10,
       frameMs: Math.round((t2 - t0) * 10) / 10,
@@ -285,21 +301,22 @@ test.describe("session rail render cost (WI-2328)", () => {
 
   // Fails until the rail rows are keyed by id (WI-2328 part 3): today an
   // activity event remounts 3–4 rows.
-  test.fixme("an activity event touches only its own row", async ({ page }) => {
+  test("an activity event touches only its own row", async ({ page }) => {
     await openRail(page);
     const id = liveIds()[3];
-    const states = ["running", "idle", "running", "idle"];
+    const states = Array.from({ length: 12 }, (_, i) => (i % 2 ? "idle" : "running"));
     let worst: Cost | null = null;
     for (const [i, state] of states.entries()) {
       const cost = await measure(page, [{
         type: "activity", id, state, activity_changed_at: new Date(NOW + 1000 * (i + 1)).toISOString(),
       }]);
       report(`activity#${i + 1}:${state}`, cost);
-      if (!worst || cost.rowsAdded > worst.rowsAdded) worst = cost;
+      if (!worst || cost.rowsAdded + cost.rowsMoved > worst.rowsAdded + worst.rowsMoved) worst = cost;
     }
-    // A row that changes section moves: at most one row out and one row in.
-    expect(worst!.rowsAdded).toBeLessThanOrEqual(1);
-    expect(worst!.rowsRemoved).toBeLessThanOrEqual(1);
+    // No row is rebuilt; a row that changes section is moved, not remounted.
+    expect(worst!.rowsAdded).toBe(0);
+    // The rail and the Sessions page list each move the row once.
+    expect(worst!.rowsMoved).toBeLessThanOrEqual(4);
     expect(worst!.fetches).toEqual([]);
   });
 
