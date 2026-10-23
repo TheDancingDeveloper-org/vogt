@@ -19,6 +19,7 @@ function scriptedTransport() {
   let sessionsHang = false;
   let eventsStatus = 200;
   const requests: string[] = [];
+  const eventInits: Array<RequestInit | undefined> = [];
   const transport: RuntimeTransport = {
     request: async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
@@ -32,6 +33,7 @@ function scriptedTransport() {
         });
       }
       if (url.includes("/api/events")) {
+        eventInits.push(init);
         if (eventsStatus !== 200) return new Response("down", { status: eventsStatus });
         const body = new ReadableStream<Uint8Array>({
           start(controller) { streams.push(controller); },
@@ -50,6 +52,7 @@ function scriptedTransport() {
   return {
     transport,
     requests,
+    eventInits,
     setSessionsStatus: (status: number) => { sessionsStatus = status; },
     setSessionsHang: (hang: boolean) => { sessionsHang = hang; },
     setEventsStatus: (status: number) => { eventsStatus = status; },
@@ -94,6 +97,14 @@ describe("event stream liveness", () => {
     await settle();
     expect(store.isConnected()).toBe(true);
     expect(store.sessionsStore.lastAnswerAt).not.toBeNull();
+  });
+
+  // WI-2324: Firefox held a second tab's GET of /api/events behind the cache
+  // entry the first tab's stream was still writing, so that tab never opened.
+  it("asks for the stream outside the HTTP cache", async () => {
+    store.startEventStream();
+    await settle();
+    expect(script.eventInits.at(-1)?.cache).toBe("no-store");
   });
 
   it("keeps a quiet stream connected on the engine's keep-alive comments alone", async () => {

@@ -1619,6 +1619,13 @@ export function subscribeEvents(
       const res = await runtimeTransport().request(`${getBase()}/api/events`, {
         headers: authHeaders({ Accept: "text/event-stream" }),
         signal: controller.signal,
+        // Kept out of the HTTP cache. The engine answers `no-cache`, which a
+        // cache may still store, and Firefox holds a second GET for the same
+        // URL behind the entry the first is still writing — so a second tab
+        // (or window) on the same profile never got its headers while the
+        // first tab's stream was open, and every wake tore that pending
+        // connect down and started another (WI-2324).
+        cache: "no-store",
       });
       // The stream is an authenticated read like any other, and the one
       // most likely to meet a rotated token first — it outlives every panel.
