@@ -20,3 +20,7 @@ overrides:
   # — so no direct dependency can be bumped to fix it, and the advisories
   # landed against a lockfile nobody had touched. Patched in 4.28.7.
   browserslist: '>=4.28.7'
+  # GHSA-4qv8-2p9j-2685 and GHSA-f72v-6w45-q472 (moderate), 2026-10-23:
+  # undici <8.12.2, reached only through jsdom (vitest's DOM, dev tooling).
+  # jsdom 30.1.2 is the latest and still allows 8.11.x. Patched in 8.12.2.
+  undici: '>=8.12.2'
