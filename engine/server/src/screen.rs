@@ -279,6 +279,36 @@ fn read_parser(
     )
 }
 
+/// The permission mode Claude Code's footer shows, as the engine names it:
+/// `bypass` (bypass permissions on), `accept-edits`, `auto` or `plan`. `None`
+/// when the footer names none, which is its default mode, or the screen is not
+/// Claude Code's. Only the bottom of the screen is read, where the footer is.
+///
+/// The screen is the agent's to draw, so this is an observation, never a
+/// grant (WI-2252).
+pub fn claude_posture(lines: &[String]) -> Option<&'static str> {
+    const MODES: &[(&str, &str)] = &[
+        ("bypass permissions on", "bypass"),
+        ("accept edits on", "accept-edits"),
+        ("auto mode on", "auto"),
+        ("plan mode on", "plan"),
+    ];
+    // Claude Code draws inline, so a short conversation leaves blank rows
+    // below its footer: count from the last line with anything on it.
+    lines
+        .iter()
+        .rev()
+        .skip_while(|line| line.trim().is_empty())
+        .take(6)
+        .find_map(|line| {
+            let line = line.to_lowercase();
+            MODES
+                .iter()
+                .find(|(shown, _)| line.contains(shown))
+                .map(|(_, mode)| *mode)
+        })
+}
+
 /// Whether the screen shows an input prompt an agent TUI or REPL draws when
 /// it is waiting for the user: a line in the lower part of the screen that,
 /// with any box-drawing border stripped, starts with a prompt glyph
@@ -648,6 +678,33 @@ pub async fn kept_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_posture_reads_the_footer_below_any_blank_rows() {
+        let screen = |footer: &str| {
+            let mut lines: Vec<String> = ["> ", footer, "", "", "", "", "", "", ""]
+                .iter()
+                .map(|l| l.to_string())
+                .collect();
+            lines.insert(0, "earlier output".into());
+            lines
+        };
+        assert_eq!(
+            claude_posture(&screen("  ⏵⏵ bypass permissions on (shift+tab to cycle)")),
+            Some("bypass")
+        );
+        assert_eq!(
+            claude_posture(&screen("  ⏵⏵ accept edits on (shift+tab to cycle)")),
+            Some("accept-edits")
+        );
+        assert_eq!(claude_posture(&screen("  ⏵⏵ auto mode on")), Some("auto"));
+        assert_eq!(claude_posture(&screen("  ⏸ plan mode on")), Some("plan"));
+        assert_eq!(claude_posture(&screen("  ? for shortcuts")), None);
+        // Words far above the footer are conversation, not the mode.
+        let mut old: Vec<String> = vec!["bypass permissions on".into()];
+        old.extend((0..10).map(|i| format!("line {i}")));
+        assert_eq!(claude_posture(&old), None);
+    }
 
     /// WI-121: the frame reproduces the screen a raw replay would, in a
     /// handful of bytes, including a frame the tail replay loses.

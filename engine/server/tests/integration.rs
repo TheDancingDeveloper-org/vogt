@@ -11824,9 +11824,12 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
     for (id, role) in [(&claude_id, "oversight"), (&klaudia_id, "worker")] {
         let stored =
             std::fs::read_to_string(state_dir.join("sessions").join(format!("{id}.json"))).unwrap();
-        assert!(
+        // Only what the first launch carried is recorded: Klaudia takes no
+        // `--settings`, so its record names none (WI-2252).
+        assert_eq!(
             stored.contains(&format!("\"{}\"", policy.display())),
-            "the record keeps the original policy: {stored}"
+            role == "oversight",
+            "the record keeps the original policy it launched with: {stored}"
         );
         assert!(
             !stored.contains(&format!("\"{}\"", replacement.display())),
@@ -11920,9 +11923,11 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
     let printed =
         live_output_containing(&client, &base, &legacy_id, &["arg=[--resume]", "helper=["]).await;
     let tail = &printed[printed.rfind("arg=[--resume]").unwrap()..];
+    // An oversight session with no recorded settings is not put on the
+    // deployment's worker policy (WI-2252); a worker's would fall back to it.
     assert!(
-        tail.contains(&format!("arg=[--settings={}]", replacement.display())),
-        "an old record falls back to the deployment's current settings: {tail:?}"
+        !tail.contains("arg=[--settings="),
+        "an old oversight record gets no worker policy: {tail:?}"
     );
     assert!(
         !tail.contains("arg=[--add-dir="),
@@ -11932,6 +11937,162 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
         tail.contains("--dangerously-skip-permissions"),
         "the recorded bypass still holds: {tail:?}"
     );
+}
+
+/// WI-2252: a prod restart woke both oversight sessions under the worker
+/// driven policy, without the bypass a person had given them after the start.
+/// A wake replays only the posture a person gave at the start: a bypass
+/// granted then comes back; one the session merely showed on its screen (a
+/// Shift+Tab, a hand-typed flag, or an agent printing the words) does not, and
+/// the summary says `posture_lost_on_resume` instead. An overseer that started
+/// as a plain shell is not handed the worker policy; a worker keeps the
+/// default posture and the policy.
+#[tokio::test]
+async fn a_wake_replays_only_a_persons_posture_and_says_a_lost_bypass() {
+    let (tmp, mut cfg, stub) = conversation_sandbox();
+    let policy = tmp.path().join("policy.json");
+    std::fs::write(&policy, br#"{"autoMode":{"allow":["$defaults"]}}"#).unwrap();
+    cfg.agent_onboarding.settings_file = Some(policy.clone());
+    // A `claude` that draws Claude Code's bypass footer when told to: what an
+    // agent printing those words looks like to the engine.
+    let forged_dir = tmp.path().join("forged");
+    std::fs::create_dir_all(&forged_dir).unwrap();
+    let forged = forged_dir.join("claude");
+    std::fs::write(
+        &forged,
+        "#!/bin/sh\nfor a in \"$@\"; do printf 'arg=[%s]\\n' \"$a\"; done\n\
+         printf '%s %s on\\n' bypass permissions\n\
+         sleep 300 &\nprintf 'helper=[%s]\\n' \"$!\"\nwait\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&forged, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let create = |body: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().to_string()
+        }
+    };
+    let cycle = |id: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let slept = client
+                .post(format!("{base}/api/sessions/{id}/hibernate"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(slept.status(), StatusCode::OK, "{:?}", slept.text().await);
+            let woken = client
+                .post(format!("{base}/api/sessions/{id}/wake"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(woken.status(), StatusCode::OK);
+            let woken: Value = woken.json().await.unwrap();
+            let printed =
+                live_output_containing(&client, &base, &id, &["arg=[--resume]", "helper=["]).await;
+            let tail = printed[printed.rfind("arg=[--resume]").unwrap()..].to_string();
+            (woken, tail)
+        }
+    };
+    let settings = format!("arg=[--settings={}]", policy.display());
+
+    // A person started this overseer with bypass: it comes back with it, and
+    // with the policy its first launch carried. Nothing was lost.
+    let granted = create(json!({
+        "name": "granted overseer",
+        "command": [stub.to_string_lossy()],
+        "role": "oversight",
+        "permission_mode": "bypass",
+    }))
+    .await;
+    live_output_containing(&client, &base, &granted, &["helper=["]).await;
+    let (woken, tail) = cycle(granted).await;
+    assert_eq!(woken["permission_mode"], "bypass", "{woken}");
+    assert!(woken.get("posture_lost_on_resume").is_none(), "{woken}");
+    assert!(
+        tail.contains("arg=[--dangerously-skip-permissions]"),
+        "{tail:?}"
+    );
+    assert!(tail.contains(&settings), "{tail:?}");
+
+    // A worker in the default posture whose agent prints the bypass footer:
+    // the wake keeps the default and the policy, and only says it saw one.
+    let worker = create(json!({
+        "name": "worker",
+        "command": [forged.to_string_lossy()],
+    }))
+    .await;
+    live_output_containing(
+        &client,
+        &base,
+        &worker,
+        &["bypass permissions on", "helper=["],
+    )
+    .await;
+    let (woken, tail) = cycle(worker).await;
+    assert!(woken["permission_mode"].is_null(), "{woken}");
+    assert_eq!(woken["posture_lost_on_resume"], true, "{woken}");
+    assert!(
+        !tail.contains("--dangerously-skip-permissions"),
+        "an agent cannot escalate through a wake: {tail:?}"
+    );
+    assert!(tail.contains(&settings), "{tail:?}");
+
+    // The incident: an overseer that began as a plain shell, a person typing
+    // `claude` into it and granting bypass there. The wake resumes the
+    // conversation through the template, without the worker policy, and says
+    // the bypass is gone rather than replaying a grant it cannot verify.
+    let typed = create(json!({ "name": "typed overseer", "role": "oversight" })).await;
+    let conversation = "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f";
+    client
+        .post(format!("{base}/api/sessions/{typed}/conversation"))
+        .json(&json!({ "agent": "claude", "id": conversation }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    client
+        .post(format!("{base}/api/sessions/{typed}/input"))
+        .json(&json!({ "text": "printf '%s %s on\\n' bypass permissions", "submit": true }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    live_output_containing(&client, &base, &typed, &["bypass permissions on"]).await;
+    let (woken, tail) = cycle(typed.clone()).await;
+    assert!(woken["permission_mode"].is_null(), "{woken}");
+    assert_eq!(woken["posture_lost_on_resume"], true, "{woken}");
+    assert!(
+        tail.contains(&format!("arg=[{conversation}]")),
+        "the conversation is resumed: {tail:?}"
+    );
+    assert!(!tail.contains("--dangerously-skip-permissions"), "{tail:?}");
+    assert!(
+        !tail.contains("arg=[--settings="),
+        "an overseer that started without the worker policy is not given it: {tail:?}"
+    );
+    // The loss is still said after another hibernation, until a person
+    // grants the bypass again: the woken screen no longer shows it.
+    let (woken, _) = cycle(typed).await;
+    assert_eq!(woken["posture_lost_on_resume"], true, "{woken}");
 }
 
 /// WI-913: a session stopped on request reads `stopped` with who and why;
