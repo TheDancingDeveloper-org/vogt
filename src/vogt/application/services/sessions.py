@@ -898,6 +898,12 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                 )
             if claim_check.mismatches:
                 reason = f"{reason}; claim check: " + "; ".join(claim_check.mismatches)
+        if summary.posture_lost_on_resume:
+            # WI-2252: said in the row, so the operator sees it on a sweep.
+            reason = (
+                f"{reason}; posture lost on resume: it showed bypass before the "
+                "restart and was woken without it (a person re-grants it)"
+            )
         rows.append(
             SessionSweepRow(
                 attention=verdict.attention,
@@ -4917,6 +4923,7 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "conversation_id": engine_session.conversation_id,
         "resources": _resources(engine_session.resources),
         "permission_mode": engine_session.permission_mode,
+        "posture_lost_on_resume": engine_session.posture_lost_on_resume,
         "account": engine_session.account,
         "stopped_by": engine_session.stopped_by,
         "stop_reason": engine_session.stop_reason,

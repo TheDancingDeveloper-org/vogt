@@ -190,6 +190,9 @@ class EngineSession:
     template: str | None = None
     #: The permission posture, when not the default (WI-926).
     permission_mode: str | None = None
+    #: Woken without the bypass its screen showed before it hibernated
+    #: (WI-2252): a person must grant it again in the terminal.
+    posture_lost_on_resume: bool = False
     #: The Claude Code account it runs under, when one was named.
     account: str | None = None
     #: Who asked the session to stop, and why (WI-913).
@@ -239,6 +242,7 @@ class EngineSession:
             resources=EngineResources.from_payload(payload.get("resources")),
             template=_optional_str(payload.get("template")),
             permission_mode=_optional_str(payload.get("permission_mode")),
+            posture_lost_on_resume=payload.get("posture_lost_on_resume") is True,
             account=_optional_str(payload.get("account")),
             stopped_by=_optional_str((payload.get("stop") or {}).get("by"))
             if isinstance(payload.get("stop"), dict)

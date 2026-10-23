@@ -1507,6 +1507,16 @@ class SessionSummary(Result):
             "Null is the default posture."
         ),
     )
+    posture_lost_on_resume: bool = Field(
+        default=False,
+        description=(
+            "Live from the engine: the session showed bypass before it was "
+            "hibernated and was woken without it (WI-2252). A wake replays "
+            "only the posture a person gave at the start, so a bypass granted "
+            "later (Shift+Tab, a hand-typed flag) is lost; a person re-grants "
+            "it in the session's terminal."
+        ),
+    )
     account: str | None = Field(
         default=None,
         description=(

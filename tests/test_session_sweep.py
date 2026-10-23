@@ -446,3 +446,32 @@ def test_a_question_menu_is_needs_you_with_its_options_in_the_digest(
     assert row.digest.question == "Which approach should the sweep fix take?"
     assert row.digest.question_kind == "question"
     assert row.digest.options == ["Narrow fix", "Full rewrite"]
+
+
+def test_a_bypass_lost_on_resume_is_said_on_the_sweep_and_the_list(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-2252: a session woken without the bypass it showed before a restart
+    carries the engine's flag on its list row, and its sweep row says so."""
+    from vogt.application.models import ListSessionsParams
+    from vogt.application.services import list_sessions
+
+    lost, lost_engine = _start(wired)
+    kept, _kept_engine = _start(wired)
+    engine.rows[lost_engine].update(posture_lost_on_resume=True)
+
+    rows = {
+        row.id: row
+        for row in list_sessions(wired, ListSessionsParams(mode="full")).sessions
+    }
+    assert rows[lost].posture_lost_on_resume is True
+    assert rows[kept].posture_lost_on_resume is False
+
+    result = sweep_sessions(wired, SweepSessionsParams(mode="full", screen_lines=0))
+    reasons = {
+        row.session.id: row.attention_reason
+        for row in result.rows
+        if row.session is not None
+    }
+    assert "posture lost on resume" in reasons[lost]
+    assert "posture lost on resume" not in reasons[kept]
