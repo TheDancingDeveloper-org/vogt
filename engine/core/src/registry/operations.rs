@@ -739,6 +739,14 @@ pub fn build_operations() -> Vec<Operation> {
             CliBinding::new(&["session", "wait-any"]),
         ),
         Operation::new(
+            "session.report",
+            "Post this session's short typed report — kind progress, result, question or blocker — with summary, branch/sha/pr, checks run, blockers and next step. Shown as the latest report on session_list/session_sweep/session_digest, raised in the Inbox and left as a note on the work item (the session's bound item unless `work_item` names one). Post a `result` when the deliverable is done. Omit `id` from inside a session Vogt started.",
+            Scope::WorkWrite,
+            true,
+            HttpRoute::new(HttpMethod::Post, "/sessions/report"),
+            CliBinding::new(&["session", "report"]),
+        ),
+        Operation::new(
             "session.report_blocked",
             "Report that this session's agent is blocked on a person: what it needs (`blocker`) and the concrete `items` to do. Shown on session_list/session_screen, raised in the Inbox and pushed; drivers stop re-prompting. Omit `id` from inside a session Vogt started. Clear with session_report_unblocked.",
             Scope::WorkWrite,

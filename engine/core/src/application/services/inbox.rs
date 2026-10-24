@@ -22,7 +22,7 @@ use crate::application::services::{context_parts, dispatch, now_of, write_contex
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{
     Clock, CodingSession, DriftProposal, IdFactory, InboxTriage, Moment, Observation, Project,
-    SessionGrant, Sweep, TriageState, WorkItem,
+    SessionGrant, SessionReport, Sweep, TriageState, WorkItem,
 };
 use crate::decisions::{self, digest_of};
 use crate::errors::VogtError;
@@ -30,6 +30,7 @@ use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
 
 const MAX_SCAN: i64 = 10_000;
+const REPORT_SCAN: i64 = 500;
 /// Bound overlays considered per read. Python's `ci_watch.MAX_BOUND`.
 const MAX_BOUND: i64 = 500;
 const KIND_TASK_RUN: &str = "agent_task.run";
@@ -759,6 +760,17 @@ where
     for proposal in view.list_drift(Some("open"), None, None, MAX_SCAN)? {
         entries.push(drift_entry(view, &proposal, &projects)?);
     }
+    let mut seen_reports = BTreeSet::new();
+    for row in view.list_session_reports(REPORT_SCAN)? {
+        let key = row
+            .engine_session_id
+            .clone()
+            .unwrap_or_else(|| row.id.clone());
+        if !seen_reports.insert(key) {
+            continue;
+        }
+        entries.push(report_entry(view, &row, &projects)?);
+    }
 
     Ok((projects, entries))
 }
@@ -1099,6 +1111,55 @@ fn action_of(kind: &str, fields: Value) -> Value {
         }
     }
     action
+}
+
+fn report_entry(
+    view: &impl ReadView,
+    row: &SessionReport,
+    projects: &BTreeMap<String, Project>,
+) -> Result<Value, VogtError> {
+    let report = crate::application::session_report::view_of(view, row)?;
+    let item = match row.work_item_id.as_deref() {
+        Some(id) => view.work_item_by_id(id)?,
+        None => None,
+    };
+    let project = item
+        .as_ref()
+        .and_then(|item| item.project_id.as_deref())
+        .and_then(|id| projects.get(id));
+    let reporter = report.get("reporter").and_then(Value::as_str);
+    let who = reporter
+        .or(row.engine_session_id.as_deref())
+        .unwrap_or("a session");
+    let title = truncate(&format!("Report ({}) from {who}", row.kind), 200);
+    let summary = truncate(&crate::application::session_report::one_line(&report), 1000);
+    let kind = format!("session.report.{}", row.kind);
+    let actor = ActorClass {
+        login: reporter.map(str::to_string),
+        kind: Some(actors::ActorKind::Bot),
+        relation: actors::ActorRelation::OrgMember,
+    };
+    let value = entry(EntrySpec {
+        entry_key: format!("agent:report:{}", row.id),
+        source: "agent",
+        kind: &kind,
+        occurred_at: Some(row.created_at),
+        observed_at: None,
+        title: &title,
+        summary: &summary,
+        project_slug: project.map(|project| project.slug.as_str()),
+        work_item_ref: report.get("work_item").and_then(Value::as_str),
+        source_subject_key: &row.id,
+        source_url: None,
+        trust_state: "unverified".to_string(),
+        freshness: "live",
+        action: row.engine_session_id.as_deref().map_or(Value::Null, |id| {
+            action_of("session", json!({"session_id": id}))
+        }),
+        actor: &actor,
+        extra: json!({"provisional": true, "session_id": row.engine_session_id, "evidence_snapshot": report}),
+    });
+    Ok(value)
 }
 
 /// CI settled on a branch a work item is bound to — pass or fail.
