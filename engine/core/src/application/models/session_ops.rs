@@ -943,6 +943,78 @@ pub struct ReportUnblockedParams {
     pub reason: String,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionReportParamsKind {
+    Progress,
+    Result,
+    Question,
+    Blocker,
+}
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionReportParams {
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub id: Option<String>,
+    pub kind: SessionReportParamsKind,
+    #[schemars(length(min = 1, max = 2000))]
+    pub summary: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub work_item: Option<String>,
+    #[serde(default)]
+    #[schemars(length(max = 300), schema_with = "optional_string")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    #[schemars(length(max = 80), schema_with = "optional_string")]
+    pub sha: Option<String>,
+    #[serde(default)]
+    #[schemars(length(max = 300), schema_with = "optional_string")]
+    pub pr: Option<String>,
+    #[serde(default)]
+    #[schemars(extend("maxItems" = 30), extend("x-keep-default" = true))]
+    pub checks: Vec<String>,
+    #[serde(default)]
+    #[schemars(extend("maxItems" = 20), extend("x-keep-default" = true))]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    #[schemars(length(max = 1000), schema_with = "optional_string")]
+    pub next_step: Option<String>,
+    #[schemars(length(min = 1))]
+    pub reason: String,
+}
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionReportView {
+    pub id: String,
+    pub kind: String,
+    pub summary: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub work_item: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub sha: Option<String>,
+    #[serde(default)]
+    pub pr: Option<String>,
+    #[serde(default)]
+    pub checks: Vec<String>,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    pub next_step: Option<String>,
+    #[serde(default)]
+    pub reporter: Option<String>,
+    pub created_at: String,
+}
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionReportResult {
+    pub report: SessionReportView,
+}
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentCliListParams {
     /// Also ask npm for each package's latest version; the engine caches the answer for an hour and leaves it out when npm does not answer.

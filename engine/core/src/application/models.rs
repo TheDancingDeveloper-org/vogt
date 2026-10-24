@@ -136,6 +136,7 @@ pub const DERIVED: &[&str] = &[
     "session.wait",
     "session.changes",
     "session.wait_any",
+    "session.report",
     "session.report_blocked",
     "session.report_unblocked",
     "agent_cli.list",
@@ -774,6 +775,11 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "session.wait_any",
             schema_of::<session_ops::SessionWaitAnyParams>(),
             schema_of::<session_ops::SessionWaitAnyResult>(),
+        ),
+        (
+            "session.report",
+            schema_of::<session_ops::SessionReportParams>(),
+            schema_of::<session_ops::SessionReportResult>(),
         ),
         (
             "session.report_blocked",
