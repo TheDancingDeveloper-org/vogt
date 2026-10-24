@@ -73,9 +73,13 @@ jobs:
       python: ${{ steps.classify.outputs.python }}
       engine: ${{ steps.classify.outputs.engine }}
       rust: ${{ steps.classify.outputs.rust }}
+      rust_full: ${{ steps.classify.outputs.rust_full }}
+      rust_packages: ${{ steps.classify.outputs.rust_packages }}
       web: ${{ steps.classify.outputs.web }}
       full: ${{ steps.classify.outputs.full }}
       voice: ${{ steps.classify.outputs.voice }}
+      voice_full: ${{ steps.classify.outputs.voice_full }}
+      voice_packages: ${{ steps.classify.outputs.voice_packages }}
       mobile: ${{ steps.classify.outputs.mobile }}
       any: ${{ steps.classify.outputs.any }}
     steps:
@@ -98,9 +102,20 @@ jobs:
               echo "python=true"
               echo "engine=true"
               echo "rust=true"
+              echo "rust_full=true"
+              echo "rust_packages="
               echo "web=true"
               echo "voice=true"
+              echo "voice_full=true"
+              echo "voice_packages="
               echo "mobile=true"
+              # A shared file is a change to every half, so the jobs that
+              # narrow themselves on a PR (the Python matrix, the core-alone
+              # job) run their full form too. This must be set here rather
+              # than only on the non-PR path below: a PR touching a shared
+              # file reaches this function having already written
+              # `full=false`, and only the last write to an output wins.
+              echo "full=true"
               echo "any=true"
             } >> "$GITHUB_OUTPUT"
           }
@@ -171,11 +186,64 @@ jobs:
           # voice-policy test reads the capability matrix), so the document is
           # an engine input too.
           matches '^docs/ENGINE\.md$' && rust=true
+
+          # Which crates a PR has to check. A member directory scopes to that
+          # package; anything else under `engine/` (the workspace manifest,
+          # the lockfile, nextest config, Dockerfiles, workspace docs) or a
+          # non-PR run checks the whole workspace. `docs/ENGINE.md` is
+          # compiled into the server crate by `include_str!`.
+          rust_full=false
+          rust_packages=""
+          if [ "$rust" = true ]; then
+            if matches '^engine/server/'; then
+              rust_packages="$rust_packages vogt-engine-server"
+            fi
+            if matches '^engine/contract/'; then
+              rust_packages="$rust_packages vogt-engine-contract"
+            fi
+            if matches '^docs/ENGINE\.md$'; then
+              rust_packages="$rust_packages vogt-engine-server"
+            fi
+            while IFS= read -r path; do
+              case "$path" in
+                engine/server/*|engine/contract/*) ;;
+                engine/*) rust_full=true; break ;;
+              esac
+            done <<< "$files"
+            if [ -n "$rust_packages" ]; then
+              # shellcheck disable=SC2086  # deliberate word splitting
+              rust_packages="$(printf '%s\n' $rust_packages | sort -u | tr '\n' ' ')"
+              rust_packages="${rust_packages% }"
+            fi
+          fi
           engine=false
           if [ "$rust" = true ] || [ "$web" = true ]; then
             engine=true
           fi
           matches '^voice/' && voice=true
+          # The voice workspace follows the same rule: a member directory
+          # scopes to its package, and every other voice path (workspace
+          # manifest, lockfile, docs, build tooling) checks the workspace.
+          voice_full=false
+          voice_packages=""
+          if [ "$voice" = true ]; then
+            for member in server stt tts models; do
+              if matches "^voice/$member/"; then
+                voice_packages="$voice_packages vogt-voice-$member"
+              fi
+            done
+            while IFS= read -r path; do
+              case "$path" in
+                voice/server/*|voice/stt/*|voice/tts/*|voice/models/*) ;;
+                voice/*) voice_full=true; break ;;
+              esac
+            done <<< "$files"
+            if [ -n "$voice_packages" ]; then
+              # shellcheck disable=SC2086  # deliberate word splitting
+              voice_packages="$(printf '%s\n' $voice_packages | sort -u | tr '\n' ' ')"
+              voice_packages="${voice_packages% }"
+            fi
+          fi
           # The shell wraps a remote URL, not the PWA bundle — `webDir` is
           # `mobile/web/`, a one-file offline fallback — so a `web/` change
           # does not imply an APK rebuild.
@@ -185,8 +253,12 @@ jobs:
             echo "python=$python"
             echo "engine=$engine"
             echo "rust=$rust"
+            echo "rust_full=$rust_full"
+            echo "rust_packages=$rust_packages"
             echo "web=$web"
             echo "voice=$voice"
+            echo "voice_full=$voice_full"
+            echo "voice_packages=$voice_packages"
             echo "mobile=$mobile"
           } >> "$GITHUB_OUTPUT"
 
@@ -217,6 +289,11 @@ jobs:
       # publishing major and minor tags, so `@v9` does not resolve. Renovate
       # bumps this line.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        # `auto` caches only on GitHub-hosted runners; these are self-hosted,
+        # so the cache is asked for explicitly and keyed on the lockfile.
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       # The self-hosted image preinstalls no language runtime.
       - name: install matrix Python
@@ -253,6 +330,11 @@ jobs:
       # and the demo acceptance test. Forge-less by construction:
       # nothing here provisions a token or a network, which is the first of
       # the two absence-modes the core must survive.
+      #
+      # Deliberately serial: the suite is bound by SQLite file I/O, not CPU
+      # (~275 s of ~291 s in the 2026-10 profile), and its tests bind sockets
+      # and spawn subprocesses, so xdist would trade a reliable run for a
+      # flaky one without buying wall clock. See docs/ci.md.
       - name: pytest
         run: uv run --no-sync pytest
 
@@ -270,6 +352,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: install Python
         run: uv python install 3.13
@@ -316,7 +401,13 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         with:
           workspaces: engine
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # A shared key is what makes a PR run restore the cache `main` (or
+          # `merge_group`) saved; without it the key includes the ref and
+          # every PR starts cold. Only `main` writes back, because a pull
+          # request's cache is never reused by another ref and the post-job
+          # save costs about two minutes.
+          shared-key: engine-ci
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # First: it needs nothing built, so it is the cheapest failure to reach.
       - name: cargo fmt
@@ -327,6 +418,9 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled()
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       # `rust-version` is a promise about the oldest toolchain that builds the
       # locked tree. CI builds with current stable, so nothing else would
@@ -589,11 +683,35 @@ jobs:
 
       # `-D warnings` because the engine's pipeline denied them, and a lint
       # that does not fail is a lint nobody reads.
+      # On a pull request that touches only one member, check that member:
+      # `--workspace` is the full form the queue and `main` use. A scope
+      # that resolved to nothing falls back to the workspace rather than
+      # silently checking whatever `cargo` considers the default members.
+      - name: resolve the Rust scope
+        id: scope
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
+        env:
+          FULL: ${{ needs.changes.outputs.rust_full }}
+          PACKAGES: ${{ needs.changes.outputs.rust_packages }}
+        run: |
+          set -euo pipefail
+          if [ "$FULL" = true ] || [ -z "$PACKAGES" ]; then
+            echo "args=--workspace" >> "$GITHUB_OUTPUT"
+          else
+            args=""
+            # shellcheck disable=SC2086  # the list is space-separated on purpose
+            for package in $PACKAGES; do
+              args="$args -p $package"
+            done
+            echo "args=$args" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: cargo clippy
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
         working-directory: engine
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked ${{ steps.scope.outputs.args }} --all-targets -- -D warnings
 
       # cargo-nextest runs each test in its own process, so a test that hangs
       # is terminated by `engine/.config/nextest.toml` (terminate-after) and
@@ -608,14 +726,14 @@ jobs:
           if ! cargo nextest --version 2>/dev/null | grep -Fq 'cargo-nextest 0.9.103'; then
             cargo install --locked cargo-nextest --version 0.9.103 --force
           fi
-          cargo nextest run --locked --workspace --no-fail-fast
+          cargo nextest run --locked ${{ steps.scope.outputs.args }} --no-fail-fast
 
       # nextest does not run doctests, so they keep their own step.
       - name: cargo test (doctests)
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
         working-directory: engine
-        run: cargo test --locked --workspace --doc
+        run: cargo test --locked ${{ steps.scope.outputs.args }} --doc
 
   voice:
     name: fmt, clippy, test (voice sidecar foundation)
@@ -635,7 +753,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: voice
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Same shared-key rule as the engine cache, kept separate so the
+          # two workspaces do not evict each other's dependency builds.
+          shared-key: voice-ci
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: install native voice build dependencies
         run: |
@@ -665,6 +786,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       # `rust-version` is a promise about the oldest toolchain that builds the
       # locked tree. CI builds with current stable, so nothing else would
@@ -673,13 +797,47 @@ jobs:
       - name: declared rust-version covers the lockfile
         run: uv run --no-project python scripts/check_rust_version.py voice
 
+      # Member paths scope to their package; the workspace manifest, lockfile
+      # and build tooling check the whole workspace, as do `merge_group` and
+      # `main`. An empty scope falls back to the workspace.
+      - name: resolve the voice scope
+        id: scope
+        env:
+          FULL: ${{ needs.changes.outputs.voice_full }}
+          PACKAGES: ${{ needs.changes.outputs.voice_packages }}
+        run: |
+          set -euo pipefail
+          if [ "$FULL" = true ] || [ -z "$PACKAGES" ]; then
+            echo "args=--workspace" >> "$GITHUB_OUTPUT"
+          else
+            args=""
+            # shellcheck disable=SC2086  # the list is space-separated on purpose
+            for package in $PACKAGES; do
+              args="$args -p $package"
+            done
+            echo "args=$args" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: cargo clippy
         working-directory: voice
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked ${{ steps.scope.outputs.args }} --all-targets --all-features -- -D warnings
 
-      - name: cargo test
+      # Nextest for the same reason as the engine: a hanging test is killed by
+      # the workspace's nextest config instead of holding the job to its
+      # timeout, and every failure is listed in one round.
+      - name: cargo nextest
         working-directory: voice
-        run: cargo test --locked --workspace
+        run: |
+          set -euo pipefail
+          if ! cargo nextest --version 2>/dev/null | grep -Fq 'cargo-nextest 0.9.103'; then
+            cargo install --locked cargo-nextest --version 0.9.103 --force
+          fi
+          cargo nextest run --locked ${{ steps.scope.outputs.args }} --no-fail-fast
+
+      # nextest does not run doctests, so they keep their own step.
+      - name: cargo test (doctests)
+        working-directory: voice
+        run: cargo test --locked ${{ steps.scope.outputs.args }} --doc
 
   android:
     name: the Android shell assembles

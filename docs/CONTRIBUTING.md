@@ -83,6 +83,13 @@ project space. Security reports go to the channel in
   ticket number is not a reason: the commit message and the PR description
   state the problem and the behaviour change in prose, so a reader without
   access to any tracker can follow the decision.
+- Run the gates for what you touched before you push, not the whole suite.
+  `scripts/check.sh <half>` runs a whole half; a narrower command is better
+  still — the test file you changed (`uv run pytest tests/test_<area>.py
+  --no-cov`), the crate you changed (`cargo nextest run -p <crate>` from
+  `engine/`), the component you changed (`pnpm vitest run <file>` from `web/`).
+  The merge queue runs everything against the exact tree `main` will become,
+  so repeating it locally buys no signal and costs the runner time.
 - Do not add compatibility aliases for identifiers a change renames. No
   released installation depends on the older names in the tree; remove them.
 
@@ -134,8 +141,10 @@ The script does not run everything. Run these yourself when they apply:
   it does not fetch external URLs.
 - **Product version.** `uv run python scripts/check_product_version.py`
   confirms `pyproject.toml`, `src/vogt/__init__.py`, `web/package.json`,
-  `mobile/package.json` and the workflows agree on one version; a release bump
-  touches all of them. CI passes the expected version as an argument.
+  `mobile/package.json` and the workflows agree on one version. Versions move
+  only at release: a feature or fix pull request does not bump them, and CI
+  asserts that the manifests agree with each other rather than that they
+  changed. A release bump is a release change and touches all of them.
 - **Voice sidecar.** `voice/` is its own Cargo workspace with native
   prerequisites (`voice/README.md`): `cargo fmt --all -- --check`,
   `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
@@ -370,10 +379,21 @@ built and embedded first, plus the first-screen bundle budget), `voice`,
 `android` (a debug APK against the sanitised Firebase placeholder) and
 `security` (no live Firebase configuration or API key is tracked).
 
+The engine and voice jobs scope clippy, nextest and doctests to the member a
+pull request changed (`-p <crate>`), and fall back to the whole workspace when
+the change cannot be attributed to one member or when running in the queue.
+Caches are shared per workspace and only `main` saves them. `pytest` stays
+serial by design: the suite is SQLite- and I/O-bound rather than CPU-bound and
+its tests bind sockets and spawn subprocesses, so `-n auto` would cost
+reliability without buying wall clock. [`docs/ci.md`](ci.md) explains both.
+
 The `ci` job at the end is the single gate: it succeeds trivially on a
 docs-only diff and fails whenever any half failed. **Required status checks on
-`main` are `ci` and `runner-policy`.** The `e2e` workflow (§5) is not
-required; it runs after a merge and nightly.
+`main` are `ci`, `dependency review` and `runner-policy`**; the short
+"How changes land" sequence is in [`docs/ci.md`](ci.md#how-changes-land). The `e2e` workflow
+(§5) is not required; it runs after a merge and nightly. The release dry run
+(§7, [`docs/ci.md`](ci.md#release-dry-run)) is advisory too: it rehearses the
+tag-time build on release-file pull requests and nightly.
 
 **Landing: the merge queue.** Push a branch and open a pull request. The PR
 gets only the fast, path-scoped checks above, so do not expect, or re-run by
