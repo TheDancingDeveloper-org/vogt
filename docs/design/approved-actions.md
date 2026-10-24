@@ -63,9 +63,11 @@ and rollback are code. Each type declares:
 
 | Field | Meaning |
 | --- | --- |
-| `name` | `forgejo.merge`, `komodo.deploy`, `tailscale.acl.apply`, `tailscale.device.tag`. |
+| `name` | `forgejo.merge`, `komodo.deploy`, `proxmox.apply`, `ansible.apply`, `tailscale.acl.apply`, `tailscale.device.tag`. |
 | `params_schema` | A JSON schema. Every field is required or has a stated default, `additionalProperties: false`. Free text is allowed only in `reason`. |
-| `risk` | `standard` or `person_only`. A `person_only` type can never be approved by a delegation (§1.4). Every `tailscale.*` type is `person_only`, and so is any request whose target matches the deployment's prod pattern. |
+| `risk` | The type's base risk, `standard` or `person_only`. A request's *effective* risk can only be raised from it, never lowered (§1.5). Every `tailscale.*` type is `person_only`, and so is any request whose target matches the deployment's prod pattern. |
+| `classify(params, plan)` | Computes the request's effective risk and `destructive` flag from its parameters and, where the type has one, the computed plan (§1.5). |
+| `target(params)` | The canonical target key the anti-splitting rules use (§1.6), e.g. `komodo:vogt-dev`, `forgejo:indexarr/ops#98`, `proxmox:root=proxmox`. |
 | `credential` | The engine-held credential the executor uses, by name (§3.5). |
 | `preconditions(params)` | Read-only checks the engine runs at execute time (§3.1). |
 | `execute(params)` | The one change. |
@@ -89,6 +91,9 @@ Core table `action_requests`, in the next free migration:
 | `params` | Canonical JSON (keys sorted, no whitespace), validated against the type's schema at request time. |
 | `params_digest` | `sha256(action ‖ 0x00 ‖ params)`. The approval binds to this digest (§6.2). |
 | `work_item` | `WI-n`. Required. The item must exist and be open. |
+| `target` | The type's `target(params)` key, stored so earlier outcomes on the same target can be found (§1.6). |
+| `risk`, `destructive` | The effective risk and destructive flag computed by `classify` at request time and again at execute time (§1.5). |
+| `supersedes` | Optional `act_…` id of an earlier denied, failed or rolled-back request on the same item and target that this one replaces. It must name such a request, or the request is refused (§1.6). |
 | `requester_session` | The `ses_…` id, taken from the engine relay, never from the body. |
 | `requester_principal` | The authenticated identity_ref of the relay. |
 | `reason` | Shown to the approver verbatim as untrusted text. ≤ 2000 characters. |
@@ -119,28 +124,87 @@ refuses every agent principal):
 | --- | --- |
 | `id` | `dlg_…`. |
 | `project` | The Vogt project the delegation applies to. A request is in scope when its `work_item` belongs to this project. |
-| `actions` | The action types oversight may approve, each `standard` risk. Naming a `person_only` type is refused. |
-| `constraints` | Per type, a narrowing of the parameters, e.g. `forgejo.merge: {repo: ["indexarr/ops"], style: ["rebase"]}`, `komodo.deploy: {stack: ["vogt-dev"]}`. A constraint can only narrow the schema. |
-| `approvers` | Which oversight sessions may approve: `any_oversight` (the WI-957 role, which only a person can assign) or listed `ses_…` ids. |
+| `actions` | The action types oversight may approve. Only `forgejo.merge`, `komodo.deploy` (non-prod) and `proxmox.apply` are delegable. Naming a `person_only` type is refused, and so is `ansible.apply` until a person decides it is delegable. |
+| `constraints` | Per type, a narrowing of the parameters, e.g. `forgejo.merge: {repo: ["indexarr/ops"], style: ["rebase"]}`, `komodo.deploy: {stack: ["vogt-dev"]}`, `proxmox.apply: {root: ["proxmox"]}`. A constraint can only narrow the schema. |
+| `approvers` | Which oversight sessions may approve: `any_oversight` (the WI-957 role, which only a person can assign) or listed `ses_…` ids. Either way, an overseer approves only requests from workers it started itself (below). |
 | `max_per_day` | A rate cap on delegated approvals. Default 20. |
 | `expires_at` | At most 30 days. No delegation is permanent. |
 | `created_by`, `reason` | The person who set it, and why. |
 
 An oversight session approves a request through a delegation with
-`action.decide` like a person would. The core checks four things: the approver
-is an oversight session listed by the delegation, the request is in the
-delegation's project, its type and parameters are within the constraints, and
-the type is not `person_only`. It also refuses three cases:
+`action.decide` like a person would. The core checks every one of these, and
+any failure means the request needs a person:
 
-- **Self-approval.** The approver is the requester.
-- **Approving the approver's own work.** The requester was started by the
-  approving oversight session for this item, and the delegation does not set
-  `allow_own_workers: true`. The default is `true`, because "oversight
-  approves its workers' steps" is the use case. The flag exists so a project
-  can require a *different* overseer.
-- **The prod pattern.** Any target matching the deployment's prod pattern
-  (`*prod*`, the same rule the Komodo MCP uses) is person-only, whatever the
-  delegation says.
+- **Own workers only** (decided 2026-10-24). The requester session's
+  `started_by_session` is the approving oversight session, read from the
+  engine's session record, never from the request. An overseer can't approve
+  a request from a worker another overseer started, from a session a person
+  started, or from itself. If the starting overseer is gone (stopped,
+  forgotten, or demoted from the oversight role), nobody inherits its
+  delegation: the worker's requests go to a person.
+- The approver is an oversight session the delegation lists.
+- The request is in the delegation's project, and its type and parameters are
+  within the constraints.
+- The request's **effective** risk is `standard` and it is not `destructive`
+  (§1.5). That covers the type, the prod pattern (`*prod*`, the same rule the
+  Komodo MCP uses) and the computed plan.
+- The request is not **routed to a person** by the anti-splitting rules (§1.6).
+
+### 1.5 Destructive requests
+
+"Destructive" is computed per request, not per type. Each executor's
+`classify` runs at request time, and again at execute time against the live
+plan. It sets `destructive: true`, and with it `risk: person_only`, when the
+request would delete or replace anything:
+
+- `proxmox.apply`: the saved plan has any `delete` or `replace` action
+  (including `create_before_destroy`). The engine computes this from
+  `tofu show -json` of the plan. It is never taken from the request.
+- `ansible.apply`: the play is not tagged `non_destructive` in the
+  inventory, or a `--check --diff` run reports a removed file, package, user
+  or service.
+- `komodo.deploy`: the new compose removes a service or a named volume that
+  the running stack has.
+- `forgejo.merge` with `delete_branch: true` is not destructive (the branch is
+  merged), but a merge into a protected branch other than the default is
+  `person_only`.
+- `tailscale.*`: always `person_only`.
+
+The core treats the computed classification as binding. An approval through
+a delegation is refused for a `person_only` or `destructive` request. If the
+execute-time classification is higher than the one approved, for example
+because the plan changed, the engine refuses with `risk_raised`, and the
+worker must request again.
+
+### 1.6 Refused requests and splitting
+
+A worker that is refused a whole action must not get it by asking for parts
+of it. A WI-2333 worker did that, splitting a refused action into smaller
+steps. Four rules close the workaround:
+
+- **Recorded by item and target.** Denied, failed, rolled-back and withdrawn
+  requests stay in `action_requests` with their `work_item` and `target`.
+  The engine also reports classifier refusals it can see (a
+  `session_report_blocked` that names an action type) as rows in state
+  `refused`.
+- **A re-request goes to a person.** A new request on the same
+  `(work_item, target)` within 24 h of a denied, failed, rolled-back or
+  refused one can't be approved through a delegation. The Inbox shows the
+  person the earlier requests and their outcomes beside the new one. Targets
+  match by prefix for narrower requests: `komodo:vogt-dev/service:a` matches a
+  refusal on `komodo:vogt-dev`. The window counts every session on the item,
+  so a second worker doesn't reset it.
+- **`supersedes` makes a re-request explicit.** A worker re-requesting after a
+  fix names the earlier request. That doesn't make it delegable, but the
+  approver can see it is a deliberate retry, not a quiet split.
+- **The classifier clause** (§5) forbids decomposing a refused or denied
+  action into narrower requests, component calls or sub-steps.
+
+*Test:* a worker denied `komodo.deploy stack=vogt-dev`, which then requests
+`komodo.deploy stack=vogt-dev services=[a]` and `services=[b]`, gets both
+requests routed to a person, with the denial shown. Neither is approvable by
+its overseer's delegation. The same holds when the narrower requests come
+from a second session on the same item.
 
 ## 2. CLI and API surface
 
@@ -260,7 +324,7 @@ ACTION_KOMODO_SECRET    <infra project> KOMODO_ACTIONS_API_SECRET  action
 ACTION_TAILSCALE_OAUTH  <infra project> TAILSCALE_ACL_OAUTH_CLIENT action
 ```
 
-Each is a **dedicated bot credential** with only the rights its executor needs:
+Oversight creates these in phase 2 and stores them in Infisical (decided 2026-10-24). Each is a **dedicated bot credential** with only the rights its executor needs:
 a Forgejo bot user with write on the named repos, a Komodo API key limited to
 deploy on non-prod stacks where Komodo allows it, and a Tailscale OAuth client
 with the `policy_file` and `devices` scopes. None is the operator's personal
@@ -289,7 +353,7 @@ phase 3). Merging `indexarr/ops` main is not a deploy, so this type stays
 | | |
 | --- | --- |
 | Params | `stack` (a Komodo stack name), `expected_commit` (optional: the ops repo SHA the stack should be at after `PullStack`), `services` (optional list) |
-| Risk | `standard`, and `person_only` when `stack` matches the prod pattern. Prod also requires `ENGINE_ACTION_KOMODO_ALLOW_PROD=1`, which is off by default, so a deployment opts in to engine-run prod deploys at all. |
+| Risk | `standard`, delegable, for non-prod stacks. `destructive` when the deploy removes a service or a named volume (§1.5). **Prod stacks are refused outright before phase 4**: the executor has no prod path until then. In phase 4 a prod deploy would be `person_only` and also need `ENGINE_ACTION_KOMODO_ALLOW_PROD=1`. |
 | Preconditions | The stack exists and is not mid-deploy. If `expected_commit` is set, the stack's repo resolves to it after a refresh. The stack's `env_diff` against the last successful deploy is recorded in the outcome as names and fingerprints only, never values. |
 | Before snapshot | The current image digests per service and the last successful deploy's update id. |
 | Execute | `DeployStack` (with `services` if given). |
@@ -297,7 +361,37 @@ phase 3). Merging `indexarr/ops` main is not a deploy, so this type stays
 | Rollback | Redeploy the before snapshot's digests (pinned), then verify again. A failed rollback ends `failed`, raises an Inbox entry of severity `high`, and leaves the stack as found. |
 | Dead-man | `0` by default. `verify` covers health. A stack may set a dead-man in its delegation constraint where an external smoke test must confirm. |
 
-### 4.3 `tailscale.acl.apply`
+### 4.3 `proxmox.apply`
+
+This is the OpenTofu apply that ops#98 (WI-2334) calls `tofu.apply
+root=proxmox`. The two names are the same type, and ops#98 should adopt
+`proxmox.apply`.
+
+| | |
+| --- | --- |
+| Params | `root` (an `infra/` root, default `proxmox`), `commit` (the ops `main` SHA the plan was made at), `plan_sha256` (the digest of the encrypted saved plan the pipeline uploaded) |
+| Risk | `standard`, delegable, when the plan has no delete or replace. `destructive` and `person_only` otherwise (§1.5). |
+| Preconditions | `main` of the ops repo is still at `commit`. The engine fetches the saved plan, checks its SHA-256 is `plan_sha256`, and decrypts it with the state key. `tofu show -json` lists no `delete` and no `replace`, unless a person approved. The plan's `prior_state` serial matches the live state's serial, so nobody applied since. |
+| Before snapshot | The state serial, and a copy of each touched VM's `qm config` (`/etc/pve/qemu-server/<id>.conf`). |
+| Execute | `tofu apply plan.tfplan`, the saved plan only. A plan the engine made itself is never applied. |
+| Verify | A fresh `tofu plan` at `commit` is empty. |
+| Rollback | Restore each touched VM's saved `qm config`. If that fails, raise an Inbox entry of severity `high`. A create is rolled back by a person (deleting is destructive). |
+| Dead-man | `0` |
+
+### 4.4 `ansible.apply`
+
+| | |
+| --- | --- |
+| Params | `play` (a role or playbook in `infra/hosts`), `hosts` (an inventory group or host), `commit` (the ops SHA), `check_sha256` (the digest of the `--check --diff` output the request was made from) |
+| Risk | `person_only` in phase 1. A play tagged `non_destructive` in the inventory can be made delegable by a person's decision. Destructive as in §1.5. |
+| Preconditions | `main` is at `commit`. A fresh `--check --diff` on the same hosts has digest `check_sha256`, so the change is the one reviewed. `--limit` resolves to the same host set. |
+| Before snapshot | The role's own backups (`.graft-bak` files, per ops#98 phase 3). |
+| Execute | `ansible-playbook --limit <hosts> <play>` at `commit`. |
+| Verify | A second `--check` run reports zero changes (idempotent). |
+| Rollback | The role's revert handlers, then a `--check` run again. |
+| Dead-man | 180 s for plays that touch `sshd`, the firewall or Tailscale, with Tailscale SSH as the out-of-band path. `0` otherwise. |
+
+### 4.5 `tailscale.acl.apply`
 
 | | |
 | --- | --- |
@@ -308,13 +402,13 @@ phase 3). Merging `indexarr/ops` main is not a deploy, so this type stays
 | Execute | `POST /api/v2/tailnet/-/acl` with `If-Match: expected_etag`. |
 | Verify | The live ETag changed, and the body's digest equals `policy_sha256`. |
 | Rollback | Re-post the before body with `If-Match` on the new ETag. |
-| Dead-man | **600 s.** The person who approved, or the requester's check over the tailnet, must `confirm` within ten minutes. Otherwise the engine restores the old policy. This is the guard against the change cutting off the path the confirmation would travel. |
+| Dead-man | **180 s**, the same as ops#98's `bin/deadman-revert.sh`. The person who approved, or the requester's check over the tailnet, must `confirm` within three minutes. Otherwise the engine restores the old policy. This is the guard against the change cutting off the path the confirmation would travel. |
 
 The Inbox entry for an ACL apply shows the **diff** between the live policy
 and the proposed one, rendered by the engine from the two bodies. A digest
 alone isn't reviewable.
 
-### 4.4 `tailscale.device.tag`
+### 4.6 `tailscale.device.tag`
 
 | | |
 | --- | --- |
@@ -324,9 +418,9 @@ alone isn't reviewable.
 | Execute | `POST /api/v2/device/{id}/tags` with the resulting set. |
 | Verify | The device's tags read back as the resulting set. |
 | Rollback | Re-post `expected_tags`. |
-| Dead-man | 600 s, as for `acl.apply`, because a tag change moves the node across ACL rules. |
+| Dead-man | 180 s, as for `acl.apply`, because a tag change moves the node across ACL rules. |
 
-### 4.5 Later types
+### 4.7 Later types
 
 `github.merge` follows `forgejo.merge`, with a GitHub App installation token
 and the repository's required checks or merge queue. `infisical.set` overlaps
@@ -355,7 +449,12 @@ The rule goes in `engine/deploy/driven-session-settings.json` under
 > fetching or using an action credential, or treating a request's approval as
 > permission for anything other than the engine executing it. A denied,
 > failed or rolled-back request is reported with `session_report_blocked`,
-> not worked around.
+> not worked around. **A refused or denied action must never be split** into
+> narrower requests, component calls or sub-steps that together achieve it
+> (for example, deploying a denied stack service by service, or applying a
+> denied plan resource by resource). After a refusal, the only routes are a
+> new request for the whole action that names the refused one in
+> `--supersedes`, or `session_report_blocked`.
 
 The protected-scope defaults stay as they are for any action done by hand.
 
@@ -443,33 +542,42 @@ including the refusal paths. `force_merge` and `--admin` have no code path.
 *Threat:* a worker floods the Inbox with requests.
 *Mitigation:* a per-session rate limit of 10 an hour at the relay, at most 3
 pending requests per session, and the parameters are schema-validated before
-any row is written.
+any row is written. These limits also cap fan-out: the pending count is
+kept per `(work_item, target)` across every session on the item, as well as
+per session, so splitting across workers doesn't buy more requests.
 
 ## 7. Phased rollout (operator accepted 1–4)
 
 | Phase | Content | Layers |
 | --- | --- | --- |
-| **1. Engine** | The action-type registry and `GET /api/actions/types`. The request relay. The `action_requests` table and migration. `action.request` / `_decide` (person only) / `_withdraw` / `_list` / `_get`. Inbox entry with parameters and Approve/Deny. Stack-secret `execute` and `confirm`. The `action` manifest flag. Executors for `forgejo.merge`, `komodo.deploy` (non-prod), `tailscale.acl.apply` and `tailscale.device.tag`. `vogt-agent-auth actions\|request\|request-status\|request-withdraw`. Wake on completion. | core, engine, PWA, deploy |
-| **2. Policy** | `action_delegations` and `action.delegation_*` (person only). Delegated approval by oversight. The "Approved Action Request" classifier rule and the `permissions.allow` lines in the driven-session settings. Ops overlay: bot credentials and `action` manifest lines. | core, deploy, ops |
+| **1. Engine** | The action-type registry and `GET /api/actions/types`. The request relay. The `action_requests` table and migration, with `target`, `risk`, `destructive` and `supersedes`. Refused-request recording and person routing (§1.6), with the splitting test. `action.request` / `_decide` (person only) / `_withdraw` / `_list` / `_get`. Inbox entry with parameters and Approve/Deny. Stack-secret `execute` and `confirm`. The `action` manifest flag. Executors for `forgejo.merge`, `komodo.deploy` (non-prod), `proxmox.apply`, `ansible.apply`, `tailscale.acl.apply` and `tailscale.device.tag`. `vogt-agent-auth actions\|request\|request-status\|request-withdraw`. Wake on completion. | core, engine, PWA, deploy |
+| **2. Policy** | `action_delegations` and `action.delegation_*` (person only). Delegated approval by oversight. The "Approved Action Request" classifier rule and the `permissions.allow` lines in the driven-session settings. Oversight creates the bot credentials and stores them in Infisical. Ops overlay: the `action` manifest lines. | core, deploy, ops |
 | **3. Retire personal-token merges** | Oversight's `indexarr/ops` merges move to `forgejo.merge` under a delegation for `indexarr/ops`, `style: rebase`. The operator's personal Forgejo token is removed from oversight's reach. | ops, process |
-| **4. Expand** | `github.merge`, `infisical.set` (engine-generated values only), the prod `komodo.deploy` opt-in, and further types on demand. Each new type is a code change with its own review. | engine |
+| **4. Expand** | `github.merge`, `infisical.set` (engine-generated values only), the prod `komodo.deploy` opt-in (not before this phase), and further types on demand. Each new type is a code change with its own review. | engine |
 
 The classifier rule ships in phase 2, not phase 1. Phase 1 is exercised by
 people and oversight sessions, which have bypass, so the executors are proven
 on dev before driven workers can reach them.
 
-## 8. Decisions for the operator
+## 8. Decisions
 
-1. **Engine-run prod deploys.** Should `komodo.deploy` ever run against prod
-   stacks, as person-only with `ENGINE_ACTION_KOMODO_ALLOW_PROD=1`? Or does
-   prod stay on the Woodpecker `vogt-estate` lanes with no engine path? The
-   recommendation is to keep prod out until phase 4.
-2. **Bot credentials.** Phase 2 needs a Forgejo bot user, a scoped Komodo API
-   key and a Tailscale OAuth client minted and stored in Infisical. This is
-   operator work in the ops overlay.
-3. **`allow_own_workers` default.** Should oversight be able to approve
-   requests from workers it started itself (recommended: yes, since that is the
-   use case), or should a *different* overseer be required by default?
+Decided by the operator on 2026-10-24:
+
+1. **Oversight approval.** Oversight may approve requests from workers it
+   started, within a standing delegation for the non-destructive types
+   `forgejo.merge`, `komodo.deploy` on non-prod stacks and `proxmox.apply`
+   with no deletes. `tailscale.*`, prod and anything destructive stay
+   person-only (§1.4, §1.5).
+2. **Bot credentials.** Oversight creates the phase-2 credentials (a Forgejo
+   bot user, a scoped Komodo API key, a Tailscale OAuth client) and stores
+   them in Infisical (§3.5).
+3. **Prod `komodo.deploy`.** Not allowed before phase 4. Whether it is
+   allowed at all is decided then (§4.2).
+
+Still open:
+
 4. **Identity mode.** As with grants (oversight-grants question 6), the
    guarantee here is real only in brokered mode with a separate session uid.
    Does adopting approved actions change the case for leaving identity mode?
+5. **Delegable Ansible plays.** Should a play tagged `non_destructive` become
+   delegable (§4.4), or does `ansible.apply` stay person-only?
