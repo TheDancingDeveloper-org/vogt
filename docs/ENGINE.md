@@ -4457,6 +4457,11 @@ byte length — never value. `writable` widens blast radius only to the entries 
 operator pre-authorised, and every overwrite is in the audit log. The same
 honest caveat applies.
 
+**Approved actions (WI-2331, design only).** A proposed extension of the
+grant pattern from credentials to engine-executed, person-approved
+infrastructure actions (`vogt-agent-auth request`). Nothing is implemented;
+see [`design/approved-actions.md`](design/approved-actions.md).
+
 **Approved grants: one secret, one session, until a time (WI-973).** The
 manifest is fixed at deploy time, and changing it cycles the pod. A grant is
 the runtime counterpart: a person approves, in the Inbox, one named secret for
