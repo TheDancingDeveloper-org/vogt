@@ -147,6 +147,22 @@ pub fn build_operations() -> Vec<Operation> {
             CliBinding::new(&["project", "transition"]),
         ),
         Operation::new(
+            "charter.get",
+            "Read the charter (standing instructions injected into every session brief) of the workspace, a project or an initiative (scope + ref slug). history=true adds earlier versions.",
+            Scope::Read,
+            false,
+            HttpRoute::new(HttpMethod::Get, "/charters"),
+            CliBinding::new(&["charter", "get"]),
+        ),
+        Operation::new(
+            "charter.set",
+            "Set the charter of the workspace, a project or an initiative: Markdown injected into every session brief started there (workspace, then project, then initiative, then the brief) and into Codex developer_instructions. Writes the next version; empty body clears; optional expected_version.",
+            Scope::WorkWrite,
+            true,
+            HttpRoute::new(HttpMethod::Post, "/charters"),
+            CliBinding::new(&["charter", "set"]),
+        ),
+        Operation::new(
             "work.create",
             "Create a work item (feature / bug / chore / question).",
             Scope::WorkWrite,

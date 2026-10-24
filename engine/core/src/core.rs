@@ -2022,6 +2022,19 @@ pub struct ActorPreference {
     pub updated_at: Moment,
 }
 
+/// One version of a scope's standing instructions. Ports `Charter`.
+/// Append-only: the current charter is the highest version for the scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Charter {
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub version: i64,
+    pub body: String,
+    pub author_actor_id: String,
+    pub created_at: Moment,
+    pub reason: String,
+}
+
 /// One reference from a project to another. Ports `DepRef`. No lockfile is
 /// parsed and no package version is resolved.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

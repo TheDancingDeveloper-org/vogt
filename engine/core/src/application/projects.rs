@@ -17,8 +17,8 @@ use crate::application::resolve;
 use crate::application::services::{context_parts, next_id, now_of};
 use crate::application::writes::{audited_write, WriteContext, WriteOutcome};
 use crate::core::{
-    py_repr, slugify, Clock, ComplianceStatus, IdFactory, LinkState, Project, ProjectLifecycle,
-    TrustState, LOCAL_SCHEME,
+    py_repr, slugify, ActorKind, Charter, Clock, ComplianceStatus, IdFactory, LinkState, Project,
+    ProjectLifecycle, TrustState, LOCAL_SCHEME,
 };
 use crate::decisions::{default_scaffold, roll_up, Scaffold, NOT_APPLICABLE};
 use crate::errors::VogtError;
@@ -1465,4 +1465,235 @@ mod tests {
             "{error}"
         );
     }
+}
+
+// --- charters (WI-2038 / WI-2141) ------------------------------------------
+
+/// A charter is a few standing rules, not a document.
+const CHARTER_MAX_CHARS: usize = 8000;
+const CHARTER_SET: &str = "charter.set";
+const CHARTER_SET_EVENT: &str = "charter.set";
+
+#[derive(Debug, Deserialize)]
+struct CharterGetParams {
+    scope: String,
+    #[serde(default)]
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+    #[serde(default)]
+    history: bool,
+    #[serde(default = "default_charter_limit")]
+    limit: i64,
+}
+
+fn default_charter_limit() -> i64 {
+    20
+}
+
+#[derive(Debug, Deserialize)]
+struct CharterSetParams {
+    scope: String,
+    #[serde(default)]
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+    body: String,
+    #[serde(default)]
+    expected_version: Option<i64>,
+    reason: String,
+}
+
+struct CharterScope {
+    kind: String,
+    id: String,
+    reference: Option<String>,
+}
+
+fn charter_scope(
+    view: &impl ReadView,
+    kind: &str,
+    reference: Option<String>,
+) -> Result<CharterScope, VogtError> {
+    match kind {
+        "workspace" => {
+            if reference.as_deref().is_some_and(|r| !r.is_empty()) {
+                return Err(VogtError::InvalidRequest(
+                    "the workspace charter takes no ref".to_string(),
+                ));
+            }
+            Ok(CharterScope {
+                kind: kind.to_string(),
+                id: String::new(),
+                reference: None,
+            })
+        }
+        "project" | "initiative" => {
+            let Some(slug) = reference.filter(|r| !r.trim().is_empty()) else {
+                return Err(VogtError::InvalidRequest(format!(
+                    "a {kind} charter needs ref (the {kind} slug)"
+                )));
+            };
+            let id = if kind == "project" {
+                resolve::project(view, &slug)?.id
+            } else {
+                resolve::initiative(view, &slug)?.id
+            };
+            Ok(CharterScope {
+                kind: kind.to_string(),
+                id,
+                reference: Some(slug),
+            })
+        }
+        _ => Err(VogtError::InvalidRequest(format!(
+            "scope must be workspace, project or initiative, not {}",
+            py_repr(kind)
+        ))),
+    }
+}
+
+fn charter_json(
+    view: &impl ReadView,
+    scope: &CharterScope,
+    row: &Charter,
+) -> Result<Value, VogtError> {
+    let author = view.actor_by_id(&row.author_actor_id)?;
+    let author_ref = author
+        .as_ref()
+        .map(|actor| actor.identity_ref.clone())
+        .unwrap_or_else(|| row.author_actor_id.clone());
+    Ok(json!({
+        "scope": scope.kind,
+        "ref": scope.reference,
+        "version": row.version,
+        "body": row.body,
+        "author": author_ref,
+        "created_at": row.created_at.to_json(),
+        "reason": row.reason,
+    }))
+}
+
+pub fn charter_get_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| charter_get(ctx, params))
+}
+
+pub fn charter_set_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| charter_set(ctx, params))
+}
+
+fn charter_get<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params: CharterGetParams = parse(params)?;
+    if params.limit < 1 || params.limit > 200 {
+        return Err(VogtError::InvalidRequest(
+            "limit must be between 1 and 200".to_string(),
+        ));
+    }
+    let view = ctx.declared.read()?;
+    let scope = charter_scope(&view, &params.scope, params.reference)?;
+    let current = view.charter(&scope.kind, &scope.id)?;
+    let history = if params.history {
+        view.charter_history(&scope.kind, &scope.id, params.limit)?
+            .iter()
+            .map(|row| charter_json(&view, &scope, row))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    let current = match current {
+        Some(row) => Some(charter_json(&view, &scope, &row)?),
+        None => None,
+    };
+    Ok(json!({"current": current, "history": history}))
+}
+
+fn charter_set<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params: CharterSetParams = parse(params)?;
+    let body_text = params.body.trim().to_string();
+    if body_text.chars().count() > CHARTER_MAX_CHARS {
+        return Err(VogtError::InvalidRequest(format!(
+            "a charter is at most {CHARTER_MAX_CHARS} characters"
+        )));
+    }
+    if params.scope == "workspace" && ctx.principal.kind == ActorKind::Agent {
+        return Err(VogtError::PersonRequired(format!(
+            "the workspace charter reaches every session on every project, so only a person sets it, not an agent ({})",
+            ctx.principal.identity_ref
+        )));
+    }
+    let mut writing = write_of(ctx);
+    let clock = std::sync::Arc::clone(&ctx.clock);
+    set_charter_write(
+        &mut writing,
+        params.scope,
+        params.reference,
+        body_text,
+        params.expected_version,
+        &params.reason,
+        clock,
+    )
+}
+
+fn set_charter_write<C: Clock + 'static, I: IdFactory + 'static>(
+    writing: &mut WriteContext<'_, C, I, SqliteDeclaredStore<C, I>>,
+    scope_kind: String,
+    reference: Option<String>,
+    body_text: String,
+    expected_version: Option<i64>,
+    reason: &str,
+    clock: std::sync::Arc<std::sync::Mutex<C>>,
+) -> Result<Value, VogtError> {
+    audited_write(writing, CHARTER_SET, reason, |txn, actor| {
+        let scope = charter_scope(txn, &scope_kind, reference.clone())?;
+        let existing = txn.charter(&scope.kind, &scope.id)?;
+        let current = existing.as_ref().map(|row| row.version).unwrap_or(0);
+        if let Some(expected) = expected_version {
+            if expected != current {
+                return Err(VogtError::CharterVersionConflict(format!(
+                    "the {} charter is at version {current}, not {expected}; re-read it and apply the change on top of the current text",
+                    scope.kind
+                )));
+            }
+        }
+        let charter = Charter {
+            scope_kind: scope.kind.clone(),
+            scope_id: scope.id.clone(),
+            version: current + 1,
+            body: body_text.clone(),
+            author_actor_id: actor.id.clone(),
+            created_at: clock
+                .lock()
+                .expect("the shared clock is not poisoned")
+                .now(),
+            reason: reason.to_string(),
+        };
+        let view = charter_json(txn, &scope, &charter)?;
+        let payload = json!({
+            "scope_kind": charter.scope_kind,
+            "scope_id": charter.scope_id,
+            "version": charter.version,
+            "body": charter.body,
+            "author_actor_id": charter.author_actor_id,
+            "created_at": charter.created_at.to_json(),
+            "reason": charter.reason,
+        });
+        txn.insert_charter(&charter)?;
+        let summary = json!({
+            "scope": scope.kind,
+            "ref": scope.reference,
+            "version": charter.version,
+            "cleared": body_text.is_empty(),
+        });
+        Ok(WriteOutcome::new(
+            json!({"charter": view}),
+            "charter",
+            &format!("{}:{}", scope.kind, scope.id),
+            payload,
+            CHARTER_SET_EVENT,
+            summary,
+        ))
+    })
 }

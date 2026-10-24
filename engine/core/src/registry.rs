@@ -232,6 +232,8 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "project.list" => Some(crate::application::projects::list_op),
         "project.update" => Some(crate::application::projects::update_op),
         "project.transition" => Some(crate::application::projects::transition_op),
+        "charter.get" => Some(crate::application::projects::charter_get_op),
+        "charter.set" => Some(crate::application::projects::charter_set_op),
         "project.brief" => Some(crate::application::projects::brief_op),
         "place.metrics" => Some(crate::application::place::place_metrics_op),
         "engine.status" => Some(crate::application::services::engine_status::engine_status_op),

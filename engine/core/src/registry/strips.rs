@@ -15,6 +15,7 @@ pub static STRIPS: &[(&str, &str)] = &[
     ("project.import", "reason"),
     ("project.update", "reason"),
     ("project.transition", "reason"),
+    ("charter.set", "reason"),
     ("work.create", "title"),
     ("work.create", "reason"),
     ("work.update", "title"),

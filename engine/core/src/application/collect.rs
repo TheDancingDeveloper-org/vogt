@@ -920,6 +920,7 @@ impl ErrorName for VogtError {
             Self::InboxEntryNotFound(_) => "InboxEntryNotFound",
             Self::InvalidTriageState(_) => "InvalidTriageState",
             Self::PreferenceVersionConflict(_) => "PreferenceVersionConflict",
+            Self::CharterVersionConflict(_) => "CharterVersionConflict",
             Self::InvalidPreference(_) => "InvalidPreference",
             Self::InvalidSnooze(_) => "InvalidSnooze",
             Self::MissingReason(_) => "MissingReason",
