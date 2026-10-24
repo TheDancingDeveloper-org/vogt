@@ -782,6 +782,45 @@ const EVENT_POLL_LIMIT: u32 = 50;
 /// cursor, so nothing is skipped.
 const EVENT_POLL_MAX_PAGES: usize = 40;
 
+/// The seq of the newest event in the core's feed, or 0 when it is empty.
+///
+/// The feed has no "latest" read: `events.list` pages forward from a cursor,
+/// and `next_cursor` is the seq of the last row returned. This used to ask
+/// for one event after 0 and keep that cursor, which is the *oldest* event,
+/// so every engine start replayed the core's whole history onto the stream
+/// (81,000 events on prod, 2026-10-24; at the old 10/s ceiling a replay
+/// outlasted the time between restarts, which is why prod ran permanently
+/// behind). "Are there events after x?" is true below the head and false at
+/// or above it, so a doubling search then a bisection finds it in about
+/// 2·log2(head) one-event reads.
+async fn find_head<F, Fut>(mut fetch: F) -> std::result::Result<u64, String>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<(Vec<serde_json::Value>, u64), String>>,
+{
+    let mut has_after = async |after: u64| -> std::result::Result<bool, String> {
+        Ok(!fetch(after).await?.0.is_empty())
+    };
+    if !has_after(0).await? {
+        return Ok(0);
+    }
+    // Invariant: events exist after `lo`, none after `hi`.
+    let (mut lo, mut hi) = (0u64, 1u64);
+    while has_after(hi).await? {
+        lo = hi;
+        hi = hi.saturating_mul(2);
+    }
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if has_after(mid).await? {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(hi)
+}
+
 /// Read everything after `cursor`, page by page, up to `max_pages` pages.
 ///
 /// Returns the events in order and the cursor after the last one read. A
@@ -836,12 +875,16 @@ pub fn spawn_event_follower(state: Arc<AppState>) {
         return;
     }
     tokio::spawn(async move {
-        // Start at the head: ask for a page of one and keep only the cursor.
-        let mut cursor = match core.events_after(0, 1).await {
-            Ok((_, next)) => next,
-            Err(detail) => {
-                tracing::info!(%detail, "vogt event follower: following from 0");
-                0
+        // Start at the head. Retried rather than falling back to 0: the core
+        // usually restarts with the engine, and a cursor of 0 replays its
+        // whole history onto every open client (WI-2328).
+        let mut cursor = loop {
+            match find_head(|after| core.events_after(after, 1)).await {
+                Ok(head) => break head,
+                Err(detail) => {
+                    tracing::info!(%detail, "vogt event follower: head not readable yet, retrying");
+                    tokio::time::sleep(EVENT_POLL_INTERVAL).await;
+                }
             }
         };
         loop {
@@ -908,6 +951,56 @@ mod drain_tests {
                 .collect();
             std::future::ready(Ok((events, end.max(after))))
         }
+    }
+
+    /// A core whose feed holds seqs 1..=head, answering one-event reads.
+    fn one_after(head: u64, calls: &RefCell<u32>) -> impl FnMut(u64) -> Page + '_ {
+        move |after| {
+            *calls.borrow_mut() += 1;
+            let events = if after < head {
+                vec![json!({ "seq": after + 1 })]
+            } else {
+                vec![]
+            };
+            std::future::ready(Ok((events, after.max(after.min(head)))))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_head_is_the_newest_event_not_the_oldest() {
+        // The old start read one event after 0 and kept seq 1, so every
+        // engine start replayed 81,264 events on prod (WI-2328).
+        for head in [1, 2, 3, 7, 64, 65, 81_264] {
+            let calls = RefCell::new(0);
+            assert_eq!(
+                super::find_head(one_after(head, &calls)).await,
+                Ok(head),
+                "head {head}"
+            );
+            assert!(
+                *calls.borrow() <= 2 * (64 - head.leading_zeros()) + 2,
+                "head {head}: {} reads",
+                calls.borrow()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_feed_starts_at_zero() {
+        let calls = RefCell::new(0);
+        assert_eq!(super::find_head(one_after(0, &calls)).await, Ok(0));
+        assert_eq!(*calls.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_core_that_is_not_up_is_an_error_not_zero() {
+        let result = super::find_head(|_| {
+            std::future::ready(Err::<(Vec<serde_json::Value>, u64), _>(
+                "core away".to_string(),
+            ))
+        })
+        .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
