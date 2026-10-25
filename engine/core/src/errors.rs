@@ -20,6 +20,7 @@ pub enum VogtError {
     BypassRefused(String),
     RoleRefused(String),
     GrantRefused(String),
+    ReportRefused(String),
     /// An engine session names no person, and one is required (WI-983).
     PersonRequired(String),
     EngineOnly(String),
@@ -98,6 +99,7 @@ impl VogtError {
             | Self::BypassRefused(m)
             | Self::RoleRefused(m)
             | Self::GrantRefused(m)
+            | Self::ReportRefused(m)
             | Self::PersonRequired(m)
             | Self::EngineOnly(m)
             | Self::InvalidRequest(m)
@@ -150,6 +152,7 @@ impl VogtError {
             Self::BypassRefused(_) => "bypass_refused",
             Self::RoleRefused(_) => "role_refused",
             Self::GrantRefused(_) => "grant_refused",
+            Self::ReportRefused(_) => "report_refused",
             Self::PersonRequired(_) => "person_required",
             Self::EngineOnly(_) => "engine_only",
             Self::InvalidRequest(_) => "invalid_request",
@@ -215,6 +218,7 @@ impl VogtError {
             Self::BypassRefused(_)
             | Self::RoleRefused(_)
             | Self::GrantRefused(_)
+            | Self::ReportRefused(_)
             | Self::PersonRequired(_)
             | Self::EngineOnly(_) => 403,
             Self::InvalidRequest(_)
@@ -358,6 +362,7 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
         ("bypass_refused", 403),
         ("role_refused", 403),
         ("grant_refused", 403),
+        ("report_refused", 403),
         ("person_required", 403),
         ("engine_only", 403),
         ("invalid_request", 400),
@@ -412,6 +417,7 @@ mod tests {
             "bypass_refused" => VogtError::BypassRefused(message),
             "role_refused" => VogtError::RoleRefused(message),
             "grant_refused" => VogtError::GrantRefused(message),
+            "report_refused" => VogtError::ReportRefused(message),
             "person_required" => VogtError::PersonRequired(message),
             "engine_only" => VogtError::EngineOnly(message),
             "invalid_request" => VogtError::InvalidRequest(message),
@@ -477,7 +483,7 @@ mod tests {
 
     #[test]
     fn every_code_round_trips_with_its_status() {
-        assert_eq!(error_table().len(), 44);
+        assert_eq!(error_table().len(), 45);
         let mut seen = std::collections::BTreeSet::new();
         for (code, status) in error_table() {
             assert!(seen.insert(*code), "duplicate code {code}");

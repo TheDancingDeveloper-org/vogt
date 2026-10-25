@@ -6,6 +6,7 @@ use crate::application::services::{next_id, now_of};
 use crate::application::writes::{audited_write, validate_reason, WriteOutcome};
 use crate::core::{ActorKind, Clock, Comment, IdFactory, SessionReport, SessionReportFields};
 use crate::errors::VogtError;
+use crate::observability::redact;
 use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
 
 const OPERATION: &str = "session.report";
@@ -19,17 +20,19 @@ pub fn report_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
             "a report has a valid kind".to_string(),
         ));
     }
-    let summary = params
-        .get("summary")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
+    let summary = redact(
+        params
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim(),
+    );
     if summary.is_empty() {
         return Err(VogtError::InvalidRequest(
             "a report has a summary".to_string(),
         ));
     }
-    crate::with_ctx!(ctx, |ctx| report(ctx, &params, &reason, kind, summary))
+    crate::with_ctx!(ctx, |ctx| report(ctx, &params, &reason, kind, &summary))
 }
 
 pub(crate) fn one_line(report: &Value) -> String {
@@ -84,7 +87,7 @@ fn report<C: Clock + 'static, I: IdFactory + 'static>(
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
+            .map(redact)
     };
     let list = |name: &str| {
         params
@@ -96,14 +99,20 @@ fn report<C: Clock + 'static, I: IdFactory + 'static>(
                     .filter_map(Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .map(str::to_string)
+                    .map(redact)
                     .collect()
             })
             .unwrap_or_default()
     };
     let fields = SessionReportFields {
         branch: clean("branch"),
-        sha: clean("sha"),
+        // The SHA is a commit id, not text: it is left as given.
+        sha: params
+            .get("sha")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         pr: clean("pr"),
         checks: list("checks"),
         blockers: list("blockers"),
@@ -112,7 +121,12 @@ fn report<C: Clock + 'static, I: IdFactory + 'static>(
     let report_id = next_id(&ctx.id_factory, "rpt");
     let comment_id = next_id(&ctx.id_factory, "cmt");
     let now = now_of(&ctx.clock);
-    let wanted_work = clean("work_item");
+    let wanted_work = params
+        .get("work_item")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let mut writing = write_of(ctx);
     audited_write(&mut writing, OPERATION, reason, move |txn, actor| {
         let work_item_id = match wanted_work.as_deref() {
@@ -198,12 +212,12 @@ fn reporting_session<C: Clock, I: IdFactory>(
         wanted.to_string()
     };
     if own.is_some_and(|own| own != target) {
-        return Err(VogtError::InvalidRequest(
+        return Err(VogtError::ReportRefused(
             "a session reports only for itself".to_string(),
         ));
     }
     if own.is_none() && ctx.principal.kind == ActorKind::Agent {
-        return Err(VogtError::InvalidRequest(
+        return Err(VogtError::ReportRefused(
             "an agent that is not a session cannot report for one".to_string(),
         ));
     }

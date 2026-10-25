@@ -30,6 +30,10 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `ci_alert_tags` | `VOGT_CI_ALERT_TAGS` | list of strings | `v*` | behaviour |
 | `ci_watch_notify_sessions` | `VOGT_CI_WATCH_NOTIFY_SESSIONS` | boolean | `True` | behaviour |
 | `deploy_lanes` | `VOGT_DEPLOY_LANES` | list of `DeployLane` tables | *(empty)* | behaviour |
+| `usage_accounts` | `VOGT_USAGE_ACCOUNTS` | list of tables | `[]` | behaviour |
+| `usage_litellm_url` | `VOGT_USAGE_LITELLM_URL` | string, optional | *(unset)* | behaviour |
+| `usage_litellm_keys` | `VOGT_USAGE_LITELLM_KEYS` | list of tables | `[]` | behaviour |
+| `usage_daily_spend_alert_usd` | `VOGT_USAGE_DAILY_SPEND_ALERT_USD` | number, optional | *(unset)* | behaviour |
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `branch_binding_patterns` | `VOGT_BRANCH_BINDING_PATTERNS` | list of strings | `(?i)\bwi-?(?P<n>\d+)\b`, `(?i)\bgh-(?P<forge>\d+)\b` | behaviour |
 | `branch_binding_template` | `VOGT_BRANCH_BINDING_TEMPLATE` | string | `wi-{number}` | behaviour |
@@ -137,6 +141,22 @@ When CI finishes on a branch bound to a work item (`work.bind_branch`), type a o
 ### `deploy_lanes`
 
 Deployment lanes `deployed_versions` reports on, each a table with `name`, `project` (a registered slug), `branch` (default `main`), and a source: `receipt_repo` + `receipt_path` (a JSON receipt a deploy pipeline commits, read through the configured forge) and/or `version_url` (a running instance's public JSON version endpoint, e.g. Vogt's `/api/config`). Empty means the `deploy-lanes` collector is not registered and deployed versions are reported as not configured. A receipt whose status says the deploy or its smoke test failed raises an Inbox alert.
+
+### `usage_accounts`
+
+Provider accounts `usage.board` reports on, each a table with `name`, `agent` (`claude` or `codex`) and `dir` (that account's config directory). Read on request only: the newest limit and reset the account's own transcripts recorded. Empty, no account is reported.
+
+### `usage_litellm_url`
+
+Base URL of a LiteLLM proxy whose keys' spend `usage.board` reads through `/key/info`. Unset, no key spend is read.
+
+### `usage_litellm_keys`
+
+LiteLLM keys `usage.board` reports spend for: `name`, `key_env` (the environment variable holding the key) and an optional `daily_alert_usd`.
+
+### `usage_daily_spend_alert_usd`
+
+Default day-spend alert threshold, in USD, for every LiteLLM key without its own `daily_alert_usd`. Unset, no alert is raised.
 
 ### `marker_file_extensions`
 

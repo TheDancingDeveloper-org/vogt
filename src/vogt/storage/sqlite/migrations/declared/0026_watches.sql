@@ -1,4 +1,4 @@
--- 0027_watches — a session waits on an event instead of polling (WI-2036).
+-- 0026_watches — a session waits on an event instead of polling (WI-2036).
 --
 -- A watch names a trigger (a pull request's state, CI on a revision, a work
 -- item's state, another session ending) and the session to wake when it

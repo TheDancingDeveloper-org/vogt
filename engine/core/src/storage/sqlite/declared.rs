@@ -1343,7 +1343,7 @@ impl ReadView for SqliteReadView {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT id, actor_id, engine_session_id, work_item_id, kind, summary, fields, created_at \
+            "SELECT id, actor_id, engine_session_id, work_item_id, kind, summary, data, created_at \
              FROM session_reports WHERE engine_session_id IN ({placeholders}) \
              ORDER BY created_at DESC, id DESC"
         );
@@ -1366,7 +1366,7 @@ impl ReadView for SqliteReadView {
     fn list_session_reports(&self, limit: i64) -> Result<Vec<SessionReport>, VogtError> {
         many(
             &self.conn,
-            "SELECT id, actor_id, engine_session_id, work_item_id, kind, summary, fields, created_at FROM session_reports ORDER BY created_at DESC, id DESC LIMIT ?",
+            "SELECT id, actor_id, engine_session_id, work_item_id, kind, summary, data, created_at FROM session_reports ORDER BY created_at DESC, id DESC LIMIT ?",
             [limit],
             row_session_report,
         )
@@ -2061,7 +2061,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             false,
         );
         self.view.conn.execute(
-            "INSERT INTO session_reports (id, actor_id, engine_session_id, work_item_id, kind, summary, fields, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO session_reports (id, actor_id, engine_session_id, work_item_id, kind, summary, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![report.id, report.actor_id, report.engine_session_id, report.work_item_id, report.kind, report.summary, fields, to_iso(report.created_at)],
         ).map_err(sql_err)?;
         Ok(())
@@ -2457,7 +2457,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             "INSERT INTO watches (id, owner_actor_id, target_session, kind, trigger_json, note, state, created_at, expires_at, fired_at, outcome_json, attempts, last_error, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 watch.id, watch.owner_actor_id, watch.target_session, watch.kind,
-                watch_trigger_json(watch), watch.note, vocab_text(watch.state.clone()),
+                watch_trigger_json(watch), watch.note, vocab_text(watch.state),
                 to_iso(watch.created_at), to_iso(watch.expires_at), watch.fired_at.map(to_iso),
                 watch_outcome_json(watch), watch.attempts, watch.last_error, watch.reason,
             ],
@@ -2467,7 +2467,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         self.view.conn.execute(
             "UPDATE watches SET state = ?, fired_at = ?, outcome_json = ?, attempts = ?, last_error = ? WHERE id = ?",
             params![
-                vocab_text(watch.state.clone()), watch.fired_at.map(to_iso),
+                vocab_text(watch.state), watch.fired_at.map(to_iso),
                 watch_outcome_json(watch), watch.attempts, watch.last_error, watch.id,
             ],
         ).map(|_| ()).map_err(sql_err)

@@ -1250,8 +1250,12 @@ where
     let page: Vec<SessionSummary> = kept.into_iter().skip(start).take(end - start).collect();
     let truncated = (start as i64) + (page.len() as i64) < total;
     let digests = if digest_mode {
+        let reports = report_lines(ctx, &page)?;
         page.iter()
-            .map(|summary| digest_of(summary, &params.fields, stall, _now))
+            .map(|summary| {
+                let report = reports.get(&summary.engine_session_id).map(String::as_str);
+                digest_of(summary, &params.fields, stall, _now, report)
+            })
             .collect()
     } else {
         Vec::new()
@@ -1428,10 +1432,11 @@ fn digest_of(
     fields: &[String],
     stall_secs: i64,
     now: crate::core::Moment,
+    report: Option<&str>,
 ) -> serde_json::Value {
     let verdict = attention_of(summary, stall_secs, now);
     let ready = summary.activity.as_deref() == Some("waiting-for-input");
-    let blocked = summary
+    let blocked_reason = summary
         .blocked
         .as_ref()
         .map(|blocked| clip(&blocked.blocker, 120));
@@ -1442,43 +1447,89 @@ fn digest_of(
         Some(approval) => (
             Some(approval.question.clone()),
             Some(approval.kind.clone()),
-            approval
-                .options
-                .iter()
-                .map(|option| json!(option.label))
-                .collect::<Vec<_>>(),
+            (!approval.options.is_empty()).then(|| {
+                approval
+                    .options
+                    .iter()
+                    .map(|option| option.label.clone())
+                    .collect::<Vec<_>>()
+            }),
         ),
-        None => (None, None, Vec::new()),
+        None => (None, None, None),
     };
-    let mut row = json!({
+    // The attributes named in `fields` go into `extra`, never onto the row,
+    // so a name cannot overwrite a digest key.
+    let full = serde_json::to_value(summary).unwrap_or(Value::Null);
+    let mut extra = serde_json::Map::new();
+    for name in fields {
+        if name == "command" {
+            continue;
+        }
+        if let Some(value) = full.get(name) {
+            extra.insert(name.clone(), value.clone());
+        }
+    }
+    // A session's own report says what it did better than a clipped reply
+    // does (WI-2039): it replaces the excerpt.
+    let last_reply_excerpt = if report.is_some() {
+        None
+    } else {
+        summary
+            .last_reply_excerpt
+            .as_ref()
+            .map(|text| clip(text, 120))
+    };
+    // `brief_file` is null until the engine reports a path, `budget` until
+    // the engine's economics line is read here, and `supervisor` until
+    // WI-956 exists.
+    json!({
         "id": summary.id,
         "name": summary.name,
         "work_item": summary.work_item,
         "activity": summary.activity,
         "attention": verdict.attention.as_str(),
         "ready": ready,
-        "blocked": blocked,
+        "blocked_reason": blocked_reason,
         "blocked_detail": blocked_detail,
         "turn_started_at": summary.turn_started_at,
         "done_at": summary.done_at,
+        "last_reply_excerpt": last_reply_excerpt,
+        "report": report,
+        "template": summary.template,
+        "brief_file": Value::Null,
         "question": question,
         "question_kind": question_kind,
         "options": options,
-        "last_reply_excerpt": summary.last_reply_excerpt.as_ref().map(|text| clip(text, 120)),
-        "template": summary.template,
-    });
-    if let Some(object) = row.as_object_mut() {
-        let full = serde_json::to_value(summary).unwrap_or(Value::Null);
-        for name in fields {
-            if name == "command" {
-                continue;
-            }
-            if let Some(value) = full.get(name) {
-                object.insert(name.clone(), value.clone());
-            }
-        }
+        "budget": Value::Null,
+        "supervisor": Value::Null,
+        "extra": (!extra.is_empty()).then_some(Value::Object(extra)),
+    })
+}
+
+/// Each session's latest `session.report`, as the digest's one line, keyed
+/// by engine session id. One read for the whole page.
+fn report_lines<C, I>(
+    ctx: &AppContext<C, I>,
+    summaries: &[SessionSummary],
+) -> Result<BTreeMap<String, String>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let ids: Vec<String> = summaries
+        .iter()
+        .map(|summary| summary.engine_session_id.clone())
+        .collect();
+    let view = ctx.declared.read()?;
+    let mut lines = BTreeMap::new();
+    for (engine_id, row) in view.latest_session_reports(&ids)? {
+        let report = crate::application::session_report::view_of(&view, &row)?;
+        lines.insert(
+            engine_id,
+            crate::application::session_report::one_line(&report),
+        );
     }
-    row
+    Ok(lines)
 }
 
 /// Honest claim check when the session said it was done. A full git/forge
@@ -1559,7 +1610,14 @@ where
         None,
     )?;
     let stall = params.stall_after_minutes.saturating_mul(60);
-    let mut rows = Vec::new();
+    let reports = if params.mode != "full" {
+        report_lines(ctx, &listed)?
+    } else {
+        BTreeMap::new()
+    };
+    // Each row keeps its session's last output time, the sort's tie-break,
+    // whether or not the row carries the full session.
+    let mut rows: Vec<(Option<String>, SessionSweepRow)> = Vec::new();
     for summary in listed {
         let Some(entry) = entries
             .iter()
@@ -1627,42 +1685,31 @@ where
         } else {
             None
         };
-        rows.push(SessionSweepRow {
-            attention: verdict.attention.as_str().to_string(),
-            attention_reason: reason,
-            digest: digest_mode.then(|| digest_of(&summary, &params.fields, stall, swept_at)),
-            session: (!digest_mode).then_some(summary),
-            claim_check,
-            screen_tail: entry.screen_tail.clone(),
-            ready: Some(entry.ready),
-        });
+        let report = reports.get(&summary.engine_session_id).map(String::as_str);
+        let last_output_at = summary.last_output_at.clone();
+        rows.push((
+            last_output_at,
+            SessionSweepRow {
+                attention: verdict.attention.as_str().to_string(),
+                attention_reason: reason,
+                digest: digest_mode
+                    .then(|| digest_of(&summary, &params.fields, stall, swept_at, report)),
+                session: (!digest_mode).then_some(summary),
+                claim_check,
+                screen_tail: entry.screen_tail.clone(),
+                ready: Some(entry.ready),
+            },
+        ));
     }
-    rows.sort_by(|left, right| {
-        let left_at = left
-            .session
-            .as_ref()
-            .and_then(|session| session.last_output_at.as_deref())
-            .or_else(|| {
-                left.digest
-                    .as_ref()
-                    .and_then(|digest| digest.get("last_reply_excerpt"))
-                    .and_then(|value| value.as_str())
-            });
-        let right_at = right
-            .session
-            .as_ref()
-            .and_then(|session| session.last_output_at.as_deref())
-            .or_else(|| {
-                right
-                    .digest
-                    .as_ref()
-                    .and_then(|digest| digest.get("last_reply_excerpt"))
-                    .and_then(|value| value.as_str())
-            });
+    // Python's order: attention first, then the newest output first, a row
+    // with no output time counting as now (so ahead of every timed row).
+    rows.sort_by(|(left_at, left), (right_at, right)| {
+        let newest = |at: &Option<String>| (at.is_none(), at.clone());
         decisions::Attention::order_of(&left.attention)
             .cmp(&decisions::Attention::order_of(&right.attention))
-            .then_with(|| right_at.cmp(&left_at))
+            .then_with(|| newest(right_at).cmp(&newest(left_at)))
     });
+    let mut rows: Vec<SessionSweepRow> = rows.into_iter().map(|(_, row)| row).collect();
     let kept_len = params.limit.max(0) as usize;
     if rows.len() > kept_len {
         rows.truncate(kept_len);

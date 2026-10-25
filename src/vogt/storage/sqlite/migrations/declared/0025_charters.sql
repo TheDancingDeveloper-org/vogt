@@ -1,4 +1,4 @@
--- 0026_charters — standing instructions per scope (WI-2038 / WI-2141).
+-- 0025_charters — standing instructions per scope (WI-2038).
 --
 -- Append-only: each set writes the next version for its scope, so the history
 -- is the rows and the current charter is the highest version. `scope_id` is ''
