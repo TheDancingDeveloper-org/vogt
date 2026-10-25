@@ -674,3 +674,150 @@ fn an_explicit_null_is_an_override_the_profile_does_not_fill() {
     assert_eq!(audit["worktree"], serde_json::Value::Null);
     assert_eq!(audit["repo_map"], true);
 }
+
+fn list_all(
+    ctx: &crate::application::context::AppContext<
+        crate::core::StepClock,
+        crate::core::SequentialIds,
+    >,
+) -> super::sessions::SessionListResult {
+    list_sessions(
+        ctx,
+        &ListSessionsParams {
+            project: None,
+            work_item: None,
+            include_stopped: false,
+            limit: 50,
+            offset: 0,
+            order: "started".to_string(),
+            mode: "full".to_string(),
+            fields: Vec::new(),
+            states: None,
+            stall_after_minutes: 10,
+            include_hidden: false,
+        },
+    )
+    .unwrap()
+}
+
+/// A start's summary has no account or budget until the engine reports them.
+#[test]
+fn a_started_summary_has_null_account_and_budget() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-acct","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let started = start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    assert!(started.session.account.is_none());
+    assert!(started.session.budget.is_none());
+}
+
+/// `account` is copied from the live engine row, null when the engine omits it.
+#[test]
+fn a_named_account_round_trips_and_a_missing_one_stays_null() {
+    let script = script_with(vec![
+        (
+            200,
+            r#"{"sessions":[{"id":"eng-named","name":"beta","cwd":"/work/tree","alive":true,"activity":"idle","account":"claude-work"}]}"#
+                .to_string(),
+        ),
+        (
+            200,
+            r#"{"id":"eng-named","name":"beta","cwd":"/work/tree"}"#.to_string(),
+        ),
+    ]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    let listed = list_all(ctx);
+    assert_eq!(listed.sessions.len(), 1, "{listed:?}");
+    assert_eq!(listed.sessions[0].account.as_deref(), Some("claude-work"));
+    assert!(listed.sessions[0].budget.is_none());
+}
+
+/// Only positive integer limits survive; zeros, floats and strings drop the budget.
+#[test]
+fn budget_keeps_positive_ints_and_drops_the_rest() {
+    let kept = serde_json::json!({
+        "turns": 4,
+        "context_tokens": 8000,
+        "wall_clock_minutes": 15,
+        "session_wall_clock_minutes": 90,
+        "ignored": "no"
+    });
+    let params = super::sessions::budget_params(kept.as_object()).unwrap();
+    assert_eq!(params.turns, Some(4));
+    assert_eq!(params.context_tokens, Some(8000));
+    assert_eq!(params.wall_clock_minutes, Some(15));
+    assert_eq!(params.session_wall_clock_minutes, Some(90));
+
+    let dropped = serde_json::json!({
+        "turns": 0,
+        "context_tokens": 1.5,
+        "wall_clock_minutes": "10",
+        "session_wall_clock_minutes": false
+    });
+    assert!(super::sessions::budget_params(dropped.as_object()).is_none());
+    assert!(super::sessions::budget_params(None).is_none());
+}
+
+/// A live list copies a mixed budget: the positive ints, and nothing else.
+#[test]
+fn a_listed_session_keeps_only_positive_budget_limits() {
+    let script = script_with(vec![
+        (
+            200,
+            r#"{"sessions":[{"id":"eng-bud","name":"beta","cwd":"/work/tree","alive":true,"activity":"idle","budget":{"turns":3,"context_tokens":0,"wall_clock_minutes":1.5,"session_wall_clock_minutes":"no"}}]}"#
+                .to_string(),
+        ),
+        (
+            200,
+            r#"{"id":"eng-bud","name":"beta","cwd":"/work/tree"}"#.to_string(),
+        ),
+    ]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    let listed = list_all(ctx);
+    let budget = listed.sessions[0]
+        .budget
+        .as_ref()
+        .expect("one limit survives");
+    assert_eq!(budget.turns, Some(3));
+    assert!(budget.context_tokens.is_none());
+    assert!(budget.wall_clock_minutes.is_none());
+    assert!(budget.session_wall_clock_minutes.is_none());
+}
+
+/// An engine-only row carries the same account and budget semantics.
+#[test]
+fn an_unlinked_row_copies_account_and_budget() {
+    let script = script_with(vec![(
+        200,
+        r#"{"sessions":[{"id":"eng-free","name":"stray","cwd":"/tmp","alive":true,"activity":"idle","account":"spare","budget":{"turns":2,"wall_clock_minutes":0}}]}"#
+            .to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let listed = list_all(ctx);
+    assert_eq!(listed.sessions.len(), 1, "{listed:?}");
+    let row = &listed.sessions[0];
+    assert!(!row.linked);
+    assert_eq!(row.account.as_deref(), Some("spare"));
+    let budget = row.budget.as_ref().expect("turns survives");
+    assert_eq!(budget.turns, Some(2));
+    assert!(budget.wall_clock_minutes.is_none());
+}

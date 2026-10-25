@@ -340,10 +340,12 @@ fn summarize_asked<C: Clock, I: IdFactory>(
         conversation_id: None,
         resources: None,
         permission_mode: None,
+        account: None,
         stopped_by: None,
         stop_reason: None,
         last_reply_excerpt: None,
         running: None,
+        budget: None,
     };
     if let Some(live) = live {
         apply_live(&mut summary, live);
@@ -403,10 +405,12 @@ fn unlinked_summary<C: Clock, I: IdFactory>(
         conversation_id: None,
         resources: None,
         permission_mode: None,
+        account: None,
         stopped_by: None,
         stop_reason: None,
         last_reply_excerpt: None,
         running: None,
+        budget: None,
     };
     apply_live(&mut summary, session);
     Ok(summary)
@@ -470,6 +474,8 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
         over_threshold: resources.over_threshold,
     });
     summary.permission_mode = live.permission_mode.clone();
+    summary.account = live.account.clone();
+    summary.budget = crate::application::services::sessions::budget_params(live.budget.as_ref());
     summary.stopped_by = live.stopped_by.clone();
     summary.stop_reason = live.stop_reason.clone();
 }
