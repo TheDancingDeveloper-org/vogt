@@ -124,6 +124,9 @@ pub const DERIVED: &[&str] = &[
     "session.grant_decide",
     "session.grant_revoke",
     "session.grant_list",
+    "watch.create",
+    "watch.list",
+    "watch.cancel",
     "decision.ask",
     "decision.answer",
     "decision.list",
@@ -175,6 +178,7 @@ mod session;
 mod session_ops;
 mod system;
 mod views;
+pub(crate) mod watches;
 mod work;
 
 /// `(operation name, params schema, result schema)` for every name in
@@ -716,6 +720,21 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "session.grant_list",
             schema_of::<session_ops::ListGrantsParams>(),
             schema_of::<session_ops::ListGrantsResult>(),
+        ),
+        (
+            "watch.create",
+            schema_of::<watches::CreateWatchParams>(),
+            schema_of::<watches::WatchResult>(),
+        ),
+        (
+            "watch.list",
+            schema_of::<watches::ListWatchesParams>(),
+            schema_of::<watches::ListWatchesResult>(),
+        ),
+        (
+            "watch.cancel",
+            schema_of::<watches::CancelWatchParams>(),
+            schema_of::<watches::WatchResult>(),
         ),
         (
             "decision.ask",

@@ -13,7 +13,7 @@ use crate::core::{
     AuthDecision, Charter, Clock, CodingSession, Comment, ContractExemption, Decision,
     DriftProposal, Event, ForgeAccount, IdFactory, InboxTriage, Initiative, InitiativeState, Label,
     Moment, PasswordCredential, Principal, Project, RelationKind, SessionGrant, SessionReport,
-    SessionReportFields, Suppression, Token, WorkItem, WorkLink, WorkOverlay, Workflow,
+    SessionReportFields, Suppression, Token, Watch, WorkItem, WorkLink, WorkOverlay, Workflow,
     WriteBackAction, WriteBackOutcome, WriteBackRecord,
 };
 use crate::errors::VogtError;
@@ -1401,6 +1401,47 @@ impl ReadView for SqliteReadView {
             row_session_grant,
         )
     }
+    fn watch(&self, watch_id: &str) -> Result<Option<Watch>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT * FROM watches WHERE id = ?",
+            [watch_id],
+            row_watch,
+        )
+    }
+    fn list_watches(
+        &self,
+        state: Option<&str>,
+        target_session: Option<&str>,
+        owner_actor_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Watch>, VogtError> {
+        let mut clauses: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        for (column, value) in [
+            ("state", state),
+            ("target_session", target_session),
+            ("owner_actor_id", owner_actor_id),
+        ] {
+            if let Some(value) = value {
+                clauses.push(format!("{column} = ?"));
+                params.push(Box::new(value.to_string()));
+            }
+        }
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", clauses.join(" AND "))
+        };
+        params.push(Box::new(limit));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        many(
+            &self.conn,
+            &format!("SELECT * FROM watches {where_sql}ORDER BY created_at DESC, id DESC LIMIT ?"),
+            refs.as_slice(),
+            row_watch,
+        )
+    }
     fn decision(&self, decision_id: &str) -> Result<Option<Decision>, VogtError> {
         one(
             &self.conn,
@@ -1765,6 +1806,18 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
         c: i64,
     ) -> Result<Vec<SessionGrant>, VogtError> {
         self.view.list_session_grants(a, b, c)
+    }
+    fn watch(&self, a: &str) -> Result<Option<Watch>, VogtError> {
+        self.view.watch(a)
+    }
+    fn list_watches(
+        &self,
+        a: Option<&str>,
+        b: Option<&str>,
+        c: Option<&str>,
+        d: i64,
+    ) -> Result<Vec<Watch>, VogtError> {
+        self.view.list_watches(a, b, c, d)
     }
     fn decision(&self, a: &str) -> Result<Option<Decision>, VogtError> {
         self.view.decision(a)
@@ -2399,6 +2452,26 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .map(|_| ())
             .map_err(sql_err)
     }
+    fn insert_watch(&mut self, watch: &Watch) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO watches (id, owner_actor_id, target_session, kind, trigger_json, note, state, created_at, expires_at, fired_at, outcome_json, attempts, last_error, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                watch.id, watch.owner_actor_id, watch.target_session, watch.kind,
+                watch_trigger_json(watch), watch.note, vocab_text(watch.state.clone()),
+                to_iso(watch.created_at), to_iso(watch.expires_at), watch.fired_at.map(to_iso),
+                watch_outcome_json(watch), watch.attempts, watch.last_error, watch.reason,
+            ],
+        ).map(|_| ()).map_err(sql_err)
+    }
+    fn update_watch(&mut self, watch: &Watch) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "UPDATE watches SET state = ?, fired_at = ?, outcome_json = ?, attempts = ?, last_error = ? WHERE id = ?",
+            params![
+                vocab_text(watch.state.clone()), watch.fired_at.map(to_iso),
+                watch_outcome_json(watch), watch.attempts, watch.last_error, watch.id,
+            ],
+        ).map(|_| ()).map_err(sql_err)
+    }
     fn insert_decision(&mut self, decision: &Decision) -> Result<(), VogtError> {
         self.view.conn.execute(
             "INSERT INTO decisions (id, asker_actor_id, asker_session, work_item_id, question, options_json, context, state, answer_json, answered_by_actor_id, created_at, answered_at, expires_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2884,6 +2957,54 @@ fn row_session(row: &Row<'_>) -> rusqlite::Result<CodingSession> {
         started_by_session: row.get("started_by_session")?,
         started_by_kind: row.get("started_by_kind")?,
     })
+}
+
+fn row_watch(row: &Row<'_>) -> rusqlite::Result<Watch> {
+    let trigger_text: String = row.get("trigger_json")?;
+    let trigger = serde_json::from_str(&trigger_text).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    let outcome = row
+        .get::<_, Option<String>>("outcome_json")?
+        .map(|text| {
+            serde_json::from_str(&text).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })
+        })
+        .transpose()?;
+    Ok(Watch {
+        id: row.get("id")?,
+        owner_actor_id: row.get("owner_actor_id")?,
+        target_session: row.get("target_session")?,
+        kind: row.get("kind")?,
+        trigger,
+        note: row.get("note")?,
+        state: vocab_cell(row, "state")?,
+        created_at: moment(row, "created_at")?,
+        expires_at: moment(row, "expires_at")?,
+        fired_at: opt_moment(row, "fired_at")?,
+        outcome,
+        attempts: row.get("attempts")?,
+        last_error: row.get("last_error")?,
+        reason: row.get("reason")?,
+    })
+}
+
+/// The trigger as Python's `json.dumps(..., sort_keys=True)` writes it.
+fn watch_trigger_json(watch: &Watch) -> String {
+    crate::decisions::python_json_dumps(&watch.trigger, true)
+}
+
+/// The outcome as Python's `json.dumps` writes it, or NULL while unset.
+fn watch_outcome_json(watch: &Watch) -> Option<String> {
+    watch
+        .outcome
+        .as_ref()
+        .map(|outcome| crate::decisions::python_json_dumps(outcome, false))
 }
 
 fn row_decision(row: &Row<'_>) -> rusqlite::Result<Decision> {

@@ -257,6 +257,9 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "initiative.publish" => {
             Some(crate::application::services::initiatives::initiative_publish_op)
         }
+        "watch.create" => Some(crate::application::services::watches::create_watch_op),
+        "watch.list" => Some(crate::application::services::watches::list_watches_op),
+        "watch.cancel" => Some(crate::application::services::watches::cancel_watch_op),
         "decision.ask" => Some(crate::application::services::decisions::ask_decision_op),
         "decision.answer" => Some(crate::application::services::decisions::answer_decision_op),
         "decision.list" => Some(crate::application::services::decisions::list_decisions_op),
