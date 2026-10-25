@@ -1253,6 +1253,8 @@ pub struct EngineSession {
     pub account: Option<String>,
     /// The engine tailer's own economics reading, when it sent an object.
     pub economics: Option<serde_json::Map<String, Value>>,
+    /// When an autopilot session declared itself done this turn.
+    pub done_at: Option<String>,
     /// The session's engine-enforced limits, when it sent an object. Absent
     /// means no budget; the core does not invent one.
     pub budget: Option<serde_json::Map<String, Value>>,
@@ -1311,6 +1313,7 @@ impl EngineSession {
             account: optional_str(get("account")),
             economics: get("economics").and_then(Value::as_object).cloned(),
             budget: get("budget").and_then(Value::as_object).cloned(),
+            done_at: optional_str(get("done_at")),
         }
     }
 }

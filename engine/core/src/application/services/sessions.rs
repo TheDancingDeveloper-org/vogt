@@ -187,6 +187,11 @@ where
         limit: optional_i64(&params, "limit", 50)?,
         offset: optional_i64(&params, "offset", 0)?,
         order: optional_string(&params, "order")?.unwrap_or_else(|| "started".to_string()),
+        mode: optional_string(&params, "mode")?.unwrap_or_else(|| "digest".to_string()),
+        fields: optional_string_list(&params, "fields")?.unwrap_or_default(),
+        states: optional_string_list(&params, "states")?,
+        stall_after_minutes: optional_i64(&params, "stall_after_minutes", 10)?,
+        include_hidden: optional_bool(&params, "include_hidden")?.unwrap_or(false),
     };
     Ok(serde_json::to_value(list_sessions(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -198,8 +203,13 @@ where
 {
     let parsed = SweepSessionsParams {
         project: optional_string(&params, "project")?,
-        screen_lines: optional_i64(&params, "screen_lines", 8)?,
+        screen_lines: optional_i64(&params, "screen_lines", 0)?,
         stall_after_minutes: optional_i64(&params, "stall_after_minutes", 10)?,
+        mode: optional_string(&params, "mode")?.unwrap_or_else(|| "digest".to_string()),
+        fields: optional_string_list(&params, "fields")?.unwrap_or_default(),
+        states: optional_string_list(&params, "states")?,
+        attention: optional_string_list(&params, "attention")?,
+        limit: optional_i64(&params, "limit", 200)?,
     };
     Ok(serde_json::to_value(sweep_sessions(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -539,6 +549,15 @@ pub struct ListSessionsParams {
     pub limit: i64,
     pub offset: i64,
     pub order: String,
+    /// `digest` (the Python default) or `full`.
+    pub mode: String,
+    /// Extra SessionSummary attribute names copied onto a digest row.
+    pub fields: Vec<String>,
+    /// Activity names a digest keeps. Empty means the default live set,
+    /// which includes `done`.
+    pub states: Option<Vec<String>>,
+    pub stall_after_minutes: i64,
+    pub include_hidden: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -546,6 +565,11 @@ pub struct SweepSessionsParams {
     pub project: Option<String>,
     pub screen_lines: i64,
     pub stall_after_minutes: i64,
+    pub mode: String,
+    pub fields: Vec<String>,
+    pub states: Option<Vec<String>>,
+    pub attention: Option<Vec<String>>,
+    pub limit: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -723,6 +747,8 @@ pub struct SessionSummary {
     pub running: Option<SessionRuntime>,
     pub resources: Option<SessionResources>,
     pub conversation_id: Option<String>,
+    /// When the session printed AUTOPILOT: DONE, if the engine recorded it.
+    pub done_at: Option<String>,
 }
 
 fn linked_default() -> bool {
@@ -761,7 +787,15 @@ pub struct SessionListResult {
 pub struct SessionSweepRow {
     pub attention: String,
     pub attention_reason: String,
-    pub session: SessionSummary,
+    /// Present in digest mode. Full mode leaves it absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<serde_json::Value>,
+    /// Present in full mode. Digest mode leaves the session off the row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionSummary>,
+    /// Claim check for an autopilot-done row. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_check: Option<serde_json::Value>,
     pub screen_tail: Vec<String>,
     pub ready: Option<bool>,
 }
@@ -1177,6 +1211,7 @@ where
     // answers or does not, and before the rows are assembled. The value is
     // the attention reference; the tick is spent in the same place.
     let _now = super::now_of(&ctx.clock);
+    let stall = params.stall_after_minutes.saturating_mul(60);
     let mut sessions = rows_of(ctx, params, &live, detail.as_deref())?;
     if params.order == "rss" {
         // Stable: sessions with no sample keep their order, after the
@@ -1191,15 +1226,34 @@ where
             }
         });
     }
+    let digest_mode = params.mode != "full";
+    let kept: Vec<SessionSummary> = if digest_mode {
+        sessions
+            .into_iter()
+            .filter(|summary| digest_keeps(summary, params.states.as_deref(), stall, _now))
+            .collect()
+    } else {
+        sessions
+    };
+    let total = kept.len() as i64;
+    let start = params.offset.max(0) as usize;
+    let end = start.saturating_add(params.limit.max(0) as usize);
+    let page: Vec<SessionSummary> = kept.into_iter().skip(start).take(end - start).collect();
+    let truncated = (start as i64) + (page.len() as i64) < total;
+    let digests = if digest_mode {
+        page.iter()
+            .map(|summary| digest_of(summary, &params.fields, stall, _now))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let sessions = if digest_mode { Vec::new() } else { page };
     Ok(SessionListResult {
         sessions,
-        // `mode` defaults to `digest` on the Python side, which returns its
-        // rows under `digests` and leaves `sessions` empty. The digest rows
-        // are not built here yet, so both are empty for the same empty list.
-        digests: Vec::new(),
+        digests,
         engine: detail,
-        total: 0,
-        truncated: false,
+        total,
+        truncated,
         hidden_count: 0,
     })
 }
@@ -1298,6 +1352,138 @@ where
     Ok(summaries)
 }
 
+const DIGEST_LIVE: &[&str] = &[
+    "running", "idle", "waiting", "blocked", "approval", "stalled", "done", "unknown",
+];
+
+fn attention_of(
+    summary: &SessionSummary,
+    stall_secs: i64,
+    now: crate::core::Moment,
+) -> decisions::Verdict {
+    decisions::classify(
+        summary.activity.as_deref(),
+        summary.alive,
+        Some(summary.activity.as_deref() == Some("waiting-for-input")),
+        summary
+            .approval
+            .as_ref()
+            .map(|approval| approval.question.as_str()),
+        summary
+            .blocked
+            .as_ref()
+            .map(|blocked| blocked.blocker.as_str()),
+        summary
+            .approval
+            .as_ref()
+            .map(|approval| approval.kind.as_str()),
+        summary
+            .last_output_at
+            .as_deref()
+            .and_then(|text| crate::core::from_iso(text).ok()),
+        now,
+        stall_secs,
+        summary
+            .done_at
+            .as_deref()
+            .and_then(|text| crate::core::from_iso(text).ok()),
+    )
+}
+
+fn digest_keeps(
+    summary: &SessionSummary,
+    states: Option<&[String]>,
+    stall_secs: i64,
+    now: crate::core::Moment,
+) -> bool {
+    let verdict = attention_of(summary, stall_secs, now);
+    let name = verdict.attention.as_str();
+    let activity = summary.activity.as_deref().unwrap_or("");
+    let wanted = states.filter(|items| !items.is_empty());
+    match wanted {
+        Some(items) => items.iter().any(|item| item == name || item == activity),
+        None => DIGEST_LIVE.contains(&name) || DIGEST_LIVE.contains(&activity),
+    }
+}
+
+fn clip(text: &str, limit: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars().take(limit) {
+        out.push(ch);
+    }
+    out
+}
+
+fn digest_of(
+    summary: &SessionSummary,
+    fields: &[String],
+    stall_secs: i64,
+    now: crate::core::Moment,
+) -> serde_json::Value {
+    let verdict = attention_of(summary, stall_secs, now);
+    let ready = summary.activity.as_deref() == Some("waiting-for-input");
+    let blocked = summary
+        .blocked
+        .as_ref()
+        .map(|blocked| clip(&blocked.blocker, 120));
+    let blocked_detail = summary.blocked.as_ref().and_then(|blocked| {
+        (blocked.blocker.chars().count() > 120).then(|| blocked.blocker.clone())
+    });
+    let (question, question_kind, options) = match summary.approval.as_ref() {
+        Some(approval) => (
+            Some(approval.question.clone()),
+            Some(approval.kind.clone()),
+            approval
+                .options
+                .iter()
+                .map(|option| json!(option.label))
+                .collect::<Vec<_>>(),
+        ),
+        None => (None, None, Vec::new()),
+    };
+    let mut row = json!({
+        "id": summary.id,
+        "name": summary.name,
+        "work_item": summary.work_item,
+        "activity": summary.activity,
+        "attention": verdict.attention.as_str(),
+        "ready": ready,
+        "blocked": blocked,
+        "blocked_detail": blocked_detail,
+        "turn_started_at": summary.turn_started_at,
+        "done_at": summary.done_at,
+        "question": question,
+        "question_kind": question_kind,
+        "options": options,
+        "last_reply_excerpt": summary.last_reply_excerpt.as_ref().map(|text| clip(text, 120)),
+        "template": summary.template,
+    });
+    if let Some(object) = row.as_object_mut() {
+        let full = serde_json::to_value(summary).unwrap_or(Value::Null);
+        for name in fields {
+            if name == "command" {
+                continue;
+            }
+            if let Some(value) = full.get(name) {
+                object.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    row
+}
+
+/// Honest claim check when the session said it was done. A full git/forge
+/// check is not in this core yet, so the fact is `unchecked`.
+fn claim_check_of(summary: &SessionSummary) -> serde_json::Value {
+    json!({
+        "checked": false,
+        "subject": summary.id,
+        "done_at": summary.done_at,
+        "mismatches": [],
+        "note": "unchecked: the rust core has no claim checker yet",
+    })
+}
+
 fn page_len(shown: usize, _unlinked: i64) -> i64 {
     shown as i64
 }
@@ -1354,6 +1540,11 @@ where
             limit: 500,
             offset: 0,
             order: "started".to_string(),
+            mode: "full".to_string(),
+            fields: Vec::new(),
+            states: None,
+            stall_after_minutes: params.stall_after_minutes,
+            include_hidden: false,
         },
         &live,
         None,
@@ -1389,25 +1580,84 @@ where
                 .and_then(|text| crate::core::from_iso(text).ok()),
             swept_at,
             stall,
+            summary
+                .done_at
+                .as_deref()
+                .and_then(|text| crate::core::from_iso(text).ok()),
         );
+        let digest_mode = params.mode != "full";
+        if digest_mode && !digest_keeps(&summary, params.states.as_deref(), stall, swept_at) {
+            continue;
+        }
+        if let Some(wanted) = params.attention.as_deref() {
+            let name = verdict.attention.as_str();
+            let needs = decisions::Attention::needs_you_name(name);
+            if !wanted
+                .iter()
+                .any(|item| item == name || (item == "needs_you" && needs))
+            {
+                continue;
+            }
+        }
+        let mut reason = verdict.reason.clone();
+        let claim_check = if verdict.attention == decisions::Attention::Done {
+            let check = claim_check_of(&summary);
+            if let Some(mismatches) = check.get("mismatches").and_then(|value| value.as_array()) {
+                if !mismatches.is_empty() {
+                    let joined = mismatches
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !joined.is_empty() {
+                        reason = format!("{reason}; claim check: {joined}");
+                    }
+                }
+            }
+            Some(check)
+        } else {
+            None
+        };
         rows.push(SessionSweepRow {
             attention: verdict.attention.as_str().to_string(),
-            attention_reason: verdict.reason.clone(),
+            attention_reason: reason,
+            digest: digest_mode.then(|| digest_of(&summary, &params.fields, stall, swept_at)),
+            session: (!digest_mode).then_some(summary),
+            claim_check,
             screen_tail: entry.screen_tail.clone(),
             ready: Some(entry.ready),
-            session: summary,
         });
     }
     rows.sort_by(|left, right| {
+        let left_at = left
+            .session
+            .as_ref()
+            .and_then(|session| session.last_output_at.as_deref())
+            .or_else(|| {
+                left.digest
+                    .as_ref()
+                    .and_then(|digest| digest.get("last_reply_excerpt"))
+                    .and_then(|value| value.as_str())
+            });
+        let right_at = right
+            .session
+            .as_ref()
+            .and_then(|session| session.last_output_at.as_deref())
+            .or_else(|| {
+                right
+                    .digest
+                    .as_ref()
+                    .and_then(|digest| digest.get("last_reply_excerpt"))
+                    .and_then(|value| value.as_str())
+            });
         decisions::Attention::order_of(&left.attention)
             .cmp(&decisions::Attention::order_of(&right.attention))
-            .then_with(|| {
-                right
-                    .session
-                    .last_output_at
-                    .cmp(&left.session.last_output_at)
-            })
+            .then_with(|| right_at.cmp(&left_at))
     });
+    let kept_len = params.limit.max(0) as usize;
+    if rows.len() > kept_len {
+        rows.truncate(kept_len);
+    }
     let mut counts = serde_json::Map::from_iter([
         ("total".to_string(), json!(rows.len() as i64)),
         ("needs_you".to_string(), json!(0)),
@@ -2669,6 +2919,7 @@ where
         permission_mode: None,
         running: None,
         resources: None,
+        done_at: None,
         conversation_id: None,
     };
     if let Some(live) = live {
@@ -2699,6 +2950,7 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.permission_mode = live.permission_mode.clone();
     summary.stopped_by = live.stopped_by.clone();
     summary.stop_reason = live.stop_reason.clone();
+    summary.done_at = live.done_at.clone();
 }
 
 fn transcript_of<C, I>(
@@ -2920,6 +3172,7 @@ fn unlinked_summary(
         permission_mode: None,
         running: None,
         resources: None,
+        done_at: None,
         conversation_id: None,
     };
     apply_live(&mut summary, session);

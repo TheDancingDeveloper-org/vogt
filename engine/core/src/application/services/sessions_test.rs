@@ -331,6 +331,11 @@ fn a_dead_engine_hides_no_linked_sessions() {
             limit: 50,
             offset: 0,
             order: "started".to_string(),
+            mode: "full".to_string(),
+            fields: Vec::new(),
+            states: None,
+            stall_after_minutes: 10,
+            include_hidden: false,
         },
     )
     .unwrap();
