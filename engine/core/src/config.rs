@@ -138,6 +138,23 @@ impl SqliteSynchronous {
     }
 }
 
+/// One provider account `usage.board` reads transcripts for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageAccount {
+    pub name: String,
+    pub agent: String,
+    pub dir: PathBuf,
+}
+
+/// One LiteLLM key whose spend `usage.board` reads. The alert threshold is
+/// integer cents so the config stays `Eq`; the handler converts it to dollars.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageKey {
+    pub name: String,
+    pub key_env: String,
+    pub daily_alert_usd_cents: Option<i64>,
+}
+
 /// One deployment lane whose deployed revision Vogt reads (`deploy_lanes`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeployLane {
@@ -240,6 +257,10 @@ pub struct VogtConfig {
     pub ci_alert_tags: Vec<String>,
     pub ci_watch_notify_sessions: bool,
     pub deploy_lanes: Vec<DeployLane>,
+    pub usage_accounts: Vec<UsageAccount>,
+    pub usage_litellm_url: Option<String>,
+    pub usage_litellm_keys: Vec<UsageKey>,
+    pub usage_daily_spend_alert_usd_cents: Option<i64>,
     pub marker_file_extensions: Vec<String>,
     pub branch_binding_patterns: Vec<String>,
     pub branch_binding_template: String,
@@ -340,6 +361,10 @@ impl Default for VogtConfig {
             ci_alert_tags: vec!["v*".to_string()],
             ci_watch_notify_sessions: true,
             deploy_lanes: Vec::new(),
+            usage_accounts: Vec::new(),
+            usage_litellm_url: None,
+            usage_litellm_keys: Vec::new(),
+            usage_daily_spend_alert_usd_cents: None,
             marker_file_extensions: vec![
                 ".py".to_string(),
                 ".rs".to_string(),
@@ -537,7 +562,7 @@ fn env_value(name: &str) -> Option<String> {
 fn parse_env_value(field: &FieldDoc, raw: &str) -> Result<Value, String> {
     match field.kind {
         Kind::Bool => Ok(Value::Bool(parse_bool(raw)?)),
-        Kind::Int { .. } => Ok(Value::Number(
+        Kind::Int { .. } | Kind::OptCents => Ok(Value::Number(
             int_from_str(raw)
                 .ok_or_else(|| format!("expected an integer, got {raw:?}"))?
                 .into(),
@@ -551,6 +576,8 @@ fn parse_env_value(field: &FieldDoc, raw: &str) -> Result<Value, String> {
         | Kind::Sqlite => Ok(Value::String(raw.to_string())),
         Kind::StringList
         | Kind::DeployLanes
+        | Kind::UsageAccounts
+        | Kind::UsageKeys
         | Kind::PathMap
         | Kind::StringMap
         | Kind::ActivityRoots
@@ -678,6 +705,7 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
                 "session_scratch_project" => config.session_scratch_project = text,
                 "image_digest" => config.image_digest = text,
                 "diagnostics_peer_url" => config.diagnostics_peer_url = text,
+                "usage_litellm_url" => config.usage_litellm_url = text,
                 _ => unreachable!(),
             }
         }
@@ -743,6 +771,11 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
             }
         }
         Kind::DeployLanes => config.deploy_lanes = expect_lanes(value)?,
+        Kind::UsageAccounts => config.usage_accounts = expect_usage_accounts(value)?,
+        Kind::UsageKeys => config.usage_litellm_keys = expect_usage_keys(value)?,
+        Kind::OptCents => {
+            config.usage_daily_spend_alert_usd_cents = expect_opt_cents(name, value)?;
+        }
         Kind::PathMap => config.forge_token_files = expect_path_map(name, value)?,
         Kind::ActivityRoots => config.agent_activity_roots = expect_path_map(name, value)?,
         Kind::SessionRoots => config.session_transcript_roots = expect_path_map(name, value)?,
@@ -810,6 +843,91 @@ fn expect_lanes(value: &Value) -> Result<Vec<DeployLane>, String> {
         .as_array()
         .ok_or_else(|| "deploy_lanes must be a list".to_string())?;
     items.iter().map(DeployLane::from_value).collect()
+}
+
+fn expect_opt_cents(name: &str, value: &Value) -> Result<Option<i64>, String> {
+    match value {
+        Value::Null => Ok(None),
+        other => Ok(Some(dollars_to_cents(name, other)?)),
+    }
+}
+
+fn dollars_to_cents(name: &str, value: &Value) -> Result<i64, String> {
+    let dollars = value
+        .as_f64()
+        .ok_or_else(|| format!("{name} must be a number of US dollars"))?;
+    if dollars < 0.0 {
+        return Err(format!("{name} must be >= 0"));
+    }
+    if !dollars.is_finite() {
+        return Err(format!("{name} must be a finite number"));
+    }
+    Ok((dollars * 100.0).round() as i64)
+}
+
+fn expect_usage_accounts(value: &Value) -> Result<Vec<UsageAccount>, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| "usage_accounts must be a list".to_string())?;
+    items
+        .iter()
+        .map(|item| {
+            let obj = item
+                .as_object()
+                .ok_or_else(|| "usage_accounts entries must be tables".to_string())?;
+            let name = table_string(obj, "name", "usage account")?;
+            let agent = table_string(obj, "agent", "usage account")?;
+            if agent != "claude" && agent != "codex" {
+                return Err(format!(
+                    "usage account agent must be 'claude' or 'codex', not {agent:?}"
+                ));
+            }
+            let dir = table_string(obj, "dir", "usage account")?;
+            if name.is_empty() || dir.is_empty() {
+                return Err("usage account name and dir must not be empty".to_string());
+            }
+            Ok(UsageAccount {
+                name,
+                agent,
+                dir: PathBuf::from(dir),
+            })
+        })
+        .collect()
+}
+
+fn expect_usage_keys(value: &Value) -> Result<Vec<UsageKey>, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| "usage_litellm_keys must be a list".to_string())?;
+    items
+        .iter()
+        .map(|item| {
+            let obj = item
+                .as_object()
+                .ok_or_else(|| "usage_litellm_keys entries must be tables".to_string())?;
+            let name = table_string(obj, "name", "usage key")?;
+            let key_env = table_string(obj, "key_env", "usage key")?;
+            if name.is_empty() || key_env.is_empty() {
+                return Err("usage key name and key_env must not be empty".to_string());
+            }
+            let daily_alert_usd_cents = match obj.get("daily_alert_usd") {
+                None | Some(Value::Null) => None,
+                Some(amount) => Some(dollars_to_cents("daily_alert_usd", amount)?),
+            };
+            Ok(UsageKey {
+                name,
+                key_env,
+                daily_alert_usd_cents,
+            })
+        })
+        .collect()
+}
+
+fn table_string(obj: &Map<String, Value>, key: &str, what: &str) -> Result<String, String> {
+    match obj.get(key) {
+        Some(Value::String(text)) => Ok(text.clone()),
+        _ => Err(format!("{what} {key} must be a string")),
+    }
 }
 
 fn expect_path_map(name: &str, value: &Value) -> Result<BTreeMap<String, PathBuf>, String> {
@@ -898,6 +1016,9 @@ enum Kind {
     String,
     StringList,
     DeployLanes,
+    UsageAccounts,
+    UsageKeys,
+    OptCents,
     PathMap,
     ActivityRoots,
     SessionRoots,
@@ -1111,6 +1232,46 @@ const FIELD_CATALOGUE: &[FieldDoc] = &[
         description: "Deployment lanes `deployed_versions` reports on, each a table with `name`, `project` (a registered slug), `branch` (default `main`), and a source: `receipt_repo` + `receipt_path` (a JSON receipt a deploy pipeline commits, read through the configured forge) and/or `version_url` (a running instance's public JSON version endpoint, e.g. Vogt's `/api/config`). Empty means the `deploy-lanes` collector is not registered and deployed versions are reported as not configured. A receipt whose status says the deploy or its smoke test failed raises an Inbox alert.",
         kind: Kind::DeployLanes,
         example: "[{ name = \"dev\", project = \"my-app\", version_url = \"https://dev.example.com/api/config\" }]",
+    },
+    FieldDoc {
+        name: "usage_accounts",
+        env_var: "VOGT_USAGE_ACCOUNTS",
+        type_label: "list of tables",
+        default_label: "`[]`",
+        policy: DefaultPolicy::Behaviour,
+        description: "Provider accounts `usage.board` reports on, each a table with `name`, `agent` (`claude` or `codex`) and `dir` (that account's config directory). Read on request only: the newest limit and reset the account's own transcripts recorded. Empty, no account is reported.",
+        kind: Kind::UsageAccounts,
+        example: "[{ name = \"work\", agent = \"claude\", dir = \"/home/me/.claude\" }]",
+    },
+    FieldDoc {
+        name: "usage_litellm_url",
+        env_var: "VOGT_USAGE_LITELLM_URL",
+        type_label: "string, optional",
+        default_label: "*(unset)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "Base URL of a LiteLLM proxy whose keys' spend `usage.board` reads through `/key/info`. Unset, no key spend is read.",
+        kind: Kind::OptString,
+        example: "null",
+    },
+    FieldDoc {
+        name: "usage_litellm_keys",
+        env_var: "VOGT_USAGE_LITELLM_KEYS",
+        type_label: "list of tables",
+        default_label: "`[]`",
+        policy: DefaultPolicy::Behaviour,
+        description: "LiteLLM keys `usage.board` reports spend for: `name`, `key_env` (the environment variable holding the key) and an optional `daily_alert_usd`.",
+        kind: Kind::UsageKeys,
+        example: "[{ name = \"deepseek\", key_env = \"LITELLM_KEY\" }]",
+    },
+    FieldDoc {
+        name: "usage_daily_spend_alert_usd",
+        env_var: "VOGT_USAGE_DAILY_SPEND_ALERT_USD",
+        type_label: "number, optional",
+        default_label: "*(unset)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "Default day-spend alert threshold, in USD, for every LiteLLM key without its own `daily_alert_usd`. Unset, no alert is raised.",
+        kind: Kind::OptCents,
+        example: "null",
     },
     FieldDoc {
         name: "marker_file_extensions",
@@ -1424,6 +1585,10 @@ const FIELD_NAMES: &[&str] = &[
     "ci_alert_tags",
     "ci_watch_notify_sessions",
     "deploy_lanes",
+    "usage_accounts",
+    "usage_litellm_url",
+    "usage_litellm_keys",
+    "usage_daily_spend_alert_usd",
     "marker_file_extensions",
     "branch_binding_patterns",
     "branch_binding_template",

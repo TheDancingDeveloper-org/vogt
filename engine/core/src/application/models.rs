@@ -156,6 +156,7 @@ pub const DERIVED: &[&str] = &[
     "events.list",
     "notifications",
     "deployed.versions",
+    "usage.board",
     "inbox.list",
     "inbox.archive",
     "inbox.snooze",
@@ -877,6 +878,11 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             schema_of::<system::DeployedVersionsResult>(),
         ),
         (
+            "usage.board",
+            schema_of::<system::UsageBoardParams>(),
+            schema_of::<system::UsageBoardResult>(),
+        ),
+        (
             "inbox.list",
             schema_of::<system::InboxListParams>(),
             schema_of::<system::InboxListResult>(),
@@ -1128,6 +1134,16 @@ pub(super) fn optional_open_object(_: &mut SchemaGenerator) -> Schema {
 /// `datetime | None`: a `date-time` string, or null.
 pub(super) fn optional_date_time(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] })
+}
+
+/// `float | None`.
+pub(super) fn optional_number(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "anyOf": [{ "type": "number" }, { "type": "null" }] })
+}
+
+/// `int | None`.
+pub(super) fn optional_integer(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "anyOf": [{ "type": "integer" }, { "type": "null" }] })
 }
 
 fn not_configured() -> String {

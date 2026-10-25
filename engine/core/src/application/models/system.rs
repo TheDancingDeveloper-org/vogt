@@ -16,7 +16,10 @@ use super::views::{
     RecentLog, RegistryOperationManifest, SetWriteBackParamsPolicy, StoreCounts, StoreMigration,
     WriteBackActionView, WriteBackListParamsOutcome,
 };
-use super::{date_time, optional_date_time, optional_string};
+use super::{
+    date_time, integer, number, optional_date_time, optional_integer, optional_number,
+    optional_string,
+};
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -540,6 +543,125 @@ pub struct DeployedVersionsResult {
     #[serde(default)]
     pub freshness: Freshness,
 }
+
+/// The usage board takes no filter: it is one view of every account.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(extend("properties" = {}))]
+pub struct UsageBoardParams {}
+
+/// One rate-limit window a provider reported for an account.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageWindowView {
+    /// `primary` / `secondary` (Codex), or `limit` for a Claude limit-hit message.
+    pub name: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_number")]
+    pub used_percent: Option<f64>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_integer")]
+    pub window_minutes: Option<i64>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub resets_at: Option<String>,
+    /// The provider's own words for the reset.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub resets_text: Option<String>,
+}
+
+/// One provider account: its reported windows, and whether it is limited.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageAccountView {
+    pub name: String,
+    pub agent: String,
+    /// A window at 100% or a hit not yet reset.
+    pub limited: bool,
+    #[serde(default)]
+    pub windows: Vec<UsageWindowView>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub limited_at: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub limit_reached: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub plan: Option<String>,
+    /// Tokens the transcripts record in the last 5h, each message once, cache reads excluded (Claude only).
+    #[serde(default)]
+    #[schemars(schema_with = "integer")]
+    pub tokens_5h: i64,
+    /// The newest transcript entry read.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub observed_at: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub detail: Option<String>,
+}
+
+/// One LiteLLM key's spend, never the key itself.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageKeyView {
+    pub name: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub alias: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_number")]
+    pub spend_usd: Option<f64>,
+    /// True when `spend_usd` is today's (a one-day budget window).
+    #[serde(default)]
+    pub daily: bool,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_number")]
+    pub max_budget_usd: Option<f64>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub budget_duration: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub budget_reset_at: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_number")]
+    pub alert_usd: Option<f64>,
+    #[serde(default)]
+    pub alert: bool,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub detail: Option<String>,
+}
+
+/// A spend alert: a key at or over its day threshold.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageAlert {
+    pub key: String,
+    #[schemars(schema_with = "number")]
+    pub spend_usd: f64,
+    #[schemars(schema_with = "number")]
+    pub threshold_usd: f64,
+    pub message: String,
+}
+
+/// Every configured account and key, read now from what each reported.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageBoardResult {
+    pub accounts: Vec<UsageAccountView>,
+    pub keys: Vec<UsageKeyView>,
+    pub alerts: Vec<UsageAlert>,
+    #[schemars(schema_with = "date_time")]
+    pub generated_at: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InboxListParams {

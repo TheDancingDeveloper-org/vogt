@@ -1058,6 +1058,14 @@ pub fn build_operations() -> Vec<Operation> {
             CliBinding::new(&["deployed-versions"]),
         ),
         Operation::new(
+            "usage.board",
+            "Usage board: each configured provider account's reported rate-limit windows, limit hits and reset times (Claude, Codex), each LiteLLM key's spend, and the keys at or over their day-spend alert. Read now from the accounts' transcripts and LiteLLM /key/info; nothing is stored.",
+            Scope::Read,
+            false,
+            HttpRoute::new(HttpMethod::Get, "/usage-board"),
+            CliBinding::new(&["usage", "board"]),
+        ),
+        Operation::new(
             "inbox.list",
             "List the normalized attention Inbox with coverage.",
             Scope::Read,
