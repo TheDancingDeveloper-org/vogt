@@ -39,6 +39,7 @@ pub mod notifications;
 pub mod preferences;
 #[allow(dead_code)]
 pub mod sessions;
+pub mod watches;
 
 /// The session resolver for callers outside `services`.
 ///
@@ -75,6 +76,7 @@ mod project_import_test;
 mod services_test;
 #[cfg(test)]
 mod upstream_truth_test;
+mod watches_test;
 
 /// The shape the registry calls. Named operations are `fn` items, not closures,
 /// so the pointer is stable.

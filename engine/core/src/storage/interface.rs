@@ -16,7 +16,7 @@ use crate::core::{
     Actor, ActorPreference, AuditRecord, AuthDecision, CodingSession, Comment, ContractExemption,
     Decision, DepRef, DriftProposal, Event, ForgeAccount, InboxTriage, Initiative, Label, Moment,
     Observation, PasswordCredential, Principal, Project, RelationKind, SessionGrant, SessionReport,
-    Suppression, Sweep, SweepOutcome, Token, WorkItem, WorkLink, WorkOverlay, Workflow,
+    Suppression, Sweep, SweepOutcome, Token, Watch, WorkItem, WorkLink, WorkOverlay, Workflow,
     WriteBackRecord,
 };
 use crate::storage::observed_types::{
@@ -452,6 +452,15 @@ pub trait ReadView {
         target_engine_session_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<SessionGrant>, crate::errors::VogtError>;
+    fn watch(&self, watch_id: &str) -> Result<Option<Watch>, crate::errors::VogtError>;
+    /// Newest first, by `created_at` then id, up to `limit`.
+    fn list_watches(
+        &self,
+        state: Option<&str>,
+        target_session: Option<&str>,
+        owner_actor_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Watch>, crate::errors::VogtError>;
     fn decision(&self, decision_id: &str) -> Result<Option<Decision>, crate::errors::VogtError>;
     /// Newest first, by `created_at` then id, up to `limit`.
     fn list_decisions(
@@ -649,6 +658,8 @@ pub trait WriteTxn: ReadView {
         &mut self,
         grant: &SessionGrant,
     ) -> Result<(), crate::errors::VogtError>;
+    fn insert_watch(&mut self, watch: &Watch) -> Result<(), crate::errors::VogtError>;
+    fn update_watch(&mut self, watch: &Watch) -> Result<(), crate::errors::VogtError>;
     fn insert_decision(&mut self, decision: &Decision) -> Result<(), crate::errors::VogtError>;
     fn update_decision(&mut self, decision: &Decision) -> Result<(), crate::errors::VogtError>;
     fn set_session_work_item(
