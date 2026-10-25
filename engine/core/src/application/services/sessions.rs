@@ -446,7 +446,7 @@ const PROFILE_FIELDS: [&str; 7] = [
 
 /// The limits a start carries (Python `SessionBudgetParams`). Each field is one
 /// limit; a field left out is not set.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBudget {
     pub turns: Option<i64>,
@@ -744,8 +744,17 @@ pub struct SessionSummary {
     pub stopped_by: Option<String>,
     pub stop_reason: Option<String>,
     pub permission_mode: Option<String>,
+    /// Live from the engine: the named Claude Code account the session runs
+    /// under. Null is the engine's default account. Sits between
+    /// `permission_mode` and `running` because pydantic emits declaration order
+    /// and Python declares `account` there.
+    pub account: Option<String>,
     pub running: Option<SessionRuntime>,
     pub resources: Option<SessionResources>,
+    /// Live from the engine: the limits this session was started with (C7).
+    /// Null when it has none, or when the engine could not be asked. After
+    /// `resources`, matching Python's `SessionSummary`.
+    pub budget: Option<SessionBudget>,
     pub conversation_id: Option<String>,
     /// When the session printed AUTOPILOT: DONE, if the engine recorded it.
     pub done_at: Option<String>,
@@ -2917,8 +2926,10 @@ where
         stopped_by: None,
         stop_reason: None,
         permission_mode: None,
+        account: None,
         running: None,
         resources: None,
+        budget: None,
         done_at: None,
         conversation_id: None,
     };
@@ -2948,9 +2959,33 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.conversation_id = live.conversation_id.clone();
     summary.resources = live.resources.as_ref().map(resources_of);
     summary.permission_mode = live.permission_mode.clone();
+    summary.account = live.account.clone();
+    summary.budget = budget_params(live.budget.as_ref());
     summary.stopped_by = live.stopped_by.clone();
     summary.stop_reason = live.stop_reason.clone();
     summary.done_at = live.done_at.clone();
+}
+
+/// Python's `_budget_params`: only positive integer limits survive. Zero is
+/// not a limit, a non-integer is ignored, and a row that yields nothing is
+/// no budget rather than an empty object.
+pub(crate) fn budget_params(raw: Option<&serde_json::Map<String, Value>>) -> Option<SessionBudget> {
+    let raw = raw?;
+    let positive = |key: &str| match raw.get(key) {
+        Some(Value::Number(number)) => number.as_i64().filter(|value| *value > 0),
+        _ => None,
+    };
+    let budget = SessionBudget {
+        turns: positive("turns"),
+        context_tokens: positive("context_tokens"),
+        wall_clock_minutes: positive("wall_clock_minutes"),
+        session_wall_clock_minutes: positive("session_wall_clock_minutes"),
+    };
+    (budget.turns.is_some()
+        || budget.context_tokens.is_some()
+        || budget.wall_clock_minutes.is_some()
+        || budget.session_wall_clock_minutes.is_some())
+    .then_some(budget)
 }
 
 fn transcript_of<C, I>(
@@ -3170,8 +3205,10 @@ fn unlinked_summary(
         stopped_by: None,
         stop_reason: None,
         permission_mode: None,
+        account: None,
         running: None,
         resources: None,
+        budget: None,
         done_at: None,
         conversation_id: None,
     };
