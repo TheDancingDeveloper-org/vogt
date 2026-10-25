@@ -243,6 +243,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "actor.list" => Some(crate::application::taxonomy::list_actors_op),
         "workflow.list" => Some(crate::application::taxonomy::list_workflows_op),
         "deployed.versions" => Some(crate::application::deployed::deployed_versions_op),
+        "usage.board" => Some(crate::application::usage::usage_board_op),
         "preference.get" => Some(crate::application::services::preferences::preference_get_op),
         "preference.set" => Some(crate::application::services::preferences::preference_set_op),
         "notifications" => Some(crate::application::services::notifications::notifications_op),

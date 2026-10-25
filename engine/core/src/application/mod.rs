@@ -43,6 +43,7 @@ pub mod session_work;
 pub mod suppressions;
 pub mod taxonomy;
 pub mod upstream;
+pub mod usage;
 pub mod views;
 #[cfg(test)]
 mod workspace_disk_test;

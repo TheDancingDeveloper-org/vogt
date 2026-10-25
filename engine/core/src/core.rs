@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod session_economics;
+pub mod usage_board;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
