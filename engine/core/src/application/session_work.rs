@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use crate::adapters::engine::EngineSession;
 use crate::application::context::{write_of, AppContext, Built};
-use crate::application::services::sessions::SessionSummary;
+use crate::application::services::sessions::{budget_params, SessionSummary};
 use crate::application::services::{now_of, resolve_session};
 use crate::application::writes::{audited_action, audited_write, WriteOutcome};
 use crate::core::{Clock, CodingSession, IdFactory};
@@ -339,7 +339,9 @@ fn summarize_asked<C: Clock, I: IdFactory>(
         role: None,
         conversation_id: None,
         resources: None,
+        budget: None,
         permission_mode: None,
+        account: None,
         stopped_by: None,
         stop_reason: None,
         last_reply_excerpt: None,
@@ -402,7 +404,9 @@ fn unlinked_summary<C: Clock, I: IdFactory>(
         role: None,
         conversation_id: None,
         resources: None,
+        budget: None,
         permission_mode: None,
+        account: None,
         stopped_by: None,
         stop_reason: None,
         last_reply_excerpt: None,
@@ -471,6 +475,8 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
         over_threshold: resources.over_threshold,
     });
     summary.permission_mode = live.permission_mode.clone();
+    summary.account = live.account.clone();
+    summary.budget = budget_params(live.budget.as_ref());
     summary.stopped_by = live.stopped_by.clone();
     summary.stop_reason = live.stop_reason.clone();
 }
