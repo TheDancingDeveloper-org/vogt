@@ -233,6 +233,11 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9",
             "id": "0024_session_started_by"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "43a896371451a866a6b6407ca61833a1d17e5a5f592e506024e634a6af73ea66",
+            "id": "0025_charters"
           }
         ],
         "tokens": [
@@ -351,7 +356,7 @@
         "work_items": 0
       },
       "data_dir": "<volatile>",
-      "declared_schema_version": 24,
+      "declared_schema_version": 25,
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "principal": "local:parity",
@@ -364,8 +369,8 @@
   {
     "body": {
       "data_dir": "<volatile>",
-      "declared_schema_expected": 24,
-      "declared_schema_version": 24,
+      "declared_schema_expected": 25,
+      "declared_schema_version": 25,
       "migrations_applied": [],
       "observed_schema_expected": 6,
       "observed_schema_version": 6
@@ -1482,6 +1487,11 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9",
             "id": "0024_session_started_by"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "43a896371451a866a6b6407ca61833a1d17e5a5f592e506024e634a6af73ea66",
+            "id": "0025_charters"
           }
         ],
         "projects": [
@@ -3574,7 +3584,7 @@
   },
   {
     "body": {
-      "declared_schema_version": 24,
+      "declared_schema_version": 25,
       "engine_state": "not configured",
       "import_root": "<root>/instance/repos",
       "instance_id": "ins_0001",
@@ -3603,7 +3613,7 @@
   },
   {
     "body": {
-      "declared_schema_version": 24,
+      "declared_schema_version": 25,
       "engine_state": "not in this backup",
       "import_root_now": "<root>/instance/repos",
       "import_root_then": "<root>/instance/repos",

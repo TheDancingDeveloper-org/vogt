@@ -6742,6 +6742,315 @@
       "exclusion_reason": null
     },
     {
+      "name": "charter.get",
+      "summary": "Read the charter (standing instructions injected into every session brief) of the workspace, a project or an initiative (scope + ref slug). history=true adds earlier versions.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/charters",
+      "mcp_tool": "charter_get",
+      "cli_path": [
+        "charter",
+        "get"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "description": "Read the charter of the workspace, a project or an initiative.",
+        "properties": {
+          "scope": {
+            "description": "workspace, project or initiative.",
+            "enum": [
+              "workspace",
+              "project",
+              "initiative"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Project or initiative slug; omitted for workspace.",
+            "title": "Ref"
+          },
+          "history": {
+            "default": false,
+            "description": "Also return earlier versions, newest first.",
+            "title": "History",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 20,
+            "maximum": 200,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "title": "CharterGetParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "$defs": {
+          "CharterView": {
+            "additionalProperties": false,
+            "description": "One version of a scope's charter.",
+            "properties": {
+              "scope": {
+                "description": "workspace, project or initiative.",
+                "enum": [
+                  "workspace",
+                  "project",
+                  "initiative"
+                ],
+                "title": "Scope",
+                "type": "string"
+              },
+              "ref": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Project or initiative slug; none for workspace.",
+                "title": "Ref"
+              },
+              "version": {
+                "title": "Version",
+                "type": "integer"
+              },
+              "body": {
+                "title": "Body",
+                "type": "string"
+              },
+              "author": {
+                "description": "identity_ref of whoever set this version.",
+                "title": "Author",
+                "type": "string"
+              },
+              "created_at": {
+                "format": "date-time",
+                "title": "Created At",
+                "type": "string"
+              },
+              "reason": {
+                "title": "Reason",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope",
+              "version",
+              "body",
+              "author",
+              "created_at",
+              "reason"
+            ],
+            "title": "CharterView",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "current": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CharterView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The newest version, or none when never set. An empty body is a cleared charter."
+          },
+          "history": {
+            "items": {
+              "$ref": "#/$defs/CharterView"
+            },
+            "title": "History",
+            "type": "array"
+          }
+        },
+        "title": "CharterGetResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "charter.set",
+      "summary": "Set the charter of the workspace, a project or an initiative: Markdown injected into every session brief started there (workspace, then project, then initiative, then the brief) and into Codex developer_instructions. Writes the next version; empty body clears; optional expected_version.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/charters",
+      "mcp_tool": "charter_set",
+      "cli_path": [
+        "charter",
+        "set"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "description": "Set the charter. An empty body clears it.",
+        "properties": {
+          "scope": {
+            "description": "workspace, project or initiative.",
+            "enum": [
+              "workspace",
+              "project",
+              "initiative"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Project or initiative slug; omitted for workspace.",
+            "title": "Ref"
+          },
+          "body": {
+            "description": "The standing instructions, in Markdown. Empty clears it.",
+            "maxLength": 8000,
+            "title": "Body",
+            "type": "string"
+          },
+          "expected_version": {
+            "default": null,
+            "description": "Write only if the current version is this (0: never set).",
+            "minimum": 0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Why this write is being made (audited).",
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "body",
+          "reason"
+        ],
+        "title": "CharterSetParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "$defs": {
+          "CharterView": {
+            "additionalProperties": false,
+            "description": "One version of a scope's charter.",
+            "properties": {
+              "scope": {
+                "description": "workspace, project or initiative.",
+                "enum": [
+                  "workspace",
+                  "project",
+                  "initiative"
+                ],
+                "title": "Scope",
+                "type": "string"
+              },
+              "ref": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Project or initiative slug; none for workspace.",
+                "title": "Ref"
+              },
+              "version": {
+                "title": "Version",
+                "type": "integer"
+              },
+              "body": {
+                "title": "Body",
+                "type": "string"
+              },
+              "author": {
+                "description": "identity_ref of whoever set this version.",
+                "title": "Author",
+                "type": "string"
+              },
+              "created_at": {
+                "format": "date-time",
+                "title": "Created At",
+                "type": "string"
+              },
+              "reason": {
+                "title": "Reason",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope",
+              "version",
+              "body",
+              "author",
+              "created_at",
+              "reason"
+            ],
+            "title": "CharterView",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "charter": {
+            "$ref": "#/$defs/CharterView"
+          }
+        },
+        "required": [
+          "charter"
+        ],
+        "title": "CharterSetResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
       "name": "work.create",
       "summary": "Create a work item (feature / bug / chore / question).",
       "scope": "work.write",

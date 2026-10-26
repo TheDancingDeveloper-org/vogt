@@ -489,6 +489,20 @@ pub trait ReadView {
     ) -> Result<Vec<Event>, crate::errors::VogtError>;
     fn list_audit(&self, query: &AuditQuery) -> Result<Vec<AuditRecord>, crate::errors::VogtError>;
     fn count_audit(&self, query: &AuditQuery) -> Result<i64, crate::errors::VogtError>;
+
+    /// The newest version of a scope's charter, or `None` when never set.
+    fn charter(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> Result<Option<crate::core::Charter>, crate::errors::VogtError>;
+    /// A scope's charter versions, newest first.
+    fn charter_history(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::core::Charter>, crate::errors::VogtError>;
 }
 
 /// A write transaction. Also a read view, so a writer never opens a second
@@ -661,6 +675,11 @@ pub trait WriteTxn: ReadView {
     fn upsert_actor_preference(
         &mut self,
         preference: &ActorPreference,
+    ) -> Result<(), crate::errors::VogtError>;
+    /// Append one charter version; `(scope_kind, scope_id, version)` is unique.
+    fn insert_charter(
+        &mut self,
+        charter: &crate::core::Charter,
     ) -> Result<(), crate::errors::VogtError>;
     fn mark_drift_superseded(
         &mut self,

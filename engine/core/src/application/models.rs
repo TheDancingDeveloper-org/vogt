@@ -40,6 +40,8 @@ pub const DERIVED: &[&str] = &[
     "project.list",
     "project.update",
     "project.transition",
+    "charter.get",
+    "charter.set",
     "forge.account_unlink",
     "forge.account_link",
     "forge.account_status",
@@ -297,6 +299,16 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "project.transition",
             schema_of::<project::TransitionProjectParams>(),
             schema_of::<project::ProjectResult>(),
+        ),
+        (
+            "charter.get",
+            schema_of::<project::CharterGetParams>(),
+            schema_of::<project::CharterGetResult>(),
+        ),
+        (
+            "charter.set",
+            schema_of::<project::CharterSetParams>(),
+            schema_of::<project::CharterSetResult>(),
         ),
         (
             "forge.account_unlink",

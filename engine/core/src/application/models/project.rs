@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::entities::{default_true, lifecycle_active, AgentPolicy, LifecycleState, Project};
 use super::forge::OnboardResult;
-use super::optional_date_time;
+use super::{date_time, integer, optional_date_time, optional_string};
 
 /// Opt a registered project into the contract.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -243,4 +243,99 @@ pub struct TransitionProjectParams {
     pub to_state: LifecycleState,
     #[schemars(length(min = 1))]
     pub reason: String,
+}
+
+/// workspace, project or initiative.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum CharterScopeKind {
+    #[serde(rename = "workspace")]
+    Workspace,
+    #[serde(rename = "project")]
+    Project,
+    #[serde(rename = "initiative")]
+    Initiative,
+}
+
+fn charter_history_default() -> bool {
+    false
+}
+
+fn charter_limit() -> i64 {
+    20
+}
+
+/// One version of a scope's charter.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharterView {
+    pub scope: CharterScopeKind,
+    /// Project or initiative slug; none for workspace.
+    #[serde(default, rename = "ref")]
+    #[schemars(schema_with = "optional_string")]
+    pub reference: Option<String>,
+    #[schemars(schema_with = "integer")]
+    pub version: i64,
+    pub body: String,
+    /// identity_ref of whoever set this version.
+    pub author: String,
+    #[schemars(schema_with = "date_time")]
+    pub created_at: String,
+    pub reason: String,
+}
+
+/// Read the charter of the workspace, a project or an initiative.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharterGetParams {
+    /// workspace, project or initiative.
+    pub scope: CharterScopeKind,
+    /// Project or initiative slug; omitted for workspace.
+    #[serde(default, rename = "ref")]
+    #[schemars(schema_with = "optional_string")]
+    pub reference: Option<String>,
+    /// Also return earlier versions, newest first.
+    #[serde(default = "charter_history_default")]
+    pub history: bool,
+    #[serde(default = "charter_limit")]
+    #[schemars(schema_with = "integer", range(min = 1, max = 200))]
+    pub limit: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharterGetResult {
+    /// The newest version, or none when never set. An empty body is a cleared charter.
+    #[serde(default)]
+    pub current: Option<CharterView>,
+    #[serde(default)]
+    pub history: Vec<CharterView>,
+}
+
+/// Set the charter. An empty body clears it.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharterSetParams {
+    /// workspace, project or initiative.
+    pub scope: CharterScopeKind,
+    /// Project or initiative slug; omitted for workspace.
+    #[serde(default, rename = "ref")]
+    #[schemars(schema_with = "optional_string")]
+    pub reference: Option<String>,
+    /// The standing instructions, in Markdown. Empty clears it.
+    #[schemars(length(max = 8000))]
+    pub body: String,
+    /// Write only if the current version is this (0: never set).
+    #[serde(default)]
+    #[schemars(schema_with = "integer", range(min = 0))]
+    pub expected_version: Option<i64>,
+    /// Why this write is being made (audited).
+    #[schemars(length(min = 1))]
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CharterSetResult {
+    pub charter: CharterView,
 }

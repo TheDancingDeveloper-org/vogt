@@ -731,6 +731,116 @@
       }
     },
     {
+      "name": "charter_get",
+      "description": "Read the charter (standing instructions injected into every session brief) of the workspace, a project or an initiative (scope + ref slug). history=true adds earlier versions.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Read the charter of the workspace, a project or an initiative.",
+        "properties": {
+          "scope": {
+            "description": "workspace, project or initiative.",
+            "enum": [
+              "workspace",
+              "project",
+              "initiative"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Project or initiative slug; omitted for workspace.",
+            "title": "Ref"
+          },
+          "history": {
+            "default": false,
+            "description": "Also return earlier versions, newest first.",
+            "title": "History",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 20,
+            "maximum": 200,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "title": "CharterGetParams",
+        "type": "object"
+      }
+    },
+    {
+      "name": "charter_set",
+      "description": "Set the charter of the workspace, a project or an initiative: Markdown injected into every session brief started there (workspace, then project, then initiative, then the brief) and into Codex developer_instructions. Writes the next version; empty body clears; optional expected_version.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Set the charter. An empty body clears it.",
+        "properties": {
+          "scope": {
+            "description": "workspace, project or initiative.",
+            "enum": [
+              "workspace",
+              "project",
+              "initiative"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Project or initiative slug; omitted for workspace.",
+            "title": "Ref"
+          },
+          "body": {
+            "description": "The standing instructions, in Markdown. Empty clears it.",
+            "maxLength": 8000,
+            "title": "Body",
+            "type": "string"
+          },
+          "expected_version": {
+            "default": null,
+            "description": "Write only if the current version is this (0: never set).",
+            "minimum": 0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Why this write is being made (audited).",
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "body",
+          "reason"
+        ],
+        "title": "CharterSetParams",
+        "type": "object"
+      }
+    },
+    {
       "name": "work_create",
       "description": "Create a work item (feature / bug / chore / question).",
       "inputSchema": {
