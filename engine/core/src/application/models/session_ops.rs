@@ -48,7 +48,7 @@ pub struct StartSessionParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub template: Option<String>,
-    /// What the session's agent should do, in the user's words. Folded into the brief as its Task section; an agent template (Claude Code, Codex, OpenCode, Klaudia) is started with a first prompt telling it to read the brief and carry that task out, so 'start a session on X and check its containers' opens an agent already checking them. A plain shell only gets the brief's path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with `template` when it is something to carry out.
+    /// What the session's agent should do, in the user's words. Folded into the brief as its Task section; an agent template (Claude Code, Codex, OpenCode, Klaudia) is started with a first prompt telling it to read the brief and carry that task out, so 'start a session on X and check its containers' opens an agent already checking them. A plain shell only gets the brief's path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with `template` when it is something to carry out. Omitted on an agent start, the task is taken from `reason` (a leading `Task:` dropped); a `review` purpose gets a default review task.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub task: Option<String>,
@@ -114,6 +114,10 @@ pub struct StartSessionParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub cwd: Option<String>,
+    /// Never compact this session on a cold wake (WI-2037): every wake resumes its full transcript, whatever the deployment's cold_wake_compaction says. Changeable later at session_hibernate.
+    #[serde(default)]
+    #[schemars(extend("default" = false))]
+    pub cold_wake_opt_out: bool,
     /// Why this write is being made (audited).
     #[schemars(length(min = 1))]
     pub reason: String,
@@ -127,6 +131,24 @@ pub struct SessionResult {
     pub session: SessionSummary,
     #[serde(default)]
     pub digest: Option<SessionDigest>,
+    /// On `session.start` for a project with a landing rule: the rule the worker runs under and any task lines it overrode.
+    #[serde(default)]
+    pub effective_policy: Option<EffectivePolicy>,
+}
+
+/// The landing rule a started session runs under (WI-1832).
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EffectivePolicy {
+    pub base_branch: String,
+    pub lands_by: String,
+    pub merge_by: String,
+    pub merge_mode: String,
+    pub deploy_by: String,
+    /// Where the task contradicted this policy, one line per axis (PR vs push only, merge, base branch, deploy). The policy wins and the brief says so; empty when the task agreed or set none.
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub overrides: Vec<String>,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -251,7 +273,7 @@ pub struct SessionInputResult {
     /// Enter was pressed — by `submit` or as one of the `keys`.
     #[serde(default)]
     pub submitted: bool,
-    /// typed (no Enter: the text sits in the input) / delivered (a turn started) / queued (behind a running turn) / unconfirmed (sent; nothing observable yet). A refused input is an error, not a value.
+    /// typed (no Enter: the text sits in the input) / delivered (a turn started) / queued (behind a running turn; once it ends Vogt checks the input box and presses Enter if the text is still there) / stuck (at rest with the text still in the input box: the submit did not land; the sweep shows it as input pending) / wedged (Codex echoed the text after a model-API error but started no turn; restart with session_hibernate then session_wake, which keeps the worktree and conversation) / unconfirmed (sent; nothing observable yet). A refused input is an error, not a value.
     #[serde(default = "default_session_input_result_delivery")]
     pub delivery: String,
     /// What `delivery` was judged from.
@@ -322,10 +344,21 @@ pub struct HibernateSessionParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub superseded_by: Option<String>,
+    /// Arm a watch before hibernating: the session is woken, and told the outcome, when this trigger fires (see watch_create).
+    #[serde(default)]
+    pub wake_on: Option<super::caught_up::WatchTriggerModel>,
+    /// How long the watch stays armed: default 24 h, at most 14 d. Past it the watch reads `expired` and wakes nobody.
+    #[serde(default = "default_hibernate_wake_on_ttl")]
+    #[schemars(range(min = 60, max = 1_209_600), extend("default" = 86400))]
+    pub wake_on_ttl_seconds: i64,
+    /// Never compact this session on a cold wake (WI-2037): a wake always resumes its full transcript, even when the deployment's cold_wake_compaction is on and the prompt cache has expired. Unset keeps the session's current choice (a new session follows the deployment).
+    #[serde(default)]
+    pub cold_wake_opt_out: Option<bool>,
     /// Why this write is being made (audited).
     #[schemars(length(min = 1))]
     pub reason: String,
 }
+fn default_hibernate_wake_on_ttl() -> i64 { 86_400 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WakeSessionParams {
@@ -783,6 +816,9 @@ pub struct SessionDigestResult {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub last_reply_excerpt: Option<String>,
+    /// The session's newest `session.report` (WI-2039).
+    #[serde(default)]
+    pub latest_report: Option<super::caught_up::SessionReportView>,
     #[serde(default)]
     pub turns: Option<i64>,
     #[serde(default)]

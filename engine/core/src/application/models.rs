@@ -124,6 +124,9 @@ pub const DERIVED: &[&str] = &[
     "session.grant_decide",
     "session.grant_revoke",
     "session.grant_list",
+    "watch.create",
+    "watch.list",
+    "watch.cancel",
     "decision.ask",
     "decision.answer",
     "decision.list",
@@ -137,6 +140,7 @@ pub const DERIVED: &[&str] = &[
     "session.changes",
     "session.wait_any",
     "session.report_blocked",
+    "session.report",
     "session.report_unblocked",
     "agent_cli.list",
     "agent_cli.update",
@@ -155,15 +159,19 @@ pub const DERIVED: &[&str] = &[
     "events.list",
     "notifications",
     "deployed.versions",
+    "usage.board",
     "inbox.list",
     "inbox.archive",
     "inbox.snooze",
     "inbox.restore",
+    "charter.get",
+    "charter.set",
     "audit.list",
 ];
 
 mod access;
 mod admin;
+mod caught_up;
 mod chat;
 mod entities;
 mod forge;
@@ -716,6 +724,21 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             schema_of::<session_ops::ListGrantsResult>(),
         ),
         (
+            "watch.create",
+            schema_of::<caught_up::CreateWatchParams>(),
+            schema_of::<caught_up::WatchResult>(),
+        ),
+        (
+            "watch.list",
+            schema_of::<caught_up::ListWatchesParams>(),
+            schema_of::<caught_up::ListWatchesResult>(),
+        ),
+        (
+            "watch.cancel",
+            schema_of::<caught_up::CancelWatchParams>(),
+            schema_of::<caught_up::WatchResult>(),
+        ),
+        (
             "decision.ask",
             schema_of::<session_ops::AskDecisionParams>(),
             schema_of::<session_ops::DecisionResult>(),
@@ -779,6 +802,11 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "session.report_blocked",
             schema_of::<session_ops::ReportBlockedParams>(),
             schema_of::<session_ops::SessionBlockedResult>(),
+        ),
+        (
+            "session.report",
+            schema_of::<caught_up::SessionReportParams>(),
+            schema_of::<caught_up::SessionReportResult>(),
         ),
         (
             "session.report_unblocked",
@@ -871,6 +899,11 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             schema_of::<system::DeployedVersionsResult>(),
         ),
         (
+            "usage.board",
+            schema_of::<caught_up::UsageBoardParams>(),
+            schema_of::<caught_up::UsageBoardResult>(),
+        ),
+        (
             "inbox.list",
             schema_of::<system::InboxListParams>(),
             schema_of::<system::InboxListResult>(),
@@ -889,6 +922,16 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "inbox.restore",
             schema_of::<system::InboxRestoreParams>(),
             schema_of::<system::InboxTriageResult>(),
+        ),
+        (
+            "charter.get",
+            schema_of::<caught_up::CharterGetParams>(),
+            schema_of::<caught_up::CharterGetResult>(),
+        ),
+        (
+            "charter.set",
+            schema_of::<caught_up::CharterSetParams>(),
+            schema_of::<caught_up::CharterSetResult>(),
         ),
         (
             "audit.list",
@@ -938,20 +981,21 @@ fn pydantic_shape(value: &mut serde_json::Value) {
             if let Some(Value::Object(properties)) = map.get_mut("properties") {
                 for (name, schema) in properties.iter_mut() {
                     if let Value::Object(property) = schema {
-                        // `default_factory=list` records no default, where
-                        // serde's `default` always does: an empty-list default
-                        // is that factory, so it is dropped.
-                        let keep_default = property.remove("x-keep-default").is_some();
-                        let empty = property.get("default") == Some(&json!([]))
-                            || property.get("default") == Some(&json!({}));
-                        if !keep_default && empty {
-                            property.remove("default");
-                        }
                         if !refers_to_definition(property) && !property.contains_key("title") {
                             property.insert("title".into(), Value::String(pydantic_title(name)));
                         }
                     }
                 }
+            }
+            // `default_factory=list` records no default, where serde's
+            // `default` always does: an empty collection default is that
+            // factory, so it is dropped unless the field asks to keep it.
+            // Done on every object, including one nested under `$defs`.
+            let keep_default = map.remove("x-keep-default").is_some();
+            let empty = map.get("default") == Some(&json!([]))
+                || map.get("default") == Some(&json!({}));
+            if !keep_default && empty {
+                map.remove("default");
             }
             for child in map.values_mut() {
                 pydantic_shape(child);
@@ -1109,6 +1153,12 @@ pub(super) fn open_object(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "object", "additionalProperties": true })
 }
 
+/// `dict[str, str]`: an object whose values are strings. No description, so a
+/// field's doc comment is not copied onto the schema.
+pub(super) fn string_map(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "object", "additionalProperties": { "type": "string" } })
+}
+
 /// `str | None` with no default: a string, or null, and required.
 pub(super) fn optional_string(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "anyOf": [{ "type": "string" }, { "type": "null" }] })
@@ -1262,3 +1312,4 @@ mod tests {
         );
     }
 }
+

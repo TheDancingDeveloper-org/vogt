@@ -5,7 +5,7 @@
 //! recorded schema is pydantic's own JSON schema, which is what makes the
 //! rejection match Python's: a bound that is absent there is not invented here.
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::errors::{record_validation, FieldError, Loc, ValidationReport, VogtError};
 
@@ -197,6 +197,7 @@ fn apply_object(
     // Pydantic reports a field's own error before it reports an extra key, so
     // the known fields are checked first and the extras appended after.
     let mut extras = Vec::new();
+    let sent = given.clone();
     if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
         let unexpected: Vec<String> = given
             .keys()
@@ -242,7 +243,12 @@ fn apply_object(
                     // Pydantic records `null` as the default of an optional field
                     // the caller left out. The CLI omits such a flag entirely, so
                     // a null default is left absent rather than inserted.
-                    if !default.is_null() {
+                    // An empty list or object is the same kind of omission:
+                    // `default_factory=list` records no default, and the schema
+                    // rewrite drops it unless the field asks to keep it. Only a
+                    // default that survived that rewrite is filled in.
+                    let empty = default == &json!([]) || default == &json!({});
+                    if !default.is_null() && !empty {
                         resolved.insert(name.clone(), default.clone());
                     }
                 } else if required_of(schema).iter().any(|item| item == name) {
@@ -256,10 +262,60 @@ fn apply_object(
     }
     problems.extend(extras);
     if problems.is_empty() {
+        // `WatchTriggerModel._fields_for_kind`. Pydantic reports the object
+        // the caller sent, before defaults are filled, so the check reads
+        // `given` rather than `resolved`.
+        if let Some(complaint) = watch_fields_for_kind(schema, &sent) {
+            let input = Value::Object(sent);
+            problems.push(finish(
+                &pydantic(location, &format!("Value error, {complaint}")),
+                &input,
+            ));
+        }
+    }
+    if problems.is_empty() {
         Ok(resolved)
     } else {
         Err(problems)
     }
+}
+
+/// The complaint from `WatchTriggerModel._fields_for_kind`, or none when this
+/// object is not that model or its fields agree with `kind`.
+fn watch_fields_for_kind(schema: &Value, resolved: &Map<String, Value>) -> Option<&'static str> {
+    if schema.get("title").and_then(Value::as_str) != Some("WatchTriggerModel") {
+        return None;
+    }
+    let kind = resolved.get("kind").and_then(Value::as_str)?;
+    let missing = |name: &str| {
+        resolved.get(name).is_none_or(|value| {
+            value.is_null() || value.as_str().is_some_and(str::is_empty)
+        })
+    };
+    let complaint = match kind {
+        "pr" if missing("project") || missing("number") => {
+            "a pr watch needs project and number"
+        }
+        "ci"
+            if missing("project")
+                || missing("sha") == missing("pr") =>
+        {
+            "a ci watch needs project and exactly one of sha or pr"
+        }
+        "ci"
+            if resolved.get("checks").is_none_or(|value| {
+                !value.as_array().is_some_and(|items| {
+                    items.iter().any(|item| item.as_str().is_some_and(|text| !text.trim().is_empty()))
+                })
+            }) =>
+        {
+            "a ci watch needs checks: the required check names (Vogt does not read branch protection, and waiting on whatever runs were observed can fire before a slower required check starts)"
+        }
+        "work_item" if missing("work_item") => "a work_item watch needs work_item",
+        "session" if missing("session") => "a session watch needs session",
+        _ => return None,
+    };
+    Some(complaint)
 }
 
 /// Pydantic `mode="before"` validators that run ahead of the type check, for the
@@ -403,10 +459,20 @@ fn check_value(
                 &value,
             ))
         } else {
-            Err(stamp(
-                &[pydantic(location, &expected_input(schema))],
-                &value,
-            ))
+            // A `$ref` names another model. Null there is the wrong model, not
+            // the wrong string, so the complaint follows the definition.
+            let typed = schema
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| root.pointer(reference.trim_start_matches('#')))
+                .unwrap_or(schema);
+            let complaint = if typed.get("properties").is_some() {
+                let model = typed.get("title").and_then(Value::as_str).unwrap_or("object");
+                format!("Input should be a valid dictionary or instance of {model}")
+            } else {
+                expected_input(typed)
+            };
+            Err(stamp(&[pydantic(location, &complaint)], &value))
         };
     }
     if let Some(nested) = schema.get("properties") {
@@ -914,6 +980,7 @@ fn error_code(complaint: &str, input: &Value) -> &'static str {
             s if s.contains("valid number") => "float_type",
             s if s.contains("valid boolean") => "bool_type",
             s if s.contains("valid list") => "list_type",
+            s if s.contains("instance of") => "model_type",
             s if s.contains("valid dictionary") => "dict_type",
             s if s.contains("datetime") => "datetime_type",
             _ => "string_type",
@@ -1038,44 +1105,19 @@ fn finish(problem: &FieldError, input: &Value) -> FieldError {
     }
 }
 
-/// The steps back out of the dotted spelling `dotted` writes. An index is
-/// digits and a field step ends at the next `.` that introduces an index, so a
-/// key that itself contains a dot stays one field.
+/// The steps back out of the dotted spelling `dotted` writes. A `.` between
+/// field names is a step (`wake_on.kind`). An index is a digit step
+/// (`cells.0`). A `.` that introduces a digit index is still a step boundary;
+/// a key whose own name contains a dot is not produced by `dotted`.
 fn parse_loc(field: &str) -> Vec<Loc> {
-    let mut steps = Vec::new();
-    let mut rest = field;
-    while !rest.is_empty() {
-        let split = rest.match_indices('.').map(|(at, _)| at).find(|at| {
-            let step = &rest[..*at];
-            let digits = step.rsplit('.').next().unwrap_or("");
-            !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
-        });
-        let (head, after) = match split {
-            Some(at) => (&rest[..at], &rest[at + 1..]),
-            None => (rest, ""),
-        };
-        // `cells.0` splits into the field and then the index.
-        let (step, index) = match head.rfind('.') {
-            Some(dot)
-                if head[dot + 1..].chars().all(|ch| ch.is_ascii_digit())
-                    && !head[dot + 1..].is_empty() =>
-            {
-                (&head[..dot], Some(&head[dot + 1..]))
-            }
-            _ => (head, None),
-        };
-        if !step.is_empty() {
-            steps.push(match step.parse::<usize>() {
-                Ok(index) if index.to_string() == step => Loc::Index(index),
-                _ => Loc::Field(step.to_string()),
-            });
-        }
-        if let Some(index) = index {
-            steps.push(Loc::Index(index.parse::<usize>().unwrap()));
-        }
-        rest = after;
-    }
-    steps
+    field
+        .split('.')
+        .filter(|step| !step.is_empty())
+        .map(|step| match step.parse::<usize>() {
+            Ok(index) if index.to_string() == step => Loc::Index(index),
+            _ => Loc::Field(step.to_string()),
+        })
+        .collect()
 }
 
 /// The dotted spelling one complaint line uses. The structured `loc` is what a
@@ -1112,6 +1154,8 @@ fn input_for(problem: &str, given: &Value) -> Value {
         return given.clone();
     };
     let mut path = parse_loc(field);
+    // The complaint names the bad field. Its value is the object one step
+    // above that field: `wake_on.kind` was rejected for `wake_on`.
     path.pop();
     let mut cursor = given;
     for part in &path {

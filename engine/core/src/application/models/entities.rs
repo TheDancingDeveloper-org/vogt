@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{date_time, integer, number, open_object, optional_date_time};
+use super::{date_time, integer, number, open_object, optional_date_time, string_map};
 
 fn token_kind_api() -> TokenKind {
     TokenKind::Api
@@ -450,6 +450,12 @@ pub struct LandingPolicy {
     pub linear_history: bool,
     #[serde(default = "operator_default")]
     pub deploy_by: String,
+    #[serde(default)]
+    #[schemars(schema_with = "string_map", extend("x-keep-default" = true))]
+    pub initiative_bases: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub long_lived_branches: Vec<String>,
 }
 
 /// How a review of this project's work is run. Guidance until enforced.

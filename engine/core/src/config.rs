@@ -149,6 +149,86 @@ pub struct DeployLane {
     pub version_url: Option<String>,
 }
 
+/// One provider account `usage.board` reads transcripts for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageAccount {
+    pub name: String,
+    pub agent: String,
+    pub dir: PathBuf,
+}
+
+impl UsageAccount {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| "a usage account must be a table".to_string())?;
+        for key in obj.keys() {
+            match key.as_str() {
+                "name" | "agent" | "dir" => {}
+                other => return Err(format!("usage account: unknown key {other:?}")),
+            }
+        }
+        let name = required_string(obj, "name")?;
+        if name.is_empty() {
+            return Err("usage account name must not be empty".to_string());
+        }
+        let agent = required_string(obj, "agent")?;
+        if agent != "claude" && agent != "codex" {
+            return Err(format!(
+                "usage account {name:?}: agent must be 'claude' or 'codex'"
+            ));
+        }
+        let dir = required_string(obj, "dir")?;
+        if dir.is_empty() {
+            return Err(format!("usage account {name:?}: dir must not be empty"));
+        }
+        Ok(Self {
+            name,
+            agent,
+            dir: PathBuf::from(dir),
+        })
+    }
+}
+
+/// One LiteLLM key `usage.board` reports spend for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageKey {
+    pub name: String,
+    pub key_env: String,
+    pub daily_alert_usd: Option<String>,
+}
+
+impl UsageKey {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| "a usage key must be a table".to_string())?;
+        for key in obj.keys() {
+            match key.as_str() {
+                "name" | "key_env" | "daily_alert_usd" => {}
+                other => return Err(format!("usage key: unknown key {other:?}")),
+            }
+        }
+        let name = required_string(obj, "name")?;
+        if name.is_empty() {
+            return Err("usage key name must not be empty".to_string());
+        }
+        let key_env = required_string(obj, "key_env")?;
+        if key_env.is_empty() {
+            return Err(format!("usage key {name:?}: key_env must not be empty"));
+        }
+        let daily_alert_usd = match obj.get("daily_alert_usd") {
+            None | Some(Value::Null) => None,
+            Some(value) => opt_nonneg_number("daily_alert_usd", value)?,
+        };
+        Ok(Self {
+            name,
+            key_env,
+            daily_alert_usd,
+        })
+    }
+}
+
 impl DeployLane {
     fn from_value(value: &Value) -> Result<Self, String> {
         let obj = value
@@ -240,11 +320,19 @@ pub struct VogtConfig {
     pub ci_alert_tags: Vec<String>,
     pub ci_watch_notify_sessions: bool,
     pub deploy_lanes: Vec<DeployLane>,
+    pub autopilot_done_requires_result_report: bool,
+    pub usage_accounts: Vec<UsageAccount>,
+    pub usage_litellm_url: Option<String>,
+    pub usage_litellm_keys: Vec<UsageKey>,
+    pub usage_daily_spend_alert_usd: Option<String>,
     pub marker_file_extensions: Vec<String>,
     pub branch_binding_patterns: Vec<String>,
     pub branch_binding_template: String,
     pub retention_days: i64,
     pub github_token_file: Option<PathBuf>,
+    pub github_app_id: Option<String>,
+    pub github_app_installation_id: Option<i64>,
+    pub github_app_private_key_file: Option<PathBuf>,
     pub forge_account_key_file: Option<PathBuf>,
     pub forge_token_files: BTreeMap<String, PathBuf>,
     pub agent_activity_roots: BTreeMap<String, PathBuf>,
@@ -265,6 +353,12 @@ pub struct VogtConfig {
     pub install_bootstrap_enabled: bool,
     pub sqlite_synchronous: SqliteSynchronous,
     pub sweep_interval_seconds: i64,
+    pub watch_interval_seconds: i64,
+    pub cold_wake_compaction: bool,
+    pub cold_wake_threshold_tokens: i64,
+    pub cold_wake_ttl_seconds: BTreeMap<String, i64>,
+    pub forge_posture_interval_seconds: i64,
+    pub github_rate_limit_floor: i64,
     pub verify_horizon_hours: i64,
     pub image_digest: Option<String>,
     pub diagnostics_peer_url: Option<String>,
@@ -340,6 +434,11 @@ impl Default for VogtConfig {
             ci_alert_tags: vec!["v*".to_string()],
             ci_watch_notify_sessions: true,
             deploy_lanes: Vec::new(),
+            autopilot_done_requires_result_report: false,
+            usage_accounts: Vec::new(),
+            usage_litellm_url: None,
+            usage_litellm_keys: Vec::new(),
+            usage_daily_spend_alert_usd: None,
             marker_file_extensions: vec![
                 ".py".to_string(),
                 ".rs".to_string(),
@@ -364,6 +463,9 @@ impl Default for VogtConfig {
             branch_binding_template: DEFAULT_BRANCH_TEMPLATE.to_string(),
             retention_days: 180,
             github_token_file: None,
+            github_app_id: None,
+            github_app_installation_id: None,
+            github_app_private_key_file: None,
             forge_account_key_file: None,
             forge_token_files: BTreeMap::new(),
             agent_activity_roots: BTreeMap::new(),
@@ -384,12 +486,25 @@ impl Default for VogtConfig {
             install_bootstrap_enabled: true,
             sqlite_synchronous: SqliteSynchronous::Normal,
             sweep_interval_seconds: 900,
+            watch_interval_seconds: 60,
+            cold_wake_compaction: false,
+            cold_wake_threshold_tokens: 100_000,
+            cold_wake_ttl_seconds: default_cold_wake_ttl(),
+            forge_posture_interval_seconds: 86400,
+            github_rate_limit_floor: 500,
             verify_horizon_hours: 24,
             image_digest: None,
             diagnostics_peer_url: None,
             diagnostics_peer_token_file: None,
         }
     }
+}
+
+fn default_cold_wake_ttl() -> BTreeMap<String, i64> {
+    let mut ttl = BTreeMap::new();
+    ttl.insert("anthropic".to_string(), 300);
+    ttl.insert("deepseek".to_string(), 300);
+    ttl
 }
 
 fn default_session_roots() -> BTreeMap<String, PathBuf> {
@@ -551,11 +666,38 @@ fn parse_env_value(field: &FieldDoc, raw: &str) -> Result<Value, String> {
         | Kind::Sqlite => Ok(Value::String(raw.to_string())),
         Kind::StringList
         | Kind::DeployLanes
+        | Kind::UsageAccounts
+        | Kind::UsageKeys
         | Kind::PathMap
         | Kind::StringMap
+        | Kind::IntMap
         | Kind::ActivityRoots
         | Kind::SessionRoots => serde_json::from_str(raw)
             .map_err(|_| format!("expected JSON for {kind_name}", kind_name = field.name)),
+        Kind::OptNumber => {
+            if raw == "null" {
+                Ok(Value::Null)
+            } else {
+                let number: f64 = raw
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("expected a number, got {raw:?}"))?;
+                let number = serde_json::Number::from_f64(number)
+                    .ok_or_else(|| format!("expected a number, got {raw:?}"))?;
+                Ok(Value::Number(number))
+            }
+        }
+        Kind::OptInt { .. } => {
+            if raw == "null" {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::Number(
+                    int_from_str(raw)
+                        .ok_or_else(|| format!("expected an integer, got {raw:?}"))?
+                        .into(),
+                ))
+            }
+        }
     }
 }
 
@@ -661,6 +803,7 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
             match name {
                 "import_root" => config.import_root = path,
                 "github_token_file" => config.github_token_file = path,
+                "github_app_private_key_file" => config.github_app_private_key_file = path,
                 "forge_account_key_file" => config.forge_account_key_file = path,
                 "engine_state_dir" => config.engine_state_dir = path,
                 "engine_token_file" => config.engine_token_file = path,
@@ -678,6 +821,8 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
                 "session_scratch_project" => config.session_scratch_project = text,
                 "image_digest" => config.image_digest = text,
                 "diagnostics_peer_url" => config.diagnostics_peer_url = text,
+                "usage_litellm_url" => config.usage_litellm_url = text,
+                "github_app_id" => config.github_app_id = text,
                 _ => unreachable!(),
             }
         }
@@ -687,7 +832,11 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
                 "fronted" => config.fronted = flag,
                 "log_requests" => config.log_requests = flag,
                 "ci_watch_notify_sessions" => config.ci_watch_notify_sessions = flag,
+                "autopilot_done_requires_result_report" => {
+                    config.autopilot_done_requires_result_report = flag
+                }
                 "install_bootstrap_enabled" => config.install_bootstrap_enabled = flag,
+                "cold_wake_compaction" => config.cold_wake_compaction = flag,
                 _ => unreachable!(),
             }
         }
@@ -710,6 +859,12 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
                 }
                 "session_ttl_days" => config.session_ttl_days = number,
                 "sweep_interval_seconds" => config.sweep_interval_seconds = number,
+                "watch_interval_seconds" => config.watch_interval_seconds = number,
+                "cold_wake_threshold_tokens" => config.cold_wake_threshold_tokens = number,
+                "forge_posture_interval_seconds" => {
+                    config.forge_posture_interval_seconds = number
+                }
+                "github_rate_limit_floor" => config.github_rate_limit_floor = number,
                 "verify_horizon_hours" => config.verify_horizon_hours = number,
                 _ => unreachable!(),
             }
@@ -743,6 +898,15 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
             }
         }
         Kind::DeployLanes => config.deploy_lanes = expect_lanes(value)?,
+        Kind::UsageAccounts => config.usage_accounts = expect_usage_accounts(value)?,
+        Kind::UsageKeys => config.usage_litellm_keys = expect_usage_keys(value)?,
+        Kind::OptNumber => {
+            config.usage_daily_spend_alert_usd = opt_nonneg_number(name, value)?;
+        }
+        Kind::OptInt { min } => {
+            config.github_app_installation_id = opt_int(name, value, min)?;
+        }
+        Kind::IntMap => config.cold_wake_ttl_seconds = expect_int_map(name, value)?,
         Kind::PathMap => config.forge_token_files = expect_path_map(name, value)?,
         Kind::ActivityRoots => config.agent_activity_roots = expect_path_map(name, value)?,
         Kind::SessionRoots => config.session_transcript_roots = expect_path_map(name, value)?,
@@ -803,6 +967,66 @@ fn expect_string_list(name: &str, value: &Value) -> Result<Vec<String>, String> 
                 .ok_or_else(|| format!("{name} entries must be strings"))
         })
         .collect()
+}
+
+fn expect_usage_accounts(value: &Value) -> Result<Vec<UsageAccount>, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| "usage_accounts must be a list".to_string())?;
+    items.iter().map(UsageAccount::from_value).collect()
+}
+
+fn expect_usage_keys(value: &Value) -> Result<Vec<UsageKey>, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| "usage_litellm_keys must be a list".to_string())?;
+    items.iter().map(UsageKey::from_value).collect()
+}
+
+fn opt_nonneg_number(name: &str, value: &Value) -> Result<Option<String>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(number) => {
+            let rendered = number.to_string();
+            let parsed: f64 = rendered
+                .parse()
+                .map_err(|_| format!("{name} must be a number"))?;
+            if parsed < 0.0 {
+                return Err(format!("{name} must be >= 0"));
+            }
+            Ok(Some(rendered))
+        }
+        Value::String(text) => {
+            let parsed: f64 = text
+                .trim()
+                .parse()
+                .map_err(|_| format!("{name} must be a number"))?;
+            if parsed < 0.0 {
+                return Err(format!("{name} must be >= 0"));
+            }
+            Ok(Some(text.trim().to_string()))
+        }
+        _ => Err(format!("{name} must be a number")),
+    }
+}
+
+fn opt_int(name: &str, value: &Value, min: i64) -> Result<Option<i64>, String> {
+    match value {
+        Value::Null => Ok(None),
+        _ => Ok(Some(expect_int(name, value, min, None)?)),
+    }
+}
+
+fn expect_int_map(name: &str, value: &Value) -> Result<BTreeMap<String, i64>, String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("{name} must be a table"))?;
+    let mut map = BTreeMap::new();
+    for (key, entry) in obj {
+        let number = expect_int(name, entry, 0, None)?;
+        map.insert(key.clone(), number);
+    }
+    Ok(map)
 }
 
 fn expect_lanes(value: &Value) -> Result<Vec<DeployLane>, String> {
@@ -902,6 +1126,11 @@ enum Kind {
     ActivityRoots,
     SessionRoots,
     StringMap,
+    IntMap,
+    UsageAccounts,
+    UsageKeys,
+    OptNumber,
+    OptInt { min: i64 },
 }
 
 /// One documented configuration field, as the generators see it.
@@ -1103,6 +1332,16 @@ const FIELD_CATALOGUE: &[FieldDoc] = &[
         example: "true",
     },
     FieldDoc {
+        name: "autopilot_done_requires_result_report",
+        env_var: "VOGT_AUTOPILOT_DONE_REQUIRES_RESULT_REPORT",
+        type_label: "boolean",
+        default_label: "`False`",
+        policy: DefaultPolicy::Behaviour,
+        description: "When true, the session sweep treats an `AUTOPILOT: DONE` as done only if the session posted a `result` report (`session.report`) since its turn began; otherwise the row reads `waiting` with the reason `done without a result report`, so oversight asks for one instead of trusting the line. Off by default.",
+        kind: Kind::Bool,
+        example: "false",
+    },
+    FieldDoc {
         name: "deploy_lanes",
         env_var: "VOGT_DEPLOY_LANES",
         type_label: "list of `DeployLane` tables",
@@ -1111,6 +1350,46 @@ const FIELD_CATALOGUE: &[FieldDoc] = &[
         description: "Deployment lanes `deployed_versions` reports on, each a table with `name`, `project` (a registered slug), `branch` (default `main`), and a source: `receipt_repo` + `receipt_path` (a JSON receipt a deploy pipeline commits, read through the configured forge) and/or `version_url` (a running instance's public JSON version endpoint, e.g. Vogt's `/api/config`). Empty means the `deploy-lanes` collector is not registered and deployed versions are reported as not configured. A receipt whose status says the deploy or its smoke test failed raises an Inbox alert.",
         kind: Kind::DeployLanes,
         example: "[{ name = \"dev\", project = \"my-app\", version_url = \"https://dev.example.com/api/config\" }]",
+    },
+    FieldDoc {
+        name: "usage_accounts",
+        env_var: "VOGT_USAGE_ACCOUNTS",
+        type_label: "list of `UsageAccount` tables",
+        default_label: "*(empty)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "Provider accounts `usage.board` reports on, each a table with `name`, `agent` (`claude` or `codex`) and `dir` (that account's config directory). Read on request only: the newest limit and reset the account's own transcripts recorded. Empty, no account is reported.",
+        kind: Kind::UsageAccounts,
+        example: "[]",
+    },
+    FieldDoc {
+        name: "usage_litellm_url",
+        env_var: "VOGT_USAGE_LITELLM_URL",
+        type_label: "string, optional",
+        default_label: "*(no default — must be set)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "Base URL of a LiteLLM proxy whose keys' spend `usage.board` reads through `/key/info`. Unset, no key spend is read.",
+        kind: Kind::OptString,
+        example: "null",
+    },
+    FieldDoc {
+        name: "usage_litellm_keys",
+        env_var: "VOGT_USAGE_LITELLM_KEYS",
+        type_label: "list of `UsageKey` tables",
+        default_label: "*(empty)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "LiteLLM keys `usage.board` reports spend for: `name`, `key_env` (the environment variable holding the key) and an optional `daily_alert_usd`.",
+        kind: Kind::UsageKeys,
+        example: "[]",
+    },
+    FieldDoc {
+        name: "usage_daily_spend_alert_usd",
+        env_var: "VOGT_USAGE_DAILY_SPEND_ALERT_USD",
+        type_label: "number, optional",
+        default_label: "*(no default — must be set)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "Default day-spend alert threshold, in USD, for every LiteLLM key without its own `daily_alert_usd`. Unset, no alert is raised.",
+        kind: Kind::OptNumber,
+        example: "null",
     },
     FieldDoc {
         name: "marker_file_extensions",
@@ -1159,6 +1438,36 @@ const FIELD_CATALOGUE: &[FieldDoc] = &[
         default_label: "*(no default — must be set)*",
         policy: DefaultPolicy::Behaviour,
         description: "Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing.",
+        kind: Kind::OptPath,
+        example: "null",
+    },
+    FieldDoc {
+        name: "github_app_id",
+        env_var: "VOGT_GITHUB_APP_ID",
+        type_label: "string, optional",
+        default_label: "*(no default — must be set)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "The ID or the client ID of a GitHub App for the forge adapter to authenticate as; GitHub accepts either as the JWT issuer. With `github_app_private_key_file` also set, GitHub reads and writes use short-lived installation tokens, which have their own rate limit, instead of `github_token_file`. The notifications collector stays on `github_token_file`, because notifications belong to a user and an App cannot read them. Not a secret, so plain config is fine. Setup, including the permissions the App needs, is in docs/GITHUB_APP.md.",
+        kind: Kind::OptString,
+        example: "null",
+    },
+    FieldDoc {
+        name: "github_app_installation_id",
+        env_var: "VOGT_GITHUB_APP_INSTALLATION_ID",
+        type_label: "integer, optional",
+        default_label: "*(no default — must be set)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "Pin every GitHub request to one installation of `github_app_id`. Unset, the installation is discovered per repository owner (`GET /repos/{owner}/{repo}/installation`, then `/orgs/{owner}/installation` or `/users/{owner}/installation`) and remembered, so one App installed on several accounts or organisations covers them all; an owner without the App is read with `github_token_file`. Publishing a new repository needs an owner to create it under: this installation's account or, unset, the App's only installation. An App with several installations must set this to publish.",
+        kind: Kind::OptInt { min: 1 },
+        example: "null",
+    },
+    FieldDoc {
+        name: "github_app_private_key_file",
+        env_var: "VOGT_GITHUB_APP_PRIVATE_KEY_FILE",
+        type_label: "path, optional",
+        default_label: "*(no default — must be set)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "Path to the GitHub App's PEM private key, which signs the short-lived JWT exchanged for installation tokens. A file for the same reason as `github_token_file`: the key never appears in the environment or a process listing. When this and `github_app_id` are set, the App takes precedence over `github_token_file` for every GitHub read and write except notifications. Unset, or unreadable, the personal token is used as before.",
         kind: Kind::OptPath,
         example: "null",
     },
@@ -1363,6 +1672,66 @@ const FIELD_CATALOGUE: &[FieldDoc] = &[
         example: "900",
     },
     FieldDoc {
+        name: "watch_interval_seconds",
+        env_var: "VOGT_WATCH_INTERVAL_SECONDS",
+        type_label: "integer",
+        default_label: "`60`",
+        policy: DefaultPolicy::Behaviour,
+        description: "How often `serve` evaluates armed watches (WI-2036) and wakes the sessions whose trigger fired. Zero disables the loop: watches are stored but nothing wakes. Vogt-side triggers (a work item's state, a session ending) fire within this interval; forge triggers read what the sweep observed, so they also wait on `sweep_interval_seconds`.",
+        kind: Kind::Int { min: 0, max: None },
+        example: "60",
+    },
+    FieldDoc {
+        name: "cold_wake_compaction",
+        env_var: "VOGT_COLD_WAKE_COMPACTION",
+        type_label: "boolean",
+        default_label: "`False`",
+        policy: DefaultPolicy::Behaviour,
+        description: "Cache-aware compaction on a cold wake (WI-2037). When on, waking a hibernated session whose provider prompt cache has expired (hibernated longer than its `cold_wake_ttl_seconds`) and whose context is at least `cold_wake_threshold_tokens` starts a fresh conversation seeded with a structured summary — task, state, decisions, files, branch, next step — instead of resuming the transcript at full uncached price. Off by default; a session opts out with `cold_wake_opt_out` at start or hibernate.",
+        kind: Kind::Bool,
+        example: "false",
+    },
+    FieldDoc {
+        name: "cold_wake_threshold_tokens",
+        env_var: "VOGT_COLD_WAKE_THRESHOLD_TOKENS",
+        type_label: "integer",
+        default_label: "`100000`",
+        policy: DefaultPolicy::Behaviour,
+        description: "The context size, in tokens, at or above which a cold wake is compacted (WI-2037). A smaller conversation is cheap enough to re-read and is resumed as it is.",
+        kind: Kind::Int { min: 0, max: None },
+        example: "100000",
+    },
+    FieldDoc {
+        name: "cold_wake_ttl_seconds",
+        env_var: "VOGT_COLD_WAKE_TTL_SECONDS",
+        type_label: "map of string to integer",
+        default_label: "`{'anthropic': 300, 'deepseek': 300}`",
+        policy: DefaultPolicy::Behaviour,
+        description: "Prompt-cache lifetime per provider, in seconds (WI-2037): a session hibernated longer than this is treated as cold. Keys are `anthropic`, `openai`, `deepseek`, `google`, … A provider with no entry is never compacted, because its cache cannot be judged. Anthropic's 1-hour cache tier is `anthropic = 3600`.",
+        kind: Kind::IntMap,
+        example: "{\"anthropic\": 300, \"deepseek\": 300}",
+    },
+    FieldDoc {
+        name: "forge_posture_interval_seconds",
+        env_var: "VOGT_FORGE_POSTURE_INTERVAL_SECONDS",
+        type_label: "integer",
+        default_label: "`86400`",
+        policy: DefaultPolicy::Behaviour,
+        description: "How often the forge posture collector re-reads a repository's update-automation settings (version-update config, vulnerability alerts, automated security fixes). Posture changes rarely and cost several API calls per repository, so the default is daily; sweeps in between skip it. Zero reads it on every sweep.",
+        kind: Kind::Int { min: 0, max: None },
+        example: "86400",
+    },
+    FieldDoc {
+        name: "github_rate_limit_floor",
+        env_var: "VOGT_GITHUB_RATE_LIMIT_FLOOR",
+        type_label: "integer",
+        default_label: "`500`",
+        policy: DefaultPolicy::Behaviour,
+        description: "When GitHub reports fewer core API requests than this left in the hour, forge reads stop until the limit resets instead of spending the rest. The limit is per GitHub user and shared with every other tool on that account. Zero never pauses early.",
+        kind: Kind::Int { min: 0, max: None },
+        example: "500",
+    },
+    FieldDoc {
         name: "verify_horizon_hours",
         env_var: "VOGT_VERIFY_HORIZON_HOURS",
         type_label: "integer",
@@ -1423,12 +1792,20 @@ const FIELD_NAMES: &[&str] = &[
     "ci_alert_branches",
     "ci_alert_tags",
     "ci_watch_notify_sessions",
+    "autopilot_done_requires_result_report",
     "deploy_lanes",
+    "usage_accounts",
+    "usage_litellm_url",
+    "usage_litellm_keys",
+    "usage_daily_spend_alert_usd",
     "marker_file_extensions",
     "branch_binding_patterns",
     "branch_binding_template",
     "retention_days",
     "github_token_file",
+    "github_app_id",
+    "github_app_installation_id",
+    "github_app_private_key_file",
     "forge_account_key_file",
     "forge_token_files",
     "agent_activity_roots",
@@ -1449,6 +1826,12 @@ const FIELD_NAMES: &[&str] = &[
     "install_bootstrap_enabled",
     "sqlite_synchronous",
     "sweep_interval_seconds",
+    "watch_interval_seconds",
+    "cold_wake_compaction",
+    "cold_wake_threshold_tokens",
+    "cold_wake_ttl_seconds",
+    "forge_posture_interval_seconds",
+    "github_rate_limit_floor",
     "verify_horizon_hours",
     "image_digest",
     "diagnostics_peer_url",

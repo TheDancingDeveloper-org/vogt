@@ -672,7 +672,7 @@ pub struct HandoffFields {
 pub struct SessionApproval {
     pub question: String,
     pub command_excerpt: String,
-    /// permission (a tool call) / folder-trust / external-imports (a CLAUDE.md importing files from outside) / read-outside-cwd.
+    /// permission (a tool call) / folder-trust / external-imports (a CLAUDE.md importing files from outside) / read-outside-cwd / question (the agent asks a question with a menu of answers).
     #[serde(default = "default_session_approval_kind")]
     pub kind: String,
     /// The menu, in order; `selected` is where the highlight is.
@@ -938,6 +938,10 @@ pub struct SessionSummary {
     #[serde(default)]
     #[schemars(schema_with = "optional_date_time")]
     pub last_output_at: Option<String>,
+    /// Live from the engine: when an autopilot session declared itself done (`AUTOPILOT: DONE`) this turn. Cleared when the next turn starts; null otherwise.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub done_at: Option<String>,
     /// The permission dialog on screen while activity is awaiting-approval; null otherwise.
     #[serde(default)]
     pub approval: Option<SessionApproval>,
@@ -948,6 +952,9 @@ pub struct SessionSummary {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub last_reply_excerpt: Option<String>,
+    /// The session's newest `session.report` (WI-2039): its own typed account of progress, result, question or blocker. Prefer it over `last_reply_excerpt`; null when it never reported.
+    #[serde(default)]
+    pub latest_report: Option<super::caught_up::SessionReportView>,
     /// Set while the session is hibernated (activity `hibernated`): its processes were stopped to free memory and it is kept to be woken by resuming its conversation (session.wake, or session.input, which wakes it). Null otherwise.
     #[serde(default)]
     pub hibernation: Option<SessionHibernation>,
@@ -975,6 +982,10 @@ pub struct SessionSummary {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub permission_mode: Option<String>,
+    /// Live from the engine: the session showed bypass before it was hibernated and was woken without it (WI-2252). A wake replays only the posture a person gave at the start, so a bypass granted later (Shift+Tab, a hand-typed flag) is lost; a person re-grants it in the session's terminal.
+    #[serde(default)]
+    #[schemars(extend("default" = false))]
+    pub posture_lost_on_resume: bool,
     /// Live from the engine: the named Claude Code account the session runs under. Null is the engine's default account.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
@@ -1581,16 +1592,35 @@ pub struct SessionDigest {
     #[serde(default)]
     #[schemars(schema_with = "optional_date_time")]
     pub turn_started_at: Option<String>,
-    /// First 120 characters of the last reply.
+    /// When an autopilot session declared itself done this turn.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub done_at: Option<String>,
+    /// First 120 characters of the last reply. Null when the session has a `report`: the report says it better.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub last_reply_excerpt: Option<String>,
+    /// The session's latest `session.report`, as one line: kind, summary, then branch/sha/pr when given (WI-2039).
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub report: Option<String>,
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub template: Option<String>,
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub brief_file: Option<String>,
+    /// The question or dialog the session is showing, when it waits on one (WI-1871). Untrusted terminal text.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub question: Option<String>,
+    /// `question` (an agent's question menu) or a dialog kind.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub question_kind: Option<String>,
+    /// The menu's choices in order, numbered from 1; answer with `session_answer` by number or label. Untrusted terminal text.
+    #[serde(default)]
+    pub options: Option<Vec<String>>,
     /// The engine's economics line for the session, e.g. `96 turns, 2 compactions`; null when the engine has not metered it.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
@@ -1609,7 +1639,7 @@ pub struct SessionDigest {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSweepRow {
-    /// approval / blocked / waiting (at its prompt, wants the next instruction) / stalled (running, silent too long) / running / idle / hibernated / exited / unknown. The table is ordered by it.
+    /// approval (a permission dialog, startup gate or question menu) / blocked / waiting (at its prompt, wants the next instruction) / stalled (running, silent too long) / running / idle / hibernated / exited / unknown. The table is ordered by it.
     pub attention: String,
     /// Why, in words.
     pub attention_reason: String,
@@ -1623,6 +1653,19 @@ pub struct SessionSweepRow {
     pub screen_tail: Vec<String>,
     #[serde(default)]
     pub ready: Option<bool>,
+    /// When the session's blocked report was made, if it has one.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub blocked_since: Option<String>,
+    /// How old the blocked report is, in seconds.
+    #[serde(default)]
+    pub blocked_age_s: Option<i64>,
+    /// The blocked report predates the session's current turn: it went back to work after reporting, so the report no longer says what it waits on and the row is not counted in `needs_you` (WI-1834).
+    #[serde(default)]
+    pub blocked_stale: bool,
+    /// On a `done` row bound to a work item: its AUTOPILOT: DONE claim checked against git and the forge (WI-1835).
+    #[serde(default)]
+    pub claim_check: Option<crate::application::models::work::ClaimCheck>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
