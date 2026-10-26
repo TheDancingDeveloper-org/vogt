@@ -381,14 +381,19 @@ fn by_id(agent: &str, root: &Path, conversation_id: &str) -> Option<PathBuf> {
         }
     }
     // The TTL elapsed. One stat per directory down the tree: unchanged means
-    // the files are unchanged, so the previous index stands.
+    // the files are unchanged, so the previous index stands — but only for an
+    // id it already holds. A file written into a directory that already
+    // existed does not move that directory's mtime on every filesystem, so a
+    // miss is rebuilt rather than refreshed in place.
     let stamp = tree_stamp(root);
     {
         let mut indexes = INDEXES.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(current) = indexes.get_mut(&key) {
             if current.root_mtime == stamp {
-                current.built_at = clock();
-                return current.lookup(conversation_id);
+                if let Some(path) = current.by_id.get(conversation_id) {
+                    current.built_at = clock();
+                    return Some(path.clone());
+                }
             }
         }
     }
