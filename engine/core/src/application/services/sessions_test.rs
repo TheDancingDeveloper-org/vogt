@@ -325,12 +325,8 @@ fn a_dead_engine_hides_no_linked_sessions() {
     let listed = list_sessions(
         ctx,
         &ListSessionsParams {
-            project: None,
-            work_item: None,
-            include_stopped: false,
-            limit: 50,
-            offset: 0,
-            order: "started".to_string(),
+            mode: "full".to_string(),
+            ..ListSessionsParams::default()
         },
     )
     .unwrap();

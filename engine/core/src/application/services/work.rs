@@ -1877,10 +1877,8 @@ where
         &super::sessions::ListSessionsParams {
             project: None,
             work_item: Some(reference),
-            include_stopped: false,
-            limit: 50,
-            offset: 0,
-            order: "started".to_string(),
+            mode: "full".to_string(),
+            ..Default::default()
         },
     )?
     .sessions;

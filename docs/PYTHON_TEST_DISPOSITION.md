@@ -55,7 +55,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_check_workflow_policy.py | retired | `scripts/check_workflow_policy.py` over GitHub workflow YAML. CI policy, not product behaviour. |
 | test_checks.py | ported | CI-revision reads in the collectors and the project brief. |
 | test_ci_watch.py | ported | Watched-ref and deployed-version reads are in `application/deployed.rs`. The bound-branch announce is in `application/ci_watch.rs`: the feed event once per conclusion, staleness, the notice text, and the session nudge (notice, then Enter; none at a permission prompt). `test_a_sweep_announces_and_survives_an_announce_failure` is `a_failed_announce_does_not_fail_the_sweep` in `application/collect.rs`, driven by the `ci_watch::seam` failure switch. |
-| test_claim_check.py | ported | The comparison is in `core/claims.rs`; the git and forge reads, the note and its once key, a session's review move, a person's move, and the rebase commit count are in `application/claims_test.rs`. The sweep's `done` row case is the once-key note case there: the Rust sweep does not classify `done` rows until WI-1518's port. |
+| test_claim_check.py | ported | The comparison is in `core/claims.rs`; the git and forge reads, the note and its once key, a session's review move, a person's move, and the rebase commit count are in `application/claims_test.rs`. The sweep's `done` row case is the once-key note case there, swept in the default digest mode as Python does (WI-2022). |
 | test_claude_profile.py | retired | `engine/deploy/claude-profile.sh` and `mcp-bootstrap.sh` (WI-1306, done). Shell in the engine image, not the core crate; the Python test keeps driving the scripts. Named accounts on `session.start` are a sessions concern and are tested with that service. |
 | test_cli.py | ported | `adapters/cli.rs`. |
 | test_clone.py | ported | Clone service under `application/services`. |
@@ -140,16 +140,16 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_serve.py | ported | Serve, health, and MCP-over-HTTP in `main.rs` and `adapters/http`. |
 | test_session_bind_work.py | ported | `application/session_work.rs`. |
 | test_session_digest_op.py | ported | `application/session_digest.rs`: the six `session.digest` cases (economics carried by the row, absent economics, no window, blocked report, transcript excerpt, unknown session). |
-| test_session_drive.py | ported | Session input and screen reads in `application/session_reads.rs` and `delivery.rs`. |
+| test_session_drive.py | ported | Session input and screen reads in `application/session_reads.rs` and `delivery.rs`; `session.wait` (until/timeout, `screen=true`, and the default digest row plus 8-line tail) and the input digest in `application/services/session_drive_test.rs` (WI-2022). |
 | test_session_economics.py | ported | `core/session_economics.rs`: Claude usage (latest turn, peak is the largest), compaction markers wherever they sit, Klaudia estimate and `compact_boundary`, repeated reads, Codex payload results, junk lines, one-turn wall clock, one turn and its output counted once across content blocks, tool names from `tool_use_id`, `budget_line`, and the shared fixtures (`engine/server/tests/fixtures/economics`: claude, klaudia, codex, klaudia_unicode, claude_gap) with the same numbers. |
 | test_session_economics_op.py | ported | `application/session_economics.rs`: metering (with the account name), no transcript, reading off with no roots, the engine reading, and an unknown session. |
 | test_session_hibernation.py | ported | Hibernate and wake in `application/services/lifecycle.rs`. |
 | test_session_last_reply.py | ported | Transcript reply reads in `adapters/transcripts.rs`. |
 | test_session_outcomes.py | ported | `collectors/session_outcomes.rs`. |
 | test_session_rename_remove.py | ported | Rename and remove in `application/services/sessions.rs`. |
-| test_session_sweep.py | ported | Sweep ordering in `application/session_reads.rs`. |
+| test_session_sweep.py | ported | Sweep ordering in `application/session_reads.rs`; attention, stale reports, input pending and the digest rows (design C1, WI-2022: the default digest drops hibernated and keeps counts, the 300-character row budget, the economics budget line, the full blocked reason, `attention`/`limit`, the question menu's options, `done` kept by default) in `application/services/session_drive_test.rs`. |
 | test_session_tool_descriptions.py | ported | MCP tool description strings generated from `registry/operations.rs`. |
-| test_sessions.py | ported | `application/services/sessions.rs`. |
+| test_sessions.py | ported | `application/services/sessions.rs`; the WI-1266 paging cases (filter then page, the declared read cap, unlinked rows not repeated), the WI-1289 hidden count, the WI-1672 `started_by_session` filter and the digest list row in `application/services/session_drive_test.rs` (WI-2022). |
 | test_storage.py | ported | `storage/sqlite/declared.rs` (atomicity, revisions, sessions, tokens). |
 | test_test_hooks.py | retired | Deterministic hooks for the in-process golden recorder. The black-box harness records out of process and does not use them. |
 | test_transcript_index.py | ported | `engine/core/src/adapters/transcripts.rs` tests (6): the cached conversation-id index (WI-1413, ported in WI-1074) — many lookups list the root at most twice, a missing id does not rescan within the TTL, a new Claude or Codex file is invisible until the 5 s index expires (injectable clock), Codex ids share one scan (listing counter); plus non-uuid Codex names (keyed by uuid tail or whole stem, as Python) and symlinks. |

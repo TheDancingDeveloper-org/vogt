@@ -1383,17 +1383,22 @@ impl ReadView for SqliteReadView {
             row_decision,
         )
     }
-    fn list_sessions(
+    fn list_sessions_started_by(
         &self,
         project_id: Option<&str>,
         work_item_id: Option<&str>,
+        started_by_session: Option<&str>,
         include_stopped: bool,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<CodingSession>, VogtError> {
         let mut clauses: Vec<String> = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        for (column, value) in [("project_id", project_id), ("work_item_id", work_item_id)] {
+        for (column, value) in [
+            ("project_id", project_id),
+            ("work_item_id", work_item_id),
+            ("started_by_session", started_by_session),
+        ] {
             if let Some(value) = value {
                 clauses.push(format!("{column} = ?"));
                 params.push(Box::new(value.to_string()));
@@ -1702,15 +1707,16 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
     ) -> Result<Vec<Decision>, VogtError> {
         self.view.list_decisions(a, b, c, d)
     }
-    fn list_sessions(
+    fn list_sessions_started_by(
         &self,
         a: Option<&str>,
         b: Option<&str>,
+        s: Option<&str>,
         c: bool,
         d: i64,
         e: i64,
     ) -> Result<Vec<CodingSession>, VogtError> {
-        self.view.list_sessions(a, b, c, d, e)
+        self.view.list_sessions_started_by(a, b, s, c, d, e)
     }
     fn list_events(&self, a: i64, b: i64, c: Option<&str>) -> Result<Vec<Event>, VogtError> {
         self.view.list_events(a, b, c)

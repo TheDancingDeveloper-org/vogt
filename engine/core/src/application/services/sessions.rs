@@ -188,6 +188,12 @@ where
         limit: optional_i64(&params, "limit", 50)?,
         offset: optional_i64(&params, "offset", 0)?,
         order: optional_string(&params, "order")?.unwrap_or_else(|| "started".to_string()),
+        mode: optional_string(&params, "mode")?.unwrap_or_else(|| "digest".to_string()),
+        fields: optional_string_list(&params, "fields")?.unwrap_or_default(),
+        started_by_session: optional_string(&params, "started_by_session")?,
+        states: optional_string_list(&params, "states")?,
+        stall_after_minutes: optional_i64(&params, "stall_after_minutes", 10)?,
+        include_hidden: optional_bool(&params, "include_hidden")?.unwrap_or(false),
     };
     Ok(serde_json::to_value(list_sessions(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -199,7 +205,13 @@ where
 {
     let parsed = SweepSessionsParams {
         project: optional_string(&params, "project")?,
-        screen_lines: optional_i64(&params, "screen_lines", 8)?,
+        mode: optional_string(&params, "mode")?.unwrap_or_else(|| "digest".to_string()),
+        fields: optional_string_list(&params, "fields")?.unwrap_or_default(),
+        states: optional_string_list(&params, "states")?,
+        attention: optional_string_list(&params, "attention")?,
+        limit: optional_i64(&params, "limit", 50)?,
+        // Python's default is 0: no screen tail unless asked (design C1).
+        screen_lines: optional_i64(&params, "screen_lines", 0)?,
         stall_after_minutes: optional_i64(&params, "stall_after_minutes", 10)?,
     };
     Ok(serde_json::to_value(sweep_sessions(ctx, &parsed)?).expect("a session result serialises"))
@@ -256,6 +268,7 @@ where
         id: require_session_id(&params)?,
         until: optional_string(&params, "until")?.unwrap_or_else(|| "ready".to_string()),
         timeout_s: optional_i64(&params, "timeout_s", 120)?,
+        screen: optional_bool(&params, "screen")?.unwrap_or(false),
     };
     Ok(serde_json::to_value(wait(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -616,13 +629,68 @@ pub struct ListSessionsParams {
     pub limit: i64,
     pub offset: i64,
     pub order: String,
+    /// `digest` (default) or `full`.
+    pub mode: String,
+    /// Extra SessionSummary attribute names on each digest row.
+    pub fields: Vec<String>,
+    /// Only sessions this one started: its engine id or `ses_…` id.
+    pub started_by_session: Option<String>,
+    /// Activities to keep; `None` is the live states, empty is every state.
+    pub states: Option<Vec<String>>,
+    pub stall_after_minutes: i64,
+    /// Also ask the engine for the sessions it hides (WI-1289).
+    pub include_hidden: bool,
+}
+
+impl Default for ListSessionsParams {
+    /// Python's `ListSessionsParams()` defaults.
+    fn default() -> Self {
+        Self {
+            project: None,
+            work_item: None,
+            include_stopped: false,
+            limit: 50,
+            offset: 0,
+            order: "started".to_string(),
+            mode: "digest".to_string(),
+            fields: Vec::new(),
+            started_by_session: None,
+            states: None,
+            stall_after_minutes: 10,
+            include_hidden: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct SweepSessionsParams {
     pub project: Option<String>,
+    /// `digest` (default) or `full`.
+    pub mode: String,
+    pub fields: Vec<String>,
+    pub states: Option<Vec<String>>,
+    /// Attention classes to keep; `needs_you` expands to its classes.
+    pub attention: Option<Vec<String>>,
+    /// Digest rows returned at most; counts cover every session.
+    pub limit: i64,
     pub screen_lines: i64,
     pub stall_after_minutes: i64,
+}
+
+impl Default for SweepSessionsParams {
+    /// Python's `SweepSessionsParams()` defaults.
+    fn default() -> Self {
+        Self {
+            project: None,
+            mode: "digest".to_string(),
+            fields: Vec::new(),
+            states: None,
+            attention: None,
+            limit: 50,
+            screen_lines: 0,
+            stall_after_minutes: 10,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -654,6 +722,9 @@ pub struct WaitParams {
     pub id: String,
     pub until: String,
     pub timeout_s: i64,
+    /// True returns the full screen; false (default) the digest row plus an
+    /// 8-line screen tail.
+    pub screen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -809,9 +880,62 @@ fn linked_default() -> bool {
     true
 }
 
+/// Python's `SessionResult`. Start, hibernate and wake carry the digest row as
+/// well as the summary (design C1); every other session write leaves it null.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionResult {
     pub session: SessionSummary,
+    pub digest: Option<SessionDigest>,
+}
+
+impl SessionResult {
+    /// A result with no digest row.
+    fn plain(session: SessionSummary) -> Self {
+        Self {
+            session,
+            digest: None,
+        }
+    }
+
+    /// Python's `_as_digest`: the summary stays, and the digest row is what an
+    /// MCP caller keeps.
+    fn digested(session: SessionSummary) -> Self {
+        let digest = Some(digest_of(&session, None, None, &[], None));
+        Self { session, digest }
+    }
+}
+
+/// One line of session state (design C1), Python's `SessionDigest`, fields in
+/// its declaration order.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SessionDigest {
+    pub id: String,
+    pub name: Option<String>,
+    pub work_item: Option<String>,
+    pub activity: Option<String>,
+    pub attention: Option<String>,
+    pub ready: Option<bool>,
+    /// First 120 characters of the blocked report.
+    pub blocked_reason: Option<String>,
+    /// The blocked report in full, when it is longer than 120 characters.
+    pub blocked_detail: Option<String>,
+    pub turn_started_at: Option<String>,
+    pub done_at: Option<String>,
+    /// First 120 characters of the last reply.
+    pub last_reply_excerpt: Option<String>,
+    pub template: Option<String>,
+    /// Null until the engine reports a brief path.
+    pub brief_file: Option<String>,
+    /// The question or dialog the session is showing (WI-1871).
+    pub question: Option<String>,
+    pub question_kind: Option<String>,
+    pub options: Option<Vec<String>>,
+    /// The engine's economics line, when it has metered the session.
+    pub budget: Option<String>,
+    /// Reserved for WI-956.
+    pub supervisor: Option<String>,
+    /// SessionSummary attributes named in `fields`, when asked.
+    pub extra: Option<serde_json::Map<String, Value>>,
 }
 
 /// `session.start`'s result: Python's `SessionResult` with its
@@ -819,6 +943,8 @@ pub struct SessionResult {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StartSessionResult {
     pub session: SessionSummary,
+    /// The digest row (design C1).
+    pub digest: Option<SessionDigest>,
     /// On `session.start` for a project with a landing rule: the rule the
     /// worker runs under and any task lines it overrode.
     pub effective_policy: Option<EffectivePolicy>,
@@ -843,10 +969,9 @@ pub struct SessionListResult {
     pub sessions: Vec<SessionSummary>,
     /// Digest rows (design C1). `mode` defaults to `digest`, so the ordinary
     /// list returns these and leaves `sessions` empty; `mode=full` does the
-    /// reverse. The Rust list does not build digests yet, so this is empty
-    /// either way.
+    /// reverse.
     #[serde(default)]
-    pub digests: Vec<serde_json::Value>,
+    pub digests: Vec<SessionDigest>,
     /// Why the engine could not be asked, or null when it answered.
     pub engine: Option<String>,
     /// How many sessions match the filters, before `limit`/`offset`.
@@ -865,7 +990,10 @@ pub struct SessionListResult {
 pub struct SessionSweepRow {
     pub attention: String,
     pub attention_reason: String,
-    pub session: SessionSummary,
+    /// The full summary on `mode=full`; null on a digest row.
+    pub session: Option<SessionSummary>,
+    /// The digest row on `mode=digest` (the default); null on `mode=full`.
+    pub digest: Option<SessionDigest>,
     pub screen_tail: Vec<String>,
     pub ready: Option<bool>,
     /// When the session's blocked report was made, if it has one (WI-1834).
@@ -947,7 +1075,12 @@ pub struct SessionWaitResult {
     pub outcome: String,
     pub matched: bool,
     pub waited_ms: i64,
-    pub screen: SessionScreenResult,
+    /// The full screen, when `screen=true` asked for it.
+    pub screen: Option<SessionScreenResult>,
+    /// The digest row, unless `screen=true`; null when it cannot be read.
+    pub digest: Option<SessionDigest>,
+    /// The last 8 non-blank screen lines, unless `screen=true`.
+    pub screen_tail: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -961,6 +1094,8 @@ pub struct SessionInputResult {
     pub delivery: String,
     pub delivery_evidence: String,
     pub woke: bool,
+    /// The digest of the session just typed into, when it can be read.
+    pub digest: Option<SessionDigest>,
 }
 
 // -- the operations -----------------------------------------------------------
@@ -1183,8 +1318,10 @@ where
         );
         return Err(error);
     }
+    let session = summarize(ctx, &stored?, Some(&started))?;
     Ok(StartSessionResult {
-        session: summarize(ctx, &stored?, Some(&started))?,
+        digest: Some(digest_of(&session, None, None, &[], None)),
+        session,
         effective_policy: effective_policy(&policy, params.task.as_deref(), caller_merges),
     })
 }
@@ -1260,13 +1397,16 @@ where
         .read()?
         .session_by_id(&session.id)?
         .unwrap_or(session);
-    Ok(SessionResult {
-        session: summarize(ctx, &stopped, None)?,
-    })
+    Ok(SessionResult::plain(summarize(ctx, &stopped, None)?))
 }
 
 /// List sessions, live activity merged in. The engine being down is a fact
 /// about the rows, not a failure of the list.
+///
+/// Python's `list_sessions`: the joined set (Vogt's links plus live sessions
+/// the engine holds that Vogt never linked) is filtered (digest mode; full
+/// mode returns every state), then ordered, then sliced, and `total` /
+/// `truncated` say whether the page is the whole answer (WI-1266).
 pub fn list_sessions<C, I>(
     ctx: &AppContext<C, I>,
     params: &ListSessionsParams,
@@ -1275,57 +1415,135 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let (live, detail) = match ctx.engine.as_ref() {
+    // The engine's count of rows it hid before this list (WI-1289). Zero when
+    // no engine answered, or one older than the object response said nothing.
+    let (live, detail, hidden_count) = match ctx.engine.as_ref() {
         None => (
             Vec::new(),
             Some("no session engine is configured (VOGT_ENGINE_URL is unset)".to_string()),
+            0,
         ),
-        Some(engine) => match engine.list_sessions() {
+        Some(engine) => match engine.list_sessions_counted(params.include_hidden) {
             // Kept as a Vec: the engine's order is the order unlinked rows
             // append in, and a HashMap would shuffle it.
-            Ok(rows) => (rows, None),
-            Err(VogtError::EngineUnavailable(text)) => (Vec::new(), Some(text)),
+            Ok((rows, hidden)) => (rows, None, i64::try_from(hidden).unwrap_or(i64::MAX)),
+            Err(VogtError::EngineUnavailable(text)) => (Vec::new(), Some(text), 0),
             Err(error) => return Err(error),
         },
     };
-    // Python's session list reads the clock once here, after the engine
-    // answers or does not, and before the rows are assembled. The value is
-    // the attention reference; the tick is spent in the same place.
-    let _now = super::now_of(&ctx.clock);
-    let mut sessions = rows_of(ctx, params, &live, detail.as_deref())?;
+    let (joined, declared_overflow) = rows_of(ctx, params, &live, detail.as_deref())?;
+    // Python reads the clock once, after the rows are joined: the attention
+    // reference for the state filter and the digest rows.
+    let now = super::now_of(&ctx.clock);
+    let stall = params.stall_after_minutes.saturating_mul(60);
+    let full = params.mode == "full";
+    let mut kept: Vec<SessionSummary> = joined
+        .into_iter()
+        .filter(|summary| {
+            full || kept_in(
+                summary,
+                Some(&attention_of(summary, now, stall)),
+                params.states.as_deref(),
+            )
+        })
+        .collect();
     if params.order == "rss" {
         // Stable: sessions with no sample keep their order, after the
-        // measured ones. Sweep shares rows_of and must not inherit this.
-        sessions.sort_by(|left, right| {
+        // measured ones.
+        kept.sort_by(|left, right| {
             let rss =
                 |row: &SessionSummary| row.resources.as_ref().map(|r| r.rss_bytes).unwrap_or(0);
             match (left.resources.is_none(), right.resources.is_none()) {
                 (true, false) => std::cmp::Ordering::Greater,
                 (false, true) => std::cmp::Ordering::Less,
-                _ => rss(right).cmp(&rss(left)),
+                (true, true) => std::cmp::Ordering::Equal,
+                (false, false) => rss(right).cmp(&rss(left)),
             }
         });
     }
+    let mut total = kept.len() as i64;
+    let offset = usize::try_from(params.offset).unwrap_or(0);
+    let limit = usize::try_from(params.limit).unwrap_or(0);
+    let page: Vec<SessionSummary> = kept.into_iter().skip(offset).take(limit).collect();
+    // The declared half is fetched one past the operation's own maximum page.
+    // When that ceiling is hit the counted total is a floor and the list is
+    // partial even when this page holds everything fetched (WI-1266 review).
+    let truncated = params.offset.saturating_add(page.len() as i64) < total || declared_overflow;
+    if declared_overflow {
+        total += 1;
+    }
+    if full {
+        return Ok(SessionListResult {
+            sessions: page,
+            digests: Vec::new(),
+            engine: detail,
+            total,
+            truncated,
+            hidden_count,
+        });
+    }
+    let digests = page
+        .iter()
+        .map(|summary| {
+            let attention = attention_of(summary, now, stall);
+            let economics = live
+                .iter()
+                .find(|row| row.id == summary.engine_session_id)
+                .and_then(|row| row.economics.as_ref());
+            digest_of(
+                summary,
+                Some(&attention),
+                Some(summary.activity.as_deref() == Some("waiting-for-input")),
+                &params.fields,
+                budget_of(economics),
+            )
+        })
+        .collect();
     Ok(SessionListResult {
-        sessions,
-        // `mode` defaults to `digest` on the Python side, which returns its
-        // rows under `digests` and leaves `sessions` empty. The digest rows
-        // are not built here yet, so both are empty for the same empty list.
-        digests: Vec::new(),
+        sessions: Vec::new(),
+        digests,
         engine: detail,
-        total: 0,
-        truncated: false,
-        hidden_count: 0,
+        total,
+        truncated,
+        hidden_count,
     })
 }
 
-/// The rows `session.list` and `session.sweep` share.
+/// How many declared links `rows_of` reads: one past `session.list`'s own
+/// maximum page (500), so a match beyond it shows as overflow.
+const DECLARED_FETCH: i64 = 501;
+
+/// Python's `_starter_engine_id`: the engine id a `started_by_session` filter
+/// matches. The column stores the starter's engine session id; a caller may
+/// name either that or the starter's `ses_…` id.
+fn starter_engine_id(
+    view: &dyn crate::storage::interface::ReadView,
+    named: Option<&str>,
+) -> Result<Option<String>, VogtError> {
+    let Some(named) = named else {
+        return Ok(None);
+    };
+    let session = match view.session_by_id(named)? {
+        Some(session) => Some(session),
+        None => view.session_by_engine_id(named)?,
+    };
+    Ok(Some(
+        session
+            .map(|session| session.engine_session_id)
+            .unwrap_or_else(|| named.to_string()),
+    ))
+}
+
+/// The rows `session.list` and `session.sweep` share (Python's `_rows`):
+/// Vogt's links joined with what the engine reported, unlinked engine sessions
+/// appended, and reply excerpts read from the agents' transcripts. The second
+/// element is true when more declared links match than were fetched.
 fn rows_of<C, I>(
     ctx: &AppContext<C, I>,
     params: &ListSessionsParams,
     live: &[EngineSession],
     detail: Option<&str>,
-) -> Result<Vec<SessionSummary>, VogtError>
+) -> Result<(Vec<SessionSummary>, bool), VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
@@ -1339,13 +1557,21 @@ where
         Some(reference) => Some(resolve::work_item(&view, reference)?.id),
         None => None,
     };
-    let recorded = view.list_sessions(
+    let starter = starter_engine_id(&view, params.started_by_session.as_deref())?;
+    // The page is cut after the state filter, so the declared half has to be
+    // the whole filtered set.
+    let mut recorded = view.list_sessions_started_by(
         project_id.as_deref(),
         work_item_id.as_deref(),
+        starter.as_deref(),
         params.include_stopped,
-        params.limit,
-        params.offset,
+        DECLARED_FETCH,
+        0,
     )?;
+    let declared_overflow = recorded.len() as i64 == DECLARED_FETCH;
+    if declared_overflow {
+        recorded.truncate((DECLARED_FETCH - 1) as usize);
+    }
     drop(view);
     let mut summaries = Vec::with_capacity(recorded.len());
     for session in &recorded {
@@ -1357,14 +1583,16 @@ where
             detail.is_none(),
         )?);
     }
-    let unfiltered = project_id.is_none() && work_item_id.is_none();
-    if unfiltered && params.offset == 0 {
+    // Engine sessions Vogt never linked surface only when no filter is set,
+    // and are not sliced here: slicing before the state filter drops a live
+    // unlinked session behind a page of hibernated links (WI-1266).
+    let unfiltered = project_id.is_none() && work_item_id.is_none() && starter.is_none();
+    if unfiltered {
         let view = ctx.declared.read()?;
         for engine_session in live {
             // A hibernated session is asleep, not stopped: listed always. An
             // exited one is the engine's leftover, listed only when stopped
-            // sessions were asked for. Linked rows are not filtered here —
-            // the declared query already applied include_stopped.
+            // sessions were asked for.
             if !engine_session.alive && !engine_session.hibernated() && !params.include_stopped {
                 continue;
             }
@@ -1372,7 +1600,6 @@ where
                 summaries.push(unlinked_summary(&view, engine_session)?);
             }
         }
-        summaries.truncate(params.limit.max(0) as usize);
     }
     // Outside the read transaction: this is file I/O, and an excerpt that
     // cannot be had is a null, never an error. Only a session the engine
@@ -1397,7 +1624,7 @@ where
                 .as_deref()
                 .is_some_and(|template| !template.is_empty())
         {
-            // An unlinked session's template is the engine's to report.
+            // A linked session with no recorded template: the engine's.
             summary.template = live_session.template.clone();
         }
         if let Some(found) = found.as_ref() {
@@ -1410,11 +1637,186 @@ where
             }
         }
     }
-    Ok(summaries)
+    Ok((summaries, declared_overflow))
 }
 
-fn page_len(shown: usize, _unlinked: i64) -> i64 {
-    shown as i64
+// -- digest rows (design C1) --------------------------------------------------
+
+/// Session states a digest listing keeps unless the caller names others.
+/// Hibernated, stopped and exited stay in the sweep's counts, not its rows.
+const DIGEST_LIVE_STATES: [&str; 8] = [
+    "running", "idle", "waiting", "blocked", "approval", "stalled", "done", "unknown",
+];
+
+/// States a default listing drops.
+const EXCLUDED_STATES: [&str; 3] = ["hibernated", "stopped", "exited"];
+
+/// How much of a reply or a blocked report a digest row carries.
+const DIGEST_CLIP: usize = 120;
+
+/// Python's `_clip`: the first `DIGEST_CLIP` characters (code points).
+fn clip(text: Option<&str>) -> Option<String> {
+    text.map(|text| text.chars().take(DIGEST_CLIP).collect())
+}
+
+/// Python's truthiness of an optional string: `None` and `""` are both false.
+fn truthy(text: Option<&str>) -> Option<&str> {
+    text.filter(|text| !text.is_empty())
+}
+
+/// Python's `_digest_of`: one line of state from a full summary.
+///
+/// `command` stays off the digest; `template` is the replacement, and
+/// `brief_file` is null until the engine reports a path. `budget` is the
+/// engine's economics line when the caller has one. `supervisor` stays null
+/// until WI-956 exists.
+pub(crate) fn digest_of(
+    summary: &SessionSummary,
+    attention: Option<&str>,
+    ready: Option<bool>,
+    fields: &[String],
+    budget: Option<String>,
+) -> SessionDigest {
+    let mut extra = serde_json::Map::new();
+    if !fields.is_empty() {
+        let dumped = serde_json::to_value(summary).expect("a session summary serialises");
+        for name in fields {
+            if name == "command" {
+                continue;
+            }
+            if let Some(value) = dumped.get(name) {
+                extra.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    let blocked = summary
+        .blocked
+        .as_ref()
+        .map(|blocked| blocked.blocker.as_str());
+    let approval = summary.approval.as_ref();
+    SessionDigest {
+        id: summary.id.clone(),
+        name: summary.name.clone(),
+        work_item: summary.work_item.clone(),
+        activity: summary.activity.clone(),
+        attention: attention.map(str::to_string),
+        ready,
+        blocked_reason: clip(blocked),
+        blocked_detail: blocked
+            .filter(|blocked| blocked.chars().count() > DIGEST_CLIP)
+            .map(str::to_string),
+        turn_started_at: summary.turn_started_at.clone(),
+        done_at: summary.done_at.clone(),
+        last_reply_excerpt: clip(summary.last_reply_excerpt.as_deref()),
+        template: summary.template.clone(),
+        brief_file: None,
+        question: approval.map(|approval| approval.question.clone()),
+        question_kind: approval.map(|approval| approval.kind.clone()),
+        options: approval
+            .filter(|approval| !approval.options.is_empty())
+            .map(|approval| {
+                approval
+                    .options
+                    .iter()
+                    .map(|option| option.label.clone())
+                    .collect()
+            }),
+        budget,
+        supervisor: None,
+        extra: (!extra.is_empty()).then_some(extra),
+    }
+}
+
+/// Python's `_budget_of`: the digest line from an engine economics reading,
+/// or `None` when the engine has not measured the session (no reading, or an
+/// empty one). Only turns and compactions reach the line.
+fn budget_of(economics: Option<&serde_json::Map<String, Value>>) -> Option<String> {
+    let economics = economics.filter(|economics| !economics.is_empty())?;
+    // `_int_of`: an int that is not a bool, else 0.
+    let int = |name: &str| economics.get(name).and_then(Value::as_i64).unwrap_or(0);
+    let reading = crate::core::session_economics::SessionEconomics {
+        turns: int("turns"),
+        compactions: int("compactions"),
+        ..Default::default()
+    };
+    Some(reading.budget_line(None, None))
+}
+
+/// Python's `_state_of`: the state a row is filtered on.
+fn state_of<'a>(summary: &'a SessionSummary, attention: Option<&'a str>) -> Option<&'a str> {
+    let activity = truthy(summary.activity.as_deref());
+    if summary.activity.as_deref() == Some("stopped") || attention == Some("exited") {
+        return if attention == Some("exited") {
+            Some("exited")
+        } else {
+            activity.or(truthy(attention))
+        };
+    }
+    activity.or(truthy(attention))
+}
+
+/// Python's `_kept`: default listings drop hibernated, stopped and exited.
+/// An empty list means the caller asked for every state.
+fn kept_in(summary: &SessionSummary, attention: Option<&str>, states: Option<&[String]>) -> bool {
+    if states.is_some_and(<[String]>::is_empty) {
+        return true;
+    }
+    let allowed = |name: &str| match states {
+        None => DIGEST_LIVE_STATES.contains(&name),
+        Some(states) => states.iter().any(|state| state == name),
+    };
+    let Some(state) = state_of(summary, attention) else {
+        return allowed("unknown");
+    };
+    if allowed(state) || attention.is_some_and(allowed) {
+        return true;
+    }
+    !EXCLUDED_STATES.contains(&state) && allowed(state)
+}
+
+/// Python's `_attention_of`: the attention class a sweep row would carry,
+/// without a screen.
+fn attention_of(summary: &SessionSummary, now: Moment, stall_after_secs: i64) -> String {
+    decisions::classify(
+        summary.activity.as_deref(),
+        summary.alive,
+        Some(summary.activity.as_deref() == Some("waiting-for-input")),
+        summary
+            .approval
+            .as_ref()
+            .map(|approval| approval.question.as_str()),
+        summary
+            .blocked
+            .as_ref()
+            .map(|blocked| blocked.blocker.as_str()),
+        summary
+            .approval
+            .as_ref()
+            .map(|approval| approval.kind.as_str()),
+        moment_of(summary.last_output_at.as_deref()),
+        now,
+        stall_after_secs,
+        moment_of(summary.done_at.as_deref()),
+        None,
+    )
+    .attention
+    .as_str()
+    .to_string()
+}
+
+/// Python's `_attention_kept`: no filter keeps every row; `needs_you` stands
+/// for its classes.
+fn attention_kept(attention: &str, wanted: Option<&[String]>) -> bool {
+    let Some(wanted) = wanted.filter(|wanted| !wanted.is_empty()) else {
+        return true;
+    };
+    wanted.iter().any(|name| {
+        if name == "needs_you" {
+            decisions::Attention::needs_you_name(attention)
+        } else {
+            name == attention
+        }
+    })
 }
 
 /// One pass over every session the engine has, ordered by who needs a person.
@@ -1462,15 +1864,14 @@ where
         Err(error) => return Err(error),
     };
     let live: Vec<EngineSession> = entries.iter().map(|entry| entry.session.clone()).collect();
-    let listed = rows_of(
+    // Unstopped links only: a history of stopped links would fill the
+    // declared cap with rows the sweep then discards (WI-1266 review).
+    let (listed, _declared_overflow) = rows_of(
         ctx,
         &ListSessionsParams {
             project: params.project.clone(),
-            work_item: None,
-            include_stopped: false,
             limit: 500,
-            offset: 0,
-            order: "started".to_string(),
+            ..ListSessionsParams::default()
         },
         &live,
         None,
@@ -1559,22 +1960,26 @@ where
             attention_reason: reason,
             screen_tail,
             ready: Some(entry.ready),
-            session: summary,
+            session: Some(summary),
+            digest: None,
             blocked_since,
             blocked_age_s,
             blocked_stale: stale,
             claim_check,
         });
     }
+    // Most urgent class first, then the most recent output; a row with no
+    // readable output time counts as now, as Python's `or now` does.
+    let output_at = |row: &SessionSweepRow| {
+        row.session
+            .as_ref()
+            .and_then(|session| moment_of(session.last_output_at.as_deref()))
+            .unwrap_or(swept_at)
+    };
     rows.sort_by(|left, right| {
         decisions::Attention::order_of(&left.attention)
             .cmp(&decisions::Attention::order_of(&right.attention))
-            .then_with(|| {
-                right
-                    .session
-                    .last_output_at
-                    .cmp(&left.session.last_output_at)
-            })
+            .then_with(|| output_at(right).cmp(&output_at(left)))
     });
     let mut counts = serde_json::Map::from_iter([
         ("total".to_string(), json!(rows.len() as i64)),
@@ -1589,6 +1994,40 @@ where
         }
     }
     counts.insert("needs_you".to_string(), json!(needs_you));
+    if params.mode == "digest" {
+        // Digest rows: the state and attention filters and `limit` apply to
+        // the rows only; the counts above cover every session.
+        let mut kept = Vec::new();
+        for row in rows {
+            let Some(session) = row.session.as_ref() else {
+                continue;
+            };
+            if !kept_in(session, Some(&row.attention), params.states.as_deref()) {
+                continue;
+            }
+            if !attention_kept(&row.attention, params.attention.as_deref()) {
+                continue;
+            }
+            let economics = live
+                .iter()
+                .find(|live_row| live_row.id == session.engine_session_id)
+                .and_then(|live_row| live_row.economics.as_ref());
+            let digest = digest_of(
+                session,
+                Some(&row.attention),
+                row.ready,
+                &params.fields,
+                budget_of(economics),
+            );
+            kept.push(SessionSweepRow {
+                session: None,
+                digest: Some(digest),
+                ..row
+            });
+        }
+        kept.truncate(usize::try_from(params.limit).unwrap_or(0));
+        rows = kept;
+    }
     Ok(SessionSweepResult {
         rows,
         counts,
@@ -1862,19 +2301,7 @@ where
         "session.input",
         Some(&detail),
     )?;
-    if submitted {
-        // A new instruction answers whatever the session reported it was
-        // blocked on, or supersedes it (WI-1834). A draft is not sent yet.
-        // Python does this from `_input_digest`'s read of the session, which
-        // a failed read skips.
-        match engine.get_session(&engine_id) {
-            Ok(Some(live)) => {
-                clear_block_on(ctx, engine, &found, "input", &reason, Some(live))?;
-            }
-            Ok(None) | Err(VogtError::EngineUnavailable(_)) | Err(VogtError::NotFound(_)) => {}
-            Err(error) => return Err(error),
-        }
-    }
+    let digest = input_digest(ctx, engine, &found, submitted, &reason)?;
     Ok(SessionInputResult {
         id: params.id.clone(),
         engine_session_id: engine_id,
@@ -1885,6 +2312,131 @@ where
         delivery: verdict.delivery.as_str().to_string(),
         delivery_evidence: verdict.evidence,
         woke,
+        digest,
+    })
+}
+
+/// Python's `_input_digest`: the digest of the session just typed into, when
+/// it can be read.
+///
+/// A submitted input also clears the session's blocked report (WI-1834), from
+/// the same read: a new instruction answers what it was blocked on, or
+/// supersedes it. A draft is not sent yet.
+fn input_digest<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    target: &Target,
+    submitted: bool,
+    reason: &str,
+) -> Result<Option<SessionDigest>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let mut live = match engine.get_session(&target.engine_session_id) {
+        Ok(live) => live,
+        Err(VogtError::EngineUnavailable(_) | VogtError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if submitted {
+        if let Some(current) = live.clone() {
+            if let Some(cleared) =
+                clear_block_on(ctx, engine, target, "input", reason, Some(current))?
+            {
+                live = Some(cleared);
+            }
+        }
+    }
+    target_digest(ctx, target, live.as_ref())
+}
+
+/// The digest row for a resolved target from one engine read: Python's
+/// `_digest_of(_summarize(...))` for a linked session, of
+/// `_summarize_engine_only(live)` for an unlinked one (null without a row).
+fn target_digest<C, I>(
+    ctx: &AppContext<C, I>,
+    target: &Target,
+    live: Option<&EngineSession>,
+) -> Result<Option<SessionDigest>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let summary = match (&target.session, live) {
+        (Some(session), live) => summarize(ctx, session, live)?,
+        (None, Some(live)) => unlinked_summary(&ctx.declared.read()?, live)?,
+        (None, None) => return Ok(None),
+    };
+    Ok(Some(digest_of(&summary, None, None, &[], None)))
+}
+
+/// Python's `_wait_digest`: one more engine read after the wait, then the
+/// target resolved again. Null when the session cannot be read.
+fn wait_digest<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    named: &str,
+    engine_id: &str,
+) -> Result<Option<SessionDigest>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let live = match engine.get_session(engine_id) {
+        Ok(Some(live)) => live,
+        Ok(None) | Err(VogtError::EngineUnavailable(_) | VogtError::NotFound(_)) => {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    let target = resolve_target(ctx, named)?;
+    target_digest(ctx, &target, Some(&live))
+}
+
+/// Python's `_tail_of`: the last 8 non-blank lines of a screen.
+fn tail_of(screen: &SessionScreenResult) -> Vec<String> {
+    let kept: Vec<&String> = screen
+        .lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    kept[kept.len().saturating_sub(8)..]
+        .iter()
+        .map(|line| (*line).clone())
+        .collect()
+}
+
+/// A wait's result: the full screen when `screen=true` asked for it, else the
+/// digest row plus an 8-line tail (design C1). `ended` is the outcome, whether
+/// it matched, and how long the wait took.
+fn wait_result<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    params: &WaitParams,
+    engine_id: &str,
+    ended: (String, bool, i64),
+    shown: SessionScreenResult,
+) -> Result<SessionWaitResult, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let (screen, digest, screen_tail) = if params.screen {
+        (Some(shown), None, Vec::new())
+    } else {
+        let digest = wait_digest(ctx, engine, &params.id, engine_id)?;
+        (None, digest, tail_of(&shown))
+    };
+    let (outcome, matched, waited_ms) = ended;
+    Ok(SessionWaitResult {
+        id: params.id.clone(),
+        engine_session_id: engine_id.to_string(),
+        outcome,
+        matched,
+        waited_ms,
+        screen,
+        digest,
+        screen_tail,
     })
 }
 
@@ -1935,14 +2487,15 @@ where
             {
                 return Err(refused);
             }
-            return Ok(SessionWaitResult {
-                id: params.id.clone(),
-                engine_session_id: engine_id.clone(),
-                outcome: "hibernated".to_string(),
-                matched: false,
-                waited_ms: 0,
-                screen: screen_result(&params.id, &engine_id, &screen.expect("checked")),
-            });
+            let shown = screen_result(&params.id, &engine_id, &screen.expect("checked"));
+            return wait_result(
+                ctx,
+                engine,
+                params,
+                &engine_id,
+                ("hibernated".to_string(), false, 0),
+                shown,
+            );
         }
         other => other?,
     };
@@ -1961,14 +2514,15 @@ where
             ))
         }
     })?;
-    Ok(SessionWaitResult {
-        id: params.id.clone(),
-        engine_session_id: engine_id.clone(),
-        outcome: waited.outcome,
-        matched: waited.matched,
-        waited_ms: waited.waited_ms,
-        screen: screen_result(&params.id, &engine_id, &waited.screen),
-    })
+    let shown = screen_result(&params.id, &engine_id, &waited.screen);
+    wait_result(
+        ctx,
+        engine,
+        params,
+        &engine_id,
+        (waited.outcome, waited.matched, waited.waited_ms),
+        shown,
+    )
 }
 
 /// Wake a hibernated session. A live session is returned as it is — waking is
@@ -2037,7 +2591,7 @@ where
         Some(session) => summarize(ctx, session, Some(&updated))?,
         None => unlinked_summary(&ctx.declared.read()?, &updated)?,
     };
-    Ok(SessionResult { session: summary })
+    Ok(SessionResult::plain(summary))
 }
 
 /// Change a session's role. Nominating oversight is a person's act.
@@ -2094,7 +2648,7 @@ where
         Some(session) => summarize(ctx, session, Some(&updated))?,
         None => unlinked_summary(&ctx.declared.read()?, &updated)?,
     };
-    Ok(SessionResult { session: summary })
+    Ok(SessionResult::plain(summary))
 }
 
 /// Answer the dialog a session shows — a permission request or a startup gate —
@@ -2254,9 +2808,10 @@ where
             "session.hibernated",
             Some(&outcome),
         )?;
-        return Ok(SessionResult {
-            session: unlinked_summary(&ctx.declared.read()?, &hibernated)?,
-        });
+        return Ok(SessionResult::digested(unlinked_summary(
+            &ctx.declared.read()?,
+            &hibernated,
+        )?));
     };
     let mut writing = write_of(ctx);
     let actor_id = session.actor_id.clone();
@@ -2290,9 +2845,11 @@ where
             ))
         },
     )?;
-    Ok(SessionResult {
-        session: summarize(ctx, &session, Some(&hibernated))?,
-    })
+    Ok(SessionResult::digested(summarize(
+        ctx,
+        &session,
+        Some(&hibernated),
+    )?))
 }
 
 // -- shared helpers -----------------------------------------------------------
@@ -2610,7 +3167,7 @@ where
     let mut summary = unlinked_summary(&ctx.declared.read()?, &session)?;
     summary.alive = killed.then_some(false);
     summary.stopped_at = Some(stopped_at);
-    Ok(SessionResult { session: summary })
+    Ok(SessionResult::plain(summary))
 }
 
 /// Python's `_resolve_purpose`: fill a start's unset fields from its purpose's
@@ -3336,7 +3893,9 @@ fn unlinked_summary(
         work_item_state: work_item.map(|item| item.state.to_string()),
         actor: None,
         cwd: session.cwd.clone(),
-        template: None,
+        // The engine's own record of the template, not an audited claim: the
+        // name it was started from, as the GUI's rail shows it.
+        template: session.template.clone(),
         model: None,
         effort: None,
         reason: None,
@@ -3824,7 +4383,7 @@ where
             Some(session) => summarize(ctx, session, Some(&current))?,
             None => unlinked_summary(&ctx.declared.read()?, &current)?,
         };
-        return Ok(SessionResult { session: summary });
+        return Ok(SessionResult::digested(summary));
     }
     let Some(session) = session else {
         let woken = engine
@@ -3844,9 +4403,10 @@ where
             "session.woken",
             Some(&detail),
         )?;
-        return Ok(SessionResult {
-            session: unlinked_summary(&ctx.declared.read()?, &woken)?,
-        });
+        return Ok(SessionResult::digested(unlinked_summary(
+            &ctx.declared.read()?,
+            &woken,
+        )?));
     };
     if session.stopped_at.is_some() {
         return Err(VogtError::Conflict(format!(
@@ -3915,9 +4475,11 @@ where
             }),
         ))
     })?;
-    Ok(SessionResult {
-        session: summarize(ctx, &session, Some(&woken))?,
-    })
+    Ok(SessionResult::digested(summarize(
+        ctx,
+        &session,
+        Some(&woken),
+    )?))
 }
 
 /// Whether the caller counts as a person for the engine's person gate: a human
@@ -4168,7 +4730,7 @@ where
         Some(session) => summarize(ctx, session, Some(&current))?,
         None => unlinked_summary(&ctx.declared.read()?, &current)?,
     };
-    Ok(SessionResult { session: summary })
+    Ok(SessionResult::plain(summary))
 }
 
 /// Kill a session if it still runs and have the engine forget it.
@@ -4222,7 +4784,7 @@ where
         let mut summary = unlinked_summary(&ctx.declared.read()?, &before)?;
         summary.alive = Some(false);
         summary.stopped_at = Some(now(&writing));
-        return Ok(SessionResult { session: summary });
+        return Ok(SessionResult::plain(summary));
     }
 
     let session = found.session.unwrap();
@@ -4250,7 +4812,7 @@ where
             .ok_or_else(|| VogtError::NotFound(format!("no session {}", py_repr(&session_id))))?;
         let summary = summarize(ctx, &after, None)?;
         Ok(WriteOutcome::new(
-            SessionResult { session: summary },
+            SessionResult::plain(summary),
             "session",
             &session_id,
             audited_payload(&after),
