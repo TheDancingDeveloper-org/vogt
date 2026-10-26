@@ -905,4 +905,192 @@ mod tests {
         assert_eq!(reading.wall_clock.mean_ms, 1001);
         assert_eq!(reading.tool_result_bytes.get("Grep"), Some(&71));
     }
+
+    /// Feed `lines` to a fresh meter for `agent`, one line at a time.
+    fn feed_all(agent: &str, lines: &[&str]) -> SessionEconomics {
+        let mut meter = Meter::new(agent);
+        for line in lines {
+            meter.feed_line(line);
+        }
+        meter.snapshot()
+    }
+
+    /// Python: test_claude_usage_is_the_latest_turn_and_peak_is_the_largest
+    #[test]
+    fn claude_usage_is_the_latest_turn_and_peak_is_the_largest() {
+        let bash_result = format!(
+            r#"{{"type":"assistant","timestamp":"2026-10-11T01:00:00Z","message":{{"model":"claude","usage":{{"input_tokens":100,"cache_read_input_tokens":50,"cache_creation_input_tokens":25,"output_tokens":10}},"content":[{{"type":"tool_result","name":"Bash","content":"{}"}}]}}}}"#,
+            "x".repeat(40)
+        );
+        let reading = feed_all(
+            "claude",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"go"}}"#,
+                &bash_result,
+                r#"{"type":"assistant","timestamp":"2026-10-11T01:00:30Z","message":{"usage":{"input_tokens":80,"output_tokens":5},"content":[]}}"#,
+            ],
+        );
+        assert_eq!(reading.turns, 2);
+        // The latest turn, not the sum: 100+50+25 would double-count history.
+        assert_eq!(reading.context_tokens, 80);
+        assert_eq!(reading.peak_context_tokens, 175);
+        assert_eq!(reading.output_tokens, 15);
+        assert!(reading.usage_measured);
+        assert_eq!(reading.compactions, 0);
+        assert_eq!(reading.tool_result_bytes.get("Bash"), Some(&40));
+        assert_eq!(reading.wall_clock.count, 1);
+        assert_eq!(reading.wall_clock.max_ms, 30_000);
+        assert_eq!(reading.wall_clock.mean_ms, 30_000);
+    }
+
+    /// Python: test_claude_compaction_marker_counts_wherever_it_sits
+    #[test]
+    fn claude_compaction_marker_counts_wherever_it_sits() {
+        let reading = feed_all(
+            "claude",
+            &[
+                r#"{"type":"system","isCompactSummary":true}"#,
+                r#"{"type":"assistant","message":{"isCompactSummary":true,"usage":{"input_tokens":1}}}"#,
+            ],
+        );
+        assert_eq!(reading.compactions, 2);
+        assert_eq!(reading.turns, 1);
+    }
+
+    /// Python: test_klaudia_estimates_and_counts_its_own_compaction_marker
+    #[test]
+    fn klaudia_estimates_and_counts_its_own_compaction_marker() {
+        let boundary = r#"{"type":"system","subtype":"compact_boundary"}"#;
+        let body = format!(
+            r#"{{"type":"assistant","message":{{"content":"{}"}}}}"#,
+            "y".repeat(CHARS_PER_TOKEN as usize * 10)
+        );
+        let reading = feed_all("klaudia", &[boundary, &body]);
+        let total = (boundary.len() + body.len()) as i64;
+        assert!(!reading.usage_measured);
+        assert_eq!(reading.compactions, 1);
+        assert_eq!(reading.turns, 1);
+        assert_eq!(reading.context_tokens, total / CHARS_PER_TOKEN);
+        assert_eq!(reading.peak_context_tokens, reading.context_tokens);
+    }
+
+    /// Python: test_a_repeated_read_counts_once_per_path
+    #[test]
+    fn a_repeated_read_counts_once_per_path() {
+        let read = |path: &str| {
+            format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","name":"Read","input":{{"file_path":"{path}"}},"content":"contents"}}]}}}}"#
+            )
+        };
+        let (a, b) = (read("/a.py"), read("/b.py"));
+        let reading = feed_all("klaudia", &[&a, &a, &b, &a]);
+        assert_eq!(reading.reads_repeated, 1);
+        assert_eq!(reading.tool_result_bytes.get("Read"), Some(&(8 * 4)));
+    }
+
+    /// Python: test_codex_results_under_payload_are_counted
+    #[test]
+    fn codex_results_under_payload_are_counted() {
+        let line = r#"{"type":"tool_result","payload":{"content":[{"type":"tool_result","tool":"shell","content":"zzzzzzzz"}]}}"#;
+        let reading = feed_all("codex", &[line]);
+        assert_eq!(reading.turns, 0);
+        assert_eq!(reading.tool_result_bytes.get("shell"), Some(&8));
+        assert_eq!(reading.tool_result_bytes.len(), 1);
+        assert_eq!(reading.context_tokens, line.len() as i64 / CHARS_PER_TOKEN);
+    }
+
+    /// Python: test_garbage_lines_are_skipped_and_an_empty_transcript_is_zero
+    #[test]
+    fn garbage_lines_are_skipped_and_an_empty_transcript_is_zero() {
+        let reading = feed_all("claude", &["not json", "", "[]"]);
+        assert_eq!(reading.turns, 0);
+        assert_eq!(reading.context_tokens, 0);
+        assert!(!reading.usage_measured);
+        assert_eq!(reading.wall_clock.count, 0);
+    }
+
+    /// Python: test_one_timestamped_turn_has_no_wall_clock
+    #[test]
+    fn one_timestamped_turn_has_no_wall_clock() {
+        let reading = feed_all(
+            "klaudia",
+            &[r#"{"type":"assistant","timestamp":"2026-10-11T01:00:00Z","message":{}}"#],
+        );
+        assert_eq!(reading.wall_clock.count, 0);
+    }
+
+    /// Python: test_claude_counts_a_turn_once_across_its_content_blocks
+    #[test]
+    fn claude_counts_a_turn_once_across_its_content_blocks() {
+        let block = |index: usize, tokens: i64| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-10-11T01:00:{index:02}Z","message":{{"id":"msg_1","usage":{{"input_tokens":{tokens},"output_tokens":1}},"content":[{{"type":"text","text":"part"}}]}}}}"#
+            )
+        };
+        let other = r#"{"type":"assistant","timestamp":"2026-10-11T01:01:00Z","message":{"id":"msg_2","usage":{"input_tokens":9,"output_tokens":1}}}"#;
+        let reading = feed_all("claude", &[&block(1, 40), &block(2, 40), other]);
+        assert_eq!(reading.turns, 2);
+        // One output reading per turn, not one per content-block entry.
+        assert_eq!(reading.output_tokens, 2);
+        assert_eq!(reading.wall_clock.count, 1);
+    }
+
+    /// Python: test_klaudia_compaction_is_a_system_subtype_and_resets_the_estimate
+    #[test]
+    fn klaudia_compaction_is_a_system_subtype_and_resets_the_estimate() {
+        let archived = format!(
+            r#"{{"type":"assistant","message":{{"content":"{}"}}}}"#,
+            "y".repeat(CHARS_PER_TOKEN as usize * 100)
+        );
+        let live = format!(
+            r#"{{"type":"assistant","message":{{"content":"{}"}}}}"#,
+            "z".repeat(CHARS_PER_TOKEN as usize * 10)
+        );
+        let boundary = r#"{"type":"system","subtype":"compact_boundary"}"#;
+        let reading = feed_all("klaudia", &[&archived, boundary, &live]);
+        assert_eq!(reading.compactions, 1);
+        assert_eq!(reading.turns, 2);
+        let live_only = (boundary.len() + live.len()) as i64 / CHARS_PER_TOKEN;
+        assert_eq!(reading.context_tokens, live_only);
+        assert!(reading.peak_context_tokens > reading.context_tokens);
+    }
+
+    /// Python: test_claude_tool_results_are_named_from_the_tool_use_id
+    #[test]
+    fn claude_tool_results_are_named_from_the_tool_use_id() {
+        let reading = feed_all(
+            "claude",
+            &[
+                r#"{"type":"assistant","message":{"id":"msg_1","usage":{"input_tokens":10,"output_tokens":1},"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/a.py"}}]}}"#,
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"contents"}]}}"#,
+            ],
+        );
+        assert_eq!(reading.tool_result_bytes.get("Read"), Some(&8));
+        assert_eq!(reading.tool_result_bytes.len(), 1);
+        assert_eq!(reading.reads_repeated, 0);
+    }
+
+    /// Python: test_claude_output_tokens_count_once_per_turn_across_its_blocks
+    #[test]
+    fn claude_output_tokens_count_once_per_turn_across_its_blocks() {
+        let blocks = [
+            r#"{"type":"thinking","thinking":"hm"}"#,
+            r#"{"type":"text","text":"hello"}"#,
+            r#"{"type":"tool_use","id":"t1","name":"Read","input":{}}"#,
+        ];
+        let lines: Vec<String> = blocks
+            .iter()
+            .map(|block| {
+                format!(
+                    r#"{{"type":"assistant","message":{{"id":"msg_1","usage":{{"input_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":7}},"content":[{block}]}}}}"#
+                )
+            })
+            .collect();
+        let reading = feed_all(
+            "claude",
+            &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        assert_eq!(reading.turns, 1);
+        assert_eq!(reading.output_tokens, 7);
+    }
 }

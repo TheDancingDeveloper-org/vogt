@@ -5,6 +5,7 @@
 
 pub mod brief;
 pub mod ci_watch;
+pub mod claims;
 pub mod collect;
 pub mod context;
 pub mod contracts;
@@ -29,6 +30,7 @@ mod memo_test;
 pub mod models;
 pub mod observations;
 pub mod place;
+pub mod policy_conflicts;
 pub mod projects;
 pub mod resolve;
 pub mod services;

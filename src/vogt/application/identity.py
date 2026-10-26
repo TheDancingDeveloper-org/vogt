@@ -38,6 +38,8 @@ config, with a token beside it — against an attacker's URL.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from vogt.config import VogtConfig
@@ -49,6 +51,24 @@ from vogt.config import VogtConfig
 HEADER_URL = "x-vogt-public-url"
 HEADER_API_PATH = "x-vogt-api-path"
 HEADER_MCP_PATH = "x-vogt-mcp-path"
+#: The engine session the MCP bridge runs in, from `$VOGT_ENGINE_SESSION_ID`
+#: (WI-1852). Read by `claimed_engine_session`; see `AppContext`.
+HEADER_ENGINE_SESSION = "x-vogt-engine-session"
+
+_ENGINE_SESSION_ID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def claimed_engine_session(headers: Mapping[str, str]) -> str | None:
+    """The engine session id a request claims to come from, or None.
+
+    Only a well-formed engine id is kept, lower-cased; anything else is no
+    claim at all rather than an error, because the header is advisory.
+    """
+    raw = (headers.get(HEADER_ENGINE_SESSION) or "").strip().lower()
+    return raw if _ENGINE_SESSION_ID.match(raw) else None
+
 
 #: What the core serves at, and therefore what it reports when it is the door.
 DEFAULT_API_PATH = "/api"
@@ -135,9 +155,11 @@ __all__ = [
     "DEFAULT_API_PATH",
     "DEFAULT_MCP_PATH",
     "HEADER_API_PATH",
+    "HEADER_ENGINE_SESSION",
     "HEADER_MCP_PATH",
     "HEADER_URL",
     "PublicIdentity",
+    "claimed_engine_session",
     "identity_from_config",
     "identity_from_headers",
 ]

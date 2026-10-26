@@ -2493,6 +2493,198 @@
         "title": "CiSummary",
         "type": "object"
       },
+      "ClaimCheck": {
+        "additionalProperties": false,
+        "description": "A session's completion claim checked against git and the forge (WI-1835).\n\nRecorded when a session says `AUTOPILOT: DONE` or moves its item to\nreview or done. `mismatches` lists, in words, where the claim and the\nfacts disagree; `unchecked` lists the facts that could not be read, so\nan empty `mismatches` is never mistaken for verified.",
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "claim": {
+            "enum": [
+              "autopilot-done",
+              "review",
+              "done"
+            ],
+            "title": "Claim",
+            "type": "string"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The worktree's HEAD commit.",
+            "title": "Head"
+          },
+          "mismatches": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Mismatches",
+            "type": "array"
+          },
+          "new_commits": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Commits on HEAD committed since the session started.",
+            "title": "New Commits"
+          },
+          "pulls": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ClaimPull"
+            },
+            "title": "Pulls",
+            "type": "array"
+          },
+          "pushed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether HEAD is on the branch's upstream.",
+            "title": "Pushed"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The session's Vogt id.",
+            "title": "Session"
+          },
+          "session_started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Started At"
+          },
+          "unchecked": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Unchecked",
+            "type": "array"
+          },
+          "work_item": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Work Item"
+          }
+        },
+        "required": [
+          "claim"
+        ],
+        "title": "ClaimCheck",
+        "type": "object"
+      },
+      "ClaimPull": {
+        "additionalProperties": false,
+        "description": "A pull request a completion claim was checked against (WI-1835).",
+        "properties": {
+          "checks": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checks"
+          },
+          "head_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Ref"
+          },
+          "merged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged At"
+          },
+          "merged_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who merged it, when the forge observation says.",
+            "title": "Merged By"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "state"
+        ],
+        "title": "ClaimPull",
+        "type": "object"
+      },
       "CloneInfo": {
         "additionalProperties": false,
         "description": "That this instance is a copy of another one, and of when.",
@@ -2971,7 +3163,7 @@
             "title": "Url"
           },
           "version": {
-            "default": "0.7.17",
+            "default": "0.7.20",
             "title": "Version",
             "type": "string"
           },
@@ -5071,6 +5263,50 @@
           "change_applied"
         ],
         "title": "DriftResult",
+        "type": "object"
+      },
+      "EffectivePolicy": {
+        "additionalProperties": false,
+        "description": "The landing rule a started session runs under (WI-1832).",
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "deploy_by": {
+            "title": "Deploy By",
+            "type": "string"
+          },
+          "lands_by": {
+            "title": "Lands By",
+            "type": "string"
+          },
+          "merge_by": {
+            "title": "Merge By",
+            "type": "string"
+          },
+          "merge_mode": {
+            "title": "Merge Mode",
+            "type": "string"
+          },
+          "overrides": {
+            "default": [],
+            "description": "Where the task contradicted this policy, one line per axis (PR vs push only, merge, base branch, deploy). The policy wins and the brief says so; empty when the task agreed or set none.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Overrides",
+            "type": "array"
+          }
+        },
+        "required": [
+          "base_branch",
+          "lands_by",
+          "merge_by",
+          "merge_mode",
+          "deploy_by"
+        ],
+        "title": "EffectivePolicy",
         "type": "object"
       },
       "EngineAgentTaskStatus": {
@@ -7828,10 +8064,26 @@
             "title": "Deploy By",
             "type": "string"
           },
+          "initiative_bases": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Initiative Bases",
+            "type": "object"
+          },
           "linear_history": {
             "default": true,
             "title": "Linear History",
             "type": "boolean"
+          },
+          "long_lived_branches": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Long Lived Branches",
+            "type": "array"
           },
           "merge_by": {
             "enum": [
@@ -7905,7 +8157,7 @@
             "type": "string"
           },
           "version": {
-            "default": "0.7.17",
+            "default": "0.7.20",
             "title": "Version",
             "type": "string"
           }
@@ -10591,7 +10843,7 @@
           },
           "kind": {
             "default": "permission",
-            "description": "permission (a tool call) / folder-trust / external-imports (a CLAUDE.md importing files from outside) / read-outside-cwd.",
+            "description": "permission (a tool call) / folder-trust / external-imports (a CLAUDE.md importing files from outside) / read-outside-cwd / question (the agent asks a question with a menu of answers).",
             "title": "Kind",
             "type": "string"
           },
@@ -10914,6 +11166,19 @@
             "description": "The engine's economics line for the session, e.g. `96 turns, 2 compactions`; null when the engine has not metered it.",
             "title": "Budget"
           },
+          "done_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When an autopilot session declared itself done this turn.",
+            "title": "Done At"
+          },
           "extra": {
             "anyOf": [
               {
@@ -10953,6 +11218,45 @@
               }
             ],
             "title": "Name"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The menu's choices in order, numbered from 1; answer with `session_answer` by number or label. Untrusted terminal text.",
+            "title": "Options"
+          },
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The question or dialog the session is showing, when it waits on one (WI-1871). Untrusted terminal text.",
+            "title": "Question"
+          },
+          "question_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`question` (an agent's question menu) or a dialog kind.",
+            "title": "Question Kind"
           },
           "ready": {
             "anyOf": [
@@ -11740,7 +12044,7 @@
           },
           "delivery": {
             "default": "unconfirmed",
-            "description": "typed (no Enter: the text sits in the input) / delivered (a turn started) / queued (behind a running turn) / unconfirmed (sent; nothing observable yet). A refused input is an error, not a value.",
+            "description": "typed (no Enter: the text sits in the input) / delivered (a turn started) / queued (behind a running turn; once it ends Vogt checks the input box and presses Enter if the text is still there) / stuck (at rest with the text still in the input box: the submit did not land; the sweep shows it as input pending) / unconfirmed (sent; nothing observable yet). A refused input is an error, not a value.",
             "title": "Delivery",
             "type": "string"
           },
@@ -12040,6 +12344,17 @@
                 "type": "null"
               }
             ]
+          },
+          "effective_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EffectivePolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "On `session.start` for a project with a landing rule: the rule the worker runs under and any task lines it overrode."
           },
           "session": {
             "$ref": "#/components/schemas/SessionSummary"
@@ -12445,6 +12760,19 @@
             "title": "Cwd",
             "type": "string"
           },
+          "done_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Live from the engine: when an autopilot session declared itself done (`AUTOPILOT: DONE`) this turn. Cleared when the next turn starts; null otherwise.",
+            "title": "Done At"
+          },
           "effort": {
             "anyOf": [
               {
@@ -12837,7 +13165,7 @@
         "description": "One session in the oversight table.",
         "properties": {
           "attention": {
-            "description": "approval / blocked / waiting (at its prompt, wants the next instruction) / stalled (running, silent too long) / running / idle / hibernated / exited / unknown. The table is ordered by it.",
+            "description": "approval (a permission dialog, startup gate or question menu) / blocked / waiting (at its prompt, wants the next instruction) / stalled (running, silent too long) / running / idle / hibernated / exited / unknown. The table is ordered by it.",
             "title": "Attention",
             "type": "string"
           },
@@ -12845,6 +13173,48 @@
             "description": "Why, in words.",
             "title": "Attention Reason",
             "type": "string"
+          },
+          "blocked_age_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How old the blocked report is, in seconds.",
+            "title": "Blocked Age S"
+          },
+          "blocked_since": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the session's blocked report was made, if it has one.",
+            "title": "Blocked Since"
+          },
+          "blocked_stale": {
+            "default": false,
+            "description": "The blocked report predates the session's current turn: it went back to work after reporting, so the report no longer says what it waits on and the row is not counted in `needs_you` (WI-1834).",
+            "title": "Blocked Stale",
+            "type": "boolean"
+          },
+          "claim_check": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClaimCheck"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "On a `done` row bound to a work item: its AUTOPILOT: DONE claim checked against git and the forge (WI-1835)."
           },
           "digest": {
             "anyOf": [
@@ -13339,7 +13709,7 @@
                 "type": "null"
               }
             ],
-            "description": "What the session's agent should do, in the user's words. Folded into the brief as its Task section; an agent template (Claude Code, Codex, OpenCode, Klaudia) is started with a first prompt telling it to read the brief and carry that task out, so 'start a session on X and check its containers' opens an agent already checking them. A plain shell only gets the brief's path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with `template` when it is something to carry out.",
+            "description": "What the session's agent should do, in the user's words. Folded into the brief as its Task section; an agent template (Claude Code, Codex, OpenCode, Klaudia) is started with a first prompt telling it to read the brief and carry that task out, so 'start a session on X and check its containers' opens an agent already checking them. A plain shell only gets the brief's path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with `template` when it is something to carry out. Omitted on an agent start, the task is taken from `reason` (a leading `Task:` dropped); a `review` purpose gets a default review task.",
             "title": "Task"
           },
           "template": {
@@ -14525,7 +14895,7 @@
             "type": "string"
           },
           "version": {
-            "default": "0.7.17",
+            "default": "0.7.20",
             "title": "Version",
             "type": "string"
           }
@@ -15383,6 +15753,16 @@
             "title": "Branches",
             "type": "array"
           },
+          "claim_check": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClaimCheck"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "comments": {
             "default": [],
             "items": {
@@ -15586,7 +15966,7 @@
   "info": {
     "description": "Every capability is available here, on the CLI, and over MCP — all three generated from one operation registry.",
     "title": "Vogt",
-    "version": "0.7.17"
+    "version": "0.7.20"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -20310,7 +20690,7 @@
     },
     "/api/sessions/answer": {
       "post": {
-        "description": "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's — an agent is refused (403 person_required) and should leave it for the Inbox. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
+        "description": "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's — an agent is refused (403 person_required) and should leave it for the Inbox. One exception: an oversight session may choose \"Yes\" on a one-line Bash command in an allow-listed class (read-only git/gh, fetch, checkout of a ref, rebase and --force-with-lease push of the worker's own branch, cargo/pnpm/uv build and test) run in the worker's own git worktree; the engine decides and audits it. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
         "operationId": "session_answer",
         "requestBody": {
           "content": {
@@ -20344,7 +20724,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's — an agent is refused (403 person_required) and should leave it for the Inbox. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id."
+        "summary": "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's — an agent is refused (403 person_required) and should leave it for the Inbox. One exception: an oversight session may choose \"Yes\" on a one-line Bash command in an allow-listed class (read-only git/gh, fetch, checkout of a ref, rebase and --force-with-lease push of the worker's own branch, cargo/pnpm/uv build and test) run in the worker's own git worktree; the engine decides and audits it. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id."
       }
     },
     "/api/sessions/blocked": {

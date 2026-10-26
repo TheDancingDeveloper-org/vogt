@@ -263,7 +263,7 @@ fn validate(fields: &[(&str, Lax)], value: &Map<String, Value>) -> Option<Value>
             (Some(Value::Null), Lax::OptionalText | Lax::OptionalInt) => Value::Null,
             (Some(Value::String(text)), Lax::OptionalText) => Value::String(text.clone()),
             (Some(_), Lax::OptionalText) => return None,
-            (Some(given), Lax::OptionalInt | Lax::Int) => Value::from(lax_int(given)?),
+            (Some(given), Lax::OptionalInt | Lax::Int) => lax_int(given)?,
             (Some(given), Lax::Bool) => Value::Bool(lax_bool(given)?),
         };
         out.insert((*name).to_string(), read);
@@ -273,16 +273,19 @@ fn validate(fields: &[(&str, Lax)], value: &Map<String, Value>) -> Option<Value>
 
 /// pydantic's lax `int`: a bool, an integral float, or a string of an int
 /// (surrounding whitespace, `_` between digits and a trailing `.0…` allowed).
-/// An int past `i64` is refused here; Python's unbounded int would keep it.
-fn lax_int(value: &Value) -> Option<i64> {
+///
+/// Python's int is unbounded, so an int past `i64` is kept, not refused: the
+/// whole `u64` range round-trips exactly, as a JSON int or a string of one
+/// (WI-1081). The engine is Rust and reports its counts as `u64`, so that is
+/// every value it can send. A magnitude past `u64` cannot be held exactly by
+/// `serde_json` without `arbitrary_precision`; see
+/// `docs/rust-port/accepted-differences.md`.
+fn lax_int(value: &Value) -> Option<Value> {
     match value {
-        Value::Bool(flag) => Some(i64::from(*flag)),
+        Value::Bool(flag) => Some(Value::from(i64::from(*flag))),
         Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                return Some(int);
-            }
-            if number.is_u64() {
-                return None;
+            if number.is_i64() || number.is_u64() {
+                return Some(Value::Number(number.clone()));
             }
             let float = number.as_f64()?;
             // pydantic refuses a float past i64 (1e20) and any fraction.
@@ -291,7 +294,7 @@ fn lax_int(value: &Value) -> Option<i64> {
                 && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&float)
             {
                 #[allow(clippy::cast_possible_truncation)]
-                Some(float as i64)
+                Some(Value::from(float as i64))
             } else {
                 None
             }
@@ -301,7 +304,7 @@ fn lax_int(value: &Value) -> Option<i64> {
     }
 }
 
-fn int_text(text: &str) -> Option<i64> {
+fn int_text(text: &str) -> Option<Value> {
     let trimmed = text.trim_matches(|c: char| c.is_ascii_whitespace());
     // A trailing `.0`, `.00`, …: "90.0" is 90, "90." and "90.5" are refused.
     let trimmed = match trimmed.split_once('.') {
@@ -309,10 +312,10 @@ fn int_text(text: &str) -> Option<i64> {
         Some(_) => return None,
         None => trimmed,
     };
-    let (sign, digits) = match trimmed.as_bytes().first()? {
-        b'+' => ("", &trimmed[1..]),
-        b'-' => ("-", &trimmed[1..]),
-        _ => ("", trimmed),
+    let (negative, digits) = match trimmed.as_bytes().first()? {
+        b'+' => (false, &trimmed[1..]),
+        b'-' => (true, &trimmed[1..]),
+        _ => (false, trimmed),
     };
     // Python's `int()`: digits, with single underscores between them.
     let bytes = digits.as_bytes();
@@ -324,7 +327,12 @@ fn int_text(text: &str) -> Option<i64> {
     {
         return None;
     }
-    format!("{sign}{}", digits.replace('_', "")).parse().ok()
+    let digits = digits.replace('_', "");
+    if negative {
+        format!("-{digits}").parse::<i64>().ok().map(Value::from)
+    } else {
+        digits.parse::<u64>().ok().map(Value::from)
+    }
 }
 
 /// pydantic's lax `bool`: a bool, 0/1 (int or float), or one of its words,
@@ -358,6 +366,47 @@ mod tests {
 
     fn used(value: Value) -> Option<Value> {
         disk(Some(&json!({ "used_percent": value }))).map(|row| row["used_percent"].clone())
+    }
+
+    /// Python keeps an int past `i64` (its int is unbounded), and so must a
+    /// nested row: the row is kept and the value round-trips (WI-1081).
+    #[test]
+    fn an_int_past_i64_round_trips_in_a_nested_row() {
+        let big = u64::MAX;
+        let past = 9_223_372_036_854_775_808_u64; // i64::MAX + 1
+        let payload = json!({
+            "history": { "enabled": true, "log_bytes": big, "db_bytes": past },
+            "agent_tasks": { "prompt_bytes": big, "task_count": "18446744073709551615" },
+            "event_lag": { "sse": { "episodes": past, "events_skipped": big } },
+            "disk": { "total_bytes": big, "free_bytes": past },
+        });
+        let out = report(&payload).expect("no row is refused");
+        assert_eq!(out["history"]["log_bytes"], json!(big));
+        assert_eq!(out["history"]["db_bytes"], json!(past));
+        assert_eq!(out["agent_tasks"]["prompt_bytes"], json!(big));
+        assert_eq!(out["agent_tasks"]["task_count"], json!(big));
+        assert_eq!(out["event_lag"]["sse"]["episodes"], json!(past));
+        assert_eq!(out["event_lag"]["sse"]["events_skipped"], json!(big));
+        assert_eq!(out["disk"]["total_bytes"], json!(big));
+        assert_eq!(out["disk"]["free_bytes"], json!(past));
+        // Through the wire format too: the digits survive a parse and a dump.
+        let wire = serde_json::to_string(&out["history"]).unwrap();
+        assert!(
+            wire.contains("\"log_bytes\":18446744073709551615"),
+            "{wire}"
+        );
+        assert!(wire.contains("\"db_bytes\":9223372036854775808"), "{wire}");
+        let reparsed: Value = serde_json::from_str(
+            r#"{"history":{"log_bytes":18446744073709551615},"agent_tasks":{},"event_lag":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            report(&reparsed).unwrap()["history"]["log_bytes"],
+            json!(18_446_744_073_709_551_615_u64)
+        );
+        // Below i64::MIN stays exact where it fits; a negative past i64 is
+        // past what serde_json holds as an int.
+        assert_eq!(used(json!(i64::MIN)), Some(json!(i64::MIN)));
     }
 
     /// Each case was read off pydantic 2 (`EngineDiskStatus.model_validate`).

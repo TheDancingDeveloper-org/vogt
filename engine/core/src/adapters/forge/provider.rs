@@ -52,12 +52,16 @@ pub trait ForgeProvider {
         repo: &RepoRef,
     ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, VogtError>;
 
-    /// The token a git clone should use, if one is configured.
+    /// The token a git clone of `repo` should use, if one is configured.
+    ///
+    /// `repo` routes a GitHub App to the installation on that repository's
+    /// owner; a personal token ignores it. An error is a token that could not
+    /// be minted (WI-1838).
     ///
     /// Returned owned so the caller can keep it after the provider borrow ends.
     /// That copies the secret, which is accepted; a borrow would be object-safe
     /// as well.
-    fn clone_token(&self) -> Option<String>;
+    fn clone_token(&self, repo: Option<&RepoRef>) -> Result<Option<String>, VogtError>;
 
     /// The token owner and reported scopes, or `None` when invalid.
     fn identity(&self) -> Result<Option<(String, String)>, VogtError>;

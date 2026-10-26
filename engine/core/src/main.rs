@@ -34,7 +34,7 @@ mod storage;
 /// fallback equal to `pyproject.toml`. Health and MCP both report this.
 pub const VERSION: &str = match option_env!("VOGT_VERSION") {
     Some(value) if !value.is_empty() => value,
-    _ => "0.7.17",
+    _ => "0.7.20",
 };
 
 use std::net::SocketAddr;
@@ -126,7 +126,11 @@ fn main() -> ExitCode {
         };
         let token = adapters::mcp::bridge::resolve_token(&env);
         let transport = adapters::mcp::bridge::UreqTransport;
-        let mut bridge = adapters::mcp::bridge::Bridge::new(&url, token, &transport, VERSION);
+        let mut bridge = adapters::mcp::bridge::Bridge::new(&url, token, &transport, VERSION)
+            .with_engine_session(
+                env.get(adapters::mcp::bridge::ENGINE_SESSION_ENV)
+                    .map(String::as_str),
+            );
         // A line at a time. A client sends `initialize` and waits for the
         // answer, so reading all of stdin first hangs the handshake.
         // Bytes, not lines of text. A line that is not UTF-8 is still a line

@@ -16,6 +16,7 @@ import {
   createEffect,
   createSignal,
   For,
+  on,
   onCleanup,
   onMount,
   Show,
@@ -76,6 +77,7 @@ import { CallSession, callSocketUrl } from "./callSession";
 import { callCaptureSupported, startCapture } from "./callCapture";
 import { CallPlayer } from "./callPlayer";
 import { runtimeTransport } from "./runtimeTransport";
+import { TransportError } from "./transport";
 
 const TTS_PREF_KEY = "vogt.assistant.tts";
 
@@ -101,6 +103,26 @@ function voiceMs(key: string, fallback: number): number {
  *  inviting you to make it. Kept in step with `PENDING_ACTION_TTL` in the
  *  engine's `assistant.rs`. */
 const PENDING_ACTION_TTL_MS = 120_000;
+
+/** How long an approval tap that failed on a live connection waits before it
+ *  is sent again. A tap that failed while the stream was down waits for the
+ *  stream instead. */
+export const TAP_RETRY_MS = 3_000;
+
+/** An approval tap the card is holding: sending, or queued because the
+ *  connection dropped under it. The card stays up until the tap succeeds. */
+interface HeldTap {
+  action: AssistantPendingAction;
+  approve: boolean;
+  state: "sending" | "queued";
+}
+
+/** A failure a retry can fix: the connection dropped, or the front door is
+ *  reconnecting. Anything else is a refusal the card should be restored for. */
+export function isTransientTapFailure(error: unknown): boolean {
+  if (error instanceof TransportError) return true;
+  return error instanceof ApiError && [502, 503, 504].includes(error.status);
+}
 
 /** A transcript row plus the two things the server never sends: whether an
  *  optimistic user turn failed to reach the engine, so it can offer a Retry
@@ -340,6 +362,13 @@ export default function Assistant(props: AssistantProps) {
   const [pendingSecondsLeft, setPendingSecondsLeft] = createSignal<number | null>(null);
   const [reasonDraft, setReasonDraft] = createSignal("");
   const [reasonBusy, setReasonBusy] = createSignal(false);
+  // The approval tap the card is holding. Null when no tap is outstanding.
+  const [heldTap, setHeldTap] = createSignal<HeldTap | null>(null);
+  let tapRetry: ReturnType<typeof setTimeout> | null = null;
+  const clearTapRetry = () => {
+    if (tapRetry !== null) clearTimeout(tapRetry);
+    tapRetry = null;
+  };
   const [draft, setDraft] = createSignal(restored.text);
   const [ttsOn, setTtsOn] = createSignal(localStorage.getItem(TTS_PREF_KEY) === "1");
   // Hands-free conversation mode (WI-174). Session-only — it opens the mic, so
@@ -758,6 +787,7 @@ export default function Assistant(props: AssistantProps) {
     clearTakeGuards();
     transcriptionController?.abort();
     inFlight()?.abort();
+    clearTapRetry();
     // Leaving the surface ends the conversation, so release the held service
     // and drop the native listeners (all no-ops on the desktop PWA).
     call?.hangUp();
@@ -880,9 +910,53 @@ export default function Assistant(props: AssistantProps) {
     void send(entry.text, entry.utterance);
   };
 
+  /** Send an approval tap. The card stays up, marked sending, until the
+   *  request succeeds. A failure the connection can fix keeps the tap queued;
+   *  any other failure restores the card so the approval can be made again. */
+  const sendTap = async (tap: HeldTap) => {
+    clearTapRetry();
+    setHeldTap({ ...tap, state: "sending" });
+    try {
+      const reply = await api.assistantAction(tap.action.id, tap.approve);
+      setHeldTap(null);
+      applyReply(reply);
+      invalidateAssistantSnapshot();
+    } catch (e) {
+      if (isTransientTapFailure(e)) {
+        setHeldTap({ ...tap, state: "queued" });
+        // The stream is up, so the request is what failed: try again shortly.
+        // A stream that is down sends the tap when it reconnects instead.
+        if (isConnected()) tapRetry = setTimeout(flushTap, TAP_RETRY_MS);
+        return;
+      }
+      setHeldTap(null);
+      setPendingAction(tap.action);
+      invalidateAssistantSnapshot();
+      props.onError(`assistant action: ${String(e)}`);
+    }
+  };
+
+  /** Send a queued tap again, if one is waiting. */
+  const flushTap = () => {
+    clearTapRetry();
+    const held = heldTap();
+    if (held?.state === "queued") void sendTap(held);
+  };
+
+  // A queued tap goes out as soon as the event stream is back.
+  createEffect(
+    on(
+      isConnected,
+      (connected) => {
+        if (connected) flushTap();
+      },
+      { defer: true },
+    ),
+  );
+
   const resolve = async (approve: boolean) => {
     const action = pendingAction();
-    if (!action || busy()) return;
+    if (!action || busy() || heldTap()) return;
     // On a call, the button goes up the call socket so the outcome is spoken.
     // (It is still a button: nothing said on the call resolves a card.)
     if (call?.resolve(action.id, approve)) {
@@ -890,19 +964,7 @@ export default function Assistant(props: AssistantProps) {
       invalidateAssistantSnapshot();
       return;
     }
-    setBusy(true);
-    setPendingAction(null);
-    // The action was consumed locally before the network round-trip. Any
-    // other assistant instance must not resurrect the old card on a failed
-    // approval attempt.
-    invalidateAssistantSnapshot();
-    try {
-      applyReply(await api.assistantAction(action.id, approve));
-    } catch (e) {
-      props.onError(`assistant action: ${String(e)}`);
-    } finally {
-      setBusy(false);
-    }
+    await sendTap({ action, approve, state: "sending" });
   };
 
   const replaceReason = async (action: AssistantVogtWriteAction) => {
@@ -1980,7 +2042,11 @@ export default function Assistant(props: AssistantProps) {
                 )}
               </Show>
               <div class="assistant-pending-actions">
-                <button type="button" disabled={busy() || disconnected()} onClick={() => void resolve(false)}>
+                <button
+                  type="button"
+                  disabled={busy() || disconnected() || heldTap() !== null}
+                  onClick={() => void resolve(false)}
+                >
                   Deny
                 </button>
                 <button
@@ -1990,6 +2056,7 @@ export default function Assistant(props: AssistantProps) {
                     busy() ||
                     reasonBusy() ||
                     disconnected() ||
+                    heldTap() !== null ||
                     !pendingReasonReady()
                   }
                   onClick={() => void resolve(true)}
@@ -2014,6 +2081,15 @@ export default function Assistant(props: AssistantProps) {
                   </span>
                 </Show>
               </div>
+              <Show when={heldTap()}>
+                {(held) => (
+                  <p class="assistant-pending-status" role="status">
+                    {held().state === "queued"
+                      ? "The connection dropped. Your answer is queued and sends when it is back."
+                      : "Sending your answer…"}
+                  </p>
+                )}
+              </Show>
               <p class="assistant-pending-audit">
                 {disconnected()
                   ? "Approval needs the live stream — reconnect to answer."

@@ -286,6 +286,12 @@ pub fn github_provider(
     }
 }
 
+/// The github.com provider over a client a test built itself.
+#[cfg(test)]
+pub(crate) fn github_provider_over(client: GitHubClient) -> GitHubProvider<GitHubClient> {
+    GitHubProvider::new(client)
+}
+
 fn kind_for_host(host: &str, config: Option<&VogtConfig>) -> Option<ForgeKind> {
     if host == GITHUB_HOST {
         Some(ForgeKind::GitHub)
@@ -303,7 +309,9 @@ fn build(
     transport: Option<Transport>,
 ) -> Result<Option<ForgeClient>, VogtError> {
     match kind {
-        ForgeKind::GitHub => Ok(GitHubClient::from_token_file(
+        // A configured GitHub App wins over the token file (WI-1838).
+        ForgeKind::GitHub => Ok(crate::adapters::github_app::github_client_for(
+            config,
             token_file_for(config, host),
             transport,
         )?
@@ -407,10 +415,10 @@ impl ForgeProvider for ForgeClient {
         }
     }
 
-    fn clone_token(&self) -> Option<String> {
+    fn clone_token(&self, repo: Option<&RepoRef>) -> Result<Option<String>, VogtError> {
         match self {
-            Self::GitHub(provider) => provider.clone_token(),
-            Self::Forgejo(provider) => provider.clone_token(),
+            Self::GitHub(provider) => provider.clone_token(repo),
+            Self::Forgejo(provider) => provider.clone_token(repo),
         }
     }
 
@@ -856,7 +864,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(github.identity().unwrap().unwrap().0, "ada");
-        assert_eq!(github.clone_token().as_deref(), Some("ghp_pasted"));
+        assert_eq!(
+            github.clone_token(None).unwrap().as_deref(),
+            Some("ghp_pasted")
+        );
 
         let forgejo = provider_for_token(
             "forge.example",
@@ -872,7 +883,7 @@ mod tests {
         // An empty paste is not a credential: the client drops it, so identity
         // fails rather than authenticating as nobody.
         let empty = provider_for_token("github.com", "", None, Some(scripted("Bearer "))).unwrap();
-        assert!(empty.clone_token().is_none());
+        assert!(empty.clone_token(None).unwrap().is_none());
         assert!(empty.identity().unwrap().is_none());
     }
 
@@ -882,7 +893,7 @@ mod tests {
         let (provider, repo) =
             identity_for(Some("https://github.com/acme/widget"), &config, None).unwrap();
         assert_eq!(repo.slug(), "acme/widget");
-        assert!(provider.clone_token().is_none());
+        assert!(provider.clone_token(Some(&repo)).unwrap().is_none());
         assert!(provider
             .parse(Some("https://github.com/acme/widget"))
             .is_some());
@@ -890,7 +901,7 @@ mod tests {
         let (provider, repo) =
             identity_for(Some("https://forge.example/acme/widget.git"), &config, None).unwrap();
         assert_eq!(repo.host, "forge.example");
-        assert!(provider.clone_token().is_none());
+        assert!(provider.clone_token(Some(&repo)).unwrap().is_none());
 
         assert!(identity_for(Some("https://gitlab.com/acme/widget"), &config, None).is_none());
     }

@@ -32,6 +32,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | File | Disposition | Where / why |
 |---|---|---|
 | test_agent_activity.py | ported | `collectors/agent_activity.rs` |
+| test_agent_auth_degraded.py | retired | `engine/deploy/agent-auth.sh` degraded launch with the secrets manager unreachable (WI-1812). Shell, not the core crate. |
 | test_agent_auth_launch.py | retired | `engine/deploy/agent-auth.sh` launch timing. Shell, not the core crate. |
 | test_agent_cli_boot_contract.py | retired | `engine/deploy/agent-cli-install.sh` and `verify-agent-clis.sh`. Engine image boot, not the core. |
 | test_agent_clis.py | ported | Agent-CLI report service. The engine owns the mechanism; the core passes the report through. |
@@ -45,6 +46,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_bootstrap_core_token.py | ported | Core-token adoption in `application/services/install.rs`. |
 | test_branch_binding.py | ported | `branches.rs` and the work-item branch binding service. |
 | test_bridge.py | ported | `adapters/mcp/bridge.rs`. |
+| test_budget_handoff.py | ported | `engine/core/src/application/services/budget_handoff_test.rs` (all 5 cases, WI-1081 port of WI-1833). The scheduler hook is not ported: the Rust core has no in-process sweep schedule yet. |
 | test_bundle_budget.py | retired | PWA first-screen bundle budget. `web/`, not the core. |
 | test_cargo_cache.py | retired | `engine/deploy/cargo-cache.sh` (WI-1256, done): Cargo cache survival on redeploy. Shell in the engine image, not the core crate; the Python test keeps driving the script. |
 | test_chats.py | ported | Chat operations in the application services, with the engine transport stood in. |
@@ -53,6 +55,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_check_workflow_policy.py | retired | `scripts/check_workflow_policy.py` over GitHub workflow YAML. CI policy, not product behaviour. |
 | test_checks.py | ported | CI-revision reads in the collectors and the project brief. |
 | test_ci_watch.py | ported | Watched-ref and deployed-version reads are in `application/deployed.rs`. The bound-branch announce is in `application/ci_watch.rs`: the feed event once per conclusion, staleness, the notice text, and the session nudge (notice, then Enter; none at a permission prompt). `test_a_sweep_announces_and_survives_an_announce_failure` is `a_failed_announce_does_not_fail_the_sweep` in `application/collect.rs`, driven by the `ci_watch::seam` failure switch. |
+| test_claim_check.py | ported | The comparison is in `core/claims.rs`; the git and forge reads, the note and its once key, a session's review move, a person's move, and the rebase commit count are in `application/claims_test.rs`. The sweep's `done` row case is the once-key note case there: the Rust sweep does not classify `done` rows until WI-1518's port. |
 | test_claude_profile.py | retired | `engine/deploy/claude-profile.sh` and `mcp-bootstrap.sh` (WI-1306, done). Shell in the engine image, not the core crate; the Python test keeps driving the scripts. Named accounts on `session.start` are a sessions concern and are tested with that service. |
 | test_cli.py | ported | `adapters/cli.rs`. |
 | test_clone.py | ported | Clone service under `application/services`. |
@@ -67,7 +70,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_delivery.py | ported | `delivery.rs`. |
 | test_demo_delivery.py | retired | Browser-only public demo delivery. Not the core. |
 | test_diagnostics.py | ported | Instance diagnostics service. |
-| test_dispatch.py | ported | `engine/core/src/application/dispatch_test.rs` (all 6 cases; the 8 parametrized malformed-value cases run as one table-driven test). |
+| test_dispatch.py | ported | `engine/core/src/application/dispatch_test.rs` (all 9 cases; the 8 parametrized malformed-value cases run as one table-driven test). |
 | test_drift.py | ported | `application/drift.rs`. |
 | test_engine_image_core.py | retired | Static checks on `engine/Dockerfile` and `engine/deploy/entrypoint.sh` (WI-1078). Engine image, not the core crate. |
 | test_engine_parity.py | retired | Rust engine wire parity. Owned by `engine/server` tests, not `engine/core`. |
@@ -84,6 +87,8 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_front_door.py | retired | Engine front door (the `/api/vogt` proxy, PTYs, files). `engine/server`, not the core. |
 | test_git_story.py | ported | `git_story.rs` and `application/git_story.rs`. |
 | test_github.py | ported | `adapters/github.rs`. |
+| test_github_app_auth.py | ported | `adapters/github_app_test.rs`; the two `github_collectors` notification tests are retired, that legacy collector set has no Rust counterpart. |
+| test_github_rate_budget.py | ported | `adapters/forge/rate_budget_test.rs`. |
 | test_grants.py | ported | `application/grants.rs`. |
 | test_handoff.py | ported | Ported in `engine/core/src/application/services/handoff_test.rs` (16 tests, WI-1080): hand-off round-trip, comment order, the worker brief leading with the latest hand-off, every review-brief case, `review_of` start and refusal, and the three `from_handoff` cases (opens on the item's latest hand-off, refuses a different `work_item`, refuses an item with no hand-off). The upstream refusal is `a_handoff_comment_on_an_upstream_item_is_refused` in `upstream_truth_test.rs`. The validation case is split: fields on a note are refused by the service (`fields_on_a_note_are_refused`), and a hand-off kind without fields is refused by WI-1060's registry validator (`a_handoff_comment_without_fields_is_refused` in `engine/core/src/registry/validate.rs`). |
 | test_http.py | ported | `adapters/http/app.rs` (status, etag, validation, openapi). |
@@ -117,6 +122,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_parity_normalise.py | retired | Normalisation helpers for the in-process parity script. `scripts/parity.py` owns normalisation now. |
 | test_place_metrics_cache.py | ported | `application/memo_test.rs` (WI-1054): the counts are shared across per-request contexts; a declared write, a rebuilt observed projection (`ObservedStore::latest_generation`) and an observed-side event each invalidate them; two data directories never share an answer; the key moves with each kind of change; a burst of callers costs one computation; a waiter takes only a computation that read the stores after it arrived; an answer `keep` refuses is asked for again (Python's provider-missing case, at the memo, since there is no monkeypatch to break `backlog`); the least recent stores are forgotten; the live Inbox half is read on every badge while the stored half is shared. Restore clears both memos. Not ported: the pooled read connections (`borrow_read`). Each Rust read opens its own rusqlite connection and is not serialised by a GIL. The engine's split read cap is engine-side and already on main. |
 | test_play_preflight.py | retired | `scripts/play_preflight.py` for the browser suite. `web/`, not the core. |
+| test_policy_conflicts.py | ported | `engine/core/src/application/policy_conflicts.rs` (WI-1081): every axis detected, agreement and negation not conflicts, push only on a PR project, a worker deployer and no landing rule, the empty section, a known long-lived base named not contradicted, and a merging caller not told not to merge. The session-start cases of WI-1832/WI-1841 in `test_sessions.py` are in `application/services/landing_policy_test.rs`. |
 | test_policy_hook.py | retired | `engine/deploy/policy-hook.sh` and `install-policy`, the PreToolUse hook driven through the real script. Shell, not the core crate; the policy decision it asks the engine for is tested with the engine policy route. |
 | test_pr_work_item_edge.py | ported | `implemented_by` from pull requests, in forge sync and the work services. |
 | test_product_identity.py | retired | User-facing rename and legacy compatibility names across Python packaging. The Rust binary stays `vogt-core` for the overlap. |
@@ -155,5 +161,5 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_voice_capabilities.py | retired | Voice sidecar policy. `voice/` is a separate workspace. |
 | test_work_get_many.py | ported | `work.get_many` batched chip read (WI-1224). Owner WI-1068. |
 | test_workflow.py | ported | Workflow machines in `decisions.rs`. |
-| test_workspace_disk.py | ported | `engine/core/src/application/workspace_disk_test.rs`: every case. status/sweep carry the disk row; the row is absent with no engine, engine unavailable, or a non-object answer; `engine.status` (ported in `application/services/engine_status.rs`, WI-1080) carries the row and says none without one. A row pydantic's `EngineDiskStatus` refuses (`{"used_percent":"x"}`, a wrong type, an unknown field) is no row on every surface, with pydantic's lax coercions reproduced (`"90"` and `90.0` are 90). Extra Rust cases pin the full `engine.status` result shape and the honest-unavailable `engine` message. Parity step `engine.status` (no engine) in golden 21c95f6. |
+| test_workspace_disk.py | ported | `engine/core/src/application/workspace_disk_test.rs`: every case. status/sweep carry the disk row; the row is absent with no engine, engine unavailable, or a non-object answer; `engine.status` (ported in `application/services/engine_status.rs`, WI-1080) carries the row and says none without one. A row pydantic's `EngineDiskStatus` refuses (`{"used_percent":"x"}`, a wrong type, an unknown field) is no row on every surface, with pydantic's lax coercions reproduced (`"90"` and `90.0` are 90). Extra Rust cases pin the full `engine.status` result shape and the honest-unavailable `engine` message. Parity step `engine.status` (no engine) in golden 09d3c55. |
 | test_writes.py | ported | `application/writes_test.rs`. |

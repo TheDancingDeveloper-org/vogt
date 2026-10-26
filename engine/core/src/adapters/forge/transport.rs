@@ -44,6 +44,21 @@ pub trait ForgeTransport {
 
     fn token(&self) -> Option<&str>;
 
+    /// The token a request to `path` (or a clone) would use now. A fixed
+    /// token by default; a GitHub App mints one per installation (WI-1838).
+    fn bearer(&self, path: Option<&str>) -> Result<Option<String>, VogtError> {
+        let _ = path;
+        Ok(self.token().map(str::to_owned))
+    }
+
+    /// The account a repository create lands under when the credential has
+    /// no user of its own (a GitHub App installation); `None` for a token.
+    fn default_owner(
+        &self,
+    ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, VogtError> {
+        Ok(None)
+    }
+
     fn get(&self, path: &str, query: &[(&str, String)]) -> Result<ForgeResponse, VogtError>;
 
     /// `GET /user` plus the `X-OAuth-Scopes` header, which is how a token is

@@ -43,10 +43,11 @@ const KINDS: &[&str] = &[
     "hibernated",
     "woken",
     "budget",
+    "done",
 ];
 
 /// What an overseer waits for when it does not say.
-const DEFAULT_UNTIL: &[&str] = &["ready", "blocked", "approval", "exited", "errored"];
+const DEFAULT_UNTIL: &[&str] = &["ready", "blocked", "approval", "exited", "errored", "done"];
 
 fn clip(text: &str) -> String {
     let mut out: String = text.chars().take(120).collect();
@@ -76,6 +77,9 @@ pub fn change_of(sequenced: &Sequenced) -> Option<SessionChange> {
         // not itself a change (a quiet mid-turn is not ready), so readiness is
         // its own event (WI-1519).
         ServerEvent::SessionReady { id } => (*id, "ready", "ready".to_string()),
+        // An autopilot agent declared itself done (WI-1518): the change an
+        // overseer waits for when a worker finishes its backlog.
+        ServerEvent::SessionDone { id, .. } => (*id, "done", "done".to_string()),
         ServerEvent::SessionBlocked { id, blocked } => match blocked {
             Some(report) => (*id, "blocked", format!("blocked: {}", report.reason)),
             None => (*id, "unblocked", "unblocked".to_string()),
@@ -301,7 +305,7 @@ pub fn replay_then_live(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vogt_engine_contract::BlockedReport;
+    use vogt_engine_contract::{BlockedReport, DoneSource};
 
     fn activity(state: ActivityState) -> ServerEvent {
         ServerEvent::Activity {
@@ -369,6 +373,23 @@ mod tests {
         assert_eq!(got.changes[0].summary.chars().count(), 120);
         assert!(got.changes[0].summary.ends_with('…'));
         assert_eq!(got.changes[3].summary, "killed (exit 9)");
+    }
+
+    #[test]
+    fn a_declared_done_is_a_done_change_and_an_overseer_waits_for_it_by_default() {
+        let bus = EventBus::new(16);
+        let id = Uuid::from_u128(9);
+        bus.publish(ServerEvent::SessionDone {
+            id,
+            at: "2026-10-17T00:00:00Z".into(),
+            source: DoneSource::Marker,
+        });
+        let got = changes(&bus, 0, None, None).unwrap();
+        assert_eq!(got.changes.len(), 1);
+        assert_eq!(got.changes[0].kind, "done");
+        assert_eq!(got.changes[0].session, id);
+        assert!(parse_until(None).unwrap().contains("done"));
+        assert!(parse_until(Some("done")).unwrap().contains("done"));
     }
 
     #[test]

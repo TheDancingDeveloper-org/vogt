@@ -17,6 +17,7 @@ pays for it.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from vogt.adapters.forge._payloads import comparison, decoded_content, quote_path
@@ -39,10 +40,16 @@ from vogt.adapters.github.client import (
     DEFAULT_PER_PAGE,
     NO_CONTENT,
     GitHubClient,
+    GitHubRateLimited,
     GitHubUnavailable,
     repo_of,
 )
 from vogt.errors import RemoteRepoExists
+
+#: Who merged each merged PR, keyed by API root, repository and number
+#: (WI-1835). Bounded, oldest entry first out.
+_MERGED_BY: dict[tuple[str, str, int], str | None] = {}
+_MERGED_BY_CAP = 4096
 
 if TYPE_CHECKING:
     from vogt.adapters.forge.writeback import WriteBackResult
@@ -161,9 +168,14 @@ class GitHubProvider:
             return None
         return payload if isinstance(payload, dict) else {}
 
-    def clone_token(self) -> str | None:
-        """The token a clone should authenticate with, if any."""
-        return self._client.token
+    def clone_token(self, ref: RepoRef | None = None) -> str | None:
+        """The token a clone of `ref` should authenticate with, if any.
+
+        `ref` routes a GitHub App to the installation on that repository's
+        owner; a personal token ignores it.
+        """
+        path = None if ref is None else f"/repos/{ref.owner}/{ref.repo}"
+        return self._client.bearer(path)
 
     def identity(self) -> tuple[str, str] | None:
         identity = self._client.identity()
@@ -173,7 +185,7 @@ class GitHubProvider:
 
     def issues_updated_since(
         self, ref: RepoRef, since: str | None
-    ) -> Iterable[ForgeIssue]:
+    ) -> Iterable[ForgeIssue | ForgePull]:
         # Ascending by update time so a watermark walks history *forward*: the
         # max `updated_at` in a page is where the next sweep resumes, and a
         # first sync backfills oldest-first a page at a time (D3).
@@ -188,8 +200,11 @@ class GitHubProvider:
         payloads = self._client.get(f"/repos/{ref.owner}/{ref.repo}/issues", **params)
         for item in _as_list(payloads):
             if "pull_request" in item:
-                # The issues endpoint returns PRs too; they have their own
-                # reader and their own kind.
+                # The issues endpoint returns PRs too. They are not issues, but
+                # they are part of the page: a page of nothing but PRs must
+                # still move the watermark, or the same window is asked for
+                # forever (WI-1752). The issues collector steps over them.
+                yield _to_pull(ref, item)
                 continue
             yield _to_issue(ref, item)
 
@@ -211,7 +226,32 @@ class GitHubProvider:
         pulls = [_to_pull(ref, item) for item in _as_list(payloads)]
         if since:
             pulls = [p for p in pulls if p.updated_at is None or p.updated_at >= since]
-        yield from reversed(pulls)
+        yield from (self._with_merger(ref, pull) for pull in reversed(pulls))
+
+    def _with_merger(self, ref: RepoRef, pull: ForgePull) -> ForgePull:
+        """Fill `merged_by` on a merged PR from the single-PR read (WI-1835).
+
+        The list page omits `merged_by`; `GET /pulls/{n}` carries it. Who merged
+        a PR never changes once it has merged, so the answer is cached per PR
+        for the life of the process and each merged PR costs one read, once.
+        A read that fails leaves `merged_by` empty rather than failing the sync.
+        """
+        if not pull.merged or pull.merged_by is not None:
+            return pull
+        key = (self._client.api_root, ref.slug, pull.number)
+        if key not in _MERGED_BY:
+            try:
+                payload = self._client.get(
+                    f"/repos/{ref.owner}/{ref.repo}/pulls/{pull.number}"
+                )
+            except GitHubUnavailable:
+                return pull
+            merger = payload.get("merged_by") if isinstance(payload, dict) else None
+            login = merger.get("login") if isinstance(merger, dict) else None
+            if len(_MERGED_BY) >= _MERGED_BY_CAP:
+                _MERGED_BY.pop(next(iter(_MERGED_BY)))
+            _MERGED_BY[key] = login if isinstance(login, str) else None
+        return replace(pull, merged_by=_MERGED_BY[key])
 
     def releases(self, ref: RepoRef) -> Iterable[ForgeRelease]:
         payloads = self._client.get(
@@ -380,14 +420,30 @@ class GitHubProvider:
     )
 
     def _version_update_config(self, ref: RepoRef) -> str | None:
+        """Which update-automation config exists, read from the git tree.
+
+        One `git/trees/HEAD` read lists the root, and only when the root
+        holds `.github` is that one subtree read too — at most two calls,
+        both ETag-cached, where this used to be eight `/contents/` probes
+        per repository per sweep (WI-1838)."""
+        base = f"/repos/{ref.owner}/{ref.repo}/git/trees"
+        try:
+            root = _tree_entries(self._client.get(f"{base}/HEAD"))
+            github_dir = root.get(".github")
+            nested = (
+                _tree_entries(self._client.get(f"{base}/{github_dir}"))
+                if github_dir
+                else {}
+            )
+        except GitHubRateLimited:
+            # A paused read is "not read", not "no config": raise so the
+            # posture collector records nothing and retries next sweep.
+            raise
+        except GitHubUnavailable:
+            return None
+        present = set(root) | {f".github/{name}" for name in nested}
         for path in self._VERSION_UPDATE_CONFIGS:
-            try:
-                found = self._client.get(
-                    f"/repos/{ref.owner}/{ref.repo}/contents/{path}"
-                )
-            except GitHubUnavailable:
-                return None
-            if found is not None:
+            if path in present:
                 return path
         return None
 
@@ -396,6 +452,8 @@ class GitHubProvider:
         None ("could not tell", never flattened to off)."""
         try:
             found = self._client.get(f"/repos/{ref.owner}/{ref.repo}/{endpoint}")
+        except GitHubRateLimited:
+            raise
         except GitHubUnavailable:
             return None
         return found is not None
@@ -526,6 +584,7 @@ def _to_issue(ref: RepoRef, item: dict[str, Any]) -> ForgeIssue:
         body=item.get("body"),
         updated_at=item.get("updated_at"),
         closed_at=item.get("closed_at"),
+        state_reason=item.get("state_reason"),
         source_url=item.get("html_url"),
     )
 
@@ -606,6 +665,8 @@ def _to_pull(ref: RepoRef, item: dict[str, Any]) -> ForgePull:
         updated_at=item.get("updated_at"),
         closed_at=item.get("closed_at"),
         source_url=item.get("html_url"),
+        merged_at=item.get("merged_at"),
+        merged_by=(item.get("merged_by") or {}).get("login"),
     )
 
 
@@ -652,3 +713,14 @@ def _runs(ref: RepoRef, payloads: object) -> Iterable[ForgeCheck]:
 
 
 __all__ = ["GITHUB_CAPABILITIES", "HOST", "GitHubProvider"]
+
+
+def _tree_entries(payload: object) -> dict[str, str]:
+    """`path → sha` for one level of a git tree payload; empty when absent."""
+    if not isinstance(payload, dict):
+        return {}
+    entries: dict[str, str] = {}
+    for item in payload.get("tree") or []:
+        if isinstance(item, dict) and item.get("path"):
+            entries[str(item["path"])] = str(item.get("sha") or "")
+    return entries

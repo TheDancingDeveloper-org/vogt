@@ -436,6 +436,7 @@ mod tests {
             peer: None,
             public_identity: crate::application::context::PublicIdentity::default(),
             forge_transport: None,
+            claimed_engine_session: None,
             config,
         };
         ctx.declared.migrate().unwrap();

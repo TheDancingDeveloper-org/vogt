@@ -23,6 +23,8 @@ mod lanes;
 mod models;
 mod payloads;
 mod provider;
+#[cfg(test)]
+mod rate_budget_test;
 pub mod registry;
 mod sync;
 mod transport;

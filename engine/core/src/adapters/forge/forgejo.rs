@@ -126,8 +126,9 @@ impl<T: ForgeTransport> ForgeProvider for ForgejoProvider<T> {
         )
     }
 
-    fn clone_token(&self) -> Option<String> {
-        self.transport.token().map(str::to_owned)
+    fn clone_token(&self, repo: Option<&RepoRef>) -> Result<Option<String>, VogtError> {
+        let _ = repo; // one token per Forgejo host
+        Ok(self.transport.token().map(str::to_owned))
     }
 
     fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
@@ -741,6 +742,8 @@ fn to_pull(repo: &RepoRef, item: &serde_json::Map<String, serde_json::Value>) ->
         updated_at: text(item.get("updated_at")).map(str::to_owned),
         closed_at: text(item.get("closed_at")).map(str::to_owned),
         source_url: text(item.get("html_url")).map(str::to_owned),
+        merged_at: text(item.get("merged_at")).map(str::to_owned),
+        merged_by: login(item.get("merged_by")).map(str::to_owned),
     }
 }
 
@@ -1156,7 +1159,7 @@ mod tests {
             "https://forge.example/acme/Widgets"
         );
         assert_eq!(
-            provider.clone_token().as_deref(),
+            provider.clone_token(None).unwrap().as_deref(),
             Some("x"),
             "the clone authenticates as the token"
         );
@@ -1244,6 +1247,24 @@ mod tests {
         assert!(pulls[0].draft);
         assert_eq!(pulls[0].head.as_deref(), Some("abc"));
         assert_eq!(pulls[0].base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_merged_pull_says_when_and_by_whom() {
+        // WI-1835: the claim check reports who merged a PR and when.
+        let provider = recorded(vec![(
+            "/pulls",
+            serde_json::json!([
+                {"number": 193, "title": "done", "state": "closed", "merged": true,
+                 "merged_at": "2026-10-17T09:00:00Z", "merged_by": {"login": "sprooty"},
+                 "updated_at": "2026-10-17T09:00:00Z"}
+            ]),
+        )]);
+        let pulls = provider.pulls_updated_since(&widgets(), None).unwrap();
+        assert_eq!(pulls.len(), 1);
+        assert!(pulls[0].merged);
+        assert_eq!(pulls[0].merged_at.as_deref(), Some("2026-10-17T09:00:00Z"));
+        assert_eq!(pulls[0].merged_by.as_deref(), Some("sprooty"));
     }
 
     #[test]

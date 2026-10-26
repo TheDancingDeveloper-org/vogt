@@ -245,6 +245,9 @@ pub struct VogtConfig {
     pub branch_binding_template: String,
     pub retention_days: i64,
     pub github_token_file: Option<PathBuf>,
+    pub github_app_id: Option<String>,
+    pub github_app_installation_id: Option<i64>,
+    pub github_app_private_key_file: Option<PathBuf>,
     pub forge_account_key_file: Option<PathBuf>,
     pub forge_token_files: BTreeMap<String, PathBuf>,
     pub agent_activity_roots: BTreeMap<String, PathBuf>,
@@ -265,6 +268,8 @@ pub struct VogtConfig {
     pub install_bootstrap_enabled: bool,
     pub sqlite_synchronous: SqliteSynchronous,
     pub sweep_interval_seconds: i64,
+    pub forge_posture_interval_seconds: i64,
+    pub github_rate_limit_floor: i64,
     pub verify_horizon_hours: i64,
     pub image_digest: Option<String>,
     pub diagnostics_peer_url: Option<String>,
@@ -364,6 +369,9 @@ impl Default for VogtConfig {
             branch_binding_template: DEFAULT_BRANCH_TEMPLATE.to_string(),
             retention_days: 180,
             github_token_file: None,
+            github_app_id: None,
+            github_app_installation_id: None,
+            github_app_private_key_file: None,
             forge_account_key_file: None,
             forge_token_files: BTreeMap::new(),
             agent_activity_roots: BTreeMap::new(),
@@ -384,6 +392,8 @@ impl Default for VogtConfig {
             install_bootstrap_enabled: true,
             sqlite_synchronous: SqliteSynchronous::Normal,
             sweep_interval_seconds: 900,
+            forge_posture_interval_seconds: 86400,
+            github_rate_limit_floor: 500,
             verify_horizon_hours: 24,
             image_digest: None,
             diagnostics_peer_url: None,
@@ -537,7 +547,7 @@ fn env_value(name: &str) -> Option<String> {
 fn parse_env_value(field: &FieldDoc, raw: &str) -> Result<Value, String> {
     match field.kind {
         Kind::Bool => Ok(Value::Bool(parse_bool(raw)?)),
-        Kind::Int { .. } => Ok(Value::Number(
+        Kind::Int { .. } | Kind::OptInt { .. } => Ok(Value::Number(
             int_from_str(raw)
                 .ok_or_else(|| format!("expected an integer, got {raw:?}"))?
                 .into(),
@@ -661,6 +671,7 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
             match name {
                 "import_root" => config.import_root = path,
                 "github_token_file" => config.github_token_file = path,
+                "github_app_private_key_file" => config.github_app_private_key_file = path,
                 "forge_account_key_file" => config.forge_account_key_file = path,
                 "engine_state_dir" => config.engine_state_dir = path,
                 "engine_token_file" => config.engine_token_file = path,
@@ -676,8 +687,19 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
                 "public_url" => config.public_url = text,
                 "engine_url" => config.engine_url = text,
                 "session_scratch_project" => config.session_scratch_project = text,
+                "github_app_id" => config.github_app_id = text,
                 "image_digest" => config.image_digest = text,
                 "diagnostics_peer_url" => config.diagnostics_peer_url = text,
+                _ => unreachable!(),
+            }
+        }
+        Kind::OptInt { min } => {
+            let number = match value {
+                Value::Null => None,
+                other => Some(expect_int(name, other, min, None)?),
+            };
+            match name {
+                "github_app_installation_id" => config.github_app_installation_id = number,
                 _ => unreachable!(),
             }
         }
@@ -710,6 +732,8 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
                 }
                 "session_ttl_days" => config.session_ttl_days = number,
                 "sweep_interval_seconds" => config.sweep_interval_seconds = number,
+                "forge_posture_interval_seconds" => config.forge_posture_interval_seconds = number,
+                "github_rate_limit_floor" => config.github_rate_limit_floor = number,
                 "verify_horizon_hours" => config.verify_horizon_hours = number,
                 _ => unreachable!(),
             }
@@ -895,6 +919,7 @@ enum Kind {
     LogFormat,
     Sqlite,
     Int { min: i64, max: Option<i64> },
+    OptInt { min: i64 },
     String,
     StringList,
     DeployLanes,
@@ -1163,6 +1188,36 @@ const FIELD_CATALOGUE: &[FieldDoc] = &[
         example: "null",
     },
     FieldDoc {
+        name: "github_app_id",
+        env_var: "VOGT_GITHUB_APP_ID",
+        type_label: "string, optional",
+        default_label: "*(no default — must be set)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "The ID or the client ID of a GitHub App for the forge adapter to authenticate as; GitHub accepts either as the JWT issuer. With `github_app_private_key_file` also set, GitHub reads and writes use short-lived installation tokens, which have their own rate limit, instead of `github_token_file`. The notifications collector stays on `github_token_file`, because notifications belong to a user and an App cannot read them. Not a secret, so plain config is fine. Setup, including the permissions the App needs, is in docs/GITHUB_APP.md.",
+        kind: Kind::OptString,
+        example: "null",
+    },
+    FieldDoc {
+        name: "github_app_installation_id",
+        env_var: "VOGT_GITHUB_APP_INSTALLATION_ID",
+        type_label: "integer, optional",
+        default_label: "*(no default — must be set)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "Pin every GitHub request to one installation of `github_app_id`. Unset, the installation is discovered per repository owner (`GET /repos/{owner}/{repo}/installation`, then `/orgs/{owner}/installation` or `/users/{owner}/installation`) and remembered, so one App installed on several accounts or organisations covers them all; an owner without the App is read with `github_token_file`. Publishing a new repository needs an owner to create it under: this installation's account or, unset, the App's only installation. An App with several installations must set this to publish.",
+        kind: Kind::OptInt { min: 1 },
+        example: "null",
+    },
+    FieldDoc {
+        name: "github_app_private_key_file",
+        env_var: "VOGT_GITHUB_APP_PRIVATE_KEY_FILE",
+        type_label: "path, optional",
+        default_label: "*(no default — must be set)*",
+        policy: DefaultPolicy::Behaviour,
+        description: "Path to the GitHub App's PEM private key, which signs the short-lived JWT exchanged for installation tokens. A file for the same reason as `github_token_file`: the key never appears in the environment or a process listing. When this and `github_app_id` are set, the App takes precedence over `github_token_file` for every GitHub read and write except notifications. Unset, or unreadable, the personal token is used as before.",
+        kind: Kind::OptPath,
+        example: "null",
+    },
+    FieldDoc {
         name: "forge_account_key_file",
         env_var: "VOGT_FORGE_ACCOUNT_KEY_FILE",
         type_label: "path, optional",
@@ -1363,6 +1418,26 @@ const FIELD_CATALOGUE: &[FieldDoc] = &[
         example: "900",
     },
     FieldDoc {
+        name: "forge_posture_interval_seconds",
+        env_var: "VOGT_FORGE_POSTURE_INTERVAL_SECONDS",
+        type_label: "integer",
+        default_label: "`86400`",
+        policy: DefaultPolicy::Behaviour,
+        description: "How often the forge posture collector re-reads a repository's update-automation settings (version-update config, vulnerability alerts, automated security fixes). Posture changes rarely and cost several API calls per repository, so the default is daily; sweeps in between skip it. Zero reads it on every sweep.",
+        kind: Kind::Int { min: 0, max: None },
+        example: "86400",
+    },
+    FieldDoc {
+        name: "github_rate_limit_floor",
+        env_var: "VOGT_GITHUB_RATE_LIMIT_FLOOR",
+        type_label: "integer",
+        default_label: "`500`",
+        policy: DefaultPolicy::Behaviour,
+        description: "When GitHub reports fewer core API requests than this left in the hour, forge reads stop until the limit resets instead of spending the rest. The limit is per GitHub user and shared with every other tool on that account. Zero never pauses early.",
+        kind: Kind::Int { min: 0, max: None },
+        example: "500",
+    },
+    FieldDoc {
         name: "verify_horizon_hours",
         env_var: "VOGT_VERIFY_HORIZON_HOURS",
         type_label: "integer",
@@ -1429,6 +1504,9 @@ const FIELD_NAMES: &[&str] = &[
     "branch_binding_template",
     "retention_days",
     "github_token_file",
+    "github_app_id",
+    "github_app_installation_id",
+    "github_app_private_key_file",
     "forge_account_key_file",
     "forge_token_files",
     "agent_activity_roots",
@@ -1449,6 +1527,8 @@ const FIELD_NAMES: &[&str] = &[
     "install_bootstrap_enabled",
     "sqlite_synchronous",
     "sweep_interval_seconds",
+    "forge_posture_interval_seconds",
+    "github_rate_limit_floor",
     "verify_horizon_hours",
     "image_digest",
     "diagnostics_peer_url",

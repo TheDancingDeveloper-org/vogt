@@ -10,11 +10,16 @@ also means it never appears in a process listing or a shell history.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -28,6 +33,13 @@ DEFAULT_TIMEOUT_SECONDS = 20
 #: concern, and a collector that silently paginates forever turns one slow repository
 #: into a stalled estate sweep.
 DEFAULT_PER_PAGE = 100
+#: Below this many core requests left in the hour, reads stop until the
+#: window resets (WI-1838). The limit is per *user*, shared with every agent
+#: session and CI helper on the same account, so the sweep leaves headroom.
+DEFAULT_RATE_LIMIT_FLOOR = 500
+#: How many conditional-request entries are kept. One per URL the sweep reads;
+#: the estate is ~70 repositories at ~15 URLs each.
+ETAG_CACHE_SIZE = 4096
 
 
 class _NoContent:
@@ -87,7 +99,29 @@ class Transport(Protocol):
         headers: dict[str, str],
         body: bytes = b"",
         method: str = "GET",
-    ) -> tuple[int, bytes]: ...
+    ) -> tuple[int, bytes] | tuple[int, bytes, dict[str, str]]: ...
+
+    # A transport may return response headers as a third element; the real
+    # network path always does. ETags and rate-limit accounting need them,
+    # and a fake that returns two elements simply opts out of both.
+
+
+class TokenProvider(Protocol):
+    """Where a client gets its bearer token when it is not a fixed string.
+
+    A GitHub App installation token lives an hour (`app_auth.GitHubAppAuth`),
+    so the client asks for it per request. Each method takes the request path,
+    because one App may have a different installation per owner. `cache_key`
+    names the rate-limit and ETag bucket, stable across refreshes;
+    `invalidate` drops a token the server has just refused, so the next
+    `token()` mints a fresh one.
+    """
+
+    def cache_key(self, path: str | None = None) -> str: ...
+
+    def token(self, path: str | None = None) -> str | None: ...
+
+    def invalidate(self, path: str | None = None) -> None: ...
 
 
 class GitHubUnavailable(VogtError):
@@ -101,6 +135,119 @@ class GitHubUnavailable(VogtError):
     http_status = 502
 
 
+class GitHubRateLimited(GitHubUnavailable):
+    """The token's core budget is below the floor; reads wait for the reset.
+
+    Raised *before* a request is sent once the budget is known to be low, so
+    a sweep over seventy repositories costs nothing while it waits instead of
+    spending the last of a limit every agent session on the account shares.
+    """
+
+    code = "github_rate_limited"
+    http_status = 503
+
+    def __init__(self, message: str, *, reset_at: float | None = None) -> None:
+        super().__init__(message)
+        self.reset_at = reset_at
+
+
+def _token_key(token: str | None) -> str:
+    """A non-reversible key for per-token state; never the token itself."""
+    if not token:
+        return "anonymous"
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+class _ConditionalCache:
+    """ETag → body per (token, URL), so an unchanged resource costs nothing.
+
+    GitHub answers `If-None-Match` with 304 when nothing changed, and a 304
+    does not count against the rate limit. Process-wide because providers are
+    built per project per sweep; bounded LRU so it cannot grow without limit.
+    """
+
+    def __init__(self, size: int = ETAG_CACHE_SIZE) -> None:
+        self._size = size
+        self._entries: OrderedDict[tuple[str, str], tuple[str, bytes]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: tuple[str, str]) -> tuple[str, bytes] | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self._entries.move_to_end(key)
+            return entry
+
+    def put(self, key: tuple[str, str], etag: str, body: bytes) -> None:
+        with self._lock:
+            self._entries[key] = (etag, body)
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._size:
+                self._entries.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
+class _RateBudget:
+    """The last `X-RateLimit-Remaining`/`-Reset` seen per token.
+
+    Read on every response. When remaining drops below the floor, reads are
+    refused locally until the reset time passes; then the budget is unknown
+    again and the next response re-learns it.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.time) -> None:
+        self.clock = clock
+        self.floor = DEFAULT_RATE_LIMIT_FLOOR
+        self._seen: dict[str, tuple[int, float]] = {}
+        self._lock = threading.Lock()
+
+    def observe(self, token_key: str, headers: dict[str, str]) -> None:
+        remaining = headers.get("x-ratelimit-remaining")
+        reset = headers.get("x-ratelimit-reset")
+        if remaining is None or reset is None:
+            return
+        # Only the core resource gates the sweep; search and GraphQL have
+        # their own buckets.
+        if headers.get("x-ratelimit-resource", "core") != "core":
+            return
+        try:
+            value = (int(remaining), float(reset))
+        except ValueError:
+            return
+        with self._lock:
+            self._seen[token_key] = value
+
+    def blocked_until(self, token_key: str) -> float | None:
+        """The reset epoch while the budget is below the floor, else None."""
+        with self._lock:
+            seen = self._seen.get(token_key)
+            if seen is None:
+                return None
+            remaining, reset = seen
+            if self.clock() >= reset:
+                del self._seen[token_key]
+                return None
+            return reset if remaining < self.floor else None
+
+    def clear(self) -> None:
+        with self._lock:
+            self._seen.clear()
+
+
+#: Process-wide: every `GitHubClient` for one token shares one budget and one
+#: conditional cache, whichever collector built it.
+ETAGS = _ConditionalCache()
+RATE_BUDGET = _RateBudget()
+
+
+def configure_rate_limit_floor(floor: int) -> None:
+    """Set the remaining-requests floor below which reads pause (WI-1838)."""
+    RATE_BUDGET.floor = max(0, int(floor))
+
+
 @dataclass(frozen=True)
 class GitHubClient:
     """Read-only access to one GitHub installation."""
@@ -109,6 +256,48 @@ class GitHubClient:
     api_root: str = API_ROOT
     transport: Transport | None = None
     timeout: int = DEFAULT_TIMEOUT_SECONDS
+    #: When set, wins over `token`: asked for a bearer token on every request.
+    token_provider: TokenProvider | None = None
+
+    def bearer(self, path: str | None = None) -> str | None:
+        """The token a request to `path` (or a clone) would use now."""
+        if self.token_provider is not None:
+            return self.token_provider.token(path)
+        return self.token
+
+    def _budget_key(self, path: str | None = None) -> str:
+        if self.token_provider is not None:
+            return self.token_provider.cache_key(path)
+        return _token_key(self.token)
+
+    def _authed_fetch(
+        self,
+        path: str,
+        url: str,
+        headers: dict[str, str],
+        *,
+        body: bytes | None = None,
+        method: str = "GET",
+    ) -> tuple[int, bytes, dict[str, str]]:
+        """`_fetch` with the bearer token attached, refreshing once on a 401.
+
+        A fixed token that gets a 401 is simply wrong; a provided one may
+        have been revoked or expired early, so it is minted again once.
+        """
+        provider = self.token_provider
+        bearer = self.bearer(path)
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        answer = self._fetch(url, headers, body=body, method=method)
+        if answer[0] == 401 and provider is not None:
+            provider.invalidate(path)
+            fresh = provider.token(path)
+            # A fallback personal token is not refreshable; retrying it with
+            # the same value would only spend another request.
+            if fresh and fresh != bearer:
+                headers["Authorization"] = f"Bearer {fresh}"
+                answer = self._fetch(url, headers, body=body, method=method)
+        return answer
 
     @classmethod
     def from_token_file(
@@ -129,6 +318,17 @@ class GitHubClient:
             return None
         return cls(token=token, transport=transport)
 
+    def default_owner(self) -> dict[str, Any] | None:
+        """The account an App installation acts for, or `None` for a PAT.
+
+        A user token creates repositories under its user; an installation
+        token has no user, so `create_repo` targets the installation's
+        account instead — the configured installation, or the only one
+        discovered so far.
+        """
+        account = getattr(self.token_provider, "account", None)
+        return account() if callable(account) else None
+
     def get(self, path: str, **params: str | int) -> Any:
         """GET one resource, returning parsed JSON, or `None` for a 404."""
         query = urllib.parse.urlencode({k: str(v) for k, v in params.items()})
@@ -138,10 +338,34 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": USER_AGENT,
         }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        token_key = self._budget_key(path)
+        reset_at = RATE_BUDGET.blocked_until(token_key)
+        if reset_at is not None:
+            when = time.strftime("%H:%M:%SZ", time.gmtime(reset_at))
+            msg = (
+                f"GitHub rate budget below {RATE_BUDGET.floor}; "
+                f"skipping {path} until the reset at {when}"
+            )
+            raise GitHubRateLimited(msg, reset_at=reset_at)
+        cache_key = (token_key, url)
+        cached = ETAGS.get(cache_key)
+        if cached is not None:
+            headers["If-None-Match"] = cached[0]
 
-        status, body, _headers = self._fetch(url, headers)
+        status, body, response_headers = self._authed_fetch(path, url, headers)
+        RATE_BUDGET.observe(token_key, response_headers)
+        if status == 304 and cached is not None:
+            # Unchanged since the last read, and free: replay what we kept.
+            status, body = 200, cached[1]
+        elif status == 200 and response_headers.get("etag"):
+            ETAGS.put(cache_key, response_headers["etag"], body)
+        exhausted = response_headers.get("x-ratelimit-remaining") == "0"
+        if status in (403, 429) and exhausted:
+            reset = response_headers.get("x-ratelimit-reset")
+            msg = f"GitHub rate limit exhausted reading {path}"
+            raise GitHubRateLimited(
+                msg, reset_at=float(reset) if reset and reset.isdigit() else None
+            )
         if status == 404:
             # A repository that is gone or private to us is a fact to record
             # as absence, not an exception to raise.
@@ -180,11 +404,17 @@ class GitHubClient:
             "User-Agent": USER_AGENT,
             "Content-Type": "application/json",
         }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
 
         body = json.dumps(payload).encode("utf-8")
-        status, response, _headers = self._fetch(url, headers, body=body, method=method)
+        # Before any installation lookup or token mint the write would cause.
+        reset_at = RATE_BUDGET.blocked_until(self._budget_key(path))
+        if reset_at is not None:
+            msg = f"GitHub rate budget below {RATE_BUDGET.floor}; not sending {path}"
+            raise GitHubRateLimited(msg, reset_at=reset_at)
+        status, response, response_headers = self._authed_fetch(
+            path, url, headers, body=body, method=method
+        )
+        RATE_BUDGET.observe(self._budget_key(path), response_headers)
         if status == 404:
             return None
         if status >= 400:
@@ -207,9 +437,7 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": USER_AGENT,
         }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        status, body, response_headers = self._fetch(url, headers)
+        status, body, response_headers = self._authed_fetch("/user", url, headers)
         if status in (401, 403, 404):
             return None
         if status >= 400:
@@ -232,9 +460,13 @@ class GitHubClient:
         method: str = "GET",
     ) -> tuple[int, bytes, dict[str, str]]:
         if self.transport is not None:
-            # The transport seam carries no headers — a fake cannot supply the
-            # scope header — so callers that need one degrade honestly.
-            status, payload = self.transport(url, headers, body or b"", method)
+            # A two-element answer carries no headers — a fake that does not
+            # supply them gets no scopes, ETags or rate accounting, honestly.
+            answer = self.transport(url, headers, body or b"", method)
+            if len(answer) == 3:
+                status, payload, extra = answer
+                return status, payload, {k.lower(): v for k, v in extra.items()}
+            status, payload = answer[0], answer[1]
             return status, payload, {}
         request = urllib.request.Request(url, headers=headers, data=body, method=method)
         try:
@@ -247,7 +479,13 @@ class GitHubClient:
                     {k.lower(): v for k, v in response.headers.items()},
                 )
         except urllib.error.HTTPError as exc:  # pragma: no cover - network shape
-            return int(exc.code), bytes(exc.read()), {}
+            # 304 and 403/429 arrive here; their headers carry the ETag
+            # answer and the rate-limit reset, so keep them.
+            return (
+                int(exc.code),
+                bytes(exc.read()),
+                {k.lower(): v for k, v in (exc.headers or {}).items()},
+            )
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             msg = f"GitHub unreachable: {exc}"
             raise GitHubUnavailable(msg) from exc

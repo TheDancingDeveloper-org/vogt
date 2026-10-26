@@ -9,6 +9,7 @@
 
 #![allow(dead_code)]
 
+pub mod claims;
 pub mod session_economics;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1493,6 +1494,34 @@ pub struct AgentPolicy {
     pub review: Option<serde_json::Value>,
     #[serde(default)]
     pub verification: Option<serde_json::Value>,
+}
+
+impl AgentPolicy {
+    /// Python's `AgentPolicy.with_base`: this policy for work that cuts from
+    /// and lands onto `base` (WI-1841).
+    ///
+    /// The landing rule's base and the worktree's base move together, so the
+    /// brief, the worktree and the conflict check all name the same branch.
+    /// A policy with no landing rule, or one already on `base`, is unchanged.
+    pub fn with_base(&self, base: &str) -> Self {
+        let mut policy = self.clone();
+        let Some(serde_json::Value::Object(landing)) = policy.landing.as_mut() else {
+            return policy;
+        };
+        if landing
+            .get("base_branch")
+            .and_then(serde_json::Value::as_str)
+            == Some(base)
+        {
+            return policy;
+        }
+        landing.insert(
+            "base_branch".to_string(),
+            serde_json::Value::String(base.to_string()),
+        );
+        policy.base_branch = base.to_string();
+        policy
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

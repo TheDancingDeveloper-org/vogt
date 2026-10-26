@@ -392,9 +392,13 @@ fn review_of_opens_a_session_on_the_review_brief() {
     let seen = script.seen.lock().unwrap().join("\n");
     assert!(seen.contains("# Review "), "{seen}");
     assert!(seen.contains("## The diff"));
-    assert!(!seen.contains("## Task"));
-    assert!(seen.contains("## Also asked"));
-    assert!(seen.contains("watch the migration"));
+    // The launch prompt waits without a Task section, so the review has one;
+    // the caller's own task stays under "Also asked" (WI-1854).
+    let task = seen.find("## Task").expect("a Task section");
+    let also = seen.find("## Also asked").expect("an Also asked section");
+    assert!(seen[task..].contains("Review the branch"));
+    assert!(!seen[task..also].contains("watch the migration"));
+    assert!(seen[also..].contains("watch the migration"));
 }
 
 #[test]

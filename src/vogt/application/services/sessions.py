@@ -26,9 +26,11 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -55,6 +57,7 @@ from vogt.application.models import (
     BindSessionWorkResult,
     CommitForSessionParams,
     CommitForSessionResult,
+    EffectivePolicy,
     EngineSessionTokenParams,
     EngineSessionTokenResult,
     HibernateSessionParams,
@@ -123,6 +126,12 @@ from vogt.application.services._brief import (
     brief_for_work_item,
     review_brief_for_work_item,
 )
+from vogt.application.services._policy_conflicts import (
+    overrides_section,
+    task_named_base,
+    task_policy_conflicts,
+)
+from vogt.application.services.claims import check_claim, record_claim_check
 from vogt.application.services.preferences import dispatch_settings
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
@@ -134,6 +143,7 @@ from vogt.core.entities import (
     Actor,
     AgentPolicy,
     CodingSession,
+    LandingPolicy,
     Project,
     Token,
     WorkItem,
@@ -275,6 +285,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     subject = _subject(ctx, params, session_id)
     if params.cwd:
         subject.cwd = _existing_worktree_cwd(params.cwd, subject.cwd)
+    caller_merges = _caller_merges(subject.policy, params, started_by_kind)
     actor_ref = f"agent:session:{session_id}"
     session_scopes = _session_scopes(ctx)
     credential = issue(session_scopes)
@@ -301,6 +312,8 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 cwd=subject.cwd,
                 autopilot=autopilot,
                 read_only=read_only,
+                landing=subject.policy.landing,
+                caller_merges=caller_merges,
             ),
             companion=subject.brief.companion,
             model=params.model,
@@ -412,7 +425,10 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         )
         return WriteOutcome(
             result=SessionResult(
-                session=_summarize(txn, session, engine_session=started)
+                session=_summarize(txn, session, engine_session=started),
+                effective_policy=_effective_policy(
+                    subject.policy, params.task, caller_merges=caller_merges
+                ),
             ),
             entity_kind="session",
             entity_id=session.id,
@@ -565,6 +581,7 @@ def _digest_of(
             value = value.model_dump(mode="json")
         extra[name] = value
     blocked = None if summary.blocked is None else summary.blocked.blocker
+    approval = summary.approval
     return SessionDigest(
         id=summary.id,
         name=summary.name,
@@ -577,8 +594,14 @@ def _digest_of(
             None if blocked is None or len(blocked) <= _DIGEST_CLIP else blocked
         ),
         turn_started_at=summary.turn_started_at,
+        done_at=summary.done_at,
         last_reply_excerpt=_clip(summary.last_reply_excerpt),
         template=summary.template,
+        question=None if approval is None else approval.question,
+        question_kind=None if approval is None else approval.kind,
+        options=None
+        if approval is None or not approval.options
+        else [option.label for option in approval.options],
         budget=budget,
         extra=extra or None,
     )
@@ -624,6 +647,7 @@ def _attention_of(
         last_output_at=summary.last_output_at,
         now=now,
         stall_after=stall_after,
+        done_at=summary.done_at,
     )
 
 
@@ -737,6 +761,10 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
     )
 
 
+#: Screen lines the sweep always reads, to find an input box (WI-1870).
+_SWEEP_INPUT_LINES = 8
+
+
 def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweepResult:
     """Every live and hibernated session at once, for a driver overseeing
     them: the `session.list` row (activity, turn timing, last reply excerpt,
@@ -759,7 +787,11 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             engine="no session engine is configured (VOGT_ENGINE_URL is unset)",
         )
     try:
-        entries = ctx.engine.sweep_sessions(screen_lines=params.screen_lines)
+        # Enough of every screen to see an input box holding unsent text
+        # (WI-1870), whatever the caller asked to be shown.
+        entries = ctx.engine.sweep_sessions(
+            screen_lines=max(params.screen_lines, _SWEEP_INPUT_LINES)
+        )
         if entries is None:
             # An engine that predates the sweep route: the same table, from
             # the list, without screens.
@@ -793,6 +825,7 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             # Vogt's link to a session the engine no longer runs: not a row
             # of a table of what is running.
             continue
+        stale = _block_is_stale(summary)
         verdict = oversight.classify(
             activity=summary.activity,
             alive=summary.alive,
@@ -800,19 +833,51 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             approval_question=None
             if summary.approval is None
             else summary.approval.question,
-            blocker=None if summary.blocked is None else summary.blocked.blocker,
+            blocker=None
+            if summary.blocked is None or stale
+            else summary.blocked.blocker,
             approval_kind=None if summary.approval is None else summary.approval.kind,
             last_output_at=summary.last_output_at,
             now=now,
             stall_after=stall_after,
+            done_at=summary.done_at,
+            turns=_turns_of(live.get(summary.engine_session_id)),
         )
+        if verdict.attention in {"waiting", "done", "idle"} and (
+            delivery.input_pending(tuple(entry.screen_tail)) is not None
+        ):
+            verdict = oversight.Verdict("waiting", oversight.INPUT_PENDING)
+        reason = verdict.reason
+        claim_check = None
+        if verdict.attention == "done" and summary.work_item is not None:
+            # WI-1835: a DONE claim is checked against git and the forge, and a
+            # mismatch is said in the row's reason so the digest carries it.
+            claim_check = check_claim(
+                ctx,
+                summary,
+                claim="autopilot-done",
+                text="\n".join([summary.last_reply_excerpt or "", *entry.screen_tail]),
+            )
+            # Once per DONE: the key is the session and the moment it said so.
+            if summary.done_at is not None:
+                record_claim_check(
+                    ctx,
+                    claim_check,
+                    once_key=f"{summary.id}@{summary.done_at.isoformat()}",
+                )
+            if claim_check.mismatches:
+                reason = f"{reason}; claim check: " + "; ".join(claim_check.mismatches)
         rows.append(
             SessionSweepRow(
                 attention=verdict.attention,
-                attention_reason=verdict.reason,
+                attention_reason=reason,
                 session=summary,
-                screen_tail=list(entry.screen_tail) if params.screen_lines else [],
+                screen_tail=list(entry.screen_tail)[-params.screen_lines :]
+                if params.screen_lines
+                else [],
                 ready=entry.ready,
+                **_block_age(summary, now, stale=stale),
+                claim_check=claim_check,
             )
         )
     rows.sort(
@@ -855,10 +920,49 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                     ),
                     screen_tail=row.screen_tail,
                     ready=row.ready,
+                    blocked_since=row.blocked_since,
+                    blocked_age_s=row.blocked_age_s,
+                    blocked_stale=row.blocked_stale,
+                    claim_check=row.claim_check,
                 )
             )
         rows = kept[: params.limit]
     return SessionSweepResult(rows=rows, counts=counts, swept_at=now, engine=None)
+
+
+def _block_is_stale(summary: SessionSummary) -> bool:
+    """Whether the session's blocked report predates its current turn.
+
+    A report is made mid-turn, just before the agent stops. A turn that
+    began after it means the session went back to work — it was typed into,
+    woken, or nudged on — so the report no longer says what it waits on
+    (WI-1834). So does a done declaration (`AUTOPILOT: DONE`) made after
+    the report, even in the same turn: the agent says nothing is left for it.
+    The report stays on the row, flagged stale, so it is not lost.
+    """
+    blocked = summary.blocked
+    if blocked is None or blocked.since is None:
+        return False
+    return any(
+        at is not None and at > blocked.since
+        for at in (summary.turn_started_at, summary.done_at)
+    )
+
+
+def _block_age(
+    summary: SessionSummary | None, now: datetime, *, stale: bool
+) -> dict[str, Any]:
+    """The sweep row's blocked_since / blocked_age_s / blocked_stale."""
+    since = None
+    if summary is not None and summary.blocked is not None:
+        since = summary.blocked.since
+    if since is None:
+        return {"blocked_stale": stale}
+    return {
+        "blocked_since": since,
+        "blocked_age_s": max(0, int((now - since).total_seconds())),
+        "blocked_stale": stale,
+    }
 
 
 def _starter_engine_id(view: ReadView, named: str | None) -> str | None:
@@ -1312,6 +1416,13 @@ def economics(
 _EXCERPT_LIMIT = 120
 
 
+def _turns_of(engine_session: EngineSession | None) -> int | None:
+    """The engine's metered turn count, or None when it has not metered one."""
+    if engine_session is None or not engine_session.economics:
+        return None
+    return _int_or_none(engine_session.economics.get("turns"))
+
+
 def _int_or_none(value: object) -> int | None:
     """An economics counter the engine sent, or None when it did not.
 
@@ -1617,7 +1728,12 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     if woken_verdict is not None:
         verdict = woken_verdict
     elif confirming:
-        verdict = _confirm_delivery(engine, engine_id, before)
+        verdict = _confirm_delivery(engine, engine_id, before, text or None)
+        if verdict.delivery == "queued" and text and submit:
+            # Behind a running turn. The CLI should take it when the turn
+            # ends, but a Claude Code turn can end with the text left in
+            # the box, unsent (WI-1870): watch for that and press Enter.
+            _follow_queued(engine, engine_id, params.id, text, person=person)
     else:
         verdict = delivery.judge(submitted=submitted, before=None, after=[])
 
@@ -1643,7 +1759,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         },
         event_kind=SESSION_INPUT_EVENT,
     )
-    digest = _input_digest(ctx, target)
+    digest = _input_digest(ctx, target, submitted=submitted, reason=reason)
     return SessionInputResult(
         id=params.id,
         engine_session_id=engine_id,
@@ -1695,7 +1811,7 @@ def _submit_until_taken(
     """
     verdict = _confirm_delivery(engine, engine_id, before, text)
     for _ in range(_CODEX_MAX_ENTERS - 1):
-        if verdict.delivery != "unconfirmed":
+        if verdict.delivery not in {"unconfirmed", "stuck"}:
             break
         try:
             engine.wait_session(engine_id, until="ready", timeout_s=_CODEX_SETTLE_S)
@@ -1710,6 +1826,94 @@ def _submit_until_taken(
         _send_all(engine, engine_id, named, [("", True)], person=person)
         verdict = _confirm_delivery(engine, engine_id, before, text)
     return verdict
+
+
+#: How long a queued input is followed for its turn to end, and how many
+#: Enters it gets once the agent is at rest with the text still in its box.
+_QUEUED_FOLLOW_S = 3600
+_QUEUED_MAX_ENTERS = 2
+
+#: The longest single wait the engine accepts (its `/wait` caps at 600 s
+#: and refuses more); a longer follow-up waits in chunks of this.
+_ENGINE_WAIT_MAX_S = 600
+
+_log = logging.getLogger(__name__)
+
+
+def _follow_queued(
+    engine: EngineClient, engine_id: str, named: str, text: str, *, person: bool
+) -> None:
+    """Follow a queued input in the background (WI-1870). A module value so
+    tests can run it inline."""
+    threading.Thread(
+        target=_submit_queued_logged,
+        args=(engine, engine_id, named, text),
+        kwargs={"person": person},
+        name=f"vogt-queued-input-{engine_id}",
+        daemon=True,
+    ).start()
+
+
+def _submit_queued_logged(
+    engine: EngineClient, engine_id: str, named: str, text: str, *, person: bool
+) -> None:
+    """The follow-up thread's body: nothing it raises may die silently."""
+    try:
+        _submit_queued(engine, engine_id, named, text, person=person)
+    except Exception:
+        _log.exception("following queued input to %s failed", named)
+
+
+def _wait_turn_end(engine: EngineClient, engine_id: str) -> bool:
+    """Wait up to `_QUEUED_FOLLOW_S` for the session to be ready, in waits
+    of at most `_ENGINE_WAIT_MAX_S` each. False when it never was, or the
+    engine no longer holds it."""
+    chunks = -(-_QUEUED_FOLLOW_S // _ENGINE_WAIT_MAX_S)
+    for _ in range(chunks):
+        waited = engine.wait_session(
+            engine_id, until="ready", timeout_s=_ENGINE_WAIT_MAX_S
+        )
+        if waited is None:
+            return False
+        if waited.outcome == "ready":
+            return True
+        if waited.outcome != "timeout":
+            # Exited, hibernated, refused: nothing left to submit to.
+            return False
+    return False
+
+
+def _submit_queued(
+    engine: EngineClient, engine_id: str, named: str, text: str, *, person: bool
+) -> delivery.Delivery:
+    """Once the running turn ends, make sure the queued text was taken
+    (WI-1870).
+
+    Waits for the agent to be ready, then reads its screen: a box that no
+    longer holds the text means the CLI took it. A box still holding it,
+    with no dialog or approval showing, gets an Enter, at most
+    `_QUEUED_MAX_ENTERS` times. Still held after that is `stuck`; the sweep
+    shows such a session as "input pending" from its screen.
+    """
+    try:
+        if not _wait_turn_end(engine, engine_id):
+            return "queued"
+        for _ in range(_QUEUED_MAX_ENTERS):
+            screen = engine.session_screen(engine_id)
+            if screen is None:
+                return "unconfirmed"
+            seen = delivery.Observation(activity=screen.activity, lines=screen.lines)
+            if not delivery.safe_to_resubmit(seen, text):
+                return "delivered"
+            _send_all(engine, engine_id, named, [("", True)], person=person)
+            verdict = _confirm_delivery(engine, engine_id, "waiting-for-input", text)
+            if verdict.delivery == "delivered":
+                _log.info("queued input to %s submitted by a follow-up Enter", named)
+                return "delivered"
+    except (EngineUnavailable, NotFound):
+        return "unconfirmed"
+    _log.warning("queued input to %s is stuck in its input box", named)
+    return "stuck"
 
 
 def _is_codex(session: object) -> bool:
@@ -1727,7 +1931,7 @@ def _confirm_delivery(
     """Read the session a few times after a submit and judge, stopping at
     the first decisive read. An engine that cannot be read leaves the
     judgement to what was seen before. `pending` is the submitted text
-    when a Codex composer should be checked for it."""
+    when the input box should be checked for it."""
     observed: list[delivery.Observation] = []
     verdict = delivery.judge(
         submitted=True, before=before, after=observed, pending=pending
@@ -1748,7 +1952,9 @@ def _confirm_delivery(
         verdict = delivery.judge(
             submitted=True, before=before, after=observed, pending=pending
         )
-        if verdict.delivery != "unconfirmed":
+        # A held box can be the CLI not yet having read the Enter: `stuck`
+        # stands only if it is still held at the last read.
+        if verdict.delivery not in {"unconfirmed", "stuck"}:
             break
     return verdict
 
@@ -2071,7 +2277,13 @@ def wake_session(ctx: AppContext, params: WakeSessionParams) -> SessionResult:
     if params.force and not _may_force_wake(ctx, engine):
         raise RoleRefused("only a person or an oversight session may force a wake")
     target = _target(ctx, params.id)
-    return _wake(ctx, engine, target, reason, force=params.force)
+    result = _wake(ctx, engine, target, reason, force=params.force)
+    # Woken on purpose: whoever woke it is acting on it, so the report it
+    # slept with no longer stands (WI-1834). A session that is still blocked
+    # reports again.
+    if _clear_block_on(ctx, engine, target, cause="wake", reason=reason):
+        result = _wake(ctx, engine, target, reason, force=params.force)
+    return result
 
 
 def _named_session(ctx: AppContext, engine_session_id: str) -> str:
@@ -2669,7 +2881,10 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
 
     A permission prompt (not a startup gate) is a person's to answer: the
     engine refuses it for anyone else with `PersonRequired` (WI-983), and
-    this decides which the caller is (`_answers_as_person`).
+    this decides which the caller is (`_answers_as_person`). The one
+    exception is an oversight session choosing "Yes" on an allow-listed
+    command in the worker's own worktree, which the engine decides and
+    audits (WI-1831).
     """
     reason = writes.validate_reason(params.reason)
     if (params.option is None) == (params.label is None or not params.label.strip()):
@@ -2678,18 +2893,19 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
-    # A person, or an oversight session: autonomous fleets have no person at
-    # the prompt, and the overseer is the driver that answers for them. The
-    # audit line records which one answered.
+    # A person answers anything. An oversight session is relayed by its
+    # engine id, not as a person: the engine lets it choose "Yes" only on an
+    # allow-listed command in the worker's own worktree and refuses the rest
+    # with `PersonRequired` (WI-1831). The audit line records which answered.
     by_person = _answers_as_person(ctx)
     by_oversight = not by_person and _is_oversight_caller(ctx, engine)
-    person = by_person or by_oversight
     answered = engine.answer_session(
         engine_id,
         option=params.option,
         label=None if params.label is None else params.label.strip(),
         expect_question=params.expect_question,
-        person=person,
+        person=by_person,
+        overseer=_caller_engine_session_id(ctx) if by_oversight else None,
     )
     if answered is None:
         msg = (
@@ -3033,12 +3249,84 @@ def _set_blocked(
     )
 
 
-def _input_digest(ctx: AppContext, target: _Target) -> SessionDigest | None:
-    """The digest of the session just typed into, when it can be read."""
+def _clear_block_on(
+    ctx: AppContext,
+    engine: EngineClient,
+    target: _Target,
+    *,
+    cause: str,
+    reason: str,
+    current: EngineSession | None = None,
+) -> EngineSession | None:
+    """Clear `target`'s blocked report because someone acted on the session
+    (WI-1834): it was given new input, or woken. The report it replaces stays
+    in the audit, as an unblock naming the cause and what it said.
+
+    A session typing into or waking itself clears nothing, and a report that
+    cannot be read or cleared is left for the sweep's staleness rule: this
+    never fails the input or wake it rides on. `current` is a read of the
+    session the caller already holds, to spare a second one. The session as
+    cleared when one was, else None.
+    """
+    if ctx.principal.identity_ref in {
+        f"agent:session:{target.engine_session_id}",
+        *(() if target.session is None else (f"agent:session:{target.session.id}",)),
+    }:
+        return None
+    engine_id = target.engine_session_id
     try:
-        live = _engine(ctx).get_session(target.engine_session_id)
+        if current is None:
+            current = engine.get_session(engine_id)
+        if current is None or current.blocked is None:
+            return None
+        was = current.blocked
+        cleared = engine.set_blocked(engine_id, blocked=False, reason=None, items=[])
+        if cleared is None:
+            return None
+    except (EngineUnavailable, Conflict, NotFound):
+        return None
+    audited_action(
+        ctx,
+        operation=SESSION_REPORT_UNBLOCKED,
+        reason=f"cleared by {cause}: {reason}",
+        entity_kind="session",
+        entity_id=target.session.id if target.session is not None else engine_id,
+        outcome={
+            "engine_session_id": engine_id,
+            "linked": target.session is not None,
+            "blocker": None,
+            "items": [],
+            "cleared_by": cause,
+            "was_blocker": was.reason,
+            "was_items": list(was.items),
+            "was_since": was.since,
+        },
+        event_kind=SESSION_UNBLOCKED_EVENT,
+    )
+    return cleared
+
+
+def _input_digest(
+    ctx: AppContext, target: _Target, *, submitted: bool, reason: str
+) -> SessionDigest | None:
+    """The digest of the session just typed into, when it can be read.
+
+    A submitted input also clears the session's blocked report (WI-1834),
+    from the same read: a new instruction answers what it was blocked on, or
+    supersedes it. A draft is not sent yet.
+    """
+    engine = _engine(ctx)
+    try:
+        live = engine.get_session(target.engine_session_id)
     except (EngineUnavailable, NotFound):
         return None
+    if submitted and live is not None:
+        live = (
+            _clear_block_on(
+                ctx, engine, target, cause="input", reason=reason, current=live
+            )
+            or live
+        )
     if target.session is None:
         if live is None:
             return None
@@ -3451,6 +3739,7 @@ def _resolve_subject(
         if project is None:  # pragma: no cover - foreign key guarantees this
             msg = f"work item {item.ref} references a project that is gone"
             raise NotFound(msg)
+        project = _with_item_base(view, project, item, params.task)
         return _Subject(
             project_id=project.id,
             project_slug=project.slug,
@@ -3467,6 +3756,7 @@ def _resolve_subject(
         )
 
     project = _resolve.project(view, params.project or "")
+    project = _with_item_base(view, project, None, params.task)
     return _Subject(
         project_id=project.id,
         project_slug=project.slug,
@@ -3475,6 +3765,42 @@ def _resolve_subject(
         brief=brief_for_project(view, project.slug, session_id, project=project),
         policy=project.agent_policy,
     )
+
+
+def _with_item_base(
+    view: ReadView, project: Project, item: WorkItem | None, task: str | None
+) -> Project:
+    """The project as this start sees it: its policy on the item's base.
+
+    A project's landing rule names one base, but a long-lived integration
+    line — the Rust port on `rust-core` — has its own (WI-1841). The
+    initiative's base applies to its items, and a task that names a known
+    long-lived branch as its base is taken at its word. The brief, the
+    worktree and the conflict check all read the result, so they agree.
+    """
+    policy = project.agent_policy
+    landing = policy.landing
+    if landing is None:
+        return project
+    base = landing.base_branch
+    if item is not None and item.initiative_id is not None:
+        keys = [item.initiative_id]
+        initiative = view.initiative_by_id(item.initiative_id)
+        if initiative is not None:
+            keys.append(initiative.slug)
+        base = next(
+            (
+                landing.initiative_bases[key]
+                for key in keys
+                if key in landing.initiative_bases
+            ),
+            base,
+        )
+    base = task_named_base(task or "", landing) or base
+    resolved = policy.with_base(base)
+    if resolved is policy:
+        return project
+    return project.model_copy(update={"agent_policy": resolved})
 
 
 def _record_declared_branch(
@@ -3519,6 +3845,49 @@ def _engine(ctx: AppContext) -> EngineClient:
     return ctx.engine
 
 
+def _caller_merges(
+    policy: AgentPolicy,
+    params: StartSessionParams,
+    started_by_kind: str | None,
+) -> bool:
+    """Whether this start is oversight's own landing work (WI-1841).
+
+    On a project where oversight merges, an oversight session that starts a
+    mechanical session to land a branch is doing what the policy says; its
+    "merge" is not overridden to "do not merge".
+    """
+    landing = policy.landing
+    return (
+        landing is not None
+        and landing.merge_by == "oversight"
+        and started_by_kind == "oversight"
+        and params.purpose == "mechanical"
+    )
+
+
+def _effective_policy(
+    policy: AgentPolicy, task: str | None, *, caller_merges: bool = False
+) -> EffectivePolicy | None:
+    """The landing rule a started worker runs under, and what it overrode.
+
+    Returned on `session.start` so the caller sees, before the worker runs,
+    that its task said one thing and the policy another (WI-1832).
+    """
+    landing = policy.landing
+    if landing is None:
+        return None
+    return EffectivePolicy(
+        base_branch=landing.base_branch,
+        lands_by=landing.worker_lands_by,
+        merge_by=landing.merge_by,
+        merge_mode=landing.merge_mode,
+        deploy_by=landing.deploy_by,
+        overrides=task_policy_conflicts(
+            task or "", landing, caller_merges=caller_merges
+        ),
+    )
+
+
 def _brief_with_task(
     brief: ComposedBrief,
     params: StartSessionParams,
@@ -3526,6 +3895,8 @@ def _brief_with_task(
     cwd: str,
     autopilot: bool = False,
     read_only: bool = False,
+    landing: LandingPolicy | None = None,
+    caller_merges: bool = False,
 ) -> str:
     """Fold an explicit task, and its touch points, into the session's brief.
 
@@ -3546,15 +3917,64 @@ def _brief_with_task(
         text = f"{text.rstrip()}\n\n{READ_ONLY}"
     task = (params.task or "").strip()
     touch = _touch_points(params, cwd=cwd)
+    if params.review_of is not None:
+        # The agent's launch prompt looks for a Task section and otherwise
+        # waits, so a reviewer gets one even when the caller named no task
+        # (WI-1854). The caller's own task stays under "Also asked".
+        text = f"{text.rstrip()}\n\n## Task\n\n{_REVIEW_TASK}\n"
+    elif not task:
+        task = _default_task(params)
     if task:
         # A reviewer already has its task — check the diff — and a caller's
         # task would read as new work to go and do. It is recorded under the
         # review instead, as what the review was asked to look at.
         heading = "## Also asked" if params.review_of is not None else "## Task"
+        # Where the task contradicts the landing rule the policy wins, and
+        # the brief says so above the task rather than leaving the worker
+        # two instructions to choose between (WI-1832).
+        overrides = overrides_section(
+            task_policy_conflicts(task, landing, caller_merges=caller_merges)
+        )
+        if overrides:
+            text = f"{text.rstrip()}\n\n{overrides}"
         text = f"{text.rstrip()}\n\n{heading}\n\n{task}\n"
     if touch:
         text = f"{text.rstrip()}\n\n{touch}"
     return text
+
+
+#: The Task section a review start gets (WI-1854): what the review brief
+#: above it already asks, said under the heading the launch prompt looks for.
+_REVIEW_TASK = (
+    "Review the branch this item's latest hand-off names, as the Review "
+    "section above says, and post the verdict as one `work_comment`: "
+    "`no blockers (head <sha>)` or `blockers (head <sha>):` with the list."
+)
+
+#: How a reason says it is the task (WI-1854): `Task: do the thing`.
+_TASK_PREFIX = re.compile(r"^\s*task\s*:\s*", re.IGNORECASE)
+
+
+def _default_task(params: StartSessionParams) -> str:
+    """The task a start implies when it names none (WI-1854).
+
+    An agent is launched to "carry out the Task section, or summarise and
+    wait", so a start that leaves `task` out opens an agent that idles.
+    Callers often put the task in `reason` instead; an agent start takes
+    it from there. A purpose of `review` gets the review task. A plain
+    shell gets nothing: it has no agent to read a task.
+    """
+    if params.purpose == "review":
+        target = params.work_item or "the bound work item"
+        return (
+            f"Review the pull request or branch bound to {target} and "
+            "report blockers: post one `work_comment` whose first line is "
+            "`no blockers (head <sha>)` or `blockers (head <sha>):` followed "
+            "by a numbered list. Make no edits, commits or pushes."
+        )
+    if params.template is None:
+        return ""
+    return _TASK_PREFIX.sub("", params.reason or "", count=1).strip()
 
 
 def _touch_points(params: StartSessionParams, *, cwd: str) -> str:
@@ -3777,20 +4197,33 @@ def _resolve_purpose(
     with ctx.declared.read() as view:
         profile = dispatch_settings(view).profiles[params.purpose]
     given = params.model_fields_set
+    # Sized by the model the start will run, the caller's or the profile's.
+    turns = profile.turns_for(params.model if "model" in given else profile.model)
     supplied: dict[str, object] = {
         "template": profile.template,
         "model": profile.model,
         "effort": profile.effort,
         "budget": SessionBudgetParams(
-            turns=profile.budget_turns,
+            turns=turns,
             wall_clock_minutes=profile.budget_wall_clock_minutes,
         )
-        if profile.budget_turns or profile.budget_wall_clock_minutes
+        if turns or profile.budget_wall_clock_minutes
         else None,
         "worktree": profile.worktree,
         "repo_map": profile.repo_map,
         "autopilot": profile.autopilot,
     }
+    if (
+        "model" in given
+        and "template" not in given
+        and params.model is not None
+        and _CLAUDE_MODEL.match(params.model)
+        and _resolved_template_tag(profile.template) != "claude"
+    ):
+        # A Claude model on the profile's other agent never runs: klaudia
+        # answers `opus` with 400 "Invalid model name" on every turn
+        # (WI-1852). The caller named the model, so the agent follows it.
+        supplied["template"] = "claude"
     filled = {field: value for field, value in supplied.items() if field not in given}
     overrides = tuple(field for field in _PROFILE_FIELDS if field in given)
     return params.model_copy(update=filled), overrides, profile.read_only
@@ -3802,6 +4235,10 @@ def _resolve_purpose(
 #: `opus`, `sonnet`, `haiku` and `fable` are the aliases Claude Code resolves
 #: itself; a full id is `claude-…`.
 _CLAUDE_MODEL = re.compile(r"^(claude-.+|opus|sonnet|haiku|fable)$")
+#: The bare aliases among those: names only Claude Code resolves.
+_CLAUDE_ALIAS = re.compile(r"^(opus|sonnet|haiku|fable)$")
+#: Agent templates that are not Claude Code.
+_NON_CLAUDE_AGENTS = ("codex", "opencode", "klaudia")
 
 
 def _resolved_template_tag(template: str | None) -> str | None:
@@ -3875,6 +4312,19 @@ def _refuse_forbidden_model(ctx: AppContext, params: StartSessionParams) -> None
             "haiku, fable) or a different template"
         )
         raise PolicyRefused(msg)
+    if (
+        template in _NON_CLAUDE_AGENTS
+        and params.model is not None
+        and _CLAUDE_ALIAS.match(params.model)
+    ):
+        # The mirror image (WI-1852): `opus` is a name only Claude Code
+        # resolves, and the other agents refuse it on every turn.
+        msg = (
+            f"template {params.template!r} runs {template}, which does not "
+            f"resolve the Claude Code alias {params.model!r}; use template "
+            "'claude', or name a model that agent takes"
+        )
+        raise PolicyRefused(msg)
     if params.model is None:
         return
     with ctx.declared.read() as view:
@@ -3930,7 +4380,7 @@ def _started_by(
         return None, "person"
     caller = _caller_engine_session_id(ctx)
     if caller is None:
-        return None, None
+        return _claimed_oversight(ctx, engine)
     try:
         live = engine.get_session(caller)
     except EngineUnavailable:
@@ -3938,6 +4388,35 @@ def _started_by(
     if live is None or live.role not in ("oversight", "worker"):
         return caller, None
     return caller, "oversight" if live.role == "oversight" else "worker"
+
+
+#: The shared pod token's actor (`agent:pod:<stack>`).
+_POD_ACTOR_PREFIX = "agent:pod:"
+
+
+def _claimed_oversight(
+    ctx: AppContext, engine: EngineClient
+) -> tuple[str | None, Literal["person", "oversight", "worker"] | None]:
+    """A pod-token caller's starter, from the session its bridge says it runs in.
+
+    An oversight session resumed by hand (`claude --resume` in a shell) runs
+    with the pod's token, not its own, so it has no session identity and its
+    starts were recorded with no starter — and its ownership filter lost them
+    (WI-1852). The MCP bridge names the engine session it runs in; that claim
+    counts only from the pod token, which already outranks any session, and
+    only when the engine says that session is live and oversight. It sets
+    attribution and nothing else.
+    """
+    claimed = ctx.claimed_engine_session
+    if claimed is None or not ctx.principal.identity_ref.startswith(_POD_ACTOR_PREFIX):
+        return None, None
+    try:
+        live = engine.get_session(claimed)
+    except EngineUnavailable:
+        return None, None
+    if live is None or not live.alive or live.role != "oversight":
+        return None, None
+    return claimed, "oversight"
 
 
 def _autopilot(params: StartSessionParams) -> bool:
@@ -4141,6 +4620,7 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "conversation_agent": engine_session.conversation_agent,
         "turn_started_at": _parse_engine_timestamp(engine_session.turn_started_at),
         "last_output_at": _parse_engine_timestamp(engine_session.last_output_at),
+        "done_at": _parse_engine_timestamp(engine_session.done_at),
         "approval": _approval(engine_session.approval),
         "blocked": _blocked(engine_session.blocked),
         "hibernation": _hibernation(engine_session.hibernation),

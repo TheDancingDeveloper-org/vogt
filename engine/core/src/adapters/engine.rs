@@ -50,7 +50,41 @@ impl Clone for EngineClient {
     }
 }
 
+/// An engine client's plain parts, which may cross to another thread. A
+/// client with an injected transport (a test's stand-in) has none: its
+/// transport is not `Send`.
+pub struct DetachedEngine {
+    base_url: String,
+    token: Option<String>,
+    timeout: Duration,
+    label: String,
+}
+
+impl DetachedEngine {
+    /// The client again, on whichever thread holds this.
+    pub fn client(self) -> EngineClient {
+        EngineClient {
+            base_url: self.base_url,
+            token: self.token,
+            transport: None,
+            timeout: self.timeout,
+            label: self.label,
+        }
+    }
+}
+
 impl EngineClient {
+    /// This client's parts for another thread, or `None` when its transport
+    /// was injected and cannot cross one (WI-1870's queued-input follow-up).
+    pub fn detached(&self) -> Option<DetachedEngine> {
+        self.transport.is_none().then(|| DetachedEngine {
+            base_url: self.base_url.clone(),
+            token: self.token.clone(),
+            timeout: self.timeout,
+            label: self.label.clone(),
+        })
+    }
+
     /// The engine's own URL, as configured.
     pub fn base_url(&self) -> &str {
         &self.base_url
@@ -565,8 +599,8 @@ impl EngineClient {
     /// Choose an option of the dialog on screen. A dialog that is gone, changed,
     /// or lacks the option is a `Conflict` naming why; a permission prompt
     /// answered without `person` is `PersonRequired` (WI-983), unless
-    /// `overseer` names the oversight session answering, which the engine lets
-    /// answer a permission prompt (WI-2028).
+    /// `overseer` names the oversight session answering and the engine finds
+    /// the command allow-listed (WI-1831, WI-2028).
     pub fn answer_session(
         &self,
         session_id: &str,
@@ -1233,6 +1267,9 @@ pub struct EngineSession {
     pub alive: bool,
     pub turn_started_at: Option<String>,
     pub last_output_at: Option<String>,
+    /// When the agent declared itself done under autopilot this turn
+    /// (WI-1518); `None` when it has not, or from an engine that predates it.
+    pub done_at: Option<String>,
     pub approval: Option<EngineApproval>,
     pub command: Option<String>,
     pub blocked: Option<EngineBlocked>,
@@ -1288,6 +1325,7 @@ impl EngineSession {
             alive,
             turn_started_at: optional_str(get("turn_started_at")),
             last_output_at: optional_str(get("last_output_at")),
+            done_at: optional_str(get("done_at")),
             approval: EngineApproval::from_payload(get("approval")),
             command: optional_str(get("command")),
             blocked: EngineBlocked::from_payload(get("blocked")),
@@ -2625,6 +2663,19 @@ mod tests {
         // WI-2028: the oversight session relayed rides along when named.
         assert!(sent[0].contains(r#""overseer":"eng-boss""#));
         assert!(!sent[1].contains("overseer"));
+    }
+
+    #[test]
+    fn an_oversight_answer_names_the_overseer_and_is_not_a_persons() {
+        // WI-1831: the engine holds an overseer to allow-listed commands in
+        // the worker's own worktree, so the core names it rather than
+        // relaying it as a person.
+        let (seen, transport) = scripted(200, r#"{"ok":true}"#);
+        client(transport)
+            .answer_session("s", Some(1), None, None, false, Some("over-1"))
+            .unwrap();
+        let sent = seen.lock().unwrap();
+        assert!(sent[0].contains(r#""person":false,"overseer":"over-1","option":1"#));
     }
 
     #[test]

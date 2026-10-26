@@ -13,7 +13,9 @@ history — so unlike the issue/PR sync they need no `subject_seen` bookkeeping.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterable
+from datetime import datetime, timedelta
 from typing import cast
 
 from vogt.adapters.forge.actors import RESOLVE_BUDGET, RESOLVER, ActorResolver
@@ -317,8 +319,44 @@ class ForgeLabelsCollector(_ForgeReadCollector):
             )
 
 
+class _PostureSchedule:
+    """When each repository's posture was last read, in this process.
+
+    Posture changes when someone edits repository settings — days apart, not
+    minutes — yet it cost three to eight calls per repository per sweep, the
+    largest share of the estate's GitHub budget (WI-1838). The store cannot
+    answer "when did we last look": it skips unchanged findings, so the newest
+    row's time is when posture last *changed*. Process-wide because the
+    collectors are rebuilt per sweep; a restart reads everything once.
+    """
+
+    def __init__(self) -> None:
+        self._last: dict[str, datetime] = {}
+        self._lock = threading.Lock()
+
+    def due(self, slug: str, now: datetime, interval: timedelta) -> bool:
+        with self._lock:
+            last = self._last.get(slug)
+        return last is None or now - last >= interval
+
+    def mark(self, slug: str, now: datetime) -> None:
+        with self._lock:
+            self._last[slug] = now
+
+    def clear(self) -> None:
+        with self._lock:
+            self._last.clear()
+
+
+POSTURE_SCHEDULE = _PostureSchedule()
+
+
 class ForgePostureCollector(_ForgeReadCollector):
-    """Update-automation posture, three facts. Replaces `gh-posture`."""
+    """Update-automation posture, three facts. Replaces `gh-posture`.
+
+    Read at most once per `forge_posture_interval_seconds` per repository;
+    a sweep in between yields only the receipt, saying it was not due.
+    """
 
     name = COLLECTOR_POSTURE
     capability = "supports_posture"
@@ -326,6 +364,22 @@ class ForgePostureCollector(_ForgeReadCollector):
         "this forge does not expose repository update-automation posture, so "
         "it is not collected here — not that automation is off"
     )
+
+    def _read_in(
+        self,
+        ctx: CollectorContext,
+        provider: ForgeProvider,
+        ref: RepoRef,
+        project: Project,
+    ) -> Iterable[Finding]:
+        interval = timedelta(seconds=ctx.config.forge_posture_interval_seconds)
+        now = ctx.clock()
+        if not POSTURE_SCHEDULE.due(ref.slug, now, interval):
+            return
+        yield from self._read(provider, ref, project)
+        # Marked only after a read that did not raise, so a failed read
+        # (rate limit, outage) is retried next sweep rather than in a day.
+        POSTURE_SCHEDULE.mark(ref.slug, now)
 
     def _read(
         self, provider: ForgeProvider, ref: RepoRef, project: Project
@@ -431,6 +485,7 @@ def forge_read_collectors(
 
 
 __all__ = [
+    "POSTURE_SCHEDULE",
     "ForgeChecksCollector",
     "ForgeLabelsCollector",
     "ForgeNotificationsCollector",

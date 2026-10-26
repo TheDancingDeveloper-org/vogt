@@ -11,6 +11,7 @@ from check_workflow_policy import (
     main,
     parse_workflow,
     producer_problems,
+    queue_problems,
     required_checks,
     run,
     timeout_problems,
@@ -22,6 +23,7 @@ PR_WORKFLOW = """\
 name: ci
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 jobs:
@@ -58,8 +60,8 @@ jobs:
 def test_a_job_without_timeout_is_reported_and_a_reusable_call_is_exempt() -> None:
     workflow = parse_workflow("ci.yml", PR_WORKFLOW)
     problems = timeout_problems(workflow)
-    assert [(p.line, "'test'" in p.message) for p in problems] == [(25, True)]
-    assert problems[0].annotation().startswith("::error file=ci.yml,line=25::")
+    assert [(p.line, "'test'" in p.message) for p in problems] == [(26, True)]
+    assert problems[0].annotation().startswith("::error file=ci.yml,line=26::")
 
 
 def test_run_block_contents_are_not_read_as_job_properties() -> None:
@@ -126,6 +128,19 @@ def test_a_producer_that_never_runs_on_a_pr_does_not_count() -> None:
     problems = producer_problems([push_only], ["release"], "SECURITY.md")
     assert len(problems) == 1
     assert "do not run on pull_request" in problems[0].message
+
+
+def test_a_required_check_must_also_run_in_the_merge_queue() -> None:
+    pr_only = parse_workflow(
+        "d.yml",
+        "on:\n  pull_request:\njobs:\n  d:\n    name: dependency review\n"
+        "    timeout-minutes: 5\n",
+    )
+    workflows = [parse_workflow("ci.yml", PR_WORKFLOW), pr_only]
+    problems = queue_problems(workflows, ["lint", "dependency review"], "SECURITY.md")
+    assert len(problems) == 1
+    message = problems[0].message
+    assert "'dependency review' is produced by no job on merge_group" in message
 
 
 def test_required_checks_are_read_from_the_security_md_list() -> None:

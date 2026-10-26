@@ -60,6 +60,87 @@ impl<T: ForgeTransport> GitHubProvider<T> {
             capabilities: capabilities(),
         }
     }
+
+    /// Fill `merged_by` on a merged PR from the single-PR read (WI-1835).
+    ///
+    /// The list page omits `merged_by`; `GET /pulls/{n}` carries it. Who merged
+    /// a PR never changes once it has merged, so the answer is cached per PR
+    /// for the life of the process and each merged PR costs one read, once.
+    /// A read that fails leaves `merged_by` empty rather than failing the sync.
+    fn with_merger(&self, repo: &RepoRef, mut pull: ForgePull) -> Result<ForgePull, VogtError> {
+        if !pull.merged || pull.merged_by.is_some() {
+            return Ok(pull);
+        }
+        let key = (
+            self.transport.api_root().to_owned(),
+            repo.slug(),
+            pull.number,
+        );
+        if let Some(cached) = merged_by_cache().lock().unwrap().get(&key) {
+            pull.merged_by = cached;
+            return Ok(pull);
+        }
+        let response = match self.transport.get(
+            &format!("/repos/{}/{}/pulls/{}", repo.owner, repo.repo, pull.number),
+            &[],
+        ) {
+            Ok(response) => response,
+            // `GitHubRateLimited` is a `GitHubUnavailable` in Python, so it is caught too.
+            Err(VogtError::GitHubUnavailable(_) | VogtError::GitHubRateLimited { .. }) => {
+                return Ok(pull)
+            }
+            Err(error) => return Err(error),
+        };
+        let login = match &response {
+            ForgeResponse::Json(serde_json::Value::Object(payload)) => payload
+                .get("merged_by")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|merger| merger.get("login"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        };
+        merged_by_cache().lock().unwrap().put(key, login.clone());
+        pull.merged_by = login;
+        Ok(pull)
+    }
+}
+
+/// Who merged each merged PR, keyed by API root, repository and number
+/// (WI-1835). Bounded, oldest entry first out. Python's `_MERGED_BY`.
+const MERGED_BY_CAP: usize = 4096;
+
+type MergedByKey = (String, String, i64);
+
+#[derive(Default)]
+struct MergedBy {
+    order: std::collections::VecDeque<MergedByKey>,
+    logins: std::collections::HashMap<MergedByKey, Option<String>>,
+}
+
+impl MergedBy {
+    fn get(&self, key: &MergedByKey) -> Option<Option<String>> {
+        self.logins.get(key).cloned()
+    }
+
+    /// Python only fills a key it does not hold, so a held key is left as is.
+    fn put(&mut self, key: MergedByKey, login: Option<String>) {
+        if self.logins.contains_key(&key) {
+            return;
+        }
+        if self.logins.len() >= MERGED_BY_CAP {
+            if let Some(oldest) = self.order.pop_front() {
+                self.logins.remove(&oldest);
+            }
+        }
+        self.order.push_back(key.clone());
+        self.logins.entry(key).or_insert(login);
+    }
+}
+
+fn merged_by_cache() -> &'static std::sync::Mutex<MergedBy> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<MergedBy>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(MergedBy::default()))
 }
 
 impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
@@ -158,8 +239,12 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         )
     }
 
-    fn clone_token(&self) -> Option<String> {
-        self.transport.token().map(str::to_owned)
+    /// The token a clone of `repo` should authenticate with, if any. `repo`
+    /// routes a GitHub App to the installation on that repository's owner; a
+    /// personal token ignores it.
+    fn clone_token(&self, repo: Option<&RepoRef>) -> Result<Option<String>, VogtError> {
+        let path = repo.map(|repo| format!("/repos/{}/{}", repo.owner, repo.repo));
+        self.transport.bearer(path.as_deref())
     }
 
     fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
@@ -226,7 +311,10 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
             pulls.retain(|pull| pull.updated_at.as_deref().is_none_or(|at| at >= since));
         }
         pulls.reverse();
-        Ok(pulls)
+        pulls
+            .into_iter()
+            .map(|pull| self.with_merger(repo, pull))
+            .collect()
     }
 
     fn releases(&self, repo: &RepoRef) -> Result<Vec<ForgeRelease>, VogtError> {
@@ -564,10 +652,11 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         if let Some(description) = description.filter(|text| !text.is_empty()) {
             payload["description"] = serde_json::Value::String(description.to_owned());
         }
-        let response = match self
-            .transport
-            .send(WriteMethod::Post, "/user/repos", Some(&payload))
-        {
+        let sent = self.create_repo_path().and_then(|path| {
+            self.transport
+                .send(WriteMethod::Post, &path, Some(&payload))
+        });
+        let response = match sent {
             Err(error) if error.message().contains("422") => {
                 return Err(VogtError::RemoteRepoExists(format!(
                     "github.com already has a repository named {} reachable by this \
@@ -652,26 +741,70 @@ impl<T: ForgeTransport> GitHubProvider<T> {
         })
     }
 
-    fn version_update_config(&self, repo: &RepoRef) -> Result<Option<String>, VogtError> {
-        for path in VERSION_UPDATE_CONFIGS {
-            match self.transport.get(
-                &format!("/repos/{}/{}/contents/{path}", repo.owner, repo.repo),
-                &[],
-            ) {
-                Err(_) => return Ok(None),
-                Ok(ForgeResponse::Missing | ForgeResponse::Empty) => {}
-                Ok(_) => return Ok(Some((*path).to_owned())),
+    /// `POST /user/repos` for a user token, or `POST /orgs/{owner}/repos` when
+    /// the credential is a GitHub App installation on an organisation — an
+    /// installation token has no user, so `/user/repos` would refuse it.
+    fn create_repo_path(&self) -> Result<String, VogtError> {
+        let account = self.transport.default_owner()?.unwrap_or_default();
+        if let Some(login) = text(account.get("login")) {
+            if account.get("type").and_then(serde_json::Value::as_str) == Some("Organization") {
+                return Ok(format!("/orgs/{login}/repos"));
             }
         }
-        Ok(None)
+        Ok("/user/repos".to_owned())
     }
 
-    /// 204 is on, 404 is off, and a transport error is "could not tell".
+    /// Which update-automation config exists, read from the git tree.
+    ///
+    /// One `git/trees/HEAD` read lists the root, and only when the root holds
+    /// `.github` is that one subtree read too — at most two calls, both
+    /// ETag-cached, where this used to be eight `/contents/` probes per
+    /// repository per sweep (WI-1838). A paused read is "not read", not "no
+    /// config": it is raised so the posture collector records nothing and
+    /// retries next sweep.
+    fn version_update_config(&self, repo: &RepoRef) -> Result<Option<String>, VogtError> {
+        let base = format!("/repos/{}/{}/git/trees", repo.owner, repo.repo);
+        let read = || -> Result<(TreeEntries, TreeEntries), VogtError> {
+            let root = tree_entries(&self.transport.get(&format!("{base}/HEAD"), &[])?);
+            let github_dir = root
+                .iter()
+                .find(|(path, _)| path == ".github")
+                .map(|(_, sha)| sha.clone())
+                .filter(|sha| !sha.is_empty());
+            let nested = match github_dir {
+                Some(sha) => tree_entries(&self.transport.get(&format!("{base}/{sha}"), &[])?),
+                None => Vec::new(),
+            };
+            Ok((root, nested))
+        };
+        let (root, nested) = match read() {
+            Ok(found) => found,
+            Err(error @ VogtError::GitHubRateLimited { .. }) => return Err(error),
+            Err(_) => return Ok(None),
+        };
+        let present: std::collections::BTreeSet<String> = root
+            .into_iter()
+            .map(|(path, _)| path)
+            .chain(
+                nested
+                    .into_iter()
+                    .map(|(name, _)| format!(".github/{name}")),
+            )
+            .collect();
+        Ok(VERSION_UPDATE_CONFIGS
+            .iter()
+            .find(|path| present.contains(**path))
+            .map(|path| (*path).to_owned()))
+    }
+
+    /// 204 is on, 404 is off, and a transport error is "could not tell" — but
+    /// a paused read is raised, so nothing is recorded (WI-1838).
     fn toggle(&self, repo: &RepoRef, endpoint: &str) -> Result<Option<bool>, VogtError> {
         match self.transport.get(
             &format!("/repos/{}/{}/{endpoint}", repo.owner, repo.repo),
             &[],
         ) {
+            Err(error @ VogtError::GitHubRateLimited { .. }) => Err(error),
             Err(_) => Ok(None),
             Ok(ForgeResponse::Missing) => Ok(Some(false)),
             Ok(_) => Ok(Some(true)),
@@ -685,6 +818,49 @@ impl ForgeResponse {
             Self::Json(serde_json::Value::String(text)) => Some(text),
             _ => None,
         }
+    }
+}
+
+/// One level of a git tree: `(path, sha)` in payload order.
+type TreeEntries = Vec<(String, String)>;
+
+/// `path → sha` for one level of a git tree payload, in payload order; empty
+/// when absent. Ports `_tree_entries`.
+fn tree_entries(response: &ForgeResponse) -> TreeEntries {
+    let ForgeResponse::Json(serde_json::Value::Object(payload)) = response else {
+        return Vec::new();
+    };
+    let Some(serde_json::Value::Array(items)) = payload.get("tree") else {
+        return Vec::new();
+    };
+    let mut entries: TreeEntries = Vec::new();
+    for item in items.iter().filter_map(serde_json::Value::as_object) {
+        let path = json_text(item.get("path"));
+        if !truthy(item.get("path")) {
+            continue;
+        }
+        let sha = if truthy(item.get("sha")) {
+            json_text(item.get("sha"))
+        } else {
+            String::new()
+        };
+        match entries.iter_mut().find(|(known, _)| *known == path) {
+            Some(entry) => entry.1 = sha,
+            None => entries.push((path, sha)),
+        }
+    }
+    entries
+}
+
+/// Python truthiness for a JSON value.
+fn truthy(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(flag)) => *flag,
+        Some(serde_json::Value::Number(number)) => number.as_f64().is_some_and(|n| n != 0.0),
+        Some(serde_json::Value::String(text)) => !text.is_empty(),
+        Some(serde_json::Value::Array(items)) => !items.is_empty(),
+        Some(serde_json::Value::Object(map)) => !map.is_empty(),
     }
 }
 
@@ -786,6 +962,12 @@ fn to_pull(repo: &RepoRef, item: &serde_json::Map<String, serde_json::Value>) ->
         updated_at: text(item.get("updated_at")).map(str::to_owned),
         closed_at: text(item.get("closed_at")).map(str::to_owned),
         source_url: text(item.get("html_url")).map(str::to_owned),
+        merged_at: text(item.get("merged_at")).map(str::to_owned),
+        merged_by: item
+            .get("merged_by")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|merger| text(merger.get("login")))
+            .map(str::to_owned),
     }
 }
 
@@ -1363,6 +1545,133 @@ mod tests {
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].name, "bug");
         assert_eq!(labels[0].color.as_deref(), Some("d73a4a"));
+    }
+
+    #[test]
+    fn a_merged_pull_gets_its_merger_from_the_single_pr_read_once() {
+        // WI-1835: GitHub's list page has `merged_at` but no `merged_by`, so a
+        // merged PR is read once on its own for it, and the answer is cached.
+        // The cache is process-wide, so this test owns its repository name.
+        let provider = GitHubProvider::new(Fixture::new(vec![
+            (
+                "/repos/acme/merger-cache/pulls/193",
+                serde_json::json!({
+                    "number": 193, "state": "closed", "merged": true,
+                    "merged_at": "2026-10-17T09:00:00Z",
+                    "merged_by": {"login": "sprooty", "type": "User"}
+                }),
+            ),
+            (
+                "/repos/acme/merger-cache/pulls",
+                serde_json::json!([
+                    {"number": 193, "title": "header button", "state": "closed",
+                     "merged_at": "2026-10-17T09:00:00Z",
+                     "head": {"ref": "wi-1707-x", "sha": "abc"},
+                     "user": {"login": "worker", "type": "Bot"}},
+                    {"number": 194, "title": "open", "state": "open"},
+                    {"number": 195, "title": "abandoned", "state": "closed", "merged_at": null}
+                ]),
+            ),
+        ]));
+        let repo = RepoRef {
+            host: HOST.to_owned(),
+            owner: "acme".to_owned(),
+            repo: "merger-cache".to_owned(),
+        };
+        let by_number = |pulls: Vec<ForgePull>| {
+            pulls
+                .into_iter()
+                .map(|pull| (pull.number, pull))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let pulls = by_number(provider.pulls_updated_since(&repo, None).unwrap());
+        let again = by_number(provider.pulls_updated_since(&repo, None).unwrap());
+
+        assert_eq!(pulls[&193].merged_by.as_deref(), Some("sprooty"));
+        assert_eq!(
+            pulls[&193].merged_at.as_deref(),
+            Some("2026-10-17T09:00:00Z")
+        );
+        assert_eq!(again[&193].merged_by.as_deref(), Some("sprooty"));
+        assert!(pulls[&194].merged_by.is_none() && pulls[&195].merged_by.is_none());
+        let single = provider
+            .transport
+            .seen
+            .borrow()
+            .iter()
+            .filter(|path| path.contains("/pulls/"))
+            .count();
+        assert_eq!(
+            single, 1,
+            "one single-PR read, for the merged PR, cached after"
+        );
+    }
+
+    #[test]
+    fn the_merger_cache_is_bounded_oldest_first_out() {
+        let mut cache = MergedBy::default();
+        let key = |number: i64| ("root".to_owned(), "o/r".to_owned(), number);
+        for number in 0..=MERGED_BY_CAP as i64 {
+            cache.put(key(number), Some(format!("m{number}")));
+        }
+        assert_eq!(cache.logins.len(), MERGED_BY_CAP);
+        assert_eq!(cache.get(&key(0)), None, "the oldest went first");
+        assert_eq!(cache.get(&key(1)), Some(Some("m1".to_owned())));
+        cache.put(key(1), None);
+        assert_eq!(
+            cache.get(&key(1)),
+            Some(Some("m1".to_owned())),
+            "a held key stays"
+        );
+    }
+
+    #[test]
+    fn a_failed_merger_read_leaves_merged_by_empty() {
+        let fixture = Fixture::new(vec![(
+            "/repos/acme/merger-fails/pulls",
+            serde_json::json!([
+                {"number": 5, "title": "landed", "state": "closed", "merged_at": "2026-10-17T09:00:00Z"}
+            ]),
+        )]);
+        struct Failing(Fixture);
+        impl ForgeTransport for Failing {
+            fn api_root(&self) -> &str {
+                self.0.api_root()
+            }
+            fn token(&self) -> Option<&str> {
+                self.0.token()
+            }
+            fn get(
+                &self,
+                path: &str,
+                query: &[(&str, String)],
+            ) -> Result<ForgeResponse, VogtError> {
+                if path.contains("/pulls/") {
+                    return Err(VogtError::GitHubUnavailable("GitHub returned 500".into()));
+                }
+                self.0.get(path, query)
+            }
+            fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
+                self.0.identity()
+            }
+            fn send(
+                &self,
+                method: WriteMethod,
+                path: &str,
+                body: Option<&serde_json::Value>,
+            ) -> Result<serde_json::Value, VogtError> {
+                self.0.send(method, path, body)
+            }
+        }
+        let provider = GitHubProvider::new(Failing(fixture));
+        let repo = RepoRef {
+            host: HOST.to_owned(),
+            owner: "acme".to_owned(),
+            repo: "merger-fails".to_owned(),
+        };
+        let pulls = provider.pulls_updated_since(&repo, None).unwrap();
+        assert!(pulls[0].merged);
+        assert_eq!(pulls[0].merged_by, None);
     }
 
     fn repo() -> RepoRef {

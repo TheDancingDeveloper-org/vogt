@@ -2092,6 +2092,11 @@ textarea {
   padding: 6px 10px;
   cursor: pointer;
   border-left: 2px solid transparent;
+  /* A busy roster is a long list: rows off screen skip layout and paint
+     until they scroll near the viewport (WI-1903). `auto` remembers each
+     row's last real height, so the scrollbar does not jump. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 34px;
 }
 .session-row:hover {
   background: rgba(255, 255, 255, 0.04);
@@ -11778,6 +11783,25 @@ a.vogt-projects-tag:hover {
   .sessions-place:not(.has-workspace) .sessions-tools a { flex: 0 0 auto; display: inline-flex; align-items: center; height: 34px; padding: 0 14px; border-color: transparent; border-radius: 999px; background: var(--bg-elev); font-size: 13px; }
   .sessions-place:not(.has-workspace) .sessions-tools a[aria-current="page"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
   .sessions-place:not(.has-workspace) .sessions-overview { padding: 0 16px 20px; }
+  /* WI-1830: the waiting cards sit above the overview, and the overview used
+     to be the only scroller inside an `overflow: hidden` place. Two cards
+     squeezed it to nothing and were clipped themselves, so the list stayed
+     stuck until every waiting session was answered. On a phone the place
+     itself scrolls: cards and list are one column, and the list grows to its
+     content instead of keeping a scroller of its own. */
+  .sessions-place:not(.has-workspace) {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .sessions-place:not(.has-workspace) > .sessions-waiting,
+  .sessions-place:not(.has-workspace) > .sessions-place-body,
+  .sessions-place:not(.has-workspace) .sessions-active-workspace,
+  .sessions-place:not(.has-workspace) .sessions-overview {
+    flex: 1 0 auto;
+    min-height: auto;
+    overflow: visible;
+  }
+  .sessions-place:not(.has-workspace) > .sessions-waiting { flex: 0 0 auto; }
   .sessions-overview-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 18px 0 8px; }
   .sessions-overview-heading {
     margin: 0;
@@ -11832,7 +11856,9 @@ a.vogt-projects-tag:hover {
   .session-waiting-identity { display: flex; flex-direction: column; gap: 2px; }
   .session-waiting-identity strong { color: var(--fg-bright); font-size: 16px; font-weight: 600; }
   .session-waiting-context { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .session-waiting-tail { max-height: 150px; padding: 10px 12px; border-radius: 10px; background: var(--term-bg); font-size: 12px; line-height: 1.55; }
+  /* A read-only snapshot of the last few lines, not a scroller: a swipe that
+     starts on it scrolls the page, never a box nested inside the card. */
+  .session-waiting-tail { max-height: none; overflow: hidden; padding: 10px 12px; border-radius: 10px; background: var(--term-bg); font-size: 12px; line-height: 1.55; touch-action: pan-y; }
   .session-waiting-acts { display: grid; grid-template-columns: 1fr 1fr; }
   .session-waiting-acts button { min-height: 46px; border-radius: 10px; font-size: 15px; font-weight: 600; }
   .session-waiting-acts button:first-child { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
@@ -12548,3 +12574,130 @@ a.vogt-projects-tag:hover {
 .chat--narrow .chat-main { padding: 8px; }
 .chat--narrow .chat-row { max-width: 92%; }
 .chat--narrow .chat-composer textarea { font-size: 16px; }
+
+/* The session rail's sections (WI-1736): a filter row above the list, one
+   header per state with its count, workers nested under their oversight
+   session, and a compact row (the working directory moves to the tooltip). */
+.rail-session-tools {
+  padding: 4px 8px 6px;
+}
+.rail-search {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  color: inherit;
+}
+.rail-search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* A section header stays at the top of the list while its rows scroll under
+   it, so the operator always sees which state the rows belong to. */
+.places-rail-session-area .rail-section-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin-top: 0;
+  background: var(--bg-elev);
+}
+.places-rail-session-area .session-row .cwd {
+  display: none;
+}
+.session-row.session-row--child {
+  margin-left: 14px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+.session-row.session-row--dimmed {
+  opacity: 0.55;
+}
+.session-row .session-caret {
+  flex: 0 0 auto;
+  border: 0;
+  background: none;
+  color: inherit;
+  padding: 0 4px 0 0;
+  font: inherit;
+  cursor: pointer;
+}
+.session-row .session-lift {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-right: 4px;
+}
+.session-row .session-tally {
+  font-size: 11px;
+  opacity: 0.8;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+@media (pointer: coarse) {
+  .places-rail-session-area .session-row,
+  .places-rail-session-area .rail-section-head {
+    min-height: 44px;
+  }
+  .rail-search {
+    font-size: 16px;
+    min-height: 44px;
+  }
+}
+
+/* The phone and overview session lists are sectioned too (WI-1736): a header
+   per state, a button that folds it, and the count. */
+.session-list-section {
+  list-style: none;
+}
+.session-list-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: start;
+  cursor: pointer;
+}
+.session-list-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+@media (pointer: coarse) {
+  .session-list-head {
+    min-height: 44px;
+  }
+}
+
+/* State badges on a session row (WI-1736, design §4): one glyph each, with the
+   words in the title and the accessible name. */
+.session-row .session-badges {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.session-row .session-badge {
+  font-size: 10px;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+}
+/* The count of pinned sessions that need a person, on the Pinned header. */
+.session-list-needs {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--activity-waiting);
+}

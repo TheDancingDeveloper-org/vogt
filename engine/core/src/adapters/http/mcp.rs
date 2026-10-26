@@ -163,6 +163,12 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
     request: Request<Body>,
 ) -> Response {
     let presented = bearer(request.headers().get("authorization"));
+    // The engine session the MCP bridge says it runs in (WI-1852).
+    let claimed_session = request
+        .headers()
+        .get(crate::application::context::HEADER_ENGINE_SESSION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let body = axum::body::to_bytes(request.into_body(), usize::MAX)
         .await
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -248,7 +254,8 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
         principal,
         build,
         operation_clock,
-    );
+    )
+    .map(|built| built.with_claimed_engine_session(claimed_session.as_deref()));
     let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);
     if let Some(context) = built.as_ref() {
         dispatcher = dispatcher.with_context(context);

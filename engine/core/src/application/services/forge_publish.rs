@@ -135,7 +135,7 @@ where
         root: source.root.clone(),
         remote: provider.clone_url(&repo),
         branch: source.branch.clone(),
-        token: provider.clone_token(),
+        token: provider.clone_token(Some(&repo))?,
         helper_dir: Some(config.resolved_data_dir().join("tmp")),
     })?;
 

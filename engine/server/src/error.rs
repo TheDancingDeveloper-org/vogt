@@ -31,6 +31,9 @@ pub enum ApiError {
     /// than reporting a server fault.
     #[error("bad gateway: {0}")]
     BadGateway(String),
+    /// The host is too short of disk to take on more work (WI-1810).
+    #[error("insufficient storage: {0}")]
+    InsufficientStorage(String),
 }
 
 impl ApiError {
@@ -46,6 +49,7 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             ApiError::BadGateway(_) => StatusCode::BAD_GATEWAY,
+            ApiError::InsufficientStorage(_) => StatusCode::INSUFFICIENT_STORAGE,
         }
     }
 }

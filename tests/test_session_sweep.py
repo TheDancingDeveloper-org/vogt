@@ -11,11 +11,21 @@ import pytest
 from vogt.adapters.engine import EngineClient
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    ListAuditParams,
     RegisterProjectParams,
+    ReportBlockedParams,
+    SessionInputParams,
     StartSessionParams,
     SweepSessionsParams,
 )
-from vogt.application.services import register_project, start_session, sweep_sessions
+from vogt.application.services import (
+    list_audit,
+    register_project,
+    report_blocked,
+    session_input,
+    start_session,
+    sweep_sessions,
+)
 
 WHY = "sweep test"
 ROOT = "/srv/estate/vogt"
@@ -28,6 +38,7 @@ class Engine:
         self.counter = 0
         self.sweep_supported = True
         self.sweep_queries: list[str] = []
+        self.inputs: list[tuple[str, dict[str, Any]]] = []
 
     def row(self, engine_id: str, **over: Any) -> dict[str, Any]:
         base = {
@@ -55,6 +66,27 @@ class Engine:
             return 200, json.dumps(
                 {"sessions": list(self.rows.values()), "hidden_count": 0}
             ).encode()
+        if path.startswith("/api/sessions/") and path.count("/") >= 3:
+            parts = path.split("/")
+            row = self.rows.get(parts[3])
+            tail = parts[4] if len(parts) > 4 else ""
+            if row is not None and method == "GET" and not tail:
+                return 200, json.dumps(row).encode()
+            if row is not None and method == "POST" and tail == "blocked":
+                req = json.loads(body)
+                row["blocked"] = (
+                    {
+                        "reason": req["reason"],
+                        "items": req["items"],
+                        "since": "2026-10-18T09:00:00Z",
+                    }
+                    if req["blocked"]
+                    else None
+                )
+                return 200, json.dumps(row).encode()
+            if row is not None and method == "POST" and tail == "input":
+                self.inputs.append((parts[3], json.loads(body)))
+                return 200, b"{}"
         if method == "GET" and path == "/api/sessions/sweep":
             if not self.sweep_supported:
                 return 404, b""
@@ -134,7 +166,8 @@ def test_one_call_returns_every_session_most_urgent_first(
     assert third is not None and third.linked is False
     assert result.counts["total"] == 4
     assert result.counts["needs_you"] == 2
-    assert engine.sweep_queries == ["screen_lines=5"]
+    # The sweep reads at least 8 lines to find an input box (WI-1870).
+    assert engine.sweep_queries == ["screen_lines=8"]
     assert busy_engine in {
         session.engine_session_id for session in sessions if session is not None
     }
@@ -285,3 +318,131 @@ def test_digest_attention_needs_you_and_limit(
     assert result.rows[0].digest.id == asking
     assert result.counts["total"] == 2
     assert result.counts["needs_you"] == 1
+
+
+def test_input_clears_a_blocked_report_and_needs_you_drops_it(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1834 acceptance: report blocked, inject input, no longer needs you."""
+    worker, worker_engine = _start(wired)
+    engine.rows[worker_engine].update(activity="idle")
+    report_blocked(
+        wired,
+        ReportBlockedParams(id=worker, blocker="Infisical returns 500", reason=WHY),
+    )
+    before = sweep_sessions(wired, SweepSessionsParams(mode="full", screen_lines=0))
+    assert before.counts["needs_you"] == 1
+    assert before.rows[0].attention == "blocked"
+    assert before.rows[0].blocked_since is not None
+    assert before.rows[0].blocked_age_s is not None
+
+    session_input(
+        wired,
+        SessionInputParams(
+            id=worker, text="Infisical is fixed, re-run", confirm=False, reason=WHY
+        ),
+    )
+
+    assert engine.inputs
+    assert engine.rows[worker_engine]["blocked"] is None
+    after = sweep_sessions(wired, SweepSessionsParams(mode="full", screen_lines=0))
+    assert after.counts["needs_you"] == 0
+    assert after.rows[0].attention != "blocked"
+    assert after.rows[0].blocked_since is None
+    # The report it replaced stays in the audit.
+    audit = list_audit(
+        wired, ListAuditParams(entity_id=worker, operation="session.report_unblocked")
+    )
+    assert [r.reason for r in audit.records] == [f"cleared by input: {WHY}"]
+
+
+def test_a_draft_does_not_clear_a_blocked_report(
+    wired: AppContext, engine: Engine
+) -> None:
+    worker, worker_engine = _start(wired)
+    report_blocked(
+        wired, ReportBlockedParams(id=worker, blocker="needs a go-ahead", reason=WHY)
+    )
+    session_input(
+        wired, SessionInputParams(id=worker, text="half", draft=True, reason=WHY)
+    )
+    assert engine.rows[worker_engine]["blocked"] is not None
+
+
+def test_a_report_older_than_the_current_turn_is_stale(
+    wired: AppContext, engine: Engine
+) -> None:
+    """Typed into straight from the terminal, or nudged on: the session went
+    back to work after reporting, so the report is stale, not needs-you."""
+    _worker, worker_engine = _start(wired)
+    _held, held_engine = _start(wired)
+    engine.rows[worker_engine].update(
+        activity="idle",
+        turn_started_at="2026-10-18T10:00:00Z",
+        blocked={"reason": "ready: #197", "since": "2026-10-18T09:00:00Z"},
+    )
+    engine.rows[held_engine].update(
+        activity="idle",
+        turn_started_at="2026-10-18T08:00:00Z",
+        blocked={"reason": "waiting on go-ahead", "since": "2026-10-18T09:00:00Z"},
+    )
+
+    result = sweep_sessions(wired, SweepSessionsParams(mode="full", screen_lines=0))
+
+    rows = {row.session.engine_session_id: row for row in result.rows if row.session}
+    assert result.counts["needs_you"] == 1
+    assert rows[held_engine].attention == "blocked"
+    assert not rows[held_engine].blocked_stale
+    assert rows[worker_engine].attention != "blocked"
+    assert rows[worker_engine].blocked_stale
+    assert rows[worker_engine].blocked_since is not None
+
+
+def test_a_done_declaration_after_the_report_makes_it_stale(
+    wired: AppContext, engine: Engine
+) -> None:
+    """AUTOPILOT: DONE after the report, even in the same turn, ages it out."""
+    _worker, worker_engine = _start(wired)
+    engine.rows[worker_engine].update(
+        activity="idle",
+        turn_started_at="2026-10-18T08:00:00Z",
+        done_at="2026-10-18T09:30:00Z",
+        blocked={"reason": "waiting on go-ahead", "since": "2026-10-18T09:00:00Z"},
+    )
+
+    result = sweep_sessions(wired, SweepSessionsParams(mode="full", screen_lines=0))
+
+    assert result.counts["needs_you"] == 0
+    assert result.rows[0].blocked_stale
+    assert result.rows[0].attention != "blocked"
+
+
+def test_a_question_menu_is_needs_you_with_its_options_in_the_digest(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1871: the engine reads an AskUserQuestion menu as kind=question."""
+    _, asking_engine = _start(wired)
+    engine.rows[asking_engine].update(
+        activity="awaiting-approval",
+        approval={
+            "question": "Which approach should the sweep fix take?",
+            "command_excerpt": "☐ Approach\nWhich approach should the sweep fix take?",
+            "kind": "question",
+            "options": [
+                {"number": 1, "label": "Narrow fix", "selected": True},
+                {"number": 2, "label": "Full rewrite"},
+            ],
+            "detected_at": "2026-10-18T00:00:00Z",
+        },
+    )
+
+    result = sweep_sessions(wired, SweepSessionsParams(attention=["needs_you"]))
+
+    assert result.counts["needs_you"] == 1
+    (row,) = result.rows
+    assert row.attention == "approval"
+    assert row.attention_reason.startswith("asking a question")
+    assert row.digest is not None
+    assert row.digest.question == "Which approach should the sweep fix take?"
+    assert row.digest.question_kind == "question"
+    assert row.digest.options == ["Narrow fix", "Full rewrite"]

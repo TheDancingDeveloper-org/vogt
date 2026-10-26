@@ -304,8 +304,8 @@ mod tests {
         ) -> Result<Option<serde_json::Map<String, Value>>, VogtError> {
             Ok(None)
         }
-        fn clone_token(&self) -> Option<String> {
-            None
+        fn clone_token(&self, _: Option<&RepoRef>) -> Result<Option<String>, VogtError> {
+            Ok(None)
         }
         fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
             Ok(None)

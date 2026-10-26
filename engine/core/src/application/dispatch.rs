@@ -35,10 +35,15 @@ pub const PROFILES_KEY: &str = "dispatch.profiles";
 pub const MAX_WORKERS_KEY: &str = "dispatch.max_workers_per_overseer";
 pub const ESCALATE_KEY: &str = "dispatch.escalate_after_failed_reviews";
 pub const REVIEW_BY_OVERSIGHT_KEY: &str = "dispatch.review_by_oversight_only";
+pub const BUDGET_RESTARTS_KEY: &str = "dispatch.budget_restarts_per_item";
 
 pub const DEFAULT_MAX_WORKERS_PER_OVERSEER: i64 = 5;
 pub const DEFAULT_ESCALATE_AFTER_FAILED_REVIEWS: i64 = 2;
 pub const DEFAULT_REVIEW_BY_OVERSIGHT_ONLY: bool = true;
+/// How many times the core restarts an item's worker from its hand-off after
+/// a budget stop (WI-1833). `0` turns the restart off; the hand-off is still
+/// written.
+pub const DEFAULT_BUDGET_RESTARTS_PER_ITEM: i64 = 1;
 
 /// The start defaults one purpose resolves to.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -47,6 +52,11 @@ pub struct Profile {
     pub model: String,
     pub effort: Option<String>,
     pub budget_turns: Option<i64>,
+    /// Turns by the model the start resolves to, over `budget_turns` (WI-1833):
+    /// a small model spends more turns on the same task (rebase and CI loops
+    /// on haiku ran out at 120). Keyed by the model as named on the start, in
+    /// the order the keys were written (Python dict order).
+    pub budget_turns_by_model: Map<String, Value>,
     pub budget_wall_clock_minutes: Option<i64>,
     pub worktree: bool,
     pub repo_map: bool,
@@ -54,6 +64,33 @@ pub struct Profile {
     /// A hint carried into the brief: the session should read and report,
     /// not change the tree.
     pub read_only: bool,
+}
+
+impl Profile {
+    /// The turn budget for a start that runs `model` (Python `turns_for`).
+    pub fn turns_for(&self, model: Option<&str>) -> Option<i64> {
+        let Some(model) = model else {
+            return self.budget_turns;
+        };
+        if let Some(turns) = self.budget_turns_by_model.get(model) {
+            return turns.as_i64();
+        }
+        // A family name matches the model ids that carry it: `haiku` sizes
+        // `claude-haiku-4-5-20251001` too. The longest matching key wins; on
+        // a tie, the first written (Python `max` keeps the first).
+        let parts: Vec<&str> = model.split('-').collect();
+        let mut best: Option<&String> = None;
+        for key in self.budget_turns_by_model.keys() {
+            let matches = parts.contains(&key.as_str()) || model.starts_with(&format!("{key}-"));
+            if matches && best.is_none_or(|kept| key.chars().count() > kept.chars().count()) {
+                best = Some(key);
+            }
+        }
+        match best {
+            Some(key) => self.budget_turns_by_model[key].as_i64(),
+            None => self.budget_turns,
+        }
+    }
 }
 
 /// One profile as a deployment overrides it: every field optional, and no
@@ -69,6 +106,8 @@ pub struct ProfileOverride {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_turns: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_turns_by_model: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_wall_clock_minutes: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,6 +127,7 @@ pub struct DispatchSettings {
     pub max_workers_per_overseer: i64,
     pub escalate_after_failed_reviews: i64,
     pub review_by_oversight_only: bool,
+    pub budget_restarts_per_item: i64,
 }
 
 impl DispatchSettings {
@@ -99,11 +139,12 @@ impl DispatchSettings {
 
 /// The preference keys a write may name. Every other `dispatch.*` key is
 /// refused, so a typo is said rather than stored and silently ignored.
-pub const KEYS: [&str; 4] = [
+pub const KEYS: [&str; 5] = [
     PROFILES_KEY,
     MAX_WORKERS_KEY,
     ESCALATE_KEY,
     REVIEW_BY_OVERSIGHT_KEY,
+    BUDGET_RESTARTS_KEY,
 ];
 
 /// The prefix every dispatch preference key carries (Python `KEY_PREFIX`).
@@ -197,6 +238,25 @@ fn profile_field_problem(over: &ProfileOverride) -> Option<String> {
             return Some(format!("{field}: must be greater than 0"));
         }
     }
+    if let Some(turns) = &over.budget_turns_by_model {
+        // `dict[str, int]`: every value a whole number, in written order.
+        if let Some((model, _)) = turns.iter().find(|(_, number)| number.as_i64().is_none()) {
+            return Some(format!(
+                "budget_turns_by_model.{model}: Input should be a valid integer"
+            ));
+        }
+    }
+    if over
+        .budget_turns_by_model
+        .as_ref()
+        .is_some_and(|turns| turns.values().any(|number| number.as_i64() <= Some(0)))
+    {
+        // Pydantic's wording for the field validator's ValueError.
+        return Some(
+            "budget_turns_by_model: Value error, every turn budget must be greater than 0"
+                .to_string(),
+        );
+    }
     None
 }
 
@@ -208,11 +268,15 @@ fn validate_scalar(key: &str, value: &Value) -> Result<Value, String> {
             MAX_WORKERS_KEY | ESCALATE_KEY => stored
                 .and_then(Value::as_i64)
                 .is_some_and(|number| number > 0),
+            BUDGET_RESTARTS_KEY => stored
+                .and_then(Value::as_i64)
+                .is_some_and(|number| number >= 0),
             _ => stored.and_then(Value::as_bool).is_some(),
         };
     if !valid {
         let shape = match key {
             MAX_WORKERS_KEY | ESCALATE_KEY => "a positive whole number under `value`",
+            BUDGET_RESTARTS_KEY => "a whole number of 0 or more under `value`",
             _ => "a boolean under `value`",
         };
         return Err(format!("invalid {key} value — expected {shape}"));
@@ -227,6 +291,7 @@ fn default_profiles() -> BTreeMap<String, Profile> {
         model: model.to_string(),
         effort: None,
         budget_turns: None,
+        budget_turns_by_model: Map::new(),
         budget_wall_clock_minutes: None,
         worktree: false,
         repo_map: false,
@@ -238,6 +303,9 @@ fn default_profiles() -> BTreeMap<String, Profile> {
         "implement".to_string(),
         Profile {
             budget_turns: Some(120),
+            budget_turns_by_model: [("haiku".to_string(), Value::from(200))]
+                .into_iter()
+                .collect(),
             budget_wall_clock_minutes: Some(90),
             worktree: true,
             repo_map: true,
@@ -303,6 +371,10 @@ pub fn resolve(stored: &BTreeMap<String, Value>) -> DispatchSettings {
             let Ok(over) = serde_json::from_value::<ProfileOverride>(fields.clone()) else {
                 continue;
             };
+            // Python's `ProfileOverride.model_validate` refuses these too.
+            if profile_field_problem(&over).is_some() {
+                continue;
+            }
             merge(profile, over);
         }
     }
@@ -314,6 +386,8 @@ pub fn resolve(stored: &BTreeMap<String, Value>) -> DispatchSettings {
             .unwrap_or(DEFAULT_ESCALATE_AFTER_FAILED_REVIEWS),
         review_by_oversight_only: scalar_bool(stored, REVIEW_BY_OVERSIGHT_KEY)
             .unwrap_or(DEFAULT_REVIEW_BY_OVERSIGHT_ONLY),
+        budget_restarts_per_item: scalar_count(stored, BUDGET_RESTARTS_KEY)
+            .unwrap_or(DEFAULT_BUDGET_RESTARTS_PER_ITEM),
     }
 }
 
@@ -330,6 +404,10 @@ fn merge(profile: &mut Profile, over: ProfileOverride) {
     }
     if let Some(turns) = over.budget_turns {
         profile.budget_turns = Some(turns);
+    }
+    if let Some(turns) = over.budget_turns_by_model {
+        // Replaces the whole table, as the Python dict merge does.
+        profile.budget_turns_by_model = turns;
     }
     if let Some(minutes) = over.budget_wall_clock_minutes {
         profile.budget_wall_clock_minutes = Some(minutes);
@@ -355,6 +433,15 @@ fn scalar_int(stored: &BTreeMap<String, Value>, key: &str) -> Option<i64> {
         .get("value")?
         .as_i64()
         .filter(|value| *value > 0)
+}
+
+/// A count setting is stored as `{"value": n}` with `n` zero or more.
+fn scalar_count(stored: &BTreeMap<String, Value>, key: &str) -> Option<i64> {
+    stored
+        .get(key)?
+        .get("value")?
+        .as_i64()
+        .filter(|value| *value >= 0)
 }
 
 /// A scalar setting is stored as `{"value": b}` with `b` a boolean.
