@@ -46650,6 +46650,819 @@
       "exclusion_reason": null
     },
     {
+      "name": "watch.create",
+      "summary": "Wait on an event instead of polling (WI-2036): arm a watch, then hibernate, and Vogt wakes the session and types the outcome when the trigger fires. Triggers: pr (project, number; on merged/closed), ci (project, sha or pr, and checks: the required check names, each observed and concluded — Vogt does not read branch protection), work_item (reaches a state, default terminal), session (another session ended, or also declared done). The watch is stored, so it survives a restart. Wakes your own session unless `session` names another. session_hibernate's wake_on arms one in the same call.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/watches",
+      "mcp_tool": "watch_create",
+      "cli_path": [
+        "watch",
+        "create"
+      ],
+      "params_schema": {
+        "$defs": {
+          "PrWatchEvent": {
+            "enum": [
+              "merged",
+              "closed"
+            ],
+            "title": "PrWatchEvent",
+            "type": "string"
+          },
+          "WatchKind": {
+            "enum": [
+              "pr",
+              "ci",
+              "work_item",
+              "session"
+            ],
+            "title": "WatchKind",
+            "type": "string"
+          },
+          "WatchTriggerModel": {
+            "additionalProperties": false,
+            "description": "What a watch waits for (WI-2036). `kind` picks the fields that apply:\n\n- `pr`: `project` + `number`; fires when the PR reads one of `on`\n  (default merged or closed).\n- `ci`: `project` + `sha` or `pr`; fires when every run on that revision\n  (a PR's head) — each named required check in `checks` (at least\n  one) — has been observed and concluded.\n- `work_item`: `work_item`; fires when it is in one of `states` (default\n  a terminal state).\n- `session`: `session`; fires when it ends (`until=ended`: exited,\n  hibernated or stopped) or also when it declares itself done\n  (`until=done`).",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/WatchKind"
+              },
+              "project": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Project slug (pr, ci).",
+                "title": "Project"
+              },
+              "number": {
+                "anyOf": [
+                  {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "PR number (pr).",
+                "title": "Number"
+              },
+              "on": {
+                "default": [
+                  "merged",
+                  "closed"
+                ],
+                "description": "PR states that fire the watch (pr).",
+                "items": {
+                  "$ref": "#/$defs/PrWatchEvent"
+                },
+                "title": "On",
+                "type": "array"
+              },
+              "sha": {
+                "anyOf": [
+                  {
+                    "maxLength": 64,
+                    "minLength": 7,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Revision (ci).",
+                "title": "Sha"
+              },
+              "pr": {
+                "anyOf": [
+                  {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "PR whose head revision to watch (ci).",
+                "title": "Pr"
+              },
+              "checks": {
+                "description": "Required check names (ci), at least one.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "title": "Checks",
+                "type": "array"
+              },
+              "work_item": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "WI ref (work_item).",
+                "title": "Work Item"
+              },
+              "states": {
+                "description": "States that fire the watch (work_item); default terminal.",
+                "items": {
+                  "type": "string"
+                },
+                "title": "States",
+                "type": "array"
+              },
+              "session": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Session to watch, ses_… or engine UUID (session).",
+                "title": "Session"
+              },
+              "until": {
+                "$ref": "#/$defs/WatchUntil",
+                "default": "ended",
+                "description": "What counts as finished (session)."
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "title": "WatchTriggerModel",
+            "type": "object"
+          },
+          "WatchUntil": {
+            "enum": [
+              "ended",
+              "done"
+            ],
+            "title": "WatchUntil",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "description": "Arm a watch: wake a session with the outcome when the trigger fires.",
+        "properties": {
+          "trigger": {
+            "$ref": "#/$defs/WatchTriggerModel"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The session to wake (ses_… or engine UUID). Default: your own session, from your token.",
+            "title": "Session"
+          },
+          "note": {
+            "default": "",
+            "description": "Appended to the wake message, e.g. what to do next.",
+            "maxLength": 400,
+            "title": "Note",
+            "type": "string"
+          },
+          "ttl_seconds": {
+            "default": 86400,
+            "description": "How long the watch stays armed: default 24 h, at most 14 d.",
+            "maximum": 1209600,
+            "minimum": 60,
+            "title": "Ttl Seconds",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Why this write is being made (audited).",
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trigger",
+          "reason"
+        ],
+        "title": "CreateWatchParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "$defs": {
+          "WatchKind": {
+            "enum": [
+              "pr",
+              "ci",
+              "work_item",
+              "session"
+            ],
+            "title": "WatchKind",
+            "type": "string"
+          },
+          "WatchStateView": {
+            "enum": [
+              "active",
+              "fired",
+              "failed",
+              "cancelled",
+              "expired"
+            ],
+            "title": "WatchStateView",
+            "type": "string"
+          },
+          "WatchView": {
+            "additionalProperties": false,
+            "description": "A watch as callers read it.",
+            "properties": {
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "owner": {
+                "description": "identity_ref of who armed it.",
+                "title": "Owner",
+                "type": "string"
+              },
+              "session": {
+                "description": "Engine id of the session it wakes.",
+                "title": "Session",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/WatchKind"
+              },
+              "trigger": {
+                "title": "Trigger",
+                "type": "object"
+              },
+              "waits_for": {
+                "description": "The trigger in a few words.",
+                "title": "Waits For",
+                "type": "string"
+              },
+              "note": {
+                "default": "",
+                "title": "Note",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/WatchStateView"
+              },
+              "created_at": {
+                "title": "Created At",
+                "type": "string"
+              },
+              "expires_at": {
+                "title": "Expires At",
+                "type": "string"
+              },
+              "fired_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Fired At"
+              },
+              "outcome": {
+                "anyOf": [
+                  {
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Outcome"
+              },
+              "delivered": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Whether the wake message reached the session.",
+                "title": "Delivered"
+              },
+              "attempts": {
+                "default": 0,
+                "title": "Attempts",
+                "type": "integer"
+              },
+              "last_error": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Last Error"
+              },
+              "reason": {
+                "title": "Reason",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "owner",
+              "session",
+              "kind",
+              "trigger",
+              "waits_for",
+              "state",
+              "created_at",
+              "expires_at",
+              "reason"
+            ],
+            "title": "WatchView",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "watch": {
+            "$ref": "#/$defs/WatchView"
+          }
+        },
+        "required": [
+          "watch"
+        ],
+        "title": "WatchResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "watch.list",
+      "summary": "Watches, newest first, by state (active, fired, failed, cancelled, expired) or by the session they wake, with each one's outcome and whether its wake message was delivered.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/watches",
+      "mcp_tool": "watch_list",
+      "cli_path": [
+        "watch",
+        "list"
+      ],
+      "params_schema": {
+        "$defs": {
+          "WatchStateView": {
+            "enum": [
+              "active",
+              "fired",
+              "failed",
+              "cancelled",
+              "expired"
+            ],
+            "title": "WatchStateView",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WatchStateView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only watches that wake this session.",
+            "title": "Session"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 200,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "ListWatchesParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "$defs": {
+          "WatchKind": {
+            "enum": [
+              "pr",
+              "ci",
+              "work_item",
+              "session"
+            ],
+            "title": "WatchKind",
+            "type": "string"
+          },
+          "WatchStateView": {
+            "enum": [
+              "active",
+              "fired",
+              "failed",
+              "cancelled",
+              "expired"
+            ],
+            "title": "WatchStateView",
+            "type": "string"
+          },
+          "WatchView": {
+            "additionalProperties": false,
+            "description": "A watch as callers read it.",
+            "properties": {
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "owner": {
+                "description": "identity_ref of who armed it.",
+                "title": "Owner",
+                "type": "string"
+              },
+              "session": {
+                "description": "Engine id of the session it wakes.",
+                "title": "Session",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/WatchKind"
+              },
+              "trigger": {
+                "title": "Trigger",
+                "type": "object"
+              },
+              "waits_for": {
+                "description": "The trigger in a few words.",
+                "title": "Waits For",
+                "type": "string"
+              },
+              "note": {
+                "default": "",
+                "title": "Note",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/WatchStateView"
+              },
+              "created_at": {
+                "title": "Created At",
+                "type": "string"
+              },
+              "expires_at": {
+                "title": "Expires At",
+                "type": "string"
+              },
+              "fired_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Fired At"
+              },
+              "outcome": {
+                "anyOf": [
+                  {
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Outcome"
+              },
+              "delivered": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Whether the wake message reached the session.",
+                "title": "Delivered"
+              },
+              "attempts": {
+                "default": 0,
+                "title": "Attempts",
+                "type": "integer"
+              },
+              "last_error": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Last Error"
+              },
+              "reason": {
+                "title": "Reason",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "owner",
+              "session",
+              "kind",
+              "trigger",
+              "waits_for",
+              "state",
+              "created_at",
+              "expires_at",
+              "reason"
+            ],
+            "title": "WatchView",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "watches": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/WatchView"
+            },
+            "title": "Watches",
+            "type": "array"
+          }
+        },
+        "title": "ListWatchesResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "watch.cancel",
+      "summary": "Cancel an active watch. A person, the watch's owner or the session it would wake may.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/watches/cancel",
+      "mcp_tool": "watch_cancel",
+      "cli_path": [
+        "watch",
+        "cancel"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "The watch id (wat_…).",
+            "title": "Id",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why this write is being made (audited).",
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "reason"
+        ],
+        "title": "CancelWatchParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "$defs": {
+          "WatchKind": {
+            "enum": [
+              "pr",
+              "ci",
+              "work_item",
+              "session"
+            ],
+            "title": "WatchKind",
+            "type": "string"
+          },
+          "WatchStateView": {
+            "enum": [
+              "active",
+              "fired",
+              "failed",
+              "cancelled",
+              "expired"
+            ],
+            "title": "WatchStateView",
+            "type": "string"
+          },
+          "WatchView": {
+            "additionalProperties": false,
+            "description": "A watch as callers read it.",
+            "properties": {
+              "id": {
+                "title": "Id",
+                "type": "string"
+              },
+              "owner": {
+                "description": "identity_ref of who armed it.",
+                "title": "Owner",
+                "type": "string"
+              },
+              "session": {
+                "description": "Engine id of the session it wakes.",
+                "title": "Session",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/WatchKind"
+              },
+              "trigger": {
+                "title": "Trigger",
+                "type": "object"
+              },
+              "waits_for": {
+                "description": "The trigger in a few words.",
+                "title": "Waits For",
+                "type": "string"
+              },
+              "note": {
+                "default": "",
+                "title": "Note",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/WatchStateView"
+              },
+              "created_at": {
+                "title": "Created At",
+                "type": "string"
+              },
+              "expires_at": {
+                "title": "Expires At",
+                "type": "string"
+              },
+              "fired_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Fired At"
+              },
+              "outcome": {
+                "anyOf": [
+                  {
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Outcome"
+              },
+              "delivered": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Whether the wake message reached the session.",
+                "title": "Delivered"
+              },
+              "attempts": {
+                "default": 0,
+                "title": "Attempts",
+                "type": "integer"
+              },
+              "last_error": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Last Error"
+              },
+              "reason": {
+                "title": "Reason",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "owner",
+              "session",
+              "kind",
+              "trigger",
+              "waits_for",
+              "state",
+              "created_at",
+              "expires_at",
+              "reason"
+            ],
+            "title": "WatchView",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "watch": {
+            "$ref": "#/$defs/WatchView"
+          }
+        },
+        "required": [
+          "watch"
+        ],
+        "title": "WatchResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
       "name": "decision.ask",
       "summary": "Ask a person to decide (WI-1321): a question, 2-4 options (label, description) with exactly one recommended, and the context they need. It appears in the Inbox; you do not block — carry on with what does not depend on it and read the answer with decision.list. Pending past expires_at (default 24 h, max 7 d) it reads `expired`, with no implied answer. Your session is recorded from your token.",
       "scope": "work.write",

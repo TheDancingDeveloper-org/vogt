@@ -63,6 +63,8 @@ pub static STRIPS: &[(&str, &str)] = &[
     ("session.grant_request", "reason"),
     ("session.grant_decide", "reason"),
     ("session.grant_revoke", "reason"),
+    ("watch.create", "reason"),
+    ("watch.cancel", "reason"),
     ("decision.ask", "reason"),
     ("decision.answer", "reason"),
     ("decision.withdraw", "reason"),

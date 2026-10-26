@@ -238,6 +238,11 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "43a896371451a866a6b6407ca61833a1d17e5a5f592e506024e634a6af73ea66",
             "id": "0025_charters"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df",
+            "id": "0026_watches"
           }
         ],
         "tokens": [
@@ -356,7 +361,7 @@
         "work_items": 0
       },
       "data_dir": "<volatile>",
-      "declared_schema_version": 25,
+      "declared_schema_version": 26,
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "principal": "local:parity",
@@ -369,8 +374,8 @@
   {
     "body": {
       "data_dir": "<volatile>",
-      "declared_schema_expected": 25,
-      "declared_schema_version": 25,
+      "declared_schema_expected": 26,
+      "declared_schema_version": 26,
       "migrations_applied": [],
       "observed_schema_expected": 6,
       "observed_schema_version": 6
@@ -1492,6 +1497,11 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "43a896371451a866a6b6407ca61833a1d17e5a5f592e506024e634a6af73ea66",
             "id": "0025_charters"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df",
+            "id": "0026_watches"
           }
         ],
         "projects": [
@@ -3584,7 +3594,7 @@
   },
   {
     "body": {
-      "declared_schema_version": 25,
+      "declared_schema_version": 26,
       "engine_state": "not configured",
       "import_root": "<root>/instance/repos",
       "instance_id": "ins_0001",
@@ -3613,7 +3623,7 @@
   },
   {
     "body": {
-      "declared_schema_version": 25,
+      "declared_schema_version": 26,
       "engine_state": "not in this backup",
       "import_root_now": "<root>/instance/repos",
       "import_root_then": "<root>/instance/repos",

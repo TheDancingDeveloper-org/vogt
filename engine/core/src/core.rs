@@ -1704,6 +1704,52 @@ fn decision_state_default() -> DecisionState {
     DecisionState::Pending
 }
 
+vocab!(WatchState {
+    Active,
+    Fired,
+    Failed,
+    Cancelled,
+    Expired
+});
+
+/// A session waiting on an event instead of polling (WI-2036). `expired` is
+/// also computed: an `active` row past `expires_at` reads `expired`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Watch {
+    pub id: String,
+    pub owner_actor_id: String,
+    pub target_session: String,
+    pub kind: String,
+    pub trigger: serde_json::Value,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default = "watch_state_default")]
+    pub state: WatchState,
+    pub created_at: Moment,
+    pub expires_at: Moment,
+    pub fired_at: Option<Moment>,
+    pub outcome: Option<serde_json::Value>,
+    #[serde(default)]
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub reason: String,
+}
+
+impl Watch {
+    /// `expired` for an active watch past its expiry, else the stored state.
+    pub fn effective_state(&self, now: Moment) -> String {
+        if self.state == WatchState::Active && self.expires_at <= now {
+            return "expired".to_string();
+        }
+        self.state.to_string()
+    }
+}
+
+fn watch_state_default() -> WatchState {
+    WatchState::Active
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Label {

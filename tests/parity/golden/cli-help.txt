@@ -24,6 +24,7 @@ positional arguments:
                        document.
     mcp                mcp operations
     project            project operations
+    charter            charter operations
     work               work operations
     board              board operations
     backlog            The ranked backlog, globally or for one project, paged
@@ -47,6 +48,7 @@ positional arguments:
     drift              drift operations
     serve              Serve the API, MCP and health endpoints on one port.
     session            session operations
+    watch              watch operations
     decision           decision operations
     agent-cli          agent-cli operations
     agent-activity     agent-activity operations
@@ -378,6 +380,56 @@ options:
   -h, --help         show this help message and exit
   --project PROJECT  A registered project slug.
   --reason REASON
+
+$ vogt charter --help
+[exit 0]
+usage: vogt charter [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    get         Read the charter (standing instructions injected into every
+                session brief) of the workspace, a project or an initiative
+                (scope + ref slug). history=true adds earlier versions.
+    set         Set the charter of the workspace, a project or an initiative:
+                Markdown injected into every session brief started there
+                (workspace, then project, then initiative, then the brief) and
+                into Codex developer_instructions. Writes the next version;
+                empty body clears; optional expected_version.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt charter get --help
+[exit 0]
+usage: vogt charter get [-h] --scope {workspace,project,initiative}
+                        [--ref REF] [--history | --no-history] [--limit LIMIT]
+
+options:
+  -h, --help            show this help message and exit
+  --scope {workspace,project,initiative}
+                        workspace, project or initiative.
+  --ref REF             Project or initiative slug; omitted for workspace.
+  --history, --no-history
+                        Also return earlier versions, newest first.
+  --limit LIMIT
+
+$ vogt charter set --help
+[exit 0]
+usage: vogt charter set [-h] --scope {workspace,project,initiative}
+                        [--ref REF] --body BODY
+                        [--expected-version EXPECTED_VERSION] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --scope {workspace,project,initiative}
+                        workspace, project or initiative.
+  --ref REF             Project or initiative slug; omitted for workspace.
+  --body BODY           The standing instructions, in Markdown. Empty clears
+                        it.
+  --expected-version EXPECTED_VERSION
+                        Write only if the current version is this (0: never
+                        set).
+  --reason REASON       Why this write is being made (audited).
 
 $ vogt work --help
 [exit 0]
@@ -2074,6 +2126,68 @@ options:
   --strip-ansi, --no-strip-ansi
                         Remove terminal escape codes so the text is readable.
                         Pass false for the raw escape stream.
+
+$ vogt watch --help
+[exit 0]
+usage: vogt watch [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    create      Wait on an event instead of polling (WI-2036): arm a watch,
+                then hibernate, and Vogt wakes the session and types the
+                outcome when the trigger fires. Triggers: pr (project, number;
+                on merged/closed), ci (project, sha or pr, and checks: the
+                required check names, each observed and concluded — Vogt does
+                not read branch protection), work_item (reaches a state,
+                default terminal), session (another session ended, or also
+                declared done). The watch is stored, so it survives a restart.
+                Wakes your own session unless `session` names another.
+                session_hibernate's wake_on arms one in the same call.
+    list        Watches, newest first, by state (active, fired, failed,
+                cancelled, expired) or by the session they wake, with each
+                one's outcome and whether its wake message was delivered.
+    cancel      Cancel an active watch. A person, the watch's owner or the
+                session it would wake may.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt watch create --help
+[exit 0]
+usage: vogt watch create [-h] --trigger TRIGGER [--session SESSION]
+                         [--note NOTE] [--ttl-seconds TTL_SECONDS]
+                         --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --trigger TRIGGER
+  --session SESSION     The session to wake (ses_… or engine UUID). Default:
+                        your own session, from your token.
+  --note NOTE           Appended to the wake message, e.g. what to do next.
+  --ttl-seconds TTL_SECONDS
+                        How long the watch stays armed: default 24 h, at most
+                        14 d.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt watch list --help
+[exit 0]
+usage: vogt watch list [-h] [--state STATE] [--session SESSION]
+                       [--limit LIMIT]
+
+options:
+  -h, --help         show this help message and exit
+  --state STATE
+  --session SESSION  Only watches that wake this session.
+  --limit LIMIT
+
+$ vogt watch cancel --help
+[exit 0]
+usage: vogt watch cancel [-h] --id ID --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          The watch id (wat_…).
+  --reason REASON  Why this write is being made (audited).
 
 $ vogt decision --help
 [exit 0]
