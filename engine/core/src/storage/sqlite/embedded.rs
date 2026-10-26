@@ -34,6 +34,7 @@ pub const DECLARED: &[(&str, &str)] = &[
     ("0024_session_started_by", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0024_session_started_by.sql")),
     ("0025_charters", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0025_charters.sql")),
     ("0026_watches", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0026_watches.sql")),
+    ("0027_session_reports", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0027_session_reports.sql")),
 ];
 
 pub const OBSERVED: &[(&str, &str)] = &[

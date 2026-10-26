@@ -1880,6 +1880,32 @@ pub struct CodingSession {
     pub stopped_at: Option<Moment>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionReportFields {
+    pub branch: Option<String>,
+    pub sha: Option<String>,
+    pub pr: Option<String>,
+    #[serde(default)]
+    pub checks: Vec<String>,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionReport {
+    pub id: String,
+    pub actor_id: String,
+    pub engine_session_id: Option<String>,
+    pub work_item_id: Option<String>,
+    pub kind: String,
+    pub summary: String,
+    pub fields: SessionReportFields,
+    pub created_at: Moment,
+}
+
 /// The hash only. A model that could round-trip the secret is one that leaks
 /// it into logs and API responses.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

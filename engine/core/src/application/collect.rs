@@ -903,6 +903,7 @@ impl ErrorName for VogtError {
             Self::BypassRefused(_) => "BypassRefused",
             Self::RoleRefused(_) => "RoleRefused",
             Self::GrantRefused(_) => "GrantRefused",
+            Self::ReportRefused(_) => "ReportRefused",
             Self::PersonRequired(_) => "PersonRequired",
             Self::PolicyRefused(_) => "PolicyRefused",
             Self::EngineOnly(_) => "EngineOnly",

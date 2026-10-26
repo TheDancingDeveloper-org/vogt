@@ -243,6 +243,11 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df",
             "id": "0026_watches"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "cd0c625480c5ffa4d0b07287e8e8ab19e71f72a27ab5f6e56d21d1fee0f8d01a",
+            "id": "0027_session_reports"
           }
         ],
         "tokens": [
@@ -361,7 +366,7 @@
         "work_items": 0
       },
       "data_dir": "<volatile>",
-      "declared_schema_version": 26,
+      "declared_schema_version": 27,
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "principal": "local:parity",
@@ -374,8 +379,8 @@
   {
     "body": {
       "data_dir": "<volatile>",
-      "declared_schema_expected": 26,
-      "declared_schema_version": 26,
+      "declared_schema_expected": 27,
+      "declared_schema_version": 27,
       "migrations_applied": [],
       "observed_schema_expected": 6,
       "observed_schema_version": 6
@@ -1502,6 +1507,11 @@
             "applied_at": "2026-01-02T03:04:05+00:00",
             "checksum": "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df",
             "id": "0026_watches"
+          },
+          {
+            "applied_at": "2026-01-02T03:04:05+00:00",
+            "checksum": "cd0c625480c5ffa4d0b07287e8e8ab19e71f72a27ab5f6e56d21d1fee0f8d01a",
+            "id": "0027_session_reports"
           }
         ],
         "projects": [
@@ -3594,7 +3604,7 @@
   },
   {
     "body": {
-      "declared_schema_version": 26,
+      "declared_schema_version": 27,
       "engine_state": "not configured",
       "import_root": "<root>/instance/repos",
       "instance_id": "ins_0001",
@@ -3623,7 +3633,7 @@
   },
   {
     "body": {
-      "declared_schema_version": 26,
+      "declared_schema_version": 27,
       "engine_state": "not in this backup",
       "import_root_now": "<root>/instance/repos",
       "import_root_then": "<root>/instance/repos",

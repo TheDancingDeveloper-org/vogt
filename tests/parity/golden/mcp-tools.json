@@ -5216,6 +5216,138 @@
       }
     },
     {
+      "name": "session_report",
+      "description": "Post this session's short typed report \u2014 kind progress, result, question or blocker \u2014 with summary, branch/sha/pr, checks run, blockers and next step. Shown as the latest report on session_list/session_sweep/session_digest, raised in the Inbox and left as a note on the work item (the session's bound item unless `work_item` names one). Post a `result` when the deliverable is done. Omit `id` from inside a session Vogt started.",
+      "inputSchema": {
+        "$defs": {
+          "SessionReportParamsKind": {
+            "enum": [
+              "progress",
+              "result",
+              "question",
+              "blocker"
+            ],
+            "title": "SessionReportParamsKind",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Id"
+          },
+          "kind": {
+            "$ref": "#/$defs/SessionReportParamsKind"
+          },
+          "summary": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          },
+          "work_item": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Work Item"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Branch"
+          },
+          "sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sha"
+          },
+          "pr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pr"
+          },
+          "checks": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Checks",
+            "type": "array"
+          },
+          "blockers": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Blockers",
+            "type": "array"
+          },
+          "next_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Next Step"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "summary",
+          "reason"
+        ],
+        "title": "SessionReportParams",
+        "type": "object"
+      }
+    },
+    {
       "name": "session_report_blocked",
       "description": "Report that this session's agent is blocked on a person: what it needs (`blocker`) and the concrete `items` to do. Shown on session_list/session_screen, raised in the Inbox and pushed; drivers stop re-prompting. Omit `id` from inside a session Vogt started. Clear with session_report_unblocked.",
       "inputSchema": {

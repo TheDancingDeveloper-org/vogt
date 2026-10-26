@@ -3,7 +3,7 @@
   "info": {
     "title": "Vogt",
     "version": "0.7.20",
-    "description": "Every capability is available here, on the CLI, and over MCP — all three generated from one operation registry."
+    "description": "Every capability is available here, on the CLI, and over MCP \u2014 all three generated from one operation registry."
   },
   "paths": {
     "/api/status": {
@@ -151,7 +151,7 @@
             "required": false,
             "schema": {
               "default": "http",
-              "description": "`http` for a client that speaks streamable HTTP MCP — the ordinary case, and the one that needs nothing installed. `bridge` for a client that can only spawn a local process.",
+              "description": "`http` for a client that speaks streamable HTTP MCP \u2014 the ordinary case, and the one that needs nothing installed. `bridge` for a client that can only spawn a local process.",
               "enum": [
                 "http",
                 "bridge"
@@ -159,7 +159,7 @@
               "title": "Client",
               "type": "string"
             },
-            "description": "`http` for a client that speaks streamable HTTP MCP — the ordinary case, and the one that needs nothing installed. `bridge` for a client that can only spawn a local process."
+            "description": "`http` for a client that speaks streamable HTTP MCP \u2014 the ordinary case, and the one that needs nothing installed. `bridge` for a client that can only spawn a local process."
           },
           {
             "name": "format",
@@ -909,7 +909,7 @@
             "required": false,
             "schema": {
               "default": "summary",
-              "description": "`summary` (default) returns compact rows — ref, title, kind, state, priority, project — so a long page fits one tool result; `full` returns every field, bodies included.",
+              "description": "`summary` (default) returns compact rows \u2014 ref, title, kind, state, priority, project \u2014 so a long page fits one tool result; `full` returns every field, bodies included.",
               "enum": [
                 "summary",
                 "full"
@@ -917,7 +917,7 @@
               "title": "Mode",
               "type": "string"
             },
-            "description": "`summary` (default) returns compact rows — ref, title, kind, state, priority, project — so a long page fits one tool result; `full` returns every field, bodies included."
+            "description": "`summary` (default) returns compact rows \u2014 ref, title, kind, state, priority, project \u2014 so a long page fits one tool result; `full` returns every field, bodies included."
           },
           {
             "name": "limit",
@@ -1527,11 +1527,11 @@
             "required": false,
             "schema": {
               "default": true,
-              "description": "Whether open pull requests rank in the backlog. On by default: a synced PR is worklike, and now that closure is observed a merged one self-heals out rather than lingering. Set false to see issues and markers only — a view choice, not a data one; the PRs stay queryable through `observations list`.",
+              "description": "Whether open pull requests rank in the backlog. On by default: a synced PR is worklike, and now that closure is observed a merged one self-heals out rather than lingering. Set false to see issues and markers only \u2014 a view choice, not a data one; the PRs stay queryable through `observations list`.",
               "title": "Include Prs",
               "type": "boolean"
             },
-            "description": "Whether open pull requests rank in the backlog. On by default: a synced PR is worklike, and now that closure is observed a merged one self-heals out rather than lingering. Set false to see issues and markers only — a view choice, not a data one; the PRs stay queryable through `observations list`."
+            "description": "Whether open pull requests rank in the backlog. On by default: a synced PR is worklike, and now that closure is observed a merged one self-heals out rather than lingering. Set false to see issues and markers only \u2014 a view choice, not a data one; the PRs stay queryable through `observations list`."
           },
           {
             "name": "mode",
@@ -1567,12 +1567,12 @@
             "required": false,
             "schema": {
               "default": 0,
-              "description": "Ranked rows to skip. `total_considered` is the full count, so a caller knows whether another page exists. Ranking is recomputed per request and staleness grows with the clock, so two pages fetched far enough apart can repeat or skip an item near a score boundary — the same caveat `audit.list` carries, for the same reason.",
+              "description": "Ranked rows to skip. `total_considered` is the full count, so a caller knows whether another page exists. Ranking is recomputed per request and staleness grows with the clock, so two pages fetched far enough apart can repeat or skip an item near a score boundary \u2014 the same caveat `audit.list` carries, for the same reason.",
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
             },
-            "description": "Ranked rows to skip. `total_considered` is the full count, so a caller knows whether another page exists. Ranking is recomputed per request and staleness grows with the clock, so two pages fetched far enough apart can repeat or skip an item near a score boundary — the same caveat `audit.list` carries, for the same reason."
+            "description": "Ranked rows to skip. `total_considered` is the full count, so a caller knows whether another page exists. Ranking is recomputed per request and staleness grows with the clock, so two pages fetched far enough apart can repeat or skip an item near a score boundary \u2014 the same caveat `audit.list` carries, for the same reason."
           }
         ],
         "responses": {
@@ -1697,12 +1697,12 @@
             "required": false,
             "schema": {
               "default": 0,
-              "description": "Ranked rows to skip. `total_considered` is the full count, so a caller knows whether another page exists. Ranking is recomputed per request and staleness grows with the clock, so two pages fetched far enough apart can repeat or skip an item near a score boundary — the same caveat `audit.list` carries, for the same reason.",
+              "description": "Ranked rows to skip. `total_considered` is the full count, so a caller knows whether another page exists. Ranking is recomputed per request and staleness grows with the clock, so two pages fetched far enough apart can repeat or skip an item near a score boundary \u2014 the same caveat `audit.list` carries, for the same reason.",
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
             },
-            "description": "Ranked rows to skip. `total_considered` is the full count, so a caller knows whether another page exists. Ranking is recomputed per request and staleness grows with the clock, so two pages fetched far enough apart can repeat or skip an item near a score boundary — the same caveat `audit.list` carries, for the same reason."
+            "description": "Ranked rows to skip. `total_considered` is the full count, so a caller knows whether another page exists. Ranking is recomputed per request and staleness grows with the clock, so two pages fetched far enough apart can repeat or skip an item near a score boundary \u2014 the same caveat `audit.list` carries, for the same reason."
           }
         ],
         "responses": {
@@ -3076,8 +3076,8 @@
     "/api/sessions": {
       "post": {
         "operationId": "session_start",
-        "summary": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. Returns both ids (ses_… and engine_session_id); then poll session_screen until `ready`.",
-        "description": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. Returns both ids (ses_… and engine_session_id); then poll session_screen until `ready`.",
+        "summary": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. Returns both ids (ses_\u2026 and engine_session_id); then poll session_screen until `ready`.",
+        "description": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. Returns both ids (ses_\u2026 and engine_session_id); then poll session_screen until `ready`.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3113,8 +3113,8 @@
       },
       "get": {
         "operationId": "session_list",
-        "summary": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…). `fields` accepts a list or a comma-separated string.",
-        "description": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…). `fields` accepts a list or a comma-separated string.",
+        "summary": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_\u2026) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_\u2026). `fields` accepts a list or a comma-separated string.",
+        "description": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_\u2026) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_\u2026). `fields` accepts a list or a comma-separated string.",
         "parameters": [
           {
             "name": "project",
@@ -3224,10 +3224,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match.",
+              "description": "Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_\u2026` id. Unlinked engine sessions (no starter) never match.",
               "title": "Started By Session"
             },
-            "description": "Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match."
+            "description": "Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_\u2026` id. Unlinked engine sessions (no starter) never match."
           },
           {
             "name": "states",
@@ -3327,8 +3327,8 @@
     "/api/sessions/stop": {
       "post": {
         "operationId": "session_stop",
-        "summary": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
-        "description": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
+        "summary": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_\u2026 id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
+        "description": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_\u2026 id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3366,8 +3366,8 @@
     "/api/sessions/input": {
       "post": {
         "operationId": "session_input",
-        "summary": "Type into a session: text, then named keys (enter, esc, tab, arrows, ctrl-c, ctrl-d, backspace), then Enter. Enter is pressed by default; pass draft=true (or submit=false) to type without sending. Takes either id: ses_… or the engine UUID. Read session_screen first and never send a blind Enter: at a menu it accepts whatever is highlighted (dismiss with esc). While a permission prompt shows, only a person's input is typed: an agent's is refused (403 person_required). On a hibernated session it wakes first, and that wake is never forced: a session handed to a successor, or whose work item is already live in the same directory, is refused (409). Audited (byte count and keys, never the text).",
-        "description": "Type into a session: text, then named keys (enter, esc, tab, arrows, ctrl-c, ctrl-d, backspace), then Enter. Enter is pressed by default; pass draft=true (or submit=false) to type without sending. Takes either id: ses_… or the engine UUID. Read session_screen first and never send a blind Enter: at a menu it accepts whatever is highlighted (dismiss with esc). While a permission prompt shows, only a person's input is typed: an agent's is refused (403 person_required). On a hibernated session it wakes first, and that wake is never forced: a session handed to a successor, or whose work item is already live in the same directory, is refused (409). Audited (byte count and keys, never the text).",
+        "summary": "Type into a session: text, then named keys (enter, esc, tab, arrows, ctrl-c, ctrl-d, backspace), then Enter. Enter is pressed by default; pass draft=true (or submit=false) to type without sending. Takes either id: ses_\u2026 or the engine UUID. Read session_screen first and never send a blind Enter: at a menu it accepts whatever is highlighted (dismiss with esc). While a permission prompt shows, only a person's input is typed: an agent's is refused (403 person_required). On a hibernated session it wakes first, and that wake is never forced: a session handed to a successor, or whose work item is already live in the same directory, is refused (409). Audited (byte count and keys, never the text).",
+        "description": "Type into a session: text, then named keys (enter, esc, tab, arrows, ctrl-c, ctrl-d, backspace), then Enter. Enter is pressed by default; pass draft=true (or submit=false) to type without sending. Takes either id: ses_\u2026 or the engine UUID. Read session_screen first and never send a blind Enter: at a menu it accepts whatever is highlighted (dismiss with esc). While a permission prompt shows, only a person's input is typed: an agent's is refused (403 person_required). On a hibernated session it wakes first, and that wake is never forced: a session handed to a successor, or whose work item is already live in the same directory, is refused (409). Audited (byte count and keys, never the text).",
         "requestBody": {
           "required": true,
           "content": {
@@ -3569,8 +3569,8 @@
     "/api/sessions/hibernate": {
       "post": {
         "operationId": "session_hibernate",
-        "summary": "Hibernate a session: stop its processes to free their memory, keep it listed (activity `hibernated`, with its last screen), and revoke its token. session_wake (or session_input, which wakes it) resumes the same agent conversation under the same id. Only for a session whose conversation id the engine knows (Claude Code started by Vogt, or any resume); a shell needs allow_shell and wakes fresh. superseded_by names the session taking over the work (ses_… or the engine UUID); a later wake is then refused unless forced. Takes either id.",
-        "description": "Hibernate a session: stop its processes to free their memory, keep it listed (activity `hibernated`, with its last screen), and revoke its token. session_wake (or session_input, which wakes it) resumes the same agent conversation under the same id. Only for a session whose conversation id the engine knows (Claude Code started by Vogt, or any resume); a shell needs allow_shell and wakes fresh. superseded_by names the session taking over the work (ses_… or the engine UUID); a later wake is then refused unless forced. Takes either id.",
+        "summary": "Hibernate a session: stop its processes to free their memory, keep it listed (activity `hibernated`, with its last screen), and revoke its token. session_wake (or session_input, which wakes it) resumes the same agent conversation under the same id. Only for a session whose conversation id the engine knows (Claude Code started by Vogt, or any resume); a shell needs allow_shell and wakes fresh. superseded_by names the session taking over the work (ses_\u2026 or the engine UUID); a later wake is then refused unless forced. Takes either id.",
+        "description": "Hibernate a session: stop its processes to free their memory, keep it listed (activity `hibernated`, with its last screen), and revoke its token. session_wake (or session_input, which wakes it) resumes the same agent conversation under the same id. Only for a session whose conversation id the engine knows (Claude Code started by Vogt, or any resume); a shell needs allow_shell and wakes fresh. superseded_by names the session taking over the work (ses_\u2026 or the engine UUID); a later wake is then refused unless forced. Takes either id.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3686,8 +3686,8 @@
     "/api/sessions/commit": {
       "post": {
         "operationId": "session_commit_for",
-        "summary": "Commit a worker session's staged changes on its behalf. The worker must be idle, hibernated or blocked — never mid-turn — and the commit is refused when the staged diff carries a conflict marker, a secret or an intent-to-add entry, or when the message or branch matches the project's forbidden text. Committed under the repo's own git identity. Returns a digest line and the SHA; the full diff only when asked. Takes either id.",
-        "description": "Commit a worker session's staged changes on its behalf. The worker must be idle, hibernated or blocked — never mid-turn — and the commit is refused when the staged diff carries a conflict marker, a secret or an intent-to-add entry, or when the message or branch matches the project's forbidden text. Committed under the repo's own git identity. Returns a digest line and the SHA; the full diff only when asked. Takes either id.",
+        "summary": "Commit a worker session's staged changes on its behalf. The worker must be idle, hibernated or blocked \u2014 never mid-turn \u2014 and the commit is refused when the staged diff carries a conflict marker, a secret or an intent-to-add entry, or when the message or branch matches the project's forbidden text. Committed under the repo's own git identity. Returns a digest line and the SHA; the full diff only when asked. Takes either id.",
+        "description": "Commit a worker session's staged changes on its behalf. The worker must be idle, hibernated or blocked \u2014 never mid-turn \u2014 and the commit is refused when the staged diff carries a conflict marker, a secret or an intent-to-add entry, or when the message or branch matches the project's forbidden text. Committed under the repo's own git identity. Returns a digest line and the SHA; the full diff only when asked. Takes either id.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3764,8 +3764,8 @@
     "/api/sessions/remove": {
       "post": {
         "operationId": "session_remove",
-        "summary": "Remove a session: kill it if it still runs and have the engine forget it — its record, kept screen and brief — as the GUI's Remove does. session_stop keeps it listed with its output readable; this drops it. A linked session's record is closed and its token revoked as a stop would. Takes either id.",
-        "description": "Remove a session: kill it if it still runs and have the engine forget it — its record, kept screen and brief — as the GUI's Remove does. session_stop keeps it listed with its output readable; this drops it. A linked session's record is closed and its token revoked as a stop would. Takes either id.",
+        "summary": "Remove a session: kill it if it still runs and have the engine forget it \u2014 its record, kept screen and brief \u2014 as the GUI's Remove does. session_stop keeps it listed with its output readable; this drops it. A linked session's record is closed and its token revoked as a stop would. Takes either id.",
+        "description": "Remove a session: kill it if it still runs and have the engine forget it \u2014 its record, kept screen and brief \u2014 as the GUI's Remove does. session_stop keeps it listed with its output readable; this drops it. A linked session's record is closed and its token revoked as a stop would. Takes either id.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3842,8 +3842,8 @@
     "/api/sessions/work-item": {
       "post": {
         "operationId": "session_bind_work",
-        "summary": "Declare which work item a session serves (work_item=WI-n), or that it serves none (work_item=null) — one current item per session, re-declarable, audited. Any principal with work.write may bind: a person, the session itself (omit id inside a session Vogt started), or its overseer. Never moves the terminal or the item's state; the item then shows the session as being worked by it. Takes either id.",
-        "description": "Declare which work item a session serves (work_item=WI-n), or that it serves none (work_item=null) — one current item per session, re-declarable, audited. Any principal with work.write may bind: a person, the session itself (omit id inside a session Vogt started), or its overseer. Never moves the terminal or the item's state; the item then shows the session as being worked by it. Takes either id.",
+        "summary": "Declare which work item a session serves (work_item=WI-n), or that it serves none (work_item=null) \u2014 one current item per session, re-declarable, audited. Any principal with work.write may bind: a person, the session itself (omit id inside a session Vogt started), or its overseer. Never moves the terminal or the item's state; the item then shows the session as being worked by it. Takes either id.",
+        "description": "Declare which work item a session serves (work_item=WI-n), or that it serves none (work_item=null) \u2014 one current item per session, re-declarable, audited. Any principal with work.write may bind: a person, the session itself (omit id inside a session Vogt started), or its overseer. Never moves the terminal or the item's state; the item then shows the session as being worked by it. Takes either id.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3881,8 +3881,8 @@
     "/api/sessions/grants": {
       "post": {
         "operationId": "session_grant_request",
-        "summary": "Ask a person to approve one scoped item for one live session (WI-973): a named credential (secret_name + project_id) the target then fetches with `vogt-agent-auth fetch VAR`. It appears in the Inbox; nothing is granted until a person approves. Ask for your own session, or — as an oversight session — for a session you drive. uses=once (default) or ttl; ttl_seconds 60..86400.",
-        "description": "Ask a person to approve one scoped item for one live session (WI-973): a named credential (secret_name + project_id) the target then fetches with `vogt-agent-auth fetch VAR`. It appears in the Inbox; nothing is granted until a person approves. Ask for your own session, or — as an oversight session — for a session you drive. uses=once (default) or ttl; ttl_seconds 60..86400.",
+        "summary": "Ask a person to approve one scoped item for one live session (WI-973): a named credential (secret_name + project_id) the target then fetches with `vogt-agent-auth fetch VAR`. It appears in the Inbox; nothing is granted until a person approves. Ask for your own session, or \u2014 as an oversight session \u2014 for a session you drive. uses=once (default) or ttl; ttl_seconds 60..86400.",
+        "description": "Ask a person to approve one scoped item for one live session (WI-973): a named credential (secret_name + project_id) the target then fetches with `vogt-agent-auth fetch VAR`. It appears in the Inbox; nothing is granted until a person approves. Ask for your own session, or \u2014 as an oversight session \u2014 for a session you drive. uses=once (default) or ttl; ttl_seconds 60..86400.",
         "requestBody": {
           "required": true,
           "content": {
@@ -4080,8 +4080,8 @@
     "/api/watches": {
       "post": {
         "operationId": "watch_create",
-        "summary": "Wait on an event instead of polling (WI-2036): arm a watch, then hibernate, and Vogt wakes the session and types the outcome when the trigger fires. Triggers: pr (project, number; on merged/closed), ci (project, sha or pr, and checks: the required check names, each observed and concluded — Vogt does not read branch protection), work_item (reaches a state, default terminal), session (another session ended, or also declared done). The watch is stored, so it survives a restart. Wakes your own session unless `session` names another. session_hibernate's wake_on arms one in the same call.",
-        "description": "Wait on an event instead of polling (WI-2036): arm a watch, then hibernate, and Vogt wakes the session and types the outcome when the trigger fires. Triggers: pr (project, number; on merged/closed), ci (project, sha or pr, and checks: the required check names, each observed and concluded — Vogt does not read branch protection), work_item (reaches a state, default terminal), session (another session ended, or also declared done). The watch is stored, so it survives a restart. Wakes your own session unless `session` names another. session_hibernate's wake_on arms one in the same call.",
+        "summary": "Wait on an event instead of polling (WI-2036): arm a watch, then hibernate, and Vogt wakes the session and types the outcome when the trigger fires. Triggers: pr (project, number; on merged/closed), ci (project, sha or pr, and checks: the required check names, each observed and concluded \u2014 Vogt does not read branch protection), work_item (reaches a state, default terminal), session (another session ended, or also declared done). The watch is stored, so it survives a restart. Wakes your own session unless `session` names another. session_hibernate's wake_on arms one in the same call.",
+        "description": "Wait on an event instead of polling (WI-2036): arm a watch, then hibernate, and Vogt wakes the session and types the outcome when the trigger fires. Triggers: pr (project, number; on merged/closed), ci (project, sha or pr, and checks: the required check names, each observed and concluded \u2014 Vogt does not read branch protection), work_item (reaches a state, default terminal), session (another session ended, or also declared done). The watch is stored, so it survives a restart. Wakes your own session unless `session` names another. session_hibernate's wake_on arms one in the same call.",
         "requestBody": {
           "required": true,
           "content": {
@@ -4232,8 +4232,8 @@
     "/api/decisions": {
       "post": {
         "operationId": "decision_ask",
-        "summary": "Ask a person to decide (WI-1321): a question, 2-4 options (label, description) with exactly one recommended, and the context they need. It appears in the Inbox; you do not block — carry on with what does not depend on it and read the answer with decision.list. Pending past expires_at (default 24 h, max 7 d) it reads `expired`, with no implied answer. Your session is recorded from your token.",
-        "description": "Ask a person to decide (WI-1321): a question, 2-4 options (label, description) with exactly one recommended, and the context they need. It appears in the Inbox; you do not block — carry on with what does not depend on it and read the answer with decision.list. Pending past expires_at (default 24 h, max 7 d) it reads `expired`, with no implied answer. Your session is recorded from your token.",
+        "summary": "Ask a person to decide (WI-1321): a question, 2-4 options (label, description) with exactly one recommended, and the context they need. It appears in the Inbox; you do not block \u2014 carry on with what does not depend on it and read the answer with decision.list. Pending past expires_at (default 24 h, max 7 d) it reads `expired`, with no implied answer. Your session is recorded from your token.",
+        "description": "Ask a person to decide (WI-1321): a question, 2-4 options (label, description) with exactly one recommended, and the context they need. It appears in the Inbox; you do not block \u2014 carry on with what does not depend on it and read the answer with decision.list. Pending past expires_at (default 24 h, max 7 d) it reads `expired`, with no implied answer. Your session is recorded from your token.",
         "requestBody": {
           "required": true,
           "content": {
@@ -4325,10 +4325,10 @@
                   "type": "null"
                 }
               ],
-              "description": "identity_ref of the asker, e.g. agent:session:…",
+              "description": "identity_ref of the asker, e.g. agent:session:\u2026",
               "title": "Asker"
             },
-            "description": "identity_ref of the asker, e.g. agent:session:…"
+            "description": "identity_ref of the asker, e.g. agent:session:\u2026"
           },
           {
             "name": "limit",
@@ -4448,8 +4448,8 @@
     "/api/sessions/answer": {
       "post": {
         "operationId": "session_answer",
-        "summary": "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's — an agent is refused (403 person_required) and should leave it for the Inbox. One exception: an oversight session may choose \"Yes\" on a one-line Bash command in an allow-listed class (read-only git/gh, fetch, checkout of a ref, rebase and --force-with-lease push of the worker's own branch, cargo/pnpm/uv build and test) run in the worker's own git worktree; the engine decides and audits it. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
-        "description": "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's — an agent is refused (403 person_required) and should leave it for the Inbox. One exception: an oversight session may choose \"Yes\" on a one-line Bash command in an allow-listed class (read-only git/gh, fetch, checkout of a ref, rebase and --force-with-lease push of the worker's own branch, cargo/pnpm/uv build and test) run in the worker's own git worktree; the engine decides and audits it. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
+        "summary": "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's \u2014 an agent is refused (403 person_required) and should leave it for the Inbox. One exception: an oversight session may choose \"Yes\" on a one-line Bash command in an allow-listed class (read-only git/gh, fetch, checkout of a ref, rebase and --force-with-lease push of the worker's own branch, cargo/pnpm/uv build and test) run in the worker's own git worktree; the engine decides and audits it. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
+        "description": "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's \u2014 an agent is refused (403 person_required) and should leave it for the Inbox. One exception: an oversight session may choose \"Yes\" on a one-line Bash command in an allow-listed class (read-only git/gh, fetch, checkout of a ref, rebase and --force-with-lease push of the worker's own branch, cargo/pnpm/uv build and test) run in the worker's own git worktree; the engine decides and audits it. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
         "requestBody": {
           "required": true,
           "content": {
@@ -4526,19 +4526,19 @@
     "/api/sessions/screen": {
       "get": {
         "operationId": "session_screen",
-        "summary": "Read what a session's terminal shows right now: visible lines, cursor, title, activity and readiness. `ready` true means the program is waiting for input — wait for it before typing. Takes either id: ses_… or the engine UUID. Needs an engine with the screen route.",
-        "description": "Read what a session's terminal shows right now: visible lines, cursor, title, activity and readiness. `ready` true means the program is waiting for input — wait for it before typing. Takes either id: ses_… or the engine UUID. Needs an engine with the screen route.",
+        "summary": "Read what a session's terminal shows right now: visible lines, cursor, title, activity and readiness. `ready` true means the program is waiting for input \u2014 wait for it before typing. Takes either id: ses_\u2026 or the engine UUID. Needs an engine with the screen route.",
+        "description": "Read what a session's terminal shows right now: visible lines, cursor, title, activity and readiness. `ready` true means the program is waiting for input \u2014 wait for it before typing. Takes either id: ses_\u2026 or the engine UUID. Needs an engine with the screen route.",
         "parameters": [
           {
             "name": "id",
             "in": "query",
             "required": true,
             "schema": {
-              "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+              "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
               "title": "Id",
               "type": "string"
             },
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
           },
           {
             "name": "scrollback_lines",
@@ -4582,19 +4582,19 @@
     "/api/sessions/last-reply": {
       "get": {
         "operationId": "session_last_reply",
-        "summary": "Read the last N replies of a session's agent (Claude Code or Codex) from its own transcript — whole, current and redacted, unlike the screen. Says how the conversation was found (`basis`). Takes either id.",
-        "description": "Read the last N replies of a session's agent (Claude Code or Codex) from its own transcript — whole, current and redacted, unlike the screen. Says how the conversation was found (`basis`). Takes either id.",
+        "summary": "Read the last N replies of a session's agent (Claude Code or Codex) from its own transcript \u2014 whole, current and redacted, unlike the screen. Says how the conversation was found (`basis`). Takes either id.",
+        "description": "Read the last N replies of a session's agent (Claude Code or Codex) from its own transcript \u2014 whole, current and redacted, unlike the screen. Says how the conversation was found (`basis`). Takes either id.",
         "parameters": [
           {
             "name": "id",
             "in": "query",
             "required": true,
             "schema": {
-              "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+              "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
               "title": "Id",
               "type": "string"
             },
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
           },
           {
             "name": "n",
@@ -4646,11 +4646,11 @@
             "in": "query",
             "required": true,
             "schema": {
-              "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+              "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
               "title": "Id",
               "type": "string"
             },
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
           }
         ],
         "responses": {
@@ -4680,19 +4680,19 @@
     "/api/sessions/digest": {
       "get": {
         "operationId": "session_digest",
-        "summary": "Read one session's digest from the engine row: activity, the blocked report, a last-reply excerpt the row already carries (at most 120 characters), and the economics the engine already computed (turns, context, compactions). Numbers are null when the row has none — this does not meter a transcript. Pass context_window to get context_pct. Takes either id.",
-        "description": "Read one session's digest from the engine row: activity, the blocked report, a last-reply excerpt the row already carries (at most 120 characters), and the economics the engine already computed (turns, context, compactions). Numbers are null when the row has none — this does not meter a transcript. Pass context_window to get context_pct. Takes either id.",
+        "summary": "Read one session's digest from the engine row: activity, the blocked report, a last-reply excerpt the row already carries (at most 120 characters), and the economics the engine already computed (turns, context, compactions). Numbers are null when the row has none \u2014 this does not meter a transcript. Pass context_window to get context_pct. Takes either id.",
+        "description": "Read one session's digest from the engine row: activity, the blocked report, a last-reply excerpt the row already carries (at most 120 characters), and the economics the engine already computed (turns, context, compactions). Numbers are null when the row has none \u2014 this does not meter a transcript. Pass context_window to get context_pct. Takes either id.",
         "parameters": [
           {
             "name": "id",
             "in": "query",
             "required": true,
             "schema": {
-              "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+              "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
               "title": "Id",
               "type": "string"
             },
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
           },
           {
             "name": "context_window",
@@ -4741,19 +4741,19 @@
     "/api/sessions/wait": {
       "get": {
         "operationId": "session_wait",
-        "summary": "Wait for a session instead of polling it: blocks (up to timeout_s, max 600) until it is ready for input — or needs a person (awaiting-approval, blocked) or exits — or, with until=exited / any_change, until it exits or changes at all. Returns why (`outcome`, `matched`) and the screen then. Takes either id.",
-        "description": "Wait for a session instead of polling it: blocks (up to timeout_s, max 600) until it is ready for input — or needs a person (awaiting-approval, blocked) or exits — or, with until=exited / any_change, until it exits or changes at all. Returns why (`outcome`, `matched`) and the screen then. Takes either id.",
+        "summary": "Wait for a session instead of polling it: blocks (up to timeout_s, max 600) until it is ready for input \u2014 or needs a person (awaiting-approval, blocked) or exits \u2014 or, with until=exited / any_change, until it exits or changes at all. Returns why (`outcome`, `matched`) and the screen then. Takes either id.",
+        "description": "Wait for a session instead of polling it: blocks (up to timeout_s, max 600) until it is ready for input \u2014 or needs a person (awaiting-approval, blocked) or exits \u2014 or, with until=exited / any_change, until it exits or changes at all. Returns why (`outcome`, `matched`) and the screen then. Takes either id.",
         "parameters": [
           {
             "name": "id",
             "in": "query",
             "required": true,
             "schema": {
-              "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+              "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
               "title": "Id",
               "type": "string"
             },
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
           },
           {
             "name": "until",
@@ -4761,7 +4761,7 @@
             "required": false,
             "schema": {
               "default": "ready",
-              "description": "`ready` (default): until the program is at its prompt — or needs a person (a permission dialog, a blocked report) or has exited, which also end the wait; `exited`: until the process ends; `any_change`: until its activity, blocked state or liveness changes at all.",
+              "description": "`ready` (default): until the program is at its prompt \u2014 or needs a person (a permission dialog, a blocked report) or has exited, which also end the wait; `exited`: until the process ends; `any_change`: until its activity, blocked state or liveness changes at all.",
               "enum": [
                 "ready",
                 "exited",
@@ -4770,7 +4770,7 @@
               "title": "Until",
               "type": "string"
             },
-            "description": "`ready` (default): until the program is at its prompt — or needs a person (a permission dialog, a blocked report) or has exited, which also end the wait; `exited`: until the process ends; `any_change`: until its activity, blocked state or liveness changes at all."
+            "description": "`ready` (default): until the program is at its prompt \u2014 or needs a person (a permission dialog, a blocked report) or has exited, which also end the wait; `exited`: until the process ends; `any_change`: until its activity, blocked state or liveness changes at all."
           },
           {
             "name": "timeout_s",
@@ -4848,14 +4848,14 @@
             "required": false,
             "schema": {
               "default": [],
-              "description": "Sessions to read, each `ses_…` or an engine UUID. Empty reads every session. There is no supervised-by-me filter yet.",
+              "description": "Sessions to read, each `ses_\u2026` or an engine UUID. Empty reads every session. There is no supervised-by-me filter yet.",
               "items": {
                 "type": "string"
               },
               "title": "Ids",
               "type": "array"
             },
-            "description": "Sessions to read, each `ses_…` or an engine UUID. Empty reads every session. There is no supervised-by-me filter yet."
+            "description": "Sessions to read, each `ses_\u2026` or an engine UUID. Empty reads every session. There is no supervised-by-me filter yet."
           },
           {
             "name": "limit",
@@ -4908,14 +4908,14 @@
             "required": false,
             "schema": {
               "default": [],
-              "description": "Sessions to wait on, each `ses_…` or an engine UUID. Empty waits on every session. There is no supervised-by-me filter yet.",
+              "description": "Sessions to wait on, each `ses_\u2026` or an engine UUID. Empty waits on every session. There is no supervised-by-me filter yet.",
               "items": {
                 "type": "string"
               },
               "title": "Ids",
               "type": "array"
             },
-            "description": "Sessions to wait on, each `ses_…` or an engine UUID. Empty waits on every session. There is no supervised-by-me filter yet."
+            "description": "Sessions to wait on, each `ses_\u2026` or an engine UUID. Empty waits on every session. There is no supervised-by-me filter yet."
           },
           {
             "name": "until",
@@ -4975,6 +4975,45 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SessionWaitAnyResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/report": {
+      "post": {
+        "operationId": "session_report",
+        "summary": "Post this session's short typed report \u2014 kind progress, result, question or blocker \u2014 with summary, branch/sha/pr, checks run, blockers and next step. Shown as the latest report on session_list/session_sweep/session_digest, raised in the Inbox and left as a note on the work item (the session's bound item unless `work_item` names one). Post a `result` when the deliverable is done. Omit `id` from inside a session Vogt started.",
+        "description": "Post this session's short typed report \u2014 kind progress, result, question or blocker \u2014 with summary, branch/sha/pr, checks run, blockers and next step. Shown as the latest report on session_list/session_sweep/session_digest, raised in the Inbox and left as a note on the work item (the session's bound item unless `work_item` names one). Post a `result` when the deliverable is done. Omit `id` from inside a session Vogt started.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionReportParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionReportResult"
                 }
               }
             }
@@ -5274,10 +5313,10 @@
                   "type": "null"
                 }
               ],
-              "description": "A Vogt session (`ses_…`), an engine session id, or an agent's own conversation id.",
+              "description": "A Vogt session (`ses_\u2026`), an engine session id, or an agent's own conversation id.",
               "title": "Session"
             },
-            "description": "A Vogt session (`ses_…`), an engine session id, or an agent's own conversation id."
+            "description": "A Vogt session (`ses_\u2026`), an engine session id, or an agent's own conversation id."
           },
           {
             "name": "limit",
@@ -5346,10 +5385,10 @@
                   "type": "null"
                 }
               ],
-              "description": "A Vogt session (`ses_…`), an engine session id, or an agent's own conversation id.",
+              "description": "A Vogt session (`ses_\u2026`), an engine session id, or an agent's own conversation id.",
               "title": "Session"
             },
-            "description": "A Vogt session (`ses_…`), an engine session id, or an agent's own conversation id."
+            "description": "A Vogt session (`ses_\u2026`), an engine session id, or an agent's own conversation id."
           },
           {
             "name": "project",
@@ -5529,11 +5568,11 @@
             "in": "query",
             "required": true,
             "schema": {
-              "description": "Search terms. Plain words, ANDed together — not FTS query syntax.",
+              "description": "Search terms. Plain words, ANDed together \u2014 not FTS query syntax.",
               "title": "Q",
               "type": "string"
             },
-            "description": "Search terms. Plain words, ANDed together — not FTS query syntax."
+            "description": "Search terms. Plain words, ANDed together \u2014 not FTS query syntax."
           },
           {
             "name": "limit",
@@ -5587,19 +5626,19 @@
     "/api/sessions/log": {
       "get": {
         "operationId": "session_log_tail",
-        "summary": "Read the tail of a session's output log, readable — the history of what it printed, not its current screen (use session_screen for that). Takes either id: Vogt's ses_… id or the engine's session UUID.",
-        "description": "Read the tail of a session's output log, readable — the history of what it printed, not its current screen (use session_screen for that). Takes either id: Vogt's ses_… id or the engine's session UUID.",
+        "summary": "Read the tail of a session's output log, readable \u2014 the history of what it printed, not its current screen (use session_screen for that). Takes either id: Vogt's ses_\u2026 id or the engine's session UUID.",
+        "description": "Read the tail of a session's output log, readable \u2014 the history of what it printed, not its current screen (use session_screen for that). Takes either id: Vogt's ses_\u2026 id or the engine's session UUID.",
         "parameters": [
           {
             "name": "id",
             "in": "query",
             "required": true,
             "schema": {
-              "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+              "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
               "title": "Id",
               "type": "string"
             },
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has)."
           },
           {
             "name": "tail_bytes",
@@ -6549,10 +6588,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Only events about this entity. The id, not the ref — the same shape audit.list takes, so the two feeds narrow alike.",
+              "description": "Only events about this entity. The id, not the ref \u2014 the same shape audit.list takes, so the two feeds narrow alike.",
               "title": "Entity Id"
             },
-            "description": "Only events about this entity. The id, not the ref — the same shape audit.list takes, so the two feeds narrow alike."
+            "description": "Only events about this entity. The id, not the ref \u2014 the same shape audit.list takes, so the two feeds narrow alike."
           }
         ],
         "responses": {
@@ -6805,7 +6844,7 @@
             "required": false,
             "schema": {
               "default": "any",
-              "description": "Who caused the entry: any; external (people outside the repository's org — never bots, and entries whose author is unknown are hidden and counted in actor_unknown_hidden); org (org members); bot (bots and the instance's own drift/CI/agent entries).",
+              "description": "Who caused the entry: any; external (people outside the repository's org \u2014 never bots, and entries whose author is unknown are hidden and counted in actor_unknown_hidden); org (org members); bot (bots and the instance's own drift/CI/agent entries).",
               "enum": [
                 "any",
                 "external",
@@ -6815,7 +6854,7 @@
               "title": "Actor",
               "type": "string"
             },
-            "description": "Who caused the entry: any; external (people outside the repository's org — never bots, and entries whose author is unknown are hidden and counted in actor_unknown_hidden); org (org members); bot (bots and the instance's own drift/CI/agent entries)."
+            "description": "Who caused the entry: any; external (people outside the repository's org \u2014 never bots, and entries whose author is unknown are hidden and counted in actor_unknown_hidden); org (org members); bot (bots and the instance's own drift/CI/agent entries)."
           },
           {
             "name": "project",
@@ -7717,7 +7756,7 @@
     },
     "/api/install/bootstrap": {
       "post": {
-        "description": "Name the first operator and mint the first token — exactly once.",
+        "description": "Name the first operator and mint the first token \u2014 exactly once.",
         "operationId": "bootstrap_api_install_bootstrap_post",
         "requestBody": {
           "content": {
@@ -7781,7 +7820,7 @@
     },
     "/connection-info": {
       "get": {
-        "description": "Where a client should go — which behind a door is not here.\n\nUnauthenticated by design, and therefore the one place a\nforwarded identity could be abused if it were trusted unconditionally:\nthis answer is what a client dials. `identity_from_headers` ignores\nthe headers unless the deployment has said it is fronted.",
+        "description": "Where a client should go \u2014 which behind a door is not here.\n\nUnauthenticated by design, and therefore the one place a\nforwarded identity could be abused if it were trusted unconditionally:\nthis answer is what a client dials. `identity_from_headers` ignores\nthe headers unless the deployment has said it is fronted.",
         "operationId": "connection_info_connection_info_get",
         "responses": {
           "200": {
@@ -8096,7 +8135,7 @@
       },
       "RegistryOperationManifest": {
         "additionalProperties": false,
-        "description": "One operation as every transport sees it.\n\nThe schemas are the JSON schema of the parameter and result models, so a\nconsumer that is not this process — the parity harness, and later a Rust\ncore — can compare contracts without importing the models.",
+        "description": "One operation as every transport sees it.\n\nThe schemas are the JSON schema of the parameter and result models, so a\nconsumer that is not this process \u2014 the parity harness, and later a Rust\ncore \u2014 can compare contracts without importing the models.",
         "properties": {
           "name": {
             "title": "Name",
@@ -8378,7 +8417,7 @@
       "DiagnosticsResult": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Is this instance what it should be, and is it well — in one read.",
+        "description": "Is this instance what it should be, and is it well \u2014 in one read.",
         "properties": {
           "status": {
             "description": "The worst of `checks`; not_configured checks do not count.",
@@ -10009,7 +10048,7 @@
       },
       "CiSummary": {
         "additionalProperties": false,
-        "description": "The CI story for a project, or the absence of one.\n\nEvery field below describes **one revision** — the newest any retained\ncheck names. That scope is the point: the same shape without it reported\na project as `failing` on the strength of a build that broke days before\nthe current head and had since been fixed. The rule that partial\ncoverage is disclosed, never silently returned as complete, is the same\nrule one layer up from the observations it was written about.",
+        "description": "The CI story for a project, or the absence of one.\n\nEvery field below describes **one revision** \u2014 the newest any retained\ncheck names. That scope is the point: the same shape without it reported\na project as `failing` on the strength of a build that broke days before\nthe current head and had since been fixed. The rule that partial\ncoverage is disclosed, never silently returned as complete, is the same\nrule one layer up from the observations it was written about.",
         "properties": {
           "status": {
             "default": "not_collected",
@@ -10180,7 +10219,7 @@
       },
       "RankedItem": {
         "additionalProperties": false,
-        "description": "One entry of a ranked view — declared or observed.\n\nObserved-first means both halves appear in the same list, ordered by the\nsame weights. The common fields are what ranking needs and what a\nreader wants; `item` carries the whole work item when there is one, and\n`subject_key` points at the evidence when there is not.",
+        "description": "One entry of a ranked view \u2014 declared or observed.\n\nObserved-first means both halves appear in the same list, ordered by the\nsame weights. The common fields are what ranking needs and what a\nreader wants; `item` carries the whole work item when there is one, and\n`subject_key` points at the evidence when there is not.",
         "properties": {
           "origin": {
             "enum": [
@@ -10192,7 +10231,7 @@
           },
           "classified": {
             "default": true,
-            "description": "Whether anything actually said what kind of work this is. False means `kind` is this product's guess from an absence of signal — an unlabelled forge issue — and that the subject may be missing from the view a reader expected to find it in. Declared work is always classified: somebody typed the kind in.",
+            "description": "Whether anything actually said what kind of work this is. False means `kind` is this product's guess from an absence of signal \u2014 an unlabelled forge issue \u2014 and that the subject may be missing from the view a reader expected to find it in. Declared work is always classified: somebody typed the kind in.",
             "title": "Classified",
             "type": "boolean"
           },
@@ -10581,7 +10620,7 @@
             "$ref": "#/components/schemas/Project"
           },
           "open_work": {
-            "description": "Outstanding work across both populations, declared and observed — the same set `backlog --project` ranks. Split below, because a total that does not name its populations is not an answer.",
+            "description": "Outstanding work across both populations, declared and observed \u2014 the same set `backlog --project` ranks. Split below, because a total that does not name its populations is not an answer.",
             "title": "Open Work",
             "type": "integer"
           },
@@ -10597,7 +10636,7 @@
           },
           "observed_work": {
             "default": 0,
-            "description": "Of `open_work`, how much a collector found — chiefly what `forge onboard` consolidated. Zero here with a non-zero `declared_work` is a project nobody has collected for; the reverse is a project nobody has declared work on.",
+            "description": "Of `open_work`, how much a collector found \u2014 chiefly what `forge onboard` consolidated. Zero here with a non-zero `declared_work` is a project nobody has collected for; the reverse is a project nobody has declared work on.",
             "title": "Observed Work",
             "type": "integer"
           },
@@ -10715,7 +10754,7 @@
       "UpdateProjectParams": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Correct a project's declaration after registration.\n\nDeliberately narrow. `lifecycle_state` is absent because it has its own\noperation with a validated edge (`project transition`), and the observed\nfields are absent because nothing declares them. What is left is what a\nregistration can get wrong and nothing else could fix — where the project\nis published, what collection should skip — and the agent policy, which is\ndata the project states rather than something derived.",
+        "description": "Correct a project's declaration after registration.\n\nDeliberately narrow. `lifecycle_state` is absent because it has its own\noperation with a validated edge (`project transition`), and the observed\nfields are absent because nothing declares them. What is left is what a\nregistration can get wrong and nothing else could fix \u2014 where the project\nis published, what collection should skip \u2014 and the agent policy, which is\ndata the project states rather than something derived.",
         "properties": {
           "slug": {
             "description": "Project to update.",
@@ -10758,7 +10797,7 @@
                 "type": "null"
               }
             ],
-            "description": "Replaces the project's agent policy entirely. Leave unset to keep it. `forbidden_text` entries are regexes and must compile, and so must `landing.branch_pattern` once `{n}` stands for a number; `landing.merge_mode` is `fast_forward` or `rebase` — `merge` is refused. A pattern that does not compile is refused rather than stored."
+            "description": "Replaces the project's agent policy entirely. Leave unset to keep it. `forbidden_text` entries are regexes and must compile, and so must `landing.branch_pattern` once `{n}` stands for a number; `landing.merge_mode` is `fast_forward` or `rebase` \u2014 `merge` is refused. A pattern that does not compile is refused rather than stored."
           },
           "reason": {
             "description": "Why this write is being made (audited).",
@@ -11210,7 +11249,7 @@
       },
       "GitStoryDriftView": {
         "additionalProperties": false,
-        "description": "One contradiction between a work item and its git evidence.\n\nDerived and read-only: Vogt *reports* the disagreement — a closed\nitem with an open PR, a merged PR under an open item, an active branch on a\ndone item — it does not reconcile it. `provenance` says which observation\nthe contradiction was read from, so a reader can check it.",
+        "description": "One contradiction between a work item and its git evidence.\n\nDerived and read-only: Vogt *reports* the disagreement \u2014 a closed\nitem with an open PR, a merged PR under an open item, an active branch on a\ndone item \u2014 it does not reconcile it. `provenance` says which observation\nthe contradiction was read from, so a reader can check it.",
         "properties": {
           "code": {
             "title": "Code",
@@ -11465,7 +11504,7 @@
       },
       "SessionBudgetParams": {
         "additionalProperties": false,
-        "description": "Limits the engine enforces on one session (C7).\n\nEach field is one limit; a field left out is a limit not set. Zero is not\na limit, so every field is positive when present. On `session.start` the\nobject itself is tri-state: omitted means apply the default, and a present\nobject — even an empty one — means use exactly the limits it names.",
+        "description": "Limits the engine enforces on one session (C7).\n\nEach field is one limit; a field left out is a limit not set. Zero is not\na limit, so every field is positive when present. On `session.start` the\nobject itself is tri-state: omitted means apply the default, and a present\nobject \u2014 even an empty one \u2014 means use exactly the limits it names.",
         "properties": {
           "turns": {
             "anyOf": [
@@ -11693,7 +11732,7 @@
       },
       "SessionSummary": {
         "additionalProperties": false,
-        "description": "One session, as Vogt knows it and as the engine currently reports it.\n\nTwo halves on purpose. `id`, `project`, `work_item` and `reason` are\nVogt's declared link — written once, audited, and true whatever the\nengine is doing. `activity` and `alive` are read from the engine at the\nmoment of asking and are never stored: a cached activity state would be\na claim about a running process, which is the one thing this product\nrefuses to invent.\n\nA session the engine holds but Vogt never linked is reported too, so the\nsurface answers \"what is running here\", not only \"what did Vogt start\".\nSuch a session has no declared half: `linked` is false, and `project`,\n`work_item`, `actor` and `reason` are null because there is nothing\naudited to name. `id` and `engine_session_id` then carry the engine's id\n(the only handle there is), and `started_at` is the engine's own creation\ntime — never a fabricated one.",
+        "description": "One session, as Vogt knows it and as the engine currently reports it.\n\nTwo halves on purpose. `id`, `project`, `work_item` and `reason` are\nVogt's declared link \u2014 written once, audited, and true whatever the\nengine is doing. `activity` and `alive` are read from the engine at the\nmoment of asking and are never stored: a cached activity state would be\na claim about a running process, which is the one thing this product\nrefuses to invent.\n\nA session the engine holds but Vogt never linked is reported too, so the\nsurface answers \"what is running here\", not only \"what did Vogt start\".\nSuch a session has no declared half: `linked` is false, and `project`,\n`work_item`, `actor` and `reason` are null because there is nothing\naudited to name. `id` and `engine_session_id` then carry the engine's id\n(the only handle there is), and `started_at` is the engine's own creation\ntime \u2014 never a fabricated one.",
         "properties": {
           "linked": {
             "default": true,
@@ -11753,7 +11792,7 @@
                 "type": "null"
               }
             ],
-            "description": "That work item's workflow state, joined at read time — a bound session on a `done` item is still allowed, and shown muted.",
+            "description": "That work item's workflow state, joined at read time \u2014 a bound session on a `done` item is still allowed, and shown muted.",
             "title": "Work Item State"
           },
           "actor": {
@@ -11980,7 +12019,7 @@
                 "type": "null"
               }
             ],
-            "description": "Live from the engine: when the current (or last) turn began — the last time the session went running from idle or waiting. With `last_output_at` it tells a long turn from a hung one.",
+            "description": "Live from the engine: when the current (or last) turn began \u2014 the last time the session went running from idle or waiting. With `last_output_at` it tells a long turn from a hung one.",
             "title": "Turn Started At"
           },
           "last_output_at": {
@@ -12139,7 +12178,7 @@
                 "type": "null"
               }
             ],
-            "description": "Live from the engine: the permission posture when it is not the default — `accept-edits`, or `bypass` (no permission checks). Null is the default posture.",
+            "description": "Live from the engine: the permission posture when it is not the default \u2014 `accept-edits`, or `bypass` (no permission checks). Null is the default posture.",
             "title": "Permission Mode"
           },
           "account": {
@@ -12163,7 +12202,7 @@
                 "type": "null"
               }
             ],
-            "description": "The agent, model and reasoning effort the session is actually running, resolved from its transcript, its command line, or what it was started with — `model`/`effort` above are only what was asked. Live and hibernated sessions."
+            "description": "The agent, model and reasoning effort the session is actually running, resolved from its transcript, its command line, or what it was started with \u2014 `model`/`effort` above are only what was asked. Live and hibernated sessions."
           },
           "resources": {
             "anyOf": [
@@ -12196,7 +12235,7 @@
                 "type": "null"
               }
             ],
-            "description": "The agent CLI's own id for the conversation this session runs, when the engine knows it — what a wake resumes, and what session.start's `resume` takes.",
+            "description": "The agent CLI's own id for the conversation this session runs, when the engine knows it \u2014 what a wake resumes, and what session.start's `resume` takes.",
             "title": "Conversation Id"
           }
         },
@@ -12210,7 +12249,7 @@
       },
       "WorkItemBranchView": {
         "additionalProperties": false,
-        "description": "One branch bound to a work item, declared or observed or both.\n\n `source` is the whole point: `declared` is a branch a Vogt-started session\n said it would use, `observed` is one a sweep actually found in the\n checkout, and `both` is the two agreeing. A branch that is one but not the\n other is drift — declared and observed are kept separate and never merged\n, so the surface can show the disagreement rather than paper over\n it. `last_commit_age_seconds` is derived from `last_commit_at` at read time\n so it is always current without the observation churning every sweep.",
+        "description": "One branch bound to a work item, declared or observed or both.\n\n `source` is the whole point: `declared` is a branch a Vogt-started session\n said it would use, `observed` is one a sweep actually found in the\n checkout, and `both` is the two agreeing. A branch that is one but not the\n other is drift \u2014 declared and observed are kept separate and never merged\n, so the surface can show the disagreement rather than paper over\n it. `last_commit_age_seconds` is derived from `last_commit_at` at read time\n so it is always current without the observation churning every sweep.",
         "properties": {
           "name": {
             "title": "Name",
@@ -12380,7 +12419,7 @@
       },
       "WorkItemPullRequestView": {
         "additionalProperties": false,
-        "description": "The pull request observed to implement a work item.\n\nRead from the `forge.pull_request` observation the `implemented_by` edge\npoints at — never declared. `state` is the *derived* PR state, richer than\nthe observation's raw open/closed/merged: `draft` and `in-review` are read\noff the PR's own draft flag and review decision so the git phase can tell\n\"opened\" from \"being reviewed\". Every field carries where it came from and\nhow old it is, so the surface can say \"observed 4 min ago from GitHub\"\nrather than presenting a stale rollup as current.",
+        "description": "The pull request observed to implement a work item.\n\nRead from the `forge.pull_request` observation the `implemented_by` edge\npoints at \u2014 never declared. `state` is the *derived* PR state, richer than\nthe observation's raw open/closed/merged: `draft` and `in-review` are read\noff the PR's own draft flag and review decision so the git phase can tell\n\"opened\" from \"being reviewed\". Every field carries where it came from and\nhow old it is, so the surface can say \"observed 4 min ago from GitHub\"\nrather than presenting a stale rollup as current.",
         "properties": {
           "number": {
             "title": "Number",
@@ -12656,7 +12695,7 @@
           },
           "local_only": {
             "default": false,
-            "description": "Create the item locally without writing it upstream. On a linked project a create normally goes through to the forge, and a write-back policy that does not permit 'create' refuses it; pass this to opt in to a native, local-only item instead — it carries no upstream subject yet and is exactly what a later `forge link` or `forge writeback` migrates upstream. Default off: the refusal stays the default so nothing is created locally by surprise.",
+            "description": "Create the item locally without writing it upstream. On a linked project a create normally goes through to the forge, and a write-back policy that does not permit 'create' refuses it; pass this to opt in to a native, local-only item instead \u2014 it carries no upstream subject yet and is exactly what a later `forge link` or `forge writeback` migrates upstream. Default off: the refusal stays the default so nothing is created locally by surprise.",
             "title": "Local Only",
             "type": "boolean"
           },
@@ -12892,7 +12931,7 @@
                 "type": "null"
               }
             ],
-            "description": "Set when the list is scoped to one project: `unlinked` is the machine-readable marker that this project has no work surface yet — the items are empty because linking or publishing is the way forward, not because there is nothing to do. Global lists carry null.",
+            "description": "Set when the list is scoped to one project: `unlinked` is the machine-readable marker that this project has no work surface yet \u2014 the items are empty because linking or publishing is the way forward, not because there is nothing to do. Global lists carry null.",
             "title": "Link State"
           },
           "detail": {
@@ -13178,7 +13217,7 @@
           },
           "declared_total": {
             "default": 0,
-            "description": "The declared-only slice of `backlog_candidates` — non-terminal declared work in this scope, the same population the rail counts. `backlog_candidates - declared_total` is the observed subjects the Board is currently silent about.",
+            "description": "The declared-only slice of `backlog_candidates` \u2014 non-terminal declared work in this scope, the same population the rail counts. `backlog_candidates - declared_total` is the observed subjects the Board is currently silent about.",
             "title": "Declared Total",
             "type": "integer"
           },
@@ -13195,7 +13234,7 @@
                 "type": "null"
               }
             ],
-            "description": "Set for a project scope: `unlinked` marks a project with no Board — the cells are empty because linking or publishing is the way forward. The global Board carries null.",
+            "description": "Set for a project scope: `unlinked` marks a project with no Board \u2014 the cells are empty because linking or publishing is the way forward. The global Board carries null.",
             "title": "Link State"
           },
           "excluded_unlinked": {
@@ -13642,7 +13681,7 @@
           },
           "closed_upstream": {
             "default": 0,
-            "description": "Observed subjects left out because their source says they are closed. Reported rather than silently dropped, so a short list is distinguishable from a filtered one — they remain queryable through `observations list`.",
+            "description": "Observed subjects left out because their source says they are closed. Reported rather than silently dropped, so a short list is distinguishable from a filtered one \u2014 they remain queryable through `observations list`.",
             "title": "Closed Upstream",
             "type": "integer"
           },
@@ -13659,7 +13698,7 @@
                 "type": "null"
               }
             ],
-            "description": "Set for a project scope: `unlinked` marks a project with no work surface — link or publish it to track work upstream. The global view carries null.",
+            "description": "Set for a project scope: `unlinked` marks a project with no work surface \u2014 link or publish it to track work upstream. The global view carries null.",
             "title": "Link State"
           },
           "excluded_unlinked": {
@@ -13990,7 +14029,7 @@
       },
       "UpdateInitiativeParams": {
         "additionalProperties": false,
-        "description": "Correct an initiative after creation, or close and reopen it.\n\nThe slug is its identity — forge tracking issues carry the\n``initiative:<slug>`` label — so a new title leaves the slug as it was.\nEvery field left unset keeps its current value.",
+        "description": "Correct an initiative after creation, or close and reopen it.\n\nThe slug is its identity \u2014 forge tracking issues carry the\n``initiative:<slug>`` label \u2014 so a new title leaves the slug as it was.\nEvery field left unset keeps its current value.",
         "properties": {
           "slug": {
             "description": "Initiative to update.",
@@ -14147,7 +14186,7 @@
       },
       "PublishInitiativeParams": {
         "additionalProperties": false,
-        "description": "Project an initiative onto a forge tracking issue per linked repo.\n\nAdditive and forward-only: for each forge-linked project the initiative\nspans, Vogt creates or adopts one tracking issue labelled\n``initiative:<slug>`` and re-renders its managed task list. Nothing is ever\nclosed or deleted — a closed initiative *proposes* its tracking issues be\nclosed (drift), it never writes the close.",
+        "description": "Project an initiative onto a forge tracking issue per linked repo.\n\nAdditive and forward-only: for each forge-linked project the initiative\nspans, Vogt creates or adopts one tracking issue labelled\n``initiative:<slug>`` and re-renders its managed task list. Nothing is ever\nclosed or deleted \u2014 a closed initiative *proposes* its tracking issues be\nclosed (drift), it never writes the close.",
         "properties": {
           "slug": {
             "description": "Initiative slug to publish.",
@@ -14707,7 +14746,7 @@
             "type": "array"
           },
           "total": {
-            "description": "How many rows this page holds — not how many exist. The store is queried a page at a time and no count is taken behind it, so `total == limit` means 'there may be more', never 'that is all'.",
+            "description": "How many rows this page holds \u2014 not how many exist. The store is queried a page at a time and no count is taken behind it, so `total == limit` means 'there may be more', never 'that is all'.",
             "title": "Total",
             "type": "integer"
           },
@@ -14818,7 +14857,7 @@
       },
       "MirroredSource": {
         "additionalProperties": false,
-        "description": "The same source in two places, reported and never judged.\n\nA path member of one project that declares the package a separately\nregistered project publishes — `rustnzb`'s `crates/nzb-core` and the\nstandalone `nzb-core`. Contents are not compared and no divergence is\nasserted; the two declared versions are recorded as the facts they are.",
+        "description": "The same source in two places, reported and never judged.\n\nA path member of one project that declares the package a separately\nregistered project publishes \u2014 `rustnzb`'s `crates/nzb-core` and the\nstandalone `nzb-core`. Contents are not compared and no divergence is\nasserted; the two declared versions are recorded as the facts they are.",
         "properties": {
           "package": {
             "title": "Package",
@@ -14952,7 +14991,7 @@
           },
           "unsupported_manifests": {
             "default": [],
-            "description": "Manifests present in a format the collector does not read (`go.mod`, `pom.xml`, …). A project whose graph lives entirely in one of these reports no references and has plenty.",
+            "description": "Manifests present in a format the collector does not read (`go.mod`, `pom.xml`, \u2026). A project whose graph lives entirely in one of these reports no references and has plenty.",
             "items": {
               "type": "string"
             },
@@ -15040,7 +15079,7 @@
       },
       "Suppression": {
         "additionalProperties": false,
-        "description": "An audited decision that an observed subject is not work.\n\nLives in the declared store because it is a decision, not an\nobservation — which is exactly why it survives re-observation of the same\nsubject, and why a dismissal recorded in the evidence store could never\nhave worked.",
+        "description": "An audited decision that an observed subject is not work.\n\nLives in the declared store because it is a decision, not an\nobservation \u2014 which is exactly why it survives re-observation of the same\nsubject, and why a dismissal recorded in the evidence store could never\nhave worked.",
         "properties": {
           "id": {
             "title": "Id",
@@ -15371,7 +15410,7 @@
           },
           "applicable": {
             "default": true,
-            "description": "Whether this criterion can apply to this project at all . False is a declaration somebody made and gave a reason for — a Cargo workspace has no root `src/` — and an inapplicable criterion is reported but never counted as failing.",
+            "description": "Whether this criterion can apply to this project at all . False is a declaration somebody made and gave a reason for \u2014 a Cargo workspace has no root `src/` \u2014 and an inapplicable criterion is reported but never counted as failing.",
             "title": "Applicable",
             "type": "boolean"
           },
@@ -15384,7 +15423,7 @@
                 "type": "null"
               }
             ],
-            "description": "Whether the repository carries this. Null where it could not be asked — an unregistered path, or a directory that is not a checkout. False alongside a file that exists on disk is the present-but-untracked case: no clone would have it.",
+            "description": "Whether the repository carries this. Null where it could not be asked \u2014 an unregistered path, or a directory that is not a checkout. False alongside a file that exists on disk is the present-but-untracked case: no clone would have it.",
             "title": "Tracked"
           }
         },
@@ -15399,7 +15438,7 @@
       },
       "RecommendationView": {
         "additionalProperties": false,
-        "description": "What would close one failing criterion, and who has to decide it.\n\nAdvisory output. A `scaffold` remedy is one `project scaffold`\nperforms; a `judgement` remedy is an instruction addressed to an actor —\nreadable by a person, executable by an agent, applied implicitly by\nneither. Nothing may treat any of it as authority.",
+        "description": "What would close one failing criterion, and who has to decide it.\n\nAdvisory output. A `scaffold` remedy is one `project scaffold`\nperforms; a `judgement` remedy is an instruction addressed to an actor \u2014\nreadable by a person, executable by an agent, applied implicitly by\nneither. Nothing may treat any of it as authority.",
         "properties": {
           "rule": {
             "title": "Rule",
@@ -15433,7 +15472,7 @@
       },
       "ContractEvaluateParams": {
         "additionalProperties": false,
-        "description": "A dry run against any path. Reads, stores nothing, needs no reason.\n\nSplit from `ContractCheckParams` because the two are different\noperations wearing one name. This one changes nothing, so the audit has\nnothing to record — and demanding a reason for it meant the CLI collected a\njustification for a write that never happened, then discarded it. It also\nforced `project.write` scope on a read, so a read-only token could not\nevaluate a contract against a folder at all.",
+        "description": "A dry run against any path. Reads, stores nothing, needs no reason.\n\nSplit from `ContractCheckParams` because the two are different\noperations wearing one name. This one changes nothing, so the audit has\nnothing to record \u2014 and demanding a reason for it meant the CLI collected a\njustification for a write that never happened, then discarded it. It also\nforced `project.write` scope on a read, so a read-only token could not\nevaluate a contract against a folder at all.",
         "properties": {
           "path": {
             "description": "Any folder or repository, registered or not. Stores nothing.",
@@ -15475,7 +15514,7 @@
             "type": "string"
           },
           "criteria": {
-            "description": "Every rule evaluated — not only the failures.",
+            "description": "Every rule evaluated \u2014 not only the failures.",
             "items": {
               "$ref": "#/components/schemas/CriterionView"
             },
@@ -16528,7 +16567,7 @@
       "StartSessionParams": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Open a terminal for a work item, or for a project.\n\nAt most one of `work_item` and `project`. A session always belongs to a\nproject — the work item's own, when one is given — because the working\ndirectory comes from the project registry and nowhere else.\n\n** Giving **neither** is allowed only when the deployment has\nconfigured a scratch project, and resolves to it. It exists for the spoken\nrequest with no subject — \"research the best risotto in Wollongong\" — which\nhas no work item and no repository but still needs a registered tree to\nopen in. The scratch project is a project like any other: registered, with\na root path somebody chose. What is *not* allowed is inventing a directory,\nwhich is the failure the registry-owned `cwd` rule exists against.",
+        "description": "Open a terminal for a work item, or for a project.\n\nAt most one of `work_item` and `project`. A session always belongs to a\nproject \u2014 the work item's own, when one is given \u2014 because the working\ndirectory comes from the project registry and nowhere else.\n\n** Giving **neither** is allowed only when the deployment has\nconfigured a scratch project, and resolves to it. It exists for the spoken\nrequest with no subject \u2014 \"research the best risotto in Wollongong\" \u2014 which\nhas no work item and no repository but still needs a registered tree to\nopen in. The scratch project is a project like any other: registered, with\na root path somebody chose. What is *not* allowed is inventing a directory,\nwhich is the failure the registry-owned `cwd` rule exists against.",
         "properties": {
           "work_item": {
             "anyOf": [
@@ -16563,7 +16602,7 @@
                 "type": "null"
               }
             ],
-            "description": "Session template to run, by name or by tag — the engine expands it against the deployment's templates. Use this to run an agent rather than a plain shell: `claude` (or `codex`, `opencode`, `klaudia`) starts that agent under the deployment's protected wrapper, so a request to *do* something in a session names one here. Omitted means a plain shell, which does nothing until typed into.",
+            "description": "Session template to run, by name or by tag \u2014 the engine expands it against the deployment's templates. Use this to run an agent rather than a plain shell: `claude` (or `codex`, `opencode`, `klaudia`) starts that agent under the deployment's protected wrapper, so a request to *do* something in a session names one here. Omitted means a plain shell, which does nothing until typed into.",
             "title": "Template"
           },
           "task": {
@@ -16624,7 +16663,7 @@
           },
           "permission_mode": {
             "default": "default",
-            "description": "The agent's permission posture. `default`: Claude Code's own mode (auto) with the deployment's driven-session policy — routine safe work proceeds, prod-mutating, destructive, shared-resource and secret-exposing actions are denied. `accept_edits`: file edits auto-accepted, everything else asks. `bypass`: no permission checks at all, for one trusted task — only a person may grant it (an agent is refused), and it is audited. Claude Code, Codex, opencode and Klaudia templates. Codex maps the same three postures: `default` is `-a on-request -s danger-full-access`; `accept_edits` adds `approvals_reviewer=\"auto_review\"`; `bypass` is `--dangerously-bypass-approvals-and-sandbox` and stays people-only. A named Codex requirements file that is missing, empty or unreadable refuses the Codex launch (400) and does not fall through to bypass. Klaudia takes `default` and `bypass` only (its `acceptEdits` is an alias for its default autonomous mode, so `accept_edits` is refused).",
+            "description": "The agent's permission posture. `default`: Claude Code's own mode (auto) with the deployment's driven-session policy \u2014 routine safe work proceeds, prod-mutating, destructive, shared-resource and secret-exposing actions are denied. `accept_edits`: file edits auto-accepted, everything else asks. `bypass`: no permission checks at all, for one trusted task \u2014 only a person may grant it (an agent is refused), and it is audited. Claude Code, Codex, opencode and Klaudia templates. Codex maps the same three postures: `default` is `-a on-request -s danger-full-access`; `accept_edits` adds `approvals_reviewer=\"auto_review\"`; `bypass` is `--dangerously-bypass-approvals-and-sandbox` and stays people-only. A named Codex requirements file that is missing, empty or unreadable refuses the Codex launch (400) and does not fall through to bypass. Klaudia takes `default` and `bypass` only (its `acceptEdits` is an alias for its default autonomous mode, so `accept_edits` is refused).",
             "enum": [
               "default",
               "accept_edits",
@@ -16738,7 +16777,7 @@
                 "type": "null"
               }
             ],
-            "description": "Start a reviewer on this work item (e.g. WI-7) instead of a worker. The brief checks the diff named by the item's latest hand-off against the item's own acceptance criteria, and it does not carry the work on. Refused without a work item — a review is of an item — and when `work_item` or `from_handoff` names a different one.",
+            "description": "Start a reviewer on this work item (e.g. WI-7) instead of a worker. The brief checks the diff named by the item's latest hand-off against the item's own acceptance criteria, and it does not carry the work on. Refused without a work item \u2014 a review is of an item \u2014 and when `work_item` or `from_handoff` names a different one.",
             "title": "Review Of"
           },
           "budget": {
@@ -16750,7 +16789,7 @@
                 "type": "null"
               }
             ],
-            "description": "Limits the engine enforces on this session (C7): a soft warning as one is approached, then hibernation (trigger `budget`) when one is reached. Omitted means the default for an agent template started with a `task` as a worker — 120 turns and 90 minutes of wall clock, no context limit — and no budget otherwise. An empty object sets no limits, which is how a start declines the default."
+            "description": "Limits the engine enforces on this session (C7): a soft warning as one is approached, then hibernation (trigger `budget`) when one is reached. Omitted means the default for an agent template started with a `task` as a worker \u2014 120 turns and 90 minutes of wall clock, no context limit \u2014 and no budget otherwise. An empty object sets no limits, which is how a start declines the default."
           },
           "worktree": {
             "anyOf": [
@@ -16761,7 +16800,7 @@
                 "type": "null"
               }
             ],
-            "description": "Start the session in a git worktree of its own rather than in the project's shared checkout (WI-1298). The engine cuts the worktree from the project's integration branch — `agent_policy.base_branch` when the project states one, otherwise `main` — onto a new branch `<work item>-<session>` (or `<project>-<session>` when no work item is given), and the session's working directory is that worktree. The shared checkout is never written to, so a dirty tree there cannot leak into the session and the session cannot disturb it. Requires a project, or a work item that belongs to one. Unset, the purpose's dispatch profile decides (WI-1323), and with no purpose the session opens in the project's checkout, as `false` does. Cannot be combined with `cwd` (WI-1671). Recorded on the audit row.",
+            "description": "Start the session in a git worktree of its own rather than in the project's shared checkout (WI-1298). The engine cuts the worktree from the project's integration branch \u2014 `agent_policy.base_branch` when the project states one, otherwise `main` \u2014 onto a new branch `<work item>-<session>` (or `<project>-<session>` when no work item is given), and the session's working directory is that worktree. The shared checkout is never written to, so a dirty tree there cannot leak into the session and the session cannot disturb it. Requires a project, or a work item that belongs to one. Unset, the purpose's dispatch profile decides (WI-1323), and with no purpose the session opens in the project's checkout, as `false` does. Cannot be combined with `cwd` (WI-1671). Recorded on the audit row.",
             "title": "Worktree"
           },
           "cwd": {
@@ -16773,7 +16812,7 @@
                 "type": "null"
               }
             ],
-            "description": "Open the session in this existing directory instead of the project's registered checkout (WI-1671). Use it when a worktree already exists and `worktree=true` cannot cut a new one — a private origin the engine cannot fetch, for example. The path must exist, must sit under the workspace's `Active/` directory (the parent of the project's checkout), must not be inside that checkout (a subdirectory shares its git toplevel; a linked worktree nested under it does not), and must be a git worktree of the same repository (the same `commondir`). Anything else is refused, and so is combining it with an explicit `worktree=true`. A purpose profile that would have set `worktree` does not, when `cwd` is given. Recorded as the session's cwd.",
+            "description": "Open the session in this existing directory instead of the project's registered checkout (WI-1671). Use it when a worktree already exists and `worktree=true` cannot cut a new one \u2014 a private origin the engine cannot fetch, for example. The path must exist, must sit under the workspace's `Active/` directory (the parent of the project's checkout), must not be inside that checkout (a subdirectory shares its git toplevel; a linked worktree nested under it does not), and must be a git worktree of the same repository (the same `commondir`). Anything else is refused, and so is combining it with an explicit `worktree=true`. A purpose profile that would have set `worktree` does not, when `cwd` is given. Recorded as the session's cwd.",
             "title": "Cwd"
           },
           "reason": {
@@ -16799,7 +16838,7 @@
                 "type": "null"
               }
             ],
-            "description": "What the session is for (WI-1323, design §2.4): implement, implement-careful, review, mechanical, investigate or design. The deployment's dispatch profile for it fills template, model, effort, budget, worktree, repo_map and autopilot wherever this start leaves them unset; a value given here wins and is audited as an override. Recorded on the session.",
+            "description": "What the session is for (WI-1323, design \u00a72.4): implement, implement-careful, review, mechanical, investigate or design. The deployment's dispatch profile for it fills template, model, effort, budget, worktree, repo_map and autopilot wherever this start leaves them unset; a value given here wins and is audited as an override. Recorded on the session.",
             "title": "Purpose"
           }
         },
@@ -16899,7 +16938,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
             "title": "Id",
             "type": "string"
           },
@@ -16921,7 +16960,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
             "title": "Id",
             "type": "string"
           },
@@ -17050,7 +17089,7 @@
           },
           "submitted": {
             "default": false,
-            "description": "Enter was pressed — by `submit` or as one of the `keys`.",
+            "description": "Enter was pressed \u2014 by `submit` or as one of the `keys`.",
             "title": "Submitted",
             "type": "boolean"
           },
@@ -17244,7 +17283,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
             "title": "Id",
             "type": "string"
           },
@@ -17263,7 +17302,7 @@
                 "type": "null"
               }
             ],
-            "description": "The session taking over this one's work (ses_… or the engine UUID). Recorded on the hibernation, and a later wake is refused unless forced — so the work stays with one session.",
+            "description": "The session taking over this one's work (ses_\u2026 or the engine UUID). Recorded on the hibernation, and a later wake is refused unless forced \u2014 so the work stays with one session.",
             "title": "Superseded By"
           },
           "reason": {
@@ -17284,7 +17323,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
             "title": "Id",
             "type": "string"
           },
@@ -17312,7 +17351,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
             "title": "Id",
             "type": "string"
           },
@@ -17340,7 +17379,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
             "title": "Id",
             "type": "string"
           },
@@ -17442,7 +17481,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
             "title": "Id",
             "type": "string"
           },
@@ -17471,7 +17510,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
             "title": "Id",
             "type": "string"
           },
@@ -17493,7 +17532,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
             "title": "Id",
             "type": "string"
           },
@@ -17533,7 +17572,7 @@
                 "type": "null"
               }
             ],
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has). Omit it from inside a session Vogt started to bind that session itself.",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has). Omit it from inside a session Vogt started to bind that session itself.",
             "title": "Id"
           },
           "work_item": {
@@ -17808,7 +17847,7 @@
         "description": "Ask a person to approve one scoped item for one session.",
         "properties": {
           "target": {
-            "description": "The session the grant is for: ses_… or the engine's UUID. Asking for a session other than your own needs you to be an oversight session.",
+            "description": "The session the grant is for: ses_\u2026 or the engine's UUID. Asking for a session other than your own needs you to be an oversight session.",
             "title": "Target",
             "type": "string"
           },
@@ -17918,7 +17957,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "The grant id (grt_…).",
+            "description": "The grant id (grt_\u2026).",
             "title": "Id",
             "type": "string"
           },
@@ -17949,7 +17988,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "The grant id (grt_…).",
+            "description": "The grant id (grt_\u2026).",
             "title": "Id",
             "type": "string"
           },
@@ -18002,7 +18041,7 @@
       },
       "WatchTriggerModel": {
         "additionalProperties": false,
-        "description": "What a watch waits for (WI-2036). `kind` picks the fields that apply:\n\n- `pr`: `project` + `number`; fires when the PR reads one of `on`\n  (default merged or closed).\n- `ci`: `project` + `sha` or `pr`; fires when every run on that revision\n  (a PR's head) — each named required check in `checks` (at least\n  one) — has been observed and concluded.\n- `work_item`: `work_item`; fires when it is in one of `states` (default\n  a terminal state).\n- `session`: `session`; fires when it ends (`until=ended`: exited,\n  hibernated or stopped) or also when it declares itself done\n  (`until=done`).",
+        "description": "What a watch waits for (WI-2036). `kind` picks the fields that apply:\n\n- `pr`: `project` + `number`; fires when the PR reads one of `on`\n  (default merged or closed).\n- `ci`: `project` + `sha` or `pr`; fires when every run on that revision\n  (a PR's head) \u2014 each named required check in `checks` (at least\n  one) \u2014 has been observed and concluded.\n- `work_item`: `work_item`; fires when it is in one of `states` (default\n  a terminal state).\n- `session`: `session`; fires when it ends (`until=ended`: exited,\n  hibernated or stopped) or also when it declares itself done\n  (`until=done`).",
         "properties": {
           "kind": {
             "$ref": "#/components/schemas/WatchKind"
@@ -18109,7 +18148,7 @@
                 "type": "null"
               }
             ],
-            "description": "Session to watch, ses_… or engine UUID (session).",
+            "description": "Session to watch, ses_\u2026 or engine UUID (session).",
             "title": "Session"
           },
           "until": {
@@ -18276,7 +18315,7 @@
                 "type": "null"
               }
             ],
-            "description": "The session to wake (ses_… or engine UUID). Default: your own session, from your token.",
+            "description": "The session to wake (ses_\u2026 or engine UUID). Default: your own session, from your token.",
             "title": "Session"
           },
           "note": {
@@ -18339,7 +18378,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "The watch id (wat_…).",
+            "description": "The watch id (wat_\u2026).",
             "title": "Id",
             "type": "string"
           },
@@ -18607,7 +18646,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "The decision id (dec_…).",
+            "description": "The decision id (dec_\u2026).",
             "title": "Id",
             "type": "string"
           },
@@ -18656,7 +18695,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "The decision id (dec_…).",
+            "description": "The decision id (dec_\u2026).",
             "title": "Id",
             "type": "string"
           },
@@ -18678,7 +18717,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
-            "description": "Session id, in either form: Vogt's `ses_…` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
+            "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
             "title": "Id",
             "type": "string"
           },
@@ -18760,7 +18799,7 @@
             "$ref": "#/components/schemas/SessionApprovalOption"
           },
           "dismissed": {
-            "description": "The dialog was gone from the screen afterwards. False: it still showed when the engine stopped looking — read the screen.",
+            "description": "The dialog was gone from the screen afterwards. False: it still showed when the engine stopped looking \u2014 read the screen.",
             "title": "Dismissed",
             "type": "boolean"
           }
@@ -18861,7 +18900,7 @@
       "SessionScreenResult": {
         "type": "object",
         "additionalProperties": false,
-        "description": "The terminal's current visible screen, as rendered text.\n\nWhat a person looking at the terminal would see right now — not the\noutput log (`session.log_tail`). Terminal content is untrusted data.",
+        "description": "The terminal's current visible screen, as rendered text.\n\nWhat a person looking at the terminal would see right now \u2014 not the\noutput log (`session.log_tail`). Terminal content is untrusted data.",
         "properties": {
           "id": {
             "description": "The id the caller named, as given.",
@@ -19035,7 +19074,7 @@
       "SessionLastReplyResult": {
         "type": "object",
         "additionalProperties": false,
-        "description": "The last assistant messages of the agent conversation a session runs.\n\nRead from the agent's own transcript (Claude Code or Codex JSONL), so a\nreply is whole and current — not cut at the screen's edge or mangled by\nredraws. `basis` says how the conversation was found: `session-id` /\n`resume-id` (named on the command line), `engine-id` (a Claude Code\nsession the engine started), or `cwd` (the newest transcript in the\nsession's directory since it started — a guess when two agents share a\ndirectory). Empty `messages` with `detail` set means it could not be read.",
+        "description": "The last assistant messages of the agent conversation a session runs.\n\nRead from the agent's own transcript (Claude Code or Codex JSONL), so a\nreply is whole and current \u2014 not cut at the screen's edge or mangled by\nredraws. `basis` says how the conversation was found: `session-id` /\n`resume-id` (named on the command line), `engine-id` (a Claude Code\nsession the engine started), or `cwd` (the newest transcript in the\nsession's directory since it started \u2014 a guess when two agents share a\ndirectory). Empty `messages` with `detail` set means it could not be read.",
         "properties": {
           "id": {
             "description": "The id the caller named, as given.",
@@ -19313,7 +19352,7 @@
       "SessionDigestResult": {
         "type": "object",
         "additionalProperties": false,
-        "description": "What an overseer reads instead of screen, last reply and git log (C3).\n\nOne engine `get_session`. Numbers come from that row's `economics` when\nthe engine sends one, and are null when it does not — this read does not\nmeter a transcript and does not open a transcript file. `last_reply_excerpt`\nis likewise only what the row already carries, clipped to 120 characters.\n`context_pct` needs the caller to name `context_window`. `budget_line` is\nthe same line `session.economics` builds, from those numbers.",
+        "description": "What an overseer reads instead of screen, last reply and git log (C3).\n\nOne engine `get_session`. Numbers come from that row's `economics` when\nthe engine sends one, and are null when it does not \u2014 this read does not\nmeter a transcript and does not open a transcript file. `last_reply_excerpt`\nis likewise only what the row already carries, clipped to 120 characters.\n`context_pct` needs the caller to name `context_window`. `budget_line` is\nthe same line `session.economics` builds, from those numbers.",
         "properties": {
           "id": {
             "description": "The id the caller named, as given.",
@@ -19573,7 +19612,7 @@
             "title": "At"
           },
           "session": {
-            "description": "The session: Vogt's `ses_…` id when the engine session is linked, otherwise the engine's own UUID.",
+            "description": "The session: Vogt's `ses_\u2026` id when the engine session is linked, otherwise the engine's own UUID.",
             "title": "Session",
             "type": "string"
           },
@@ -19657,6 +19696,259 @@
           "next_cursor"
         ],
         "title": "SessionWaitAnyResult"
+      },
+      "SessionReportParams": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SessionReportParamsKind"
+          },
+          "summary": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          },
+          "work_item": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Work Item"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha"
+          },
+          "pr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr"
+          },
+          "checks": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Checks",
+            "type": "array"
+          },
+          "blockers": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Blockers",
+            "type": "array"
+          },
+          "next_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Step"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "summary",
+          "reason"
+        ],
+        "title": "SessionReportParams"
+      },
+      "SessionReportParamsKind": {
+        "enum": [
+          "progress",
+          "result",
+          "question",
+          "blocker"
+        ],
+        "title": "SessionReportParamsKind",
+        "type": "string"
+      },
+      "SessionReportResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "report": {
+            "$ref": "#/components/schemas/SessionReportView"
+          }
+        },
+        "required": [
+          "report"
+        ],
+        "title": "SessionReportResult"
+      },
+      "SessionReportView": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "work_item": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Work Item"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha"
+          },
+          "pr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr"
+          },
+          "checks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "next_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Step"
+          },
+          "reporter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reporter"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "summary",
+          "created_at"
+        ],
+        "title": "SessionReportView",
+        "type": "object"
       },
       "ReportBlockedParams": {
         "additionalProperties": false,
@@ -20468,7 +20760,7 @@
                 "type": "null"
               }
             ],
-            "description": "The agent CLI of the last conversation the session ran — one the engine launched, or one typed into its shell that reported itself.",
+            "description": "The agent CLI of the last conversation the session ran \u2014 one the engine launched, or one typed into its shell that reported itself.",
             "title": "Conversation Agent"
           },
           "conversation_id": {
@@ -20545,7 +20837,7 @@
       },
       "HistoryOutputMatch": {
         "additionalProperties": false,
-        "description": "One hit from a session-output search.\n\n`live` distinguishes a match in a running session's scrollback from one in\nthe archived index. The snippet is plain text — terminal output is\nuntrusted and is never marked up.",
+        "description": "One hit from a session-output search.\n\n`live` distinguishes a match in a running session's scrollback from one in\nthe archived index. The snippet is plain text \u2014 terminal output is\nuntrusted and is never marked up.",
         "properties": {
           "session_id": {
             "title": "Session Id",
@@ -20613,7 +20905,7 @@
       },
       "LogTailResult": {
         "additionalProperties": false,
-        "description": "The tail of one session's output log.\n\nWorks for a live session too — the engine reads the on-disk log by id, no\narchive row required. `session_id` is null when the engine has no log for\nthat id (or could not be asked, with `engine` then set).",
+        "description": "The tail of one session's output log.\n\nWorks for a live session too \u2014 the engine reads the on-disk log by id, no\narchive row required. `session_id` is null when the engine has no log for\nthat id (or could not be asked, with `engine` then set).",
         "properties": {
           "session_id": {
             "anyOf": [
@@ -20827,7 +21119,7 @@
             "$ref": "#/components/schemas/Token"
           },
           "secret": {
-            "description": "Shown once. Not stored, not recoverable — rotate if lost.",
+            "description": "Shown once. Not stored, not recoverable \u2014 rotate if lost.",
             "title": "Secret",
             "type": "string"
           },
@@ -21531,7 +21823,7 @@
       "ForgeLinkResult": {
         "type": "object",
         "additionalProperties": false,
-        "description": "`forge.link`'s receipt: the linked project, and what migrated.\n\n`migrated` lists every open native item published upstream and re-keyed\nduring this link, oldest first. A mid-migration provider failure raises\ninstead — naming which items migrated and which are still native — so a\nresult in hand means every listed item, and only those, moved.",
+        "description": "`forge.link`'s receipt: the linked project, and what migrated.\n\n`migrated` lists every open native item published upstream and re-keyed\nduring this link, oldest first. A mid-migration provider failure raises\ninstead \u2014 naming which items migrated and which are still native \u2014 so a\nresult in hand means every listed item, and only those, moved.",
         "properties": {
           "project": {
             "$ref": "#/components/schemas/Project"
@@ -21552,7 +21844,7 @@
       },
       "ForgePublishParams": {
         "additionalProperties": false,
-        "description": "Create the remote and make the project upstream-truth.\n\nThe first verb that creates upstream state and pushes commits, which is\nwhy every precondition is typed and checked up front: not already\nlinked, no `repo_url` to clobber, a clean checkout on a named branch,\nand a usable credential. The push is plain — never forced.",
+        "description": "Create the remote and make the project upstream-truth.\n\nThe first verb that creates upstream state and pushes commits, which is\nwhy every precondition is typed and checked up front: not already\nlinked, no `repo_url` to clobber, a clean checkout on a named branch,\nand a usable credential. The push is plain \u2014 never forced.",
         "properties": {
           "project": {
             "description": "Project slug.",
@@ -21680,7 +21972,7 @@
       },
       "ForgeAccountResult": {
         "additionalProperties": false,
-        "description": "The outcome of a link or unlink — status only, never the token.",
+        "description": "The outcome of a link or unlink \u2014 status only, never the token.",
         "properties": {
           "host": {
             "title": "Host",
@@ -21819,7 +22111,7 @@
             "type": "string"
           },
           "already_registered": {
-            "description": "Whether this instance already has a project whose repository URL is this repo — computed against the declared project list, so a select-all can skip what is already imported.",
+            "description": "Whether this instance already has a project whose repository URL is this repo \u2014 computed against the declared project list, so a select-all can skip what is already imported.",
             "title": "Already Registered",
             "type": "boolean"
           }
@@ -21854,7 +22146,7 @@
                 "type": "null"
               }
             ],
-            "description": "Whose credential enumerated these — the linked actor login, or null when the instance file token was used.",
+            "description": "Whose credential enumerated these \u2014 the linked actor login, or null when the instance file token was used.",
             "title": "Login"
           },
           "detail": {
@@ -21866,7 +22158,7 @@
                 "type": "null"
               }
             ],
-            "description": "Why the list is empty when it is — no forge configured for the host, for instance — so an empty picker reads as 'not collected' rather than 'you have no repositories'.",
+            "description": "Why the list is empty when it is \u2014 no forge configured for the host, for instance \u2014 so an empty picker reads as 'not collected' rather than 'you have no repositories'.",
             "title": "Detail"
           }
         },
@@ -21877,7 +22169,7 @@
       },
       "ForgeImportParams": {
         "additionalProperties": false,
-        "description": "Import a repository the picker listed, as a project.\n\nNamed exactly as `forge.repos` shows it — `owner` and `name` — because\nthis is the verb that turns one of those listed rows into a project:\nclone under the acting credential, register, and consolidate. The\ncredential that reaches the repository to list it is the credential the\nclone runs under, so a private repository a personal PAT can see imports\nwithout the instance file token ever needing access to it.",
+        "description": "Import a repository the picker listed, as a project.\n\nNamed exactly as `forge.repos` shows it \u2014 `owner` and `name` \u2014 because\nthis is the verb that turns one of those listed rows into a project:\nclone under the acting credential, register, and consolidate. The\ncredential that reaches the repository to list it is the credential the\nclone runs under, so a private repository a personal PAT can see imports\nwithout the instance file token ever needing access to it.",
         "properties": {
           "owner": {
             "description": "Repository owner, as `forge repos` lists it.",
@@ -22046,7 +22338,7 @@
       },
       "Event": {
         "additionalProperties": false,
-        "description": "One row of the ordered notification feed.\n\n`seq` is the `/events` cursor — a single monotonic sequence over a single\ntable, so no client ever merges orderings across the two stores.",
+        "description": "One row of the ordered notification feed.\n\n`seq` is the `/events` cursor \u2014 a single monotonic sequence over a single\ntable, so no client ever merges orderings across the two stores.",
         "properties": {
           "seq": {
             "title": "Seq",
@@ -22231,7 +22523,7 @@
       "NotificationsResult": {
         "type": "object",
         "additionalProperties": false,
-        "description": "The inbox, and what it is honestly able to be.\n\n `freshness` is here for the same reason every other aggregate carries one\n: an empty inbox with no sweep behind it means nobody has looked.\n `scope` states out loud that these belong to the configured token's\n account rather than to the reading actor — a limit of the design, not of\n this response.",
+        "description": "The inbox, and what it is honestly able to be.\n\n `freshness` is here for the same reason every other aggregate carries one\n: an empty inbox with no sweep behind it means nobody has looked.\n `scope` states out loud that these belong to the configured token's\n account rather than to the reading actor \u2014 a limit of the design, not of\n this response.",
         "properties": {
           "notifications": {
             "items": {
@@ -24002,7 +24294,7 @@
         "title": "AuditListResult"
       },
       "ConnectionInfo": {
-        "description": "What a client needs to connect, from the server itself (DEPLOY §4.3).\n\nOne generated document rather than per-client hand-copied config: the\n`:18081` incident began as a URL that lived in seven places and was\nretired in one.",
+        "description": "What a client needs to connect, from the server itself (DEPLOY \u00a74.3).\n\nOne generated document rather than per-client hand-copied config: the\n`:18081` incident began as a URL that lived in seven places and was\nretired in one.",
         "properties": {
           "api_path": {
             "title": "Api Path",
@@ -24145,7 +24437,7 @@
             "$ref": "#/components/schemas/Actor"
           },
           "secret": {
-            "description": "Shown once. Not stored, not recoverable — rotate if lost.",
+            "description": "Shown once. Not stored, not recoverable \u2014 rotate if lost.",
             "title": "Secret",
             "type": "string"
           },
@@ -24183,7 +24475,7 @@
         "description": "Whether this instance is still in first-run install mode.",
         "properties": {
           "install_mode": {
-            "description": "True while the token store holds no tokens at all — the state in which the unauthenticated bootstrap will answer. The first token, however issued, turns this false for good.",
+            "description": "True while the token store holds no tokens at all \u2014 the state in which the unauthenticated bootstrap will answer. The first token, however issued, turns this false for good.",
             "title": "Install Mode",
             "type": "boolean"
           }
@@ -24263,7 +24555,7 @@
         "type": "object"
       },
       "Readiness": {
-        "description": "Ready means the stores are migrated *to this build's schema* and\nanswering.\n\nReadiness gates traffic until migration completes (`DEPLOYMENT.md`),\nwhich is why this reports schema versions rather\nthan a bare boolean: a red probe should say what is wrong.\n\n**Both numbers are reported per store, and that is the whole of the fix\nmade at r13.** Until then this answered with the *applied* version alone\nand said `ready` whenever the stores responded — a fact about the disk\nthat answers no question a deployer has. An image whose migration had not\nrun looked exactly like one whose migration had, so a container carrying\na new migration came up green and failed afterwards on a missing table,\nas a SQL error at whatever touched it first rather than as a red probe.\nComparing the two is what turns that into an outage the orchestrator can\nsee before it routes traffic.",
+        "description": "Ready means the stores are migrated *to this build's schema* and\nanswering.\n\nReadiness gates traffic until migration completes (`DEPLOYMENT.md`),\nwhich is why this reports schema versions rather\nthan a bare boolean: a red probe should say what is wrong.\n\n**Both numbers are reported per store, and that is the whole of the fix\nmade at r13.** Until then this answered with the *applied* version alone\nand said `ready` whenever the stores responded \u2014 a fact about the disk\nthat answers no question a deployer has. An image whose migration had not\nrun looked exactly like one whose migration had, so a container carrying\na new migration came up green and failed afterwards on a missing table,\nas a SQL error at whatever touched it first rather than as a red probe.\nComparing the two is what turns that into an outage the orchestrator can\nsee before it routes traffic.",
         "properties": {
           "declared_schema_expected": {
             "default": 0,

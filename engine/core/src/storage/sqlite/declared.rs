@@ -12,9 +12,9 @@ use crate::core::{
     default_workflow, from_iso, to_iso, Actor, ActorKind, ActorPreference, AuditRecord,
     AuthDecision, Charter, Clock, CodingSession, Comment, ContractExemption, Decision,
     DriftProposal, Event, ForgeAccount, IdFactory, InboxTriage, Initiative, InitiativeState, Label,
-    Moment, PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression, Token,
-    Watch, WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackAction, WriteBackOutcome,
-    WriteBackRecord,
+    Moment, PasswordCredential, Principal, Project, RelationKind, SessionGrant, SessionReport,
+    SessionReportFields, Suppression, Token, Watch, WorkItem, WorkLink, WorkOverlay, Workflow,
+    WriteBackAction, WriteBackOutcome, WriteBackRecord,
 };
 use crate::errors::VogtError;
 use crate::storage::interface::{
@@ -1332,6 +1332,45 @@ impl ReadView for SqliteReadView {
             row_session,
         )
     }
+    fn latest_session_reports(
+        &self,
+        engine_session_ids: &[String],
+    ) -> Result<BTreeMap<String, SessionReport>, VogtError> {
+        if engine_session_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = std::iter::repeat_n("?", engine_session_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, actor_id, engine_session_id, work_item_id, kind, summary, data, created_at \
+             FROM session_reports WHERE engine_session_id IN ({placeholders}) \
+             ORDER BY created_at DESC, id DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(sql_err)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(engine_session_ids.iter()),
+                row_session_report,
+            )
+            .map_err(sql_err)?;
+        let mut reports = BTreeMap::new();
+        for row in rows {
+            let report = row.map_err(sql_err)?;
+            if let Some(engine_id) = report.engine_session_id.clone() {
+                reports.entry(engine_id).or_insert(report);
+            }
+        }
+        Ok(reports)
+    }
+    fn list_session_reports(&self, limit: i64) -> Result<Vec<SessionReport>, VogtError> {
+        many(
+            &self.conn,
+            "SELECT id, actor_id, engine_session_id, work_item_id, kind, summary, data, created_at FROM session_reports ORDER BY created_at DESC, id DESC LIMIT ?",
+            [limit],
+            row_session_report,
+        )
+    }
     fn list_session_grants(
         &self,
         state: Option<&str>,
@@ -1756,6 +1795,15 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
     fn session_by_engine_id(&self, a: &str) -> Result<Option<CodingSession>, VogtError> {
         self.view.session_by_engine_id(a)
     }
+    fn latest_session_reports(
+        &self,
+        a: &[String],
+    ) -> Result<BTreeMap<String, SessionReport>, VogtError> {
+        self.view.latest_session_reports(a)
+    }
+    fn list_session_reports(&self, a: i64) -> Result<Vec<SessionReport>, VogtError> {
+        self.view.list_session_reports(a)
+    }
     fn list_session_grants(
         &self,
         a: Option<&str>,
@@ -2010,6 +2058,18 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .as_ref()
             .map(|value| crate::decisions::python_json_dumps(value, false));
         self.view.conn.execute("INSERT INTO comments (id, work_item_id, actor_id, body, created_at, kind, data) VALUES (?, ?, ?, ?, ?, ?, ?)", params![comment.id, comment.work_item_id, comment.actor_id, comment.body, to_iso(comment.created_at), comment.kind, data]).map_err(sql_err)?;
+        Ok(())
+    }
+    fn insert_session_report(&mut self, report: &SessionReport) -> Result<(), VogtError> {
+        let fields = crate::decisions::python_json_dumps(
+            &serde_json::to_value(&report.fields)
+                .map_err(|err| VogtError::InvalidRequest(err.to_string()))?,
+            false,
+        );
+        self.view.conn.execute(
+            "INSERT INTO session_reports (id, actor_id, engine_session_id, work_item_id, kind, summary, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![report.id, report.actor_id, report.engine_session_id, report.work_item_id, report.kind, report.summary, fields, to_iso(report.created_at)],
+        ).map_err(sql_err)?;
         Ok(())
     }
     fn insert_suppression(&mut self, suppression: &Suppression) -> Result<(), VogtError> {
@@ -3509,6 +3569,31 @@ fn row_comment(row: &Row<'_>) -> rusqlite::Result<Comment> {
         created_at: moment(row, "created_at")?,
         kind: row.get("kind").unwrap_or_else(|_| "note".to_string()),
         handoff,
+    })
+}
+
+fn row_session_report(row: &Row<'_>) -> rusqlite::Result<SessionReport> {
+    let fields: String = row.get(6)?;
+    let fields = serde_json::from_str::<SessionReportFields>(&fields).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    let created_at = row.get::<_, String>(7)?;
+    let created_at = from_iso(&created_at).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, err)),
+        )
+    })?;
+    Ok(SessionReport {
+        id: row.get(0)?,
+        actor_id: row.get(1)?,
+        engine_session_id: row.get(2)?,
+        work_item_id: row.get(3)?,
+        kind: row.get(4)?,
+        summary: row.get(5)?,
+        fields,
+        created_at,
     })
 }
 

@@ -20,6 +20,7 @@ pub enum VogtError {
     BypassRefused(String),
     RoleRefused(String),
     GrantRefused(String),
+    ReportRefused(String),
     /// An engine session names no person, and one is required (WI-983).
     PersonRequired(String),
     /// A start's model is one the project, or the template, will not run
@@ -110,6 +111,7 @@ impl VogtError {
             | Self::BypassRefused(m)
             | Self::RoleRefused(m)
             | Self::GrantRefused(m)
+            | Self::ReportRefused(m)
             | Self::PersonRequired(m)
             | Self::PolicyRefused(m)
             | Self::EngineOnly(m)
@@ -164,6 +166,7 @@ impl VogtError {
             Self::BypassRefused(_) => "bypass_refused",
             Self::RoleRefused(_) => "role_refused",
             Self::GrantRefused(_) => "grant_refused",
+            Self::ReportRefused(_) => "report_refused",
             Self::PersonRequired(_) => "person_required",
             Self::PolicyRefused(_) => "policy_refused",
             Self::EngineOnly(_) => "engine_only",
@@ -231,6 +234,7 @@ impl VogtError {
             Self::BypassRefused(_)
             | Self::RoleRefused(_)
             | Self::GrantRefused(_)
+            | Self::ReportRefused(_)
             | Self::PersonRequired(_)
             | Self::EngineOnly(_) => 403,
             Self::InvalidRequest(_)
@@ -374,6 +378,7 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
         ("bypass_refused", 403),
         ("role_refused", 403),
         ("grant_refused", 403),
+        ("report_refused", 403),
         ("person_required", 403),
         ("policy_refused", 422),
         ("engine_only", 403),
@@ -429,6 +434,7 @@ mod tests {
             "bypass_refused" => VogtError::BypassRefused(message),
             "role_refused" => VogtError::RoleRefused(message),
             "grant_refused" => VogtError::GrantRefused(message),
+            "report_refused" => VogtError::ReportRefused(message),
             "person_required" => VogtError::PersonRequired(message),
             "policy_refused" => VogtError::PolicyRefused(message),
             "engine_only" => VogtError::EngineOnly(message),
@@ -495,7 +501,7 @@ mod tests {
 
     #[test]
     fn every_code_round_trips_with_its_status() {
-        assert_eq!(error_table().len(), 45);
+        assert_eq!(error_table().len(), 46);
         let mut seen = std::collections::BTreeSet::new();
         for (code, status) in error_table() {
             assert!(seen.insert(*code), "duplicate code {code}");
