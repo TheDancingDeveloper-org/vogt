@@ -28,7 +28,7 @@ from vogt.adapters.mcp.stdio import (
     tool_success,
 )
 from vogt.adapters.mcp.surface import McpSurface
-from vogt.application.context import AppContext
+from vogt.application.context import AppContext, with_claimed_engine_session
 from vogt.application.services.auth import (
     Authenticated,
     Forbidden,
@@ -73,6 +73,7 @@ def add_mcp_route(
         # back). _handle() — the authorize write and the operation dispatch —
         # is the slow part, so only it is offloaded.
         ctx, caller = resolve(request)
+        ctx = with_claimed_engine_session(ctx, request.headers)
         response = await asyncio.to_thread(
             _handle, message, ctx=ctx, caller=caller, registry=registry
         )

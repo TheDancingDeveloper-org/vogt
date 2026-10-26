@@ -3125,6 +3125,7 @@ mod tests {
             auto_agent_auth: false,
             agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
             codex_session_id: false,
+            codex_approval_policy: "never".to_string(),
             agent_auth_secrets: vec![],
             agent_grant_projects: vec![],
             session_templates: vec![],
@@ -3164,7 +3165,12 @@ mod tests {
             agent_onboarding: crate::claude_config::Onboarding::default(),
             session_rss_warn_bytes: None,
             worktree_clean_on_hibernate: false,
+            worktree_clean_on_stop: false,
             disk_warn_percent: 85,
+            scratch_prune_bytes: 2 << 30,
+            min_free_percent: 0,
+            shared_cargo_target_dir: None,
+            shared_cargo_target_max_bytes: 40 << 30,
             metrics_bind: None,
             chat: Default::default(),
             economics_tick: std::time::Duration::ZERO,
@@ -3290,6 +3296,7 @@ mod tests {
                 rows: Some(24),
                 scrollback_bytes: None,
                 companion: None,
+                charter: None,
                 budget: None,
             })
             .expect("spawn cat")
@@ -4614,6 +4621,7 @@ mod tests {
                 rows: Some(24),
                 scrollback_bytes: None,
                 companion: None,
+                charter: None,
                 budget: None,
             })
             .expect("spawn worker")

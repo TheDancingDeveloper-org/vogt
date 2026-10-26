@@ -86,7 +86,10 @@ GitHub dependency graph and Dependabot security updates are enabled for every
 manifest Vogt ships (`.github/dependabot.yml`). Pull requests run the
 `dependency review` workflow, which blocks a change introducing a high or
 critical severity dependency advisory. CodeQL scans Python, TypeScript,
-JavaScript, and Rust on pull requests, pushes to `main`, and weekly.
+JavaScript, and Rust only when a release is cut: on a `v*` tag push (beta and
+prod) or a manual `workflow_dispatch`. The dev deploy lane dispatches it with
+`ref` set to the commit it deploys. It does not run on pull requests, the
+merge queue, pushes to `main`, or a schedule.
 
 `.github/dependabot.yml` carries two deliberate exceptions. The CodeQL
 `init` and `analyze` actions are grouped into one update, because a PR that
@@ -111,9 +114,6 @@ After enabling these workflows, configure repository Settings → Rules → Rule
 
 - `ci`
 - `dependency review`
-- `analyze (python)`
-- `analyze (javascript-typescript)`
-- `analyze (rust)`
 - `runner-policy`
 
 Also enable **Dependency graph**, **Dependabot alerts**, and **Dependabot
@@ -122,8 +122,8 @@ settings and therefore cannot be represented in tracked files; verify them
 after a repository transfer or visibility change.
 
 This is a public repository, and `pull_request`-triggered jobs run on the
-project's self-hosted runner pool (`ci.yml`, `codeql.yml`,
-`runner-policy.yml`, `docs.yml`, `mirror-base-images.yml`). Those jobs run
+project's self-hosted runner pool (`ci.yml`, `runner-policy.yml`, `docs.yml`,
+`mirror-base-images.yml`). Those jobs run
 `uv`/`pytest`, `pnpm install`, `cargo`, Playwright and `gradlew` over
 PR-controlled source — arbitrary code execution by design — on a pool that
 also runs the secret-bearing jobs.
@@ -159,39 +159,34 @@ by where the pipeline runs. What the tree _does_ enforce:
   are gated on `github.event_name != 'pull_request'`, and no workflow uses
   `pull_request_target`.
 - Release images are not built at release time: `release.yml` promotes, by
-  digest, the images `build.yml` built on `main` (see *Release signing*
-  below). Pull-request jobs never publish or sign an image.
+  digest, the images `build.yml` built on `main` (see *Image trust*
+  below). Pull-request jobs never publish an image.
 
 If the approval setting is ever found disabled, treat every self-hosted runner
 as potentially compromised by fork-submitted code and rotate the credentials
 those runners can reach.
 
-### Release signing: build once, promote by digest
+### Image trust: build once, promote by digest
 
-Every published image is signed keylessly with cosign, by digest, using the
-workflow's own GitHub OIDC identity — there is no signing key to store or
-rotate. A released image carries two signatures on the **same digest**:
+No image is signed. Signing was dropped (operator decision, 2026-10-20):
+`build.yml` and `release.yml` neither install cosign nor sign, and no job
+requests an `id-token`. A digest is trusted by its registry name and its SBOM
+and provenance attestations.
 
-- `…/.github/workflows/build.yml@refs/heads/main`, made when `build.yml` built
-  and smoke-tested it for a commit on `main`;
-- `…/.github/workflows/release.yml@refs/tags/vX.Y.Z`, made when the `v*` tag
-  promoted that digest. Deployments verify this identity
-  ([`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §6).
-
-`release.yml` never builds. Before it signs, it requires a `build.yml` run on
-`main` for the tagged commit whose image jobs succeeded, and it verifies each
-digest's `build.yml` signature with the certificate's workflow-sha pinned to
-the tagged commit, so it can only promote what `build.yml` built from that
-exact source. It retags by digest (`imagetools create --prefer-index=false`)
-and asserts every semver tag resolves to the promoted digest. The SBOM and
-provenance attestations are the ones BuildKit recorded in the image index at
-build time; they travel with the digest. If any of this is missing the
-release fails; there is no rebuild fallback.
+`release.yml` never builds. It requires a `build.yml` run on `main` for the
+tagged commit whose image jobs succeeded, finds each image by its `sha-`
+commit tag, and checks that the digest carries the SBOM and provenance
+attestations. It retags by digest (`imagetools create --prefer-index=false`)
+and asserts every semver tag resolves to the promoted digest. The attestations
+are the ones BuildKit recorded in the image index at build time; they travel
+with the digest. If any of this is missing the release fails; there is no
+rebuild fallback. A deployment pins the digest, which a tag cannot silently
+move.
 
 **Accepted trade-off.** `build.yml` imports its BuildKit layer cache from the
 operator's plaintext, unauthenticated LAN registry (`VOGT_BUILDKIT_CACHE_REGISTRY`)
 to keep per-commit builds fast. Releases used to build cold precisely so that
-a poisoned cache entry could not become a release-signed artefact; promoting
+a poisoned cache entry could not become a release artefact; promoting
 the `main` build gives that up in exchange for shipping exactly the bytes the
 development lane ran. The cache is therefore part of the release trust
 boundary: it must stay reachable only from the runner hosts, and the

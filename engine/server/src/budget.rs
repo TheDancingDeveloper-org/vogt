@@ -97,8 +97,9 @@ enum Dimension {
 /// The line typed at the prompt on a soft warning. It names no marker, so its
 /// echo can never read as the agent finishing.
 pub const SOFT_LINE: &str = "[vogt] budget: {what} ({n} of {limit}). \
-Commit your work in progress on your branch, write a hand-off comment \
-(work_comment kind=handoff), then stop.";
+Commit your work in progress on your branch and push it, write a hand-off \
+comment (work_comment kind=handoff: branch, head_sha, done, remaining, \
+gates_run, blockers), then stop.";
 
 /// `used` against `limit`: missing or zero is no limit, at or over the limit
 /// is hard, at or over `soft_pct` of it is soft.

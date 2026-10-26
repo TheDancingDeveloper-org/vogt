@@ -97,11 +97,15 @@ class _ForgeSyncCollector:
         newest = None if watermark is None else from_iso(watermark)
         subject_keys: list[str] = []
         for item in items:
-            key = provider.subject_key(ref, item.number)
-            subject_keys.append(key)
+            # Every item moves the watermark, including one this collector does
+            # not own: a page can be all pull requests (WI-1752), and skipping
+            # them without advancing would ask for the same window forever.
             moved = _moment(item.updated_at)
             if moved is not None and (newest is None or moved > newest):
                 newest = moved
+            if not self._owns(item):
+                continue
+            subject_keys.append(provider.subject_key(ref, item.number))
             yield self._finding(provider, ref, project, item)
 
         self._pending[project.id] = _Pending(
@@ -112,9 +116,10 @@ class _ForgeSyncCollector:
             project,
             ref=ref,
             supported=True,
-            count=len(items),
+            count=len(subject_keys),
             # A full page means the forge may hold more that moved since the
             # watermark; the next sweep continues from where this one reached.
+            # Counted over the whole page, pull requests included.
             truncated=len(items) >= _PAGE,
             watermark=None if newest is None else to_iso(newest),
         )
@@ -142,6 +147,9 @@ class _ForgeSyncCollector:
         )
 
     # -- subclass surface --------------------------------------------------
+
+    def _owns(self, item: ForgeIssue | ForgePull) -> bool:
+        raise NotImplementedError  # pragma: no cover - subclasses implement
 
     def _fetch(
         self, provider: ForgeProvider, ref: RepoRef, since: str | None
@@ -196,6 +204,9 @@ class ForgeIssuesCollector(_ForgeSyncCollector):
     name = COLLECTOR_ISSUES
     kind = KIND_ISSUE
 
+    def _owns(self, item: ForgeIssue | ForgePull) -> bool:
+        return isinstance(item, ForgeIssue)
+
     def _fetch(
         self, provider: ForgeProvider, ref: RepoRef, since: str | None
     ) -> Iterable[ForgeIssue | ForgePull]:
@@ -237,6 +248,8 @@ class ForgeIssuesCollector(_ForgeSyncCollector):
                 "body": item.body,
                 "updated_at": item.updated_at,
                 "closed_at": item.closed_at,
+                # How a closed issue closed: a not-planned close is `wont_do`.
+                "state_reason": item.state_reason,
                 "repo": ref.slug,
             },
         )
@@ -247,6 +260,9 @@ class ForgePullsCollector(_ForgeSyncCollector):
 
     name = COLLECTOR_PULLS
     kind = KIND_PULL_REQUEST
+
+    def _owns(self, item: ForgeIssue | ForgePull) -> bool:
+        return isinstance(item, ForgePull)
 
     def _fetch(
         self, provider: ForgeProvider, ref: RepoRef, since: str | None
@@ -292,6 +308,8 @@ class ForgePullsCollector(_ForgeSyncCollector):
                 "implements": _implements(provider, ref, item),
                 "updated_at": item.updated_at,
                 "closed_at": item.closed_at,
+                "merged_at": item.merged_at,
+                "merged_by": item.merged_by,
                 "repo": ref.slug,
             },
         )

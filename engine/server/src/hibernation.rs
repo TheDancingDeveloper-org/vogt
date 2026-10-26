@@ -75,6 +75,14 @@ pub struct Record {
     /// quietly change it (WI-926).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The posture the agent's own screen showed when it was last hibernated
+    /// (WI-2252): `bypass`, `accept-edits`, `auto` or `plan`, read from
+    /// Claude Code's footer. It covers a posture a person changed after the
+    /// start (Shift+Tab) or typed into a plain shell. Never replayed: the
+    /// screen is the agent's to draw, so it only lets a wake say that a
+    /// bypass was lost (`posture_lost_on_resume`), never grant one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_permission_mode: Option<String>,
     /// The Claude Code account it was started under; a wake keeps it, and its
     /// `CLAUDE_CONFIG_DIR` rides in `env`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,6 +110,10 @@ pub struct Record {
     /// On autopilot (WI-949); a wake keeps it on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autopilot: bool,
+    /// When the agent last declared itself done under autopilot (WI-1518); a
+    /// wake keeps it until the next turn starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<String>,
     /// The project policy it enforces (WI-1243); a wake keeps it. Absent on a
     /// record written before the field existed, which wakes without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +161,34 @@ pub struct Record {
     /// Absent on a record written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<vogt_engine_contract::BlockedReport>,
+    /// Set only for the length of a compacting wake (WI-2037): the id the
+    /// new conversation is pinned to, so it does not collide with the one
+    /// it replaces. Never written.
+    #[serde(skip)]
+    pub fresh_conversation: Option<Uuid>,
+}
+
+/// Whether a woken session lost the bypass it showed before it slept
+/// (WI-2252): its screen said `bypass` and the posture the wake replays, the
+/// one a person gave at the start, is not.
+pub fn posture_lost(observed: Option<&str>, granted: Option<&str>) -> bool {
+    observed == Some("bypass") && granted != Some("bypass")
+}
+
+/// The posture a hibernation records as seen (WI-2252): what the screen
+/// shows now, except that a session woken without its bypass, and not given
+/// it back since, keeps the bypass it had before. Otherwise a second
+/// hibernation would read the worker posture off the screen and the loss
+/// would stop being said.
+pub fn observed_posture(
+    previous: Option<&str>,
+    still_lost: bool,
+    shown: Option<&str>,
+) -> Option<String> {
+    if still_lost && shown != Some("bypass") {
+        return previous.map(str::to_string);
+    }
+    shown.map(str::to_string)
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -169,6 +209,7 @@ impl Record {
             model: None,
             effort: None,
             permission_mode: None,
+            observed_permission_mode: None,
             account: None,
             settings_file: None,
             add_dirs: Vec::new(),
@@ -176,6 +217,7 @@ impl Record {
             brief_file: None,
             keep_awake: false,
             autopilot: false,
+            done_at: None,
             policy: None,
             budget: None,
             budget_soft_sent: false,
@@ -189,6 +231,7 @@ impl Record {
             rows: None,
             cols: None,
             blocked: None,
+            fresh_conversation: None,
         }
     }
 }
@@ -492,6 +535,39 @@ fn alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_bypass_seen_and_not_granted_is_lost() {
+        assert!(posture_lost(Some("bypass"), None));
+        assert!(posture_lost(Some("bypass"), Some("accept-edits")));
+        assert!(!posture_lost(Some("bypass"), Some("bypass")));
+        assert!(!posture_lost(Some("auto"), None));
+        assert!(!posture_lost(None, None));
+    }
+
+    #[test]
+    fn a_lost_bypass_is_remembered_until_the_screen_shows_it_again() {
+        assert_eq!(
+            observed_posture(None, false, Some("bypass")).as_deref(),
+            Some("bypass")
+        );
+        assert_eq!(
+            observed_posture(Some("bypass"), false, Some("auto")).as_deref(),
+            Some("auto")
+        );
+        assert_eq!(
+            observed_posture(Some("bypass"), true, Some("auto")).as_deref(),
+            Some("bypass")
+        );
+        assert_eq!(
+            observed_posture(Some("bypass"), true, None).as_deref(),
+            Some("bypass")
+        );
+        assert_eq!(
+            observed_posture(Some("bypass"), true, Some("bypass")).as_deref(),
+            Some("bypass")
+        );
+    }
 
     #[test]
     fn a_record_round_trips_and_never_holds_a_secret() {

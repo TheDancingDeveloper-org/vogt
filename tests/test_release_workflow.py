@@ -3,8 +3,9 @@
 `build.yml` builds, smoke-tests, signs and publishes the images once per
 commit on `main` — the core, the lean stack, the workbench stack and the
 voice sidecar; the dev lane deploys and validates the digests it consumes; a
-`v*` tag then retags and release-signs the same digests. These tests pin the
-shape that makes that true, because each property is one innocent-looking
+`v*` tag then retags the same digests (the release itself signs nothing).
+These tests pin the shape that makes that true, because each property is one
+innocent-looking
 edit away from quietly going back to "a release rebuilds something the dev
 lane never ran".
 """
@@ -102,11 +103,10 @@ def test_the_build_run_gate_names_build_yml_jobs_that_exist() -> None:
     assert "branch=main" in block
 
 
-def test_promotion_verifies_then_retags_and_signs_by_digest() -> None:
+def test_promotion_checks_then_retags_by_digest_and_never_signs() -> None:
     block = _job_block(_release(), "promote")
-    # Only what build.yml signed, on main, at this exact commit, is promoted.
-    assert "/.github/workflows/build.yml@refs/heads/main" in block
-    assert '--certificate-github-workflow-sha "$TAG_SHA"' in block
+    # The digest is found by build.yml's sha- tag and must carry the SBOM and
+    # provenance attestations; a digest without them is not promoted.
     assert "{{json .${kind}}}" in block and "SBOM Provenance" in block
     # Registry-side retag of the digest, re-checked afterwards.
     # `--prefer-index=false` keeps buildx from wrapping a single manifest in
@@ -115,14 +115,18 @@ def test_promotion_verifies_then_retags_and_signs_by_digest() -> None:
     assert '"${args[@]}" "${repo}@${digest}"' in block
     assert 'if [ "$got" != "$digest" ]; then' in block
     assert 'tags="$version ${version%.*} latest"' in block
-    # Signed by digest, never by tag, under this workflow's own identity.
-    for env in ("IMAGE", "STACK_IMAGE", "VOICE_IMAGE"):
-        assert re.search(
-            rf'cosign sign --yes "\${{{env}}}@\$\{{\w+_DIGEST\}}"', block
-        ), env
-    assert "id-token: write" in block
+    # Image signing was dropped: nothing in the release signs, and the job
+    # needs no OIDC token for it.
+    assert "cosign" not in block
+    assert "id-token: write" not in block
     # No silent fallback: the failure is an error, not a rebuild.
     assert "Nothing is rebuilt" in block
+
+
+def test_release_signs_nothing() -> None:
+    text = _release()
+    assert "cosign" not in text
+    assert "sigstore" not in text
 
 
 def test_the_manifest_records_the_source_and_every_digest() -> None:
@@ -136,7 +140,6 @@ def test_the_manifest_records_the_source_and_every_digest() -> None:
         'method: "build-once-promote-by-digest"',
         "rebuilt: false",
         "build_run_id:",
-        "cosign_identities:",
     ):
         assert key in block, key
     for need in ("build-run", "promote", "android", "release-pair"):
@@ -162,13 +165,12 @@ def test_core_and_stack_are_built_once_and_tagged_after_smoke() -> None:
     assert "push-by-digest=true" in image
     assert "docker pull" in image and "${IMAGE}@${DIGEST}" in image
     assert image.index("docker pull") < image.index("imagetools create")
-    assert image.index("imagetools create") < image.index("cosign sign")
+    assert "cosign" not in build
     assert "docker/build-push-action" not in stack
     assert ".github/stack-bake.hcl" in stack
     assert "stack gitguard" in stack
     assert stack.index("docker pull") < stack.index("codex_gitguard_e2e")
     assert stack.index("codex_gitguard_e2e") < stack.index("imagetools create")
-    assert stack.index("imagetools create") < stack.index("cosign sign")
     bake = (ROOT / ".github" / "stack-bake.hcl").read_text(encoding="utf-8")
     assert 'target "stack"' in bake and 'target "gitguard"' in bake
     assert "push-by-digest=true" in bake

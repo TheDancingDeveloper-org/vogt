@@ -98,6 +98,13 @@ pub struct SessionSpec {
     /// there is no brief.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companion: Option<String>,
+    /// The scope's charters (WI-2038): standing instructions for the
+    /// workspace, project and initiative, broadest first. They are already in
+    /// the brief; the engine also appends them to the standing instructions
+    /// of an agent CLI that keeps those apart from its first prompt (Codex
+    /// `developer_instructions`), so they outlive a compacted conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charter: Option<String>,
     /// Which model the agent CLI in `command` should run, and how hard it
     /// should think. The engine turns these into that CLI's own
     /// flags or environment; a command it has no mapping for is refused by
@@ -256,6 +263,13 @@ pub struct SessionSummary {
     /// byte, and from older engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<String>,
+    /// When the agent declared itself done under autopilot (the
+    /// `AUTOPILOT: DONE` marker, WI-1518). RFC 3339. Set once per turn, cleared
+    /// when the next turn starts, and kept across a hibernation and a wake.
+    /// Absent when it has not declared itself done this turn, and from older
+    /// engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<String>,
     /// The latest of the clocks the list sorts and hides by (WI-1289):
     /// activity change, last output, last person input, a blocked or
     /// approval change, and an exit or hibernation. RFC 3339. The engine
@@ -314,6 +328,13 @@ pub struct SessionSummary {
     /// (`accept-edits`, `bypass`) (WI-926).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The session showed bypass before it was hibernated, and was woken
+    /// without it (WI-2252): a person granted bypass after the start (Shift+Tab
+    /// in the TUI, or a hand-typed `claude --dangerously-skip-permissions`),
+    /// and a wake only replays the posture a person gave at the start. The
+    /// operator re-grants it in the session's terminal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub posture_lost_on_resume: bool,
     /// The Claude Code account it was started under, when one was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -465,6 +486,17 @@ pub enum HibernateTrigger {
     Budget,
 }
 
+/// What an agent's done declaration came from (WI-1518).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DoneSource {
+    /// The `AUTOPILOT: DONE` line among the last lines of its screen.
+    Marker,
+    /// A done declaration made through the engine's own report route. Named
+    /// here so the wire shape is settled; nothing emits it yet.
+    Report,
+}
+
 /// A hibernated session's record of when and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hibernation {
@@ -519,6 +551,12 @@ pub struct WakeRequest {
     /// (WI-1251). Off unless asked for.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
+    /// Cold-wake compaction (WI-2037): instead of resuming the recorded
+    /// conversation, start a fresh one whose first prompt is this summary,
+    /// followed by the session directory's git facts and the original
+    /// brief. vogt-core decides when; the engine only carries it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh_prompt: Option<String>,
 }
 
 /// What a session is for (WI-957). Absent on the wire means `worker`.
@@ -791,6 +829,13 @@ pub struct AnswerRequest {
     /// other caller is a person or not by its own actor's kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person: Option<bool>,
+    /// The engine id of the oversight session vogt-core is relaying, when
+    /// the answer comes from one (WI-1831, WI-2028). Read only from
+    /// vogt-core's own credential. The engine checks the role itself and lets
+    /// that session answer a `permission` prompt (`oversight_answer`); other
+    /// kinds stay a person's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overseer: Option<String>,
 }
 
 /// What `POST /api/sessions/{id}/answer` did.
@@ -1010,6 +1055,15 @@ pub enum ServerEvent {
     /// once per turn when the screen render says the prompt is waiting.
     SessionReady {
         id: Uuid,
+    },
+    /// An autopilot session's agent declared itself done (WI-1518): its
+    /// autopilot went off on the `AUTOPILOT: DONE` marker. Published once per
+    /// turn, so a re-render of the same screen announces nothing new.
+    SessionDone {
+        id: Uuid,
+        /// When it was declared. RFC 3339.
+        at: String,
+        source: DoneSource,
     },
     /// A session was hibernated: its process tree is gone, the session is
     /// still listed (`activity: hibernated`) and can be woken.

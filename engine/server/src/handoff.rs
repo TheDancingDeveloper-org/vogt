@@ -146,7 +146,7 @@ fn cap(text: &str) -> String {
 /// Every call passes `--no-optional-locks`: `status` otherwise takes
 /// `index.lock`, and the session directory is one a worker may be committing
 /// in at the same moment.
-fn git_facts(cwd: &str) -> Option<String> {
+pub(crate) fn git_facts(cwd: &str) -> Option<String> {
     let capture = |args: &[&str]| -> Option<String> {
         let out = Command::new("git")
             .arg("--no-optional-locks")

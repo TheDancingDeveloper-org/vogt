@@ -124,6 +124,8 @@ pub struct Session {
     superseded_by: Mutex<Option<String>>,
     /// The permission posture, when not the default (WI-926).
     permission_mode: Mutex<Option<String>>,
+    /// Woken without the bypass it showed before hibernating (WI-2252).
+    posture_lost_on_resume: AtomicBool,
     account: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
     stop: Mutex<Option<vogt_engine_contract::StopRequest>>,
@@ -134,6 +136,9 @@ pub struct Session {
     first_output_seen: AtomicBool,
     /// The launch wrapper's report was accepted; a second is refused.
     launch_reported: AtomicBool,
+    /// Set when the launch wrapper reported `degraded`: the session started
+    /// without its brokered credentials (WI-1812). Lives and dies with it.
+    agent_auth_degraded: parking_lot::Mutex<Option<crate::launch::DegradedLaunch>>,
     /// The economics tailer's place in this session's transcript, and the
     /// snapshot it last produced (WI-1245).
     economics: parking_lot::Mutex<Option<crate::economics::Tail>>,
@@ -169,6 +174,10 @@ pub struct Session {
     /// (WI-1519). Set when one is, cleared when the next turn starts, so a
     /// session that keeps idling does not announce readiness again.
     ready_announced: AtomicBool,
+    /// When the agent declared itself done under autopilot this turn (WI-1518),
+    /// RFC 3339. Set once per turn, so a re-render of the same screen does not
+    /// declare it again; cleared when the next turn starts.
+    done_at: Mutex<Option<String>>,
 }
 
 impl Session {
@@ -184,6 +193,15 @@ impl Session {
     /// Claim the session's one launch report. True the first time only.
     pub fn mark_launch_reported(&self) -> bool {
         !self.launch_reported.swap(true, Ordering::AcqRel)
+    }
+
+    /// Why this session started without its brokered credentials, if it did.
+    pub fn agent_auth_degraded(&self) -> Option<crate::launch::DegradedLaunch> {
+        self.agent_auth_degraded.lock().clone()
+    }
+
+    pub fn set_agent_auth_degraded(&self, degraded: crate::launch::DegradedLaunch) {
+        *self.agent_auth_degraded.lock() = Some(degraded);
     }
 
     pub fn activity(&self) -> ActivityState {
@@ -282,6 +300,28 @@ impl Session {
 
     pub fn set_autopilot(&self, on: bool) {
         self.autopilot.store(on, Ordering::Release);
+    }
+
+    /// When the agent declared itself done this turn (WI-1518), RFC 3339.
+    pub fn done_at(&self) -> Option<String> {
+        self.done_at.lock().clone()
+    }
+
+    /// Record that the agent declared itself done this turn (WI-1518). True
+    /// the first time; false when this turn already carries the declaration.
+    pub fn mark_done(&self, at: String) -> bool {
+        let mut done = self.done_at.lock();
+        if done.is_some() {
+            return false;
+        }
+        *done = Some(at);
+        true
+    }
+
+    /// Put a done declaration back onto a session that was just woken, without
+    /// announcing it (WI-1518).
+    pub fn restore_done_at(&self, at: Option<String>) {
+        *self.done_at.lock() = at;
     }
 
     /// The project policy this session enforces, when it has one (WI-1243).
@@ -506,11 +546,13 @@ impl Session {
             keep_awake: self.keep_awake(),
             autopilot: self.autopilot(),
             autopilot_nudges: self.autopilot_nudges(),
+            done_at: self.done_at(),
             role: self.role(),
             work_item: self.work_item(),
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
+            posture_lost_on_resume: self.posture_lost_on_resume(),
             account: self.account.lock().clone(),
             stop: self.stop.lock().clone(),
             economics: self.economics_snapshot.lock().clone(),
@@ -572,6 +614,14 @@ impl Session {
 
     pub fn set_permission_mode(&self, mode: Option<String>) {
         *self.permission_mode.lock() = mode;
+    }
+
+    pub fn set_posture_lost_on_resume(&self, lost: bool) {
+        self.posture_lost_on_resume.store(lost, Ordering::Relaxed);
+    }
+
+    pub fn posture_lost_on_resume(&self) -> bool {
+        self.posture_lost_on_resume.load(Ordering::Relaxed)
     }
 
     pub fn set_account(&self, account: Option<String>) {
@@ -781,6 +831,15 @@ impl Session {
     /// to detect a socket that is open but no longer delivering output.
     pub fn scrollback_position(&self) -> u64 {
         self.scrollback.lock().total_written()
+    }
+
+    /// Whether the program in the PTY has bracketed paste on. False when
+    /// the session keeps no grid.
+    pub fn bracketed_paste(&self) -> bool {
+        self.terminal
+            .lock()
+            .as_ref()
+            .is_some_and(crate::screen::Terminal::bracketed_paste)
     }
 
     pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
@@ -1238,6 +1297,7 @@ pub fn spawn(
         work_item: Mutex::new(None),
         superseded_by: Mutex::new(None),
         permission_mode: Mutex::new(None),
+        posture_lost_on_resume: AtomicBool::new(false),
         account: Mutex::new(None),
         stop: Mutex::new(None),
         launcher: if spawning_agent_auth_helper {
@@ -1247,6 +1307,7 @@ pub fn spawn(
         },
         first_output_seen: AtomicBool::new(false),
         launch_reported: AtomicBool::new(false),
+        agent_auth_degraded: parking_lot::Mutex::new(None),
         economics: parking_lot::Mutex::new(None),
         economics_snapshot: parking_lot::Mutex::new(None),
         // Set by the registry from the spec, like autopilot: the spawn path
@@ -1259,6 +1320,7 @@ pub fn spawn(
         budget_session_banked: Mutex::new(Duration::ZERO),
         budget_hold: AtomicBool::new(false),
         ready_announced: AtomicBool::new(false),
+        done_at: Mutex::new(None),
     });
 
     spawn_reader_thread(
@@ -1858,6 +1920,8 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
             *session.turn_started_at.lock() = Some(now);
             // The next rest at a prompt is a new turn's readiness (WI-1519).
             session.ready_announced.store(false, Ordering::Release);
+            // Likewise a done declaration belongs to the turn it ended (WI-1518).
+            *session.done_at.lock() = None;
         }
         if new != ActivityState::AwaitingApproval {
             *session.approval.lock() = None;

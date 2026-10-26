@@ -216,6 +216,15 @@ pub async fn wake_session(
             ));
         }
     }
+    if req
+        .fresh_prompt
+        .as_ref()
+        .is_some_and(|p| p.len() > crate::sessions::FRESH_PROMPT_MAX)
+    {
+        return Err(crate::error::ApiError::BadRequest(
+            "a wake's fresh_prompt is at most 64 KiB".into(),
+        ));
+    }
     let session = state.sessions.wake(id, req).await?;
     Ok(Json(session.summary()))
 }
@@ -605,6 +614,61 @@ pub async fn list_session_grants(
     ))
 }
 
+/// Let an oversight session answer `dialog` on `session`, or refuse it as
+/// `person_gate` would (WI-1831, WI-2028, `oversight_answer`). The overseer
+/// must be a live session the engine has marked oversight, other than the
+/// target, and the dialog a `permission` prompt. Audited either way, as the
+/// oversight session and with the command excerpt.
+fn oversight_may_answer(
+    state: &AppState,
+    session: &crate::pty::Session,
+    dialog: &crate::approval::Detected,
+    overseer: &str,
+    via: &str,
+    label: &str,
+) -> Result<()> {
+    let who = format!("oversight session {overseer}");
+    let refuse = |why: String| {
+        tracing::warn!(
+            target: "vogt::audit",
+            event = "session.permission_answer",
+            outcome = "refused",
+            via = %via,
+            session_id = %session.id,
+            overseer = %overseer,
+            why = %why,
+            "refused an oversight answer to a permission prompt"
+        );
+        crate::person_gate::refusal(&format!("{who} ({why})"), dialog)
+    };
+    let caller = Uuid::parse_str(overseer)
+        .ok()
+        .and_then(|id| state.sessions.get(id).ok());
+    let Some(caller) = caller else {
+        return Err(refuse("no such session".into()));
+    };
+    if caller.id == session.id {
+        return Err(refuse("a session does not answer its own prompt".into()));
+    }
+    if caller.role() != vogt_engine_contract::SessionRole::Oversight {
+        return Err(refuse("it is not an oversight session".into()));
+    }
+    let command = crate::oversight_answer::may_answer(dialog).map_err(refuse)?;
+    tracing::info!(
+        target: "vogt::audit",
+        event = "session.permission_answer",
+        outcome = "answered",
+        via = %via,
+        session_id = %session.id,
+        overseer = %overseer,
+        question = %dialog.question,
+        command = %command,
+        label = %label,
+        "an oversight session answered a permission prompt"
+    );
+    Ok(())
+}
+
 /// Choose one option of the dialog on screen (WI-917): a permission
 /// dialog or a startup gate. The engine reads the menu as it is now, moves
 /// the highlight to the option with arrow keys, presses Enter, and looks
@@ -630,7 +694,13 @@ pub async fn answer_session(
         .ok_or_else(|| ApiError::Conflict("no dialog is showing on this session".into()))?;
     let identity = identity.as_deref();
     let person = crate::person_gate::is_person(identity, req.person);
-    if crate::person_gate::needs_person(dialog.kind) && !person {
+    // An overseer named by vogt-core, and only by vogt-core: checked against
+    // the chosen option below, once the menu is read (WI-1831).
+    let overseer = match (identity, req.overseer.as_deref()) {
+        (Some(i), Some(overseer)) if i.stack_secret && !person => Some(overseer),
+        _ => None,
+    };
+    if crate::person_gate::needs_person(dialog.kind) && !person && overseer.is_none() {
         let who = identity.map_or("unidentified", |i| i.name.as_str());
         return Err(crate::person_gate::refuse(
             &session,
@@ -682,6 +752,9 @@ pub async fn answer_session(
             menu.join(" | ")
         ))
     })?;
+    if let Some(overseer) = overseer.filter(|_| crate::person_gate::needs_person(dialog.kind)) {
+        oversight_may_answer(&state, &session, &dialog, overseer, "answer", &chosen.label)?;
+    }
     let keys = crate::approval::keys_to_choose(&dialog.options, chosen.number, dialog.horizontal)
         .ok_or_else(|| ApiError::Conflict("the option is not on the menu".into()))?;
     // Arrows one write each, then Enter: a TUI reading a burst can merge an
@@ -1024,11 +1097,17 @@ pub struct SessionInputReq {
     /// break-glass token, as for `AnswerRequest::person`.
     #[serde(default)]
     pub person: Option<bool>,
+    /// The engine id of the oversight session vogt-core is relaying
+    /// (WI-2028), read only from vogt-core's own credential, as for
+    /// `AnswerRequest::overseer`.
+    #[serde(default)]
+    pub overseer: Option<String>,
 }
 
 /// Type into a session. Refused with `403 person required`, nothing typed,
 /// when a permission prompt is showing and the caller is not a person: on a
-/// modal dialog every keystroke is an answer to it (WI-983).
+/// modal dialog every keystroke is an answer to it (WI-983). An oversight
+/// session vogt-core relays may answer a `permission` prompt (WI-2028).
 pub async fn session_input(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
@@ -1043,24 +1122,37 @@ pub async fn session_input(
     let session = state.sessions.get(id)?;
     let identity = identity.map(|axum::Extension(identity)| identity);
     let person = crate::person_gate::is_person(identity.as_ref(), req.person);
+    let overseer = match (identity.as_ref(), req.overseer.clone()) {
+        (Some(i), Some(overseer)) if i.stack_secret && !person => Some(overseer),
+        _ => None,
+    };
     if !person {
         let reading = Arc::clone(&session);
         let person = req.person;
-        tokio::task::spawn_blocking(move || {
-            crate::person_gate::guard(
+        let gate_state = Arc::clone(&state);
+        tokio::task::spawn_blocking(move || match overseer {
+            Some(overseer) => match crate::person_gate::permission_dialog(&reading) {
+                Some(dialog) => oversight_may_answer(
+                    &gate_state,
+                    &reading,
+                    &dialog,
+                    &overseer,
+                    "input",
+                    "(keys)",
+                ),
+                None => Ok(()),
+            },
+            None => crate::person_gate::guard(
                 &reading,
                 identity.as_ref(),
                 person,
                 crate::person_gate::Via::Input,
-            )
+            ),
         })
         .await
         .map_err(|e| crate::error::ApiError::Internal(format!("read the screen: {e}")))??;
     }
-    let mut bytes = req.text.into_bytes();
-    if req.submit {
-        bytes.push(b'\r');
-    }
+    let bytes = crate::screen::input_bytes(&req.text, session.bracketed_paste(), req.submit);
     session
         .write_input(&bytes)
         .map_err(|e| crate::error::ApiError::Pty(format!("write input: {e}")))?;
@@ -1306,6 +1398,12 @@ pub struct AgentTaskStorageStatus {
 pub struct AuthBrokerStatus {
     pub auto_agent_auth: bool,
     pub helper: String,
+    /// Live sessions that started without their brokered credentials because
+    /// the secrets manager was unreachable (WI-1812).
+    pub degraded_session_count: usize,
+    /// The most recent of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<crate::launch::DegradedLaunch>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1322,6 +1420,8 @@ pub async fn operational_status(
         None => None,
     };
     let task_artifacts = state.agent_tasks.prompt_artifact_stats()?;
+    let (degraded_sessions, last_degraded) =
+        crate::launch::degraded_summary(&state.sessions.live_sessions());
 
     Ok(Json(OperationalStatus {
         version: crate::product::VERSION,
@@ -1370,6 +1470,8 @@ pub async fn operational_status(
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| state.config.agent_auth_helper.display().to_string()),
+            degraded_session_count: degraded_sessions,
+            degraded: last_degraded,
         },
         storage: ServerStorageStatus {
             state_dir: state.config.state_dir.display().to_string(),

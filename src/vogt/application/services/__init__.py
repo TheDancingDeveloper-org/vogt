@@ -25,6 +25,7 @@ from vogt.application.services.auth import (
     whoami,
 )
 from vogt.application.services.board import list_board
+from vogt.application.services.charters import get_charter, set_charter
 from vogt.application.services.chats import (
     chat_archive,
     chat_create,
@@ -123,6 +124,7 @@ from vogt.application.services.projects import (
     transition_project,
     update_project,
 )
+from vogt.application.services.reports import report as report_session
 from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
     answer_session,
@@ -163,7 +165,13 @@ from vogt.application.services.taxonomy import (
     list_workflows,
     update_initiative,
 )
+from vogt.application.services.usage import usage_board_read
 from vogt.application.services.views import backlog, bugs, why
+from vogt.application.services.watches import (
+    cancel_watch,
+    create_watch,
+    list_watches,
+)
 from vogt.application.services.work import (
     bind_branch,
     comment_work,
@@ -196,6 +204,7 @@ __all__ = [
     "bind_session_work",
     "brief_project",
     "bugs",
+    "cancel_watch",
     "chat_archive",
     "chat_create",
     "chat_decide",
@@ -222,6 +231,7 @@ __all__ = [
     "create_label",
     "create_project",
     "create_user",
+    "create_watch",
     "create_work",
     "decide_grant",
     "deployed_versions",
@@ -232,6 +242,7 @@ __all__ = [
     "engine_session_token",
     "engine_status",
     "export_instance",
+    "get_charter",
     "get_many_work",
     "get_preferences",
     "get_project",
@@ -268,6 +279,7 @@ __all__ = [
     "list_suppressions",
     "list_tokens",
     "list_users",
+    "list_watches",
     "list_work",
     "list_workflows",
     "list_write_backs",
@@ -288,6 +300,7 @@ __all__ = [
     "remove_user",
     "rename_session",
     "report_blocked",
+    "report_session",
     "report_unblocked",
     "reproject_initiative",
     "request_grant",
@@ -307,6 +320,7 @@ __all__ = [
     "session_screen",
     "session_wait",
     "session_wait_any",
+    "set_charter",
     "set_password",
     "set_preference",
     "set_session_role",
@@ -327,6 +341,7 @@ __all__ = [
     "update_initiative",
     "update_project",
     "update_work",
+    "usage_board_read",
     "wake_session",
     "whoami",
     "why",

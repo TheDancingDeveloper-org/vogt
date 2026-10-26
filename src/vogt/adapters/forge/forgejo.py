@@ -175,7 +175,8 @@ class ForgejoClient:
         method: str = "GET",
     ) -> tuple[int, bytes]:
         if self.transport is not None:
-            return self.transport(url, headers, body or b"", method)
+            answer = self.transport(url, headers, body or b"", method)
+            return answer[0], answer[1]
         request = urllib.request.Request(url, headers=headers, data=body, method=method)
         try:
             with urllib.request.urlopen(  # https only; api_root is not caller-set
@@ -332,8 +333,9 @@ class ForgejoProvider:
             return None
         return payload if isinstance(payload, dict) else {}
 
-    def clone_token(self) -> str | None:
+    def clone_token(self, ref: RepoRef | None = None) -> str | None:
         """The token a clone should authenticate with, if any."""
+        del ref  # one token per Forgejo host
         return self._client.token
 
     def identity(self) -> tuple[str, str] | None:
@@ -419,6 +421,8 @@ class ForgejoProvider:
                 updated_at=item.get("updated_at"),
                 closed_at=item.get("closed_at"),
                 source_url=item.get("html_url"),
+                merged_at=item.get("merged_at"),
+                merged_by=_login(item.get("merged_by")),
             )
             for item in _as_list(payloads)
         ]

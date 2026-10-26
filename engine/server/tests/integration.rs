@@ -43,6 +43,7 @@ fn test_config() -> Config {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
         codex_session_id: false,
+        codex_approval_policy: "never".to_string(),
         agent_auth_secrets: vec![],
         agent_grant_projects: vec![],
         // The synthetic agent CLI is registered as a session preset in the
@@ -87,7 +88,12 @@ fn test_config() -> Config {
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         worktree_clean_on_hibernate: false,
+        worktree_clean_on_stop: false,
         disk_warn_percent: 85,
+        scratch_prune_bytes: 2 << 30,
+        min_free_percent: 0,
+        shared_cargo_target_dir: None,
+        shared_cargo_target_max_bytes: 40 << 30,
         metrics_bind: None,
         chat: Default::default(),
         economics_tick: std::time::Duration::ZERO,
@@ -2228,7 +2234,10 @@ async fn session_child_receives_its_own_session_id() {
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
-    let detail: SessionDetail = loop {
+    // The exit can be recorded before the last of the child's output is read
+    // off the PTY, so keep reading until the id shows or the deadline passes.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let printed = loop {
         let detail: SessionDetail = client
             .get(format!("{base}/api/sessions/{id}"))
             .send()
@@ -2237,16 +2246,17 @@ async fn session_child_receives_its_own_session_id() {
             .json()
             .await
             .unwrap();
-        if detail.summary.exit_code.is_some() {
-            break detail;
+        let snapshot = base64::engine::general_purpose::STANDARD
+            .decode(detail.scrollback_base64.as_bytes())
+            .unwrap();
+        let printed = String::from_utf8_lossy(&snapshot).into_owned();
+        if printed.contains(&id)
+            || (detail.summary.exit_code.is_some() && std::time::Instant::now() > deadline)
+        {
+            break printed;
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     };
-
-    let snapshot = base64::engine::general_purpose::STANDARD
-        .decode(detail.scrollback_base64.as_bytes())
-        .unwrap();
-    let printed = String::from_utf8_lossy(&snapshot);
     assert!(
         printed.contains(&id),
         "child should see its own session id; got {printed:?}"
@@ -9656,6 +9666,98 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
     drop(tmp);
 }
 
+/// A compacting wake (WI-2037) does not resume: it starts a new conversation
+/// under a new id whose first prompt is the summary, the git facts and the
+/// original brief; the next wake resumes that new conversation.
+#[tokio::test]
+async fn a_cold_wake_with_a_summary_starts_a_fresh_conversation() {
+    let (tmp, cfg, stub) = hibernation_sandbox();
+    let state_dir = cfg.state_dir.clone();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "cold agent",
+            "prompt": "## Task\n\nDo the original thing.\n",
+            "command": [stub.to_string_lossy()],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    live_output_containing(&client, &base, &id, &["helper=["]).await;
+    let hibernate = |client: reqwest::Client, base: String, id: String| async move {
+        let res = client
+            .post(format!("{base}/api/sessions/{id}/hibernate"))
+            .json(&json!({ "reason": "idle" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    };
+    hibernate(client.clone(), base.clone(), id.clone()).await;
+
+    // Too large a summary is refused before anything starts.
+    let refused = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .json(&json!({ "fresh_prompt": "x".repeat(65 * 1024) }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+    let woken: Value = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .json(&json!({ "fresh_prompt": "# Resumed from a summary\n\nState: half done.\n" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let fresh = woken["conversation"]["id"].as_str().unwrap().to_string();
+    assert_ne!(fresh, id, "a fresh conversation needs its own id");
+    let printed = live_output_containing(&client, &base, &id, &["helper=["]).await;
+    assert!(!printed.contains("--resume"), "{printed:?}");
+    assert!(
+        printed.contains(&format!("arg=[--session-id]\r\narg=[{fresh}]")),
+        "{printed:?}"
+    );
+    let brief = std::fs::read_to_string(
+        state_dir
+            .join("agent-task-prompts")
+            .join("sessions")
+            .join(format!("{id}.md")),
+    )
+    .unwrap();
+    assert!(brief.starts_with("# Resumed from a summary"), "{brief}");
+    assert!(brief.contains("## Git (session directory)"), "{brief}");
+    assert!(brief.contains("# Original brief"), "{brief}");
+    assert!(brief.contains("Do the original thing."), "{brief}");
+
+    // The next plain wake resumes the new conversation, not the old one.
+    hibernate(client.clone(), base.clone(), id.clone()).await;
+    let woken = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(woken.status(), StatusCode::OK);
+    let printed = live_output_containing(&client, &base, &id, &["helper=["]).await;
+    assert!(
+        printed.contains(&format!("arg=[--resume]\r\narg=[{fresh}]")),
+        "{printed:?}"
+    );
+    drop(tmp);
+}
+
 /// A budget is part of the session, not of the process: hibernating and
 /// waking under the same id must bring back the same limits (WI-1245 / C7).
 #[tokio::test]
@@ -11722,9 +11824,12 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
     for (id, role) in [(&claude_id, "oversight"), (&klaudia_id, "worker")] {
         let stored =
             std::fs::read_to_string(state_dir.join("sessions").join(format!("{id}.json"))).unwrap();
-        assert!(
+        // Only what the first launch carried is recorded: Klaudia takes no
+        // `--settings`, so its record names none (WI-2252).
+        assert_eq!(
             stored.contains(&format!("\"{}\"", policy.display())),
-            "the record keeps the original policy: {stored}"
+            role == "oversight",
+            "the record keeps the original policy it launched with: {stored}"
         );
         assert!(
             !stored.contains(&format!("\"{}\"", replacement.display())),
@@ -11818,9 +11923,11 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
     let printed =
         live_output_containing(&client, &base, &legacy_id, &["arg=[--resume]", "helper=["]).await;
     let tail = &printed[printed.rfind("arg=[--resume]").unwrap()..];
+    // An oversight session with no recorded settings is not put on the
+    // deployment's worker policy (WI-2252); a worker's would fall back to it.
     assert!(
-        tail.contains(&format!("arg=[--settings={}]", replacement.display())),
-        "an old record falls back to the deployment's current settings: {tail:?}"
+        !tail.contains("arg=[--settings="),
+        "an old oversight record gets no worker policy: {tail:?}"
     );
     assert!(
         !tail.contains("arg=[--add-dir="),
@@ -11830,6 +11937,162 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
         tail.contains("--dangerously-skip-permissions"),
         "the recorded bypass still holds: {tail:?}"
     );
+}
+
+/// WI-2252: a prod restart woke both oversight sessions under the worker
+/// driven policy, without the bypass a person had given them after the start.
+/// A wake replays only the posture a person gave at the start: a bypass
+/// granted then comes back; one the session merely showed on its screen (a
+/// Shift+Tab, a hand-typed flag, or an agent printing the words) does not, and
+/// the summary says `posture_lost_on_resume` instead. An overseer that started
+/// as a plain shell is not handed the worker policy; a worker keeps the
+/// default posture and the policy.
+#[tokio::test]
+async fn a_wake_replays_only_a_persons_posture_and_says_a_lost_bypass() {
+    let (tmp, mut cfg, stub) = conversation_sandbox();
+    let policy = tmp.path().join("policy.json");
+    std::fs::write(&policy, br#"{"autoMode":{"allow":["$defaults"]}}"#).unwrap();
+    cfg.agent_onboarding.settings_file = Some(policy.clone());
+    // A `claude` that draws Claude Code's bypass footer when told to: what an
+    // agent printing those words looks like to the engine.
+    let forged_dir = tmp.path().join("forged");
+    std::fs::create_dir_all(&forged_dir).unwrap();
+    let forged = forged_dir.join("claude");
+    std::fs::write(
+        &forged,
+        "#!/bin/sh\nfor a in \"$@\"; do printf 'arg=[%s]\\n' \"$a\"; done\n\
+         printf '%s %s on\\n' bypass permissions\n\
+         sleep 300 &\nprintf 'helper=[%s]\\n' \"$!\"\nwait\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&forged, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let create = |body: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().to_string()
+        }
+    };
+    let cycle = |id: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let slept = client
+                .post(format!("{base}/api/sessions/{id}/hibernate"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(slept.status(), StatusCode::OK, "{:?}", slept.text().await);
+            let woken = client
+                .post(format!("{base}/api/sessions/{id}/wake"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(woken.status(), StatusCode::OK);
+            let woken: Value = woken.json().await.unwrap();
+            let printed =
+                live_output_containing(&client, &base, &id, &["arg=[--resume]", "helper=["]).await;
+            let tail = printed[printed.rfind("arg=[--resume]").unwrap()..].to_string();
+            (woken, tail)
+        }
+    };
+    let settings = format!("arg=[--settings={}]", policy.display());
+
+    // A person started this overseer with bypass: it comes back with it, and
+    // with the policy its first launch carried. Nothing was lost.
+    let granted = create(json!({
+        "name": "granted overseer",
+        "command": [stub.to_string_lossy()],
+        "role": "oversight",
+        "permission_mode": "bypass",
+    }))
+    .await;
+    live_output_containing(&client, &base, &granted, &["helper=["]).await;
+    let (woken, tail) = cycle(granted).await;
+    assert_eq!(woken["permission_mode"], "bypass", "{woken}");
+    assert!(woken.get("posture_lost_on_resume").is_none(), "{woken}");
+    assert!(
+        tail.contains("arg=[--dangerously-skip-permissions]"),
+        "{tail:?}"
+    );
+    assert!(tail.contains(&settings), "{tail:?}");
+
+    // A worker in the default posture whose agent prints the bypass footer:
+    // the wake keeps the default and the policy, and only says it saw one.
+    let worker = create(json!({
+        "name": "worker",
+        "command": [forged.to_string_lossy()],
+    }))
+    .await;
+    live_output_containing(
+        &client,
+        &base,
+        &worker,
+        &["bypass permissions on", "helper=["],
+    )
+    .await;
+    let (woken, tail) = cycle(worker).await;
+    assert!(woken["permission_mode"].is_null(), "{woken}");
+    assert_eq!(woken["posture_lost_on_resume"], true, "{woken}");
+    assert!(
+        !tail.contains("--dangerously-skip-permissions"),
+        "an agent cannot escalate through a wake: {tail:?}"
+    );
+    assert!(tail.contains(&settings), "{tail:?}");
+
+    // The incident: an overseer that began as a plain shell, a person typing
+    // `claude` into it and granting bypass there. The wake resumes the
+    // conversation through the template, without the worker policy, and says
+    // the bypass is gone rather than replaying a grant it cannot verify.
+    let typed = create(json!({ "name": "typed overseer", "role": "oversight" })).await;
+    let conversation = "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f";
+    client
+        .post(format!("{base}/api/sessions/{typed}/conversation"))
+        .json(&json!({ "agent": "claude", "id": conversation }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    client
+        .post(format!("{base}/api/sessions/{typed}/input"))
+        .json(&json!({ "text": "printf '%s %s on\\n' bypass permissions", "submit": true }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    live_output_containing(&client, &base, &typed, &["bypass permissions on"]).await;
+    let (woken, tail) = cycle(typed.clone()).await;
+    assert!(woken["permission_mode"].is_null(), "{woken}");
+    assert_eq!(woken["posture_lost_on_resume"], true, "{woken}");
+    assert!(
+        tail.contains(&format!("arg=[{conversation}]")),
+        "the conversation is resumed: {tail:?}"
+    );
+    assert!(!tail.contains("--dangerously-skip-permissions"), "{tail:?}");
+    assert!(
+        !tail.contains("arg=[--settings="),
+        "an overseer that started without the worker policy is not given it: {tail:?}"
+    );
+    // The loss is still said after another hibernation, until a person
+    // grants the bypass again: the woken screen no longer shows it.
+    let (woken, _) = cycle(typed).await;
+    assert_eq!(woken["posture_lost_on_resume"], true, "{woken}");
 }
 
 /// WI-913: a session stopped on request reads `stopped` with who and why;
@@ -12626,6 +12889,121 @@ done
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     let done = std::fs::read_to_string(&log).unwrap_or_default();
     assert_eq!(done.lines().count(), ITEMS);
+}
+
+/// WI-1518: an autopilot session whose agent prints `AUTOPILOT: DONE` at its
+/// prompt yields exactly one `done` change on the overseer feed, and a
+/// wait-any on the default `until` wakes for it. Autopilot is off once the
+/// marker is seen, so the change does not repeat however long it sits there.
+#[tokio::test]
+async fn an_autopilot_session_that_declares_done_yields_one_done_change() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let opencode = bin.join("opencode");
+    std::fs::write(
+        &opencode,
+        r#"#!/usr/bin/env bash
+box() { printf '  ┃\r\n  ┃  Ask anything…\r\n  ┃\r\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\r\n   tab agents  ctrl+p commands\r\n'; }
+box
+printf '     AUTOPILOT: DONE\r\n'
+box
+while IFS= read -r _; do box; done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cfg = test_config();
+    cfg.autopilot = vogt_engine_server::autopilot::Policy {
+        nudge_after: Duration::from_millis(600),
+        max_nudges: 10,
+    };
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "backlog",
+            "command": [opencode.display().to_string()],
+            "autopilot": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // An overseer's wait: the default `until`, advancing its cursor past
+    // anything else (the prompt's `ready` comes first) until `done` lands.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut cursor = 0u64;
+    let done = loop {
+        let wait: Value = client
+            .get(format!(
+                "{base}/api/sessions/wait-any?ids={id}&cursor={cursor}&timeout_s=5"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        cursor = wait["next_cursor"].as_u64().unwrap();
+        if wait["change"]["kind"] == "done" {
+            break wait["change"].clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no done change arrived: {wait}"
+        );
+    };
+    assert_eq!(done["session"], id.as_str());
+
+    // Sit past several ticks: no second `done`, and autopilot is off.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let feed: Value = client
+        .get(format!(
+            "{base}/api/sessions/changes?since=0&ids={id}&limit=500"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let dones = feed["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "done")
+        .count();
+    assert_eq!(dones, 1, "exactly one done change: {feed}");
+
+    let detail: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let summary = &detail["summary"];
+    assert!(
+        summary.get("autopilot").is_none(),
+        "autopilot is off: {summary}"
+    );
+    assert!(
+        summary["done_at"].is_string(),
+        "the summary keeps when it was declared: {summary}"
+    );
 }
 
 /// A session blocked on a person is never nudged, autopilot or not.
@@ -13633,6 +14011,101 @@ async fn only_a_person_answers_a_permission_prompt() {
         .unwrap();
     assert_eq!(answered.status(), StatusCode::OK);
     live_output_containing(&operator, &base, &relayed, &["chose 1"]).await;
+}
+
+/// WI-2028: vogt-core relaying an oversight session (`overseer`) answers a
+/// worker's permission prompt, by `/answer` and by `/input` keys. The same
+/// relay naming a plain worker, or the worker itself, is still refused.
+#[tokio::test]
+async fn an_oversight_session_answers_a_workers_permission_prompt() {
+    let (base, tmp, _guard) = wi983_front_door().await;
+    let operator = client_for(TEST_TOKEN);
+    let core = client_for(WI983_STACK);
+    let script = dialog_script(tmp.path(), "ask.py", "Do you want to proceed?");
+    let new_shell = |name: &'static str| {
+        let operator = operator.clone();
+        let base = base.clone();
+        async move {
+            let made: Value = operator
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({ "name": name, "command": ["/bin/sh"] }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            made["id"].as_str().unwrap().to_string()
+        }
+    };
+    let overseer = new_shell("overseer").await;
+    let promoted = operator
+        .post(format!("{base}/api/sessions/{overseer}/role"))
+        .json(&json!({ "role": "oversight" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promoted.status(), StatusCode::OK);
+    let plain = new_shell("plain worker").await;
+
+    let (id, approval) = session_showing_dialog(&operator, &base, "asking", &script).await;
+    assert_eq!(approval["kind"], "permission", "{approval}");
+    // A worker that is not oversight, and the asking session itself, are not
+    // overseers: refused, nothing typed.
+    for named in [plain.as_str(), id.as_str()] {
+        for (route, body) in [
+            (
+                "answer",
+                json!({ "option": 1, "person": false, "overseer": named }),
+            ),
+            (
+                "input",
+                json!({ "text": "1", "person": false, "overseer": named }),
+            ),
+        ] {
+            let refused = core
+                .post(format!("{base}/api/sessions/{id}/{route}"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{route} {named}");
+            let said: Value = refused.json().await.unwrap();
+            assert!(
+                said["error"].as_str().unwrap().contains("person required"),
+                "{said}"
+            );
+        }
+    }
+    // `overseer` from anyone but vogt-core is ignored.
+    let forged = client_for(WI983_SESSION)
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "option": 1, "overseer": overseer }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+
+    // The oversight session answers by option.
+    let answered = core
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "option": 1, "person": false, "overseer": overseer }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &id, &["chose 1"]).await;
+
+    // And by keys.
+    let (keyed, _) = session_showing_dialog(&operator, &base, "keyed", &script).await;
+    let typed = core
+        .post(format!("{base}/api/sessions/{keyed}/input"))
+        .json(&json!({ "text": "\r", "person": false, "overseer": overseer }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(typed.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &keyed, &["chose 1"]).await;
 }
 
 /// WI-983 stops at permission prompts. An overseer still drives: it types
@@ -15661,7 +16134,7 @@ async fn worktree_cleanup_waits_for_every_session_in_the_worktree() {
     cfg.default_cwd = tmp.path().to_path_buf();
     cfg.workspace_root = tmp.path().canonicalize().unwrap();
     cfg.state_dir = tmp.path().join("state");
-    cfg.worktree_clean_on_hibernate = true;
+    cfg.worktree_clean_on_stop = true;
     let (base, _h) = boot_with_config(cfg).await;
     let client = reqwest::Client::builder()
         .default_headers(auth())
@@ -15706,6 +16179,81 @@ async fn worktree_cleanup_waits_for_every_session_in_the_worktree() {
     assert!(!target.exists(), "the last session out cleans the worktree");
     assert!(linked.join("Cargo.toml").exists());
     assert!(repo.join("README").exists());
+}
+
+/// WI-1750: by default a hibernation keeps the worktree's build output (the
+/// session is woken to carry on, and every engine shutdown hibernates every
+/// live session); removing the hibernated session is its stop, and cleans.
+#[tokio::test]
+async fn hibernation_keeps_build_output_and_removal_cleans_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "seed@vogt.invalid"]);
+    git(&repo, &["config", "user.name", "seed"]);
+    std::fs::write(repo.join("README"), "r").unwrap();
+    git(&repo, &["add", "README"]);
+    git(&repo, &["commit", "-qm", "init"]);
+    let linked = tmp.path().join("linked");
+    git(&repo, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+    std::fs::write(linked.join("Cargo.toml"), "[package]\nname=\"t\"\n").unwrap();
+    let target = linked.join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("out"), "built").unwrap();
+
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    cfg.worktree_clean_on_stop = true;
+    cfg.worktree_clean_on_hibernate = false;
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let cwd = linked.to_string_lossy().into_owned();
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "h", "command": ["/bin/cat"], "cwd": cwd }),
+    )
+    .await;
+
+    let hibernated = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({ "allow_shell": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hibernated.status(), StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        target.join("out").exists(),
+        "a hibernated session keeps its build output"
+    );
+
+    let removed = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(removed.status().is_success(), "{}", removed.status());
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while target.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!target.exists(), "removing the hibernated session cleans");
+    assert!(linked.join("Cargo.toml").exists());
 }
 
 /// A Codex turn whose title says `working` while its screen has gone quiet
@@ -15771,4 +16319,133 @@ fn a_quiet_working_codex_session_does_not_starve_the_runtime() {
     done_rx
         .recv_timeout(Duration::from_secs(20))
         .expect("the engine runtime stalled: the activity watcher is spinning");
+}
+
+/// WI-1812: a session launched through the real `agent-auth.sh` while the
+/// secrets manager is unreachable still starts, says so in its terminal, and
+/// shows in `/api/status`; once the secrets manager answers again, the next
+/// session gets its credentials from the same engine, with no restart.
+#[tokio::test]
+async fn a_launch_with_the_secrets_manager_down_degrades_and_recovers_without_restart() {
+    for tool in ["jq", "curl", "timeout"] {
+        if std::process::Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: the launch uses {tool}");
+            return;
+        }
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../deploy/agent-auth.sh");
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let write_exec = |name: &str, body: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_exec("vogt-mcp-bootstrap", "#!/bin/sh\nexit 0\n");
+    // Down: the login hangs, as it did against an Infisical with no Redis.
+    write_exec("infisical", "#!/bin/sh\nexec sleep 30\n");
+
+    // A stand-in secrets-manager API that answers the one bulk read.
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", api.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/api/v4/secrets",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "secrets": [
+                    { "secretKey": "ALPHA", "secretValue": "alpha-value" }
+                ]}))
+            }),
+        );
+        axum::serve(api, app).await.unwrap()
+    });
+
+    let cfg = broker_config(&tmp, "ALPHA proj-a ALPHA\n");
+    let (base, _state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let start = |name: &'static str| {
+        let client = client.clone();
+        let base = base.clone();
+        let script = script.display().to_string();
+        let (path, api_url, bin) = (path.clone(), api_url.clone(), bin.clone());
+        async move {
+            client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({
+                    "name": name,
+                    "command": ["/bin/bash", script, "run", "--", "/bin/bash", "-c",
+                        "echo \"granted=[$AGENT_AUTH_GRANTED] alpha=[${ALPHA:-}]\"; sleep 30"],
+                    "env": [
+                        ["VOGT_ENGINE_BROKER_URL", base],
+                        ["PATH", path],
+                        ["VOGT_MCP_BOOTSTRAP", bin.join("vogt-mcp-bootstrap").display().to_string()],
+                        ["ENGINE_AGENT_AUTH_TIMEOUT", "1"],
+                        ["ENGINE_AGENT_AUTH_SECRETS", "ALPHA proj-a ALPHA"],
+                        ["INFISICAL_API_URL", format!("{api_url}/api")],
+                        ["INFISICAL_CLIENT_ID", "id"],
+                        ["INFISICAL_CLIENT_SECRET", "secret"],
+                    ],
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    let down = start("auth-down").await;
+    live_output_containing(
+        &client,
+        &base,
+        &down,
+        &["agent auth unavailable", "granted=[] alpha=[]"],
+    )
+    .await;
+    let mut status = Value::Null;
+    for _ in 0..50 {
+        status = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        if status["auth_broker"]["degraded_session_count"] == json!(1) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(status["auth_broker"]["degraded_session_count"], json!(1));
+    assert_eq!(status["auth_broker"]["degraded"]["session_id"], json!(down));
+    assert!(status["auth_broker"]["degraded"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("timed out"));
+
+    // The secrets manager is back: the next launch gets its credentials.
+    write_exec("infisical", "#!/bin/sh\nprintf tok-123\n");
+    let up = start("auth-up").await;
+    live_output_containing(
+        &client,
+        &base,
+        &up,
+        &["granted=[ALPHA] alpha=[alpha-value]"],
+    )
+    .await;
 }

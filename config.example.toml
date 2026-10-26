@@ -76,9 +76,29 @@
 # default policy: behaviour
 # ci_watch_notify_sessions = true
 
+# When true, the session sweep treats an `AUTOPILOT: DONE` as done only if the session posted a `result` report (`session.report`) since its turn began; otherwise the row reads `waiting` with the reason `done without a result report`, so oversight asks for one instead of trusting the line. Off by default.
+# default policy: behaviour
+# autopilot_done_requires_result_report = false
+
 # Deployment lanes `deployed_versions` reports on, each a table with `name`, `project` (a registered slug), `branch` (default `main`), and a source: `receipt_repo` + `receipt_path` (a JSON receipt a deploy pipeline commits, read through the configured forge) and/or `version_url` (a running instance's public JSON version endpoint, e.g. Vogt's `/api/config`). Empty means the `deploy-lanes` collector is not registered and deployed versions are reported as not configured. A receipt whose status says the deploy or its smoke test failed raises an Inbox alert.
 # default policy: behaviour
 # deploy_lanes = [{ name = "dev", project = "my-app", version_url = "https://dev.example.com/api/config" }]
+
+# Provider accounts `usage.board` reports on, each a table with `name`, `agent` (`claude` or `codex`) and `dir` (that account's config directory). Read on request only: the newest limit and reset the account's own transcripts recorded. Empty, no account is reported.
+# default policy: behaviour
+# usage_accounts = []
+
+# Base URL of a LiteLLM proxy whose keys' spend `usage.board` reads through `/key/info`. Unset, no key spend is read.
+# default policy: behaviour
+# usage_litellm_url = null
+
+# LiteLLM keys `usage.board` reports spend for: `name`, `key_env` (the environment variable holding the key) and an optional `daily_alert_usd`.
+# default policy: behaviour
+# usage_litellm_keys = []
+
+# Default day-spend alert threshold, in USD, for every LiteLLM key without its own `daily_alert_usd`. Unset, no alert is raised.
+# default policy: behaviour
+# usage_daily_spend_alert_usd = null
 
 # File types the marker collector reads. Configuration rather than a hard-coded list, because which extensions hold source is a workspace's business, not Vogt's.
 # default policy: behaviour
@@ -99,6 +119,18 @@
 # Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing.
 # default policy: behaviour
 # github_token_file = null
+
+# The ID or the client ID of a GitHub App for the forge adapter to authenticate as; GitHub accepts either as the JWT issuer. With `github_app_private_key_file` also set, GitHub reads and writes use short-lived installation tokens, which have their own rate limit, instead of `github_token_file`. The notifications collector stays on `github_token_file`, because notifications belong to a user and an App cannot read them. Not a secret, so plain config is fine. Setup, including the permissions the App needs, is in docs/GITHUB_APP.md.
+# default policy: behaviour
+# github_app_id = null
+
+# Pin every GitHub request to one installation of `github_app_id`. Unset, the installation is discovered per repository owner (`GET /repos/{owner}/{repo}/installation`, then `/orgs/{owner}/installation` or `/users/{owner}/installation`) and remembered, so one App installed on several accounts or organisations covers them all; an owner without the App is read with `github_token_file`. Publishing a new repository needs an owner to create it under: this installation's account or, unset, the App's only installation. An App with several installations must set this to publish.
+# default policy: behaviour
+# github_app_installation_id = null
+
+# Path to the GitHub App's PEM private key, which signs the short-lived JWT exchanged for installation tokens. A file for the same reason as `github_token_file`: the key never appears in the environment or a process listing. When this and `github_app_id` are set, the App takes precedence over `github_token_file` for every GitHub read and write except notifications. Unset, or unreadable, the personal token is used as before.
+# default policy: behaviour
+# github_app_private_key_file = null
 
 # Path to a file holding a urlsafe-base64 Fernet key, used to encrypt per-actor forge Personal Access Tokens at rest. A linked PAT must be *recoverable* to call the upstream API on the actor's behalf, which is the deliberate opposite of the vogt-issued tokens in `0005_tokens` — those store only a hash because they never need recovery. Its absence is what switches account linking off: with no key there is nowhere safe to keep a token, so the feature is disabled rather than insecure, and the file-token fallback (`github_token_file`) keeps working for sweeps and unlinked actors. A file rather than an environment variable, so the key never appears in a process listing.
 # default policy: behaviour
@@ -179,6 +211,30 @@
 # How often `serve` runs collectors in the background. Zero disables the schedule, leaving sweeps on-demand only. A default rather than a required value because an instance that never looks is the failure this product exists to prevent: stale evidence and no evidence are indistinguishable from the outside, so the safe default is to keep looking.
 # default policy: behaviour
 # sweep_interval_seconds = 900
+
+# How often `serve` evaluates armed watches (WI-2036) and wakes the sessions whose trigger fired. Zero disables the loop: watches are stored but nothing wakes. Vogt-side triggers (a work item's state, a session ending) fire within this interval; forge triggers read what the sweep observed, so they also wait on `sweep_interval_seconds`.
+# default policy: behaviour
+# watch_interval_seconds = 60
+
+# Cache-aware compaction on a cold wake (WI-2037). When on, waking a hibernated session whose provider prompt cache has expired (hibernated longer than its `cold_wake_ttl_seconds`) and whose context is at least `cold_wake_threshold_tokens` starts a fresh conversation seeded with a structured summary — task, state, decisions, files, branch, next step — instead of resuming the transcript at full uncached price. Off by default; a session opts out with `cold_wake_opt_out` at start or hibernate.
+# default policy: behaviour
+# cold_wake_compaction = false
+
+# The context size, in tokens, at or above which a cold wake is compacted (WI-2037). A smaller conversation is cheap enough to re-read and is resumed as it is.
+# default policy: behaviour
+# cold_wake_threshold_tokens = 100000
+
+# Prompt-cache lifetime per provider, in seconds (WI-2037): a session hibernated longer than this is treated as cold. Keys are `anthropic`, `openai`, `deepseek`, `google`, … A provider with no entry is never compacted, because its cache cannot be judged. Anthropic's 1-hour cache tier is `anthropic = 3600`.
+# default policy: behaviour
+# cold_wake_ttl_seconds = {"anthropic": 300, "deepseek": 300}
+
+# How often the forge posture collector re-reads a repository's update-automation settings (version-update config, vulnerability alerts, automated security fixes). Posture changes rarely and cost several API calls per repository, so the default is daily; sweeps in between skip it. Zero reads it on every sweep.
+# default policy: behaviour
+# forge_posture_interval_seconds = 86400
+
+# When GitHub reports fewer core API requests than this left in the hour, forge reads stop until the limit resets instead of spending the rest. The limit is per GitHub user and shared with every other tool on that account. Zero never pauses early.
+# default policy: behaviour
+# github_rate_limit_floor = 500
 
 # How recently a subject must have been observed for a linked declared entity to count as `verified` rather than `stale`. Trust is computed from this, never hand-set.
 # default policy: behaviour

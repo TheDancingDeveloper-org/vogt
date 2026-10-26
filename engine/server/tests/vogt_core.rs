@@ -187,6 +187,7 @@ fn base_config() -> Config {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
         codex_session_id: false,
+        codex_approval_policy: "never".to_string(),
         agent_auth_secrets: vec![],
         agent_grant_projects: vec![],
         session_templates: vec![],
@@ -226,7 +227,12 @@ fn base_config() -> Config {
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         worktree_clean_on_hibernate: false,
+        worktree_clean_on_stop: false,
         disk_warn_percent: 85,
+        scratch_prune_bytes: 2 << 30,
+        min_free_percent: 0,
+        shared_cargo_target_dir: None,
+        shared_cargo_target_max_bytes: 40 << 30,
         metrics_bind: None,
         chat: Default::default(),
         economics_tick: std::time::Duration::ZERO,
@@ -946,26 +952,37 @@ async fn stand_in_core_with_events(
                     .find_map(|pair| pair.strip_prefix("after="))
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(0);
-                let wants_none = query.contains("limit=1");
-                let rows = feed.lock().unwrap().clone();
-                let head = rows
+                let limit: usize = query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("limit="))
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(100);
+                // The real core's contract (vogt.application.services.history
+                // .list_events): the events after `after`, at most `limit`,
+                // and `next_cursor` is the seq of the last one returned, or
+                // `after` when none. This stand-in used to answer any
+                // `limit=1` read with no events and the head as the cursor, a
+                // shortcut the real core does not have, so the follower's
+                // "start at the head" passed here while replaying every event
+                // in prod (WI-2328).
+                let visible: Vec<Value> = feed
+                    .lock()
+                    .unwrap()
                     .iter()
-                    .filter_map(|row| row.get("seq").and_then(|v| v.as_i64()))
-                    .max()
-                    .unwrap_or(0);
-                let visible: Vec<Value> = if wants_none {
-                    Vec::new()
-                } else {
-                    rows.into_iter()
-                        .filter(|row| row.get("seq").and_then(|v| v.as_i64()).unwrap_or(0) > after)
-                        .collect()
-                };
+                    .filter(|row| row.get("seq").and_then(|v| v.as_i64()).unwrap_or(0) > after)
+                    .take(limit)
+                    .cloned()
+                    .collect();
+                let next_cursor = visible
+                    .last()
+                    .and_then(|row| row.get("seq").and_then(|v| v.as_i64()))
+                    .unwrap_or(after);
                 // Recorded *after* the answer is computed. Recording first
                 // opens a window in which a test that waits for this signal
                 // can change the feed before the handler has read it — which
                 // is exactly the race this comment is paying for.
                 seen.lock().unwrap().push(after);
-                Json(json!({ "events": visible, "next_cursor": head }))
+                Json(json!({ "events": visible, "next_cursor": next_cursor }))
             }
         }),
     );

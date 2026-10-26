@@ -20,6 +20,7 @@ from vogt.core.entities import (
     AgentPolicy,
     AuditRecord,
     AuthDecision,
+    Charter,
     CodingSession,
     Comment,
     ContractExemption,
@@ -36,10 +37,12 @@ from vogt.core.entities import (
     Project,
     RelationKind,
     SessionGrant,
+    SessionReport,
     Suppression,
     Sweep,
     SweepOutcome,
     Token,
+    Watch,
     WorkItem,
     WorkLink,
     WorkOverlay,
@@ -496,6 +499,16 @@ class ReadView(Protocol):
 
     def inbox_triage_by_key(self, entry_key: str) -> InboxTriage | None: ...
 
+    def charter(self, *, scope_kind: str, scope_id: str) -> Charter | None:
+        """The newest version of a scope's charter, or `None` when never set."""
+        ...
+
+    def charter_history(
+        self, *, scope_kind: str, scope_id: str, limit: int = 50
+    ) -> list[Charter]:
+        """A scope's charter versions, newest first."""
+        ...
+
     def actor_preference(self, *, actor_id: str, key: str) -> ActorPreference | None:
         """One actor's setting under `key`, or `None` when never written."""
         ...
@@ -531,6 +544,19 @@ class ReadView(Protocol):
 
     def decision(self, decision_id: str) -> Decision | None: ...
 
+    def watch(self, watch_id: str) -> Watch | None: ...
+
+    def list_watches(
+        self,
+        *,
+        state: str | None = None,
+        target_session: str | None = None,
+        owner_actor_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Watch]:
+        """Watches, newest first, optionally of one state, session or owner."""
+        ...
+
     def list_decisions(
         self,
         *,
@@ -540,6 +566,26 @@ class ReadView(Protocol):
         limit: int = 200,
     ) -> list[Decision]:
         """Decisions, newest first, optionally of one state, item or asker."""
+        ...
+
+    def latest_session_reports(
+        self, engine_session_ids: list[str]
+    ) -> dict[str, SessionReport]:
+        """The newest report each of these engine sessions made, by its id.
+
+        A session that never reported is absent from the result.
+        """
+        ...
+
+    def list_session_reports(
+        self,
+        *,
+        engine_session_id: str | None = None,
+        work_item_id: str | None = None,
+        kind: str | None = None,
+        limit: int = 200,
+    ) -> list[SessionReport]:
+        """Session reports, newest first, optionally of one session, item or kind."""
         ...
 
     def list_session_grants(
@@ -771,12 +817,24 @@ class WriteTxn(ReadView, Protocol):
 
     def insert_decision(self, decision: Decision) -> None: ...
 
+    def insert_session_report(self, report: SessionReport) -> None: ...
+
     def update_decision(self, decision: Decision) -> None:
         """Replace a decision's state and answer fields."""
         ...
 
+    def insert_watch(self, watch: Watch) -> None: ...
+
+    def update_watch(self, watch: Watch) -> None:
+        """Replace a watch's state, outcome, attempts and error."""
+        ...
+
     def update_session_grant(self, grant: SessionGrant) -> None:
         """Replace a grant's decision and revocation fields."""
+        ...
+
+    def set_session_cold_wake_opt_out(self, session_id: str, *, opt_out: bool) -> None:
+        """Opt a session out of cold-wake compaction (WI-2037), or back in."""
         ...
 
     def set_session_work_item(self, session_id: str, work_item_id: str | None) -> None:
@@ -800,6 +858,10 @@ class WriteTxn(ReadView, Protocol):
     def insert_drift(self, proposal: DriftProposal) -> None: ...
 
     def upsert_inbox_triage(self, triage: InboxTriage) -> None: ...
+
+    def insert_charter(self, charter: Charter) -> None:
+        """Append one charter version; (scope, version) is unique."""
+        ...
 
     def upsert_actor_preference(self, preference: ActorPreference) -> None:
         """Insert or replace one (actor, key) setting, version and all."""

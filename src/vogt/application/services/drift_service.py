@@ -199,6 +199,11 @@ def _referenced_issue_findings(
     return findings
 
 
+def _reason_of(observation: Observation) -> str | None:
+    reason = observation.payload.get("state_reason")
+    return reason if isinstance(reason, str) else None
+
+
 def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
     """The forge-derived kinds: state mismatch, vanished upstream, red CI,
     posture."""
@@ -250,6 +255,7 @@ def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
                         project_id=item.project_id,
                         evidence=_snapshot(observation),
                         evidence_observation_id=observation.id,
+                        upstream_reason=_reason_of(observation),
                     )
                 )
 
