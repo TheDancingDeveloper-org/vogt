@@ -803,6 +803,11 @@ where
         entries.push(decision_entry(view, &decision)?);
     }
 
+    // Sessions' own reports (WI-2039) are not ported yet. Python reads the
+    // clock here for the report horizon even when there are no reports, so the
+    // clock advances once to keep later timestamps in step with Python.
+    let _report_horizon = now_of(&ctx.clock);
+
     for session in &live {
         let declared = view.session_by_engine_id(&session.id)?;
         if let Some(blocked) = &session.blocked {
