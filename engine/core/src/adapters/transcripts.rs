@@ -1488,6 +1488,15 @@ mod tests {
 
     /// Move this thread's clock past every TTL, as Python's tests patch
     /// `_clock` to `monotonic() + 100`.
+
+    /// Move a directory's mtime forward. A file written in the same tick as
+    /// the scan leaves a coarse filesystem stamp unchanged (WI-2242).
+    fn bump_mtime(path: &Path) {
+        let later = SystemTime::UNIX_EPOCH + mtime(path) + Duration::from_secs(10);
+        let file = fs::File::open(path).unwrap();
+        file.set_modified(later).unwrap();
+    }
+
     fn skew_clock(seconds: f64) {
         CLOCK_SKEW.with(|skew| skew.set(seconds));
     }
@@ -1555,6 +1564,10 @@ mod tests {
         let root = claude_root(tmp.as_path(), 1, 2);
         assert!(by_id("claude", &root, "conv-00000").is_some());
         fs::write(root.join("dir-keep").join("conv-new.jsonl"), "{}\n").unwrap();
+        // Coarse filesystem mtime: a write in the same tick leaves the child
+        // directory's stamp unchanged, so move it on (WI-2242).
+        let keep = root.join("dir-keep");
+        bump_mtime(&keep);
         // Still inside the TTL: the index stands and the new file is invisible.
         assert!(by_id("claude", &root, "conv-new").is_none());
         skew_clock(100.0);
@@ -1590,6 +1603,9 @@ mod tests {
             "{}\n",
         )
         .unwrap();
+        // A new rollout in today's directory moves that day's mtime, but a
+        // same-tick write may not; move the stamp on explicitly (WI-2242).
+        bump_mtime(&day);
         assert!(by_id("codex", &root, second).is_none());
         skew_clock(100.0);
         let found = by_id("codex", &root, second).unwrap();
