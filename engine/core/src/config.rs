@@ -861,9 +861,7 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
                 "sweep_interval_seconds" => config.sweep_interval_seconds = number,
                 "watch_interval_seconds" => config.watch_interval_seconds = number,
                 "cold_wake_threshold_tokens" => config.cold_wake_threshold_tokens = number,
-                "forge_posture_interval_seconds" => {
-                    config.forge_posture_interval_seconds = number
-                }
+                "forge_posture_interval_seconds" => config.forge_posture_interval_seconds = number,
                 "github_rate_limit_floor" => config.github_rate_limit_floor = number,
                 "verify_horizon_hours" => config.verify_horizon_hours = number,
                 _ => unreachable!(),

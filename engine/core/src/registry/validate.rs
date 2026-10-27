@@ -288,9 +288,9 @@ fn watch_fields_for_kind(schema: &Value, resolved: &Map<String, Value>) -> Optio
     }
     let kind = resolved.get("kind").and_then(Value::as_str)?;
     let missing = |name: &str| {
-        resolved.get(name).is_none_or(|value| {
-            value.is_null() || value.as_str().is_some_and(str::is_empty)
-        })
+        resolved
+            .get(name)
+            .is_none_or(|value| value.is_null() || value.as_str().is_some_and(str::is_empty))
     };
     let complaint = match kind {
         "pr" if missing("project") || missing("number") => {
@@ -467,7 +467,10 @@ fn check_value(
                 .and_then(|reference| root.pointer(reference.trim_start_matches('#')))
                 .unwrap_or(schema);
             let complaint = if typed.get("properties").is_some() {
-                let model = typed.get("title").and_then(Value::as_str).unwrap_or("object");
+                let model = typed
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("object");
                 format!("Input should be a valid dictionary or instance of {model}")
             } else {
                 expected_input(typed)

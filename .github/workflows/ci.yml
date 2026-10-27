@@ -171,12 +171,14 @@ jobs:
           # voice-policy test reads the capability matrix), so the document is
           # an engine input too.
           matches '^docs/ENGINE\.md$' && rust=true
-          # The PWA contract check reads the Rust registry golden.
-          matches '^tests/parity/golden/registry\.json$' && engine=true
           engine=false
           if [ "$rust" = true ] || [ "$web" = true ]; then
             engine=true
           fi
+          # The PWA contract check reads the Rust registry golden. This has to
+          # follow the engine=false reset above, or a registry-only change is
+          # classified as no engine work.
+          matches '^tests/parity/golden/registry\.json$' && engine=true
           matches '^voice/' && voice=true
           # The shell wraps a remote URL, not the PWA bundle — `webDir` is
           # `mobile/web/`, a one-file offline fallback — so a `web/` change
@@ -232,7 +234,7 @@ jobs:
       - run: uv sync --locked
 
       - name: canonical product version is aligned
-        run: uv run --no-sync python scripts/check_product_version.py 0.7.22
+        run: cargo run --quiet --manifest-path engine/core/Cargo.toml --bin vogt-core -- check-product-version 0.7.22
 
       - name: ruff (lint)
         run: uv run --no-sync ruff check .
