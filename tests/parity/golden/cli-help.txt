@@ -47,6 +47,7 @@ positional arguments:
     drift              drift operations
     serve              Serve the API, MCP and health endpoints on one port.
     session            session operations
+    watch              watch operations
     decision           decision operations
     agent-cli          agent-cli operations
     agent-activity     agent-activity operations
@@ -75,7 +76,9 @@ positional arguments:
                        SHA/version) against its branch head, with the commits
                        and work items merged but not yet deployed. Read from
                        the deploy-lanes collector's last sweep.
+    usage              usage operations
     inbox              inbox operations
+    charter            charter operations
     preference         preference operations
     chat               chat operations
     audit              audit operations
@@ -359,8 +362,8 @@ options:
 
 $ vogt project transition --help
 [exit 0]
-usage: vogt project transition [-h] --slug SLUG
-                               --to-state {incubating,active,maintenance,archived}
+usage: vogt project transition [-h] --slug SLUG --to-state
+                               {incubating,active,maintenance,archived}
                                --reason REASON
 
 options:
@@ -555,8 +558,8 @@ options:
 
 $ vogt work relate --help
 [exit 0]
-usage: vogt work relate [-h] --ref REF
-                        --kind {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
+usage: vogt work relate [-h] --ref REF --kind
+                        {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
                         --target TARGET --reason REASON
 
 options:
@@ -571,8 +574,8 @@ options:
 
 $ vogt work unrelate --help
 [exit 0]
-usage: vogt work unrelate [-h] --ref REF
-                          --kind {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
+usage: vogt work unrelate [-h] --ref REF --kind
+                          {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
                           --target TARGET --reason REASON
 
 options:
@@ -1063,8 +1066,8 @@ options:
 
 $ vogt contract inapplicable --help
 [exit 0]
-usage: vogt contract inapplicable [-h] --project PROJECT --rule RULE
-                                  --target TARGET --reason REASON
+usage: vogt contract inapplicable [-h] --project PROJECT --rule RULE --target
+                                  TARGET --reason REASON
 
 options:
   -h, --help         show this help message and exit
@@ -1077,8 +1080,8 @@ options:
 
 $ vogt contract applicable --help
 [exit 0]
-usage: vogt contract applicable [-h] --project PROJECT --rule RULE
-                                --target TARGET --reason REASON
+usage: vogt contract applicable [-h] --project PROJECT --rule RULE --target
+                                TARGET --reason REASON
 
 options:
   -h, --help         show this help message and exit
@@ -1110,8 +1113,8 @@ options:
 
 $ vogt drift detect --help
 [exit 0]
-usage: vogt drift detect [-h] [--auto-accept | --no-auto-accept]
-                         --reason REASON
+usage: vogt drift detect [-h] [--auto-accept | --no-auto-accept] --reason
+                         REASON
 
 options:
   -h, --help            show this help message and exit
@@ -1135,9 +1138,8 @@ options:
 
 $ vogt drift resolve --help
 [exit 0]
-usage: vogt drift resolve [-h] --id ID
-                          --resolution {accepted,rejected,contested}
-                          --reason REASON
+usage: vogt drift resolve [-h] --id ID --resolution
+                          {accepted,rejected,contested} --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -1200,7 +1202,8 @@ positional arguments:
                    Enter: at a menu it accepts whatever is highlighted
                    (dismiss with esc). While a permission prompt shows, only a
                    person's input is typed: an agent's is refused (403
-                   person_required). On a hibernated session it wakes first,
+                   person_required), except an oversight session's on a
+                   permission prompt. On a hibernated session it wakes first,
                    and that wake is never forced: a session handed to a
                    successor, or whose work item is already live in the same
                    directory, is refused (409). Audited (byte count and keys,
@@ -1221,7 +1224,10 @@ positional arguments:
                    Vogt, or any resume); a shell needs allow_shell and wakes
                    fresh. superseded_by names the session taking over the work
                    (ses_… or the engine UUID); a later wake is then refused
-                   unless forced. Takes either id.
+                   unless forced. wake_on arms a watch first (see
+                   watch_create), so the session is woken with the outcome
+                   when it fires — hibernate until PR #N merges instead of
+                   polling. Takes either id.
     wake           Wake a hibernated session: start it again under the same
                    id, resuming its agent conversation in the directory it ran
                    in, with a new token for the same actor. Refused (409) when
@@ -1286,8 +1292,11 @@ positional arguments:
                    take anyone's answer; a permission prompt (approval.kind
                    permission or read-outside-cwd) only a person's — an agent
                    is refused (403 person_required) and should leave it for
-                   the Inbox. Pass expect_question = approval.question so a
-                   stale answer is refused. Audited. Takes either id.
+                   the Inbox. One exception: an oversight session may answer a
+                   worker's permission prompt (not read-outside-cwd); the
+                   engine checks its role and audits it with the command. Pass
+                   expect_question = approval.question so a stale answer is
+                   refused. Audited. Takes either id.
     screen         Read what a session's terminal shows right now: visible
                    lines, cursor, title, activity and readiness. `ready` true
                    means the program is waiting for input — wait for it before
@@ -1337,6 +1346,14 @@ positional arguments:
                    and pushed; drivers stop re-prompting. Omit `id` from
                    inside a session Vogt started. Clear with
                    session_report_unblocked.
+    report         Post this session's short typed report — kind progress,
+                   result, question or blocker — with summary, branch/sha/pr,
+                   checks run, blockers and next step. Shown as the latest
+                   report on session_list/session_sweep/session_digest, raised
+                   in the Inbox and left as a note on the work item (the
+                   session's bound item unless `work_item` names one). Post a
+                   `result` when the deliverable is done. Omit `id` from
+                   inside a session Vogt started.
     unblocked      Clear a session's blocked report once the person has acted
                    (or the agent found a way on). Omit `id` from inside a
                    session Vogt started.
@@ -1364,6 +1381,7 @@ usage: vogt session start [-h] [--work-item WORK_ITEM] [--project PROJECT]
                           [--from-handoff FROM_HANDOFF]
                           [--review-of REVIEW_OF] [--budget BUDGET]
                           [--worktree | --no-worktree] [--cwd CWD]
+                          [--cold-wake-opt-out | --no-cold-wake-opt-out]
                           --reason REASON
                           [--purpose {implement,implement-careful,review,mechanical,investigate,design}]
 
@@ -1389,7 +1407,9 @@ options:
                         checking them. A plain shell only gets the brief's
                         path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a
                         task with `template` when it is something to carry
-                        out.
+                        out. Omitted on an agent start, the task is taken from
+                        `reason` (a leading `Task:` dropped); a `review`
+                        purpose gets a default review task.
   --files FILES         Files the task touches, each `path` or `path:start-
                         end`. Rendered under Touch points; a line range is a
                         hint, not a slice of the file.
@@ -1526,6 +1546,11 @@ options:
                         purpose profile that would have set `worktree` does
                         not, when `cwd` is given. Recorded as the session's
                         cwd.
+  --cold-wake-opt-out, --no-cold-wake-opt-out
+                        Never compact this session on a cold wake (WI-2037):
+                        every wake resumes its full transcript, whatever the
+                        deployment's cold_wake_compaction says. Changeable
+                        later at session_hibernate.
   --reason REASON       Why this write is being made (audited).
   --purpose {implement,implement-careful,review,mechanical,investigate,design}
                         What the session is for (WI-1323, design §2.4):
@@ -1666,7 +1691,11 @@ options:
 $ vogt session hibernate --help
 [exit 0]
 usage: vogt session hibernate [-h] --id ID [--allow-shell | --no-allow-shell]
-                              [--superseded-by SUPERSEDED_BY] --reason REASON
+                              [--superseded-by SUPERSEDED_BY]
+                              [--wake-on WAKE_ON]
+                              [--wake-on-ttl-seconds WAKE_ON_TTL_SECONDS]
+                              [--cold-wake-opt-out | --no-cold-wake-opt-out]
+                              --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -1682,6 +1711,19 @@ options:
                         engine UUID). Recorded on the hibernation, and a later
                         wake is refused unless forced — so the work stays with
                         one session.
+  --wake-on WAKE_ON     Arm a watch before hibernating: the session is woken,
+                        and told the outcome, when this trigger fires (see
+                        watch_create).
+  --wake-on-ttl-seconds WAKE_ON_TTL_SECONDS
+                        How long the watch stays armed: default 24 h, at most
+                        14 d. Past it the watch reads `expired` and wakes
+                        nobody.
+  --cold-wake-opt-out, --no-cold-wake-opt-out
+                        Never compact this session on a cold wake (WI-2037): a
+                        wake always resumes its full transcript, even when the
+                        deployment's cold_wake_compaction is on and the prompt
+                        cache has expired. Unset keeps the session's current
+                        choice (a new session follows the deployment).
   --reason REASON       Why this write is being made (audited).
 
 $ vogt session wake --help
@@ -1769,8 +1811,8 @@ options:
 
 $ vogt session set-role --help
 [exit 0]
-usage: vogt session set-role [-h] --id ID --role {worker,oversight}
-                             --reason REASON
+usage: vogt session set-role [-h] --id ID --role {worker,oversight} --reason
+                             REASON
 
 options:
   -h, --help            show this help message and exit
@@ -1786,8 +1828,8 @@ options:
 
 $ vogt session bind --help
 [exit 0]
-usage: vogt session bind [-h] [--id ID] [--work-item WORK_ITEM]
-                         --reason REASON
+usage: vogt session bind [-h] [--id ID] [--work-item WORK_ITEM] --reason
+                         REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2013,6 +2055,38 @@ options:
   --items ITEMS      The concrete things the person has to do, one per entry.
   --reason REASON    Why this write is being made (audited).
 
+$ vogt session report --help
+[exit 0]
+usage: vogt session report [-h] [--id ID] --kind
+                           {progress,result,question,blocker} --summary
+                           SUMMARY [--work-item WORK_ITEM] [--branch BRANCH]
+                           [--sha SHA] [--pr PR] [--checks CHECKS]
+                           [--blockers BLOCKERS] [--next-step NEXT_STEP]
+                           --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               The reporting session, in either id form. Omit it from
+                        inside a session Vogt started (its token names the
+                        session).
+  --kind {progress,result,question,blocker}
+                        `progress` while working, `result` when the
+                        deliverable is done (branch pushed, verdict reached),
+                        `question` or `blocker` when it needs someone.
+  --summary SUMMARY     What happened or what is needed, in a sentence or two.
+                        Never paste credentials: credential-shaped text is
+                        redacted before it is stored.
+  --work-item WORK_ITEM
+                        The item this is about (`WI-7`). Defaults to the
+                        session's bound item.
+  --branch BRANCH
+  --sha SHA
+  --pr PR               PR number or URL, when there is one.
+  --checks CHECKS       Checks run and their outcome, one per entry.
+  --blockers BLOCKERS
+  --next-step NEXT_STEP
+  --reason REASON       Why this write is being made (audited).
+
 $ vogt session unblocked --help
 [exit 0]
 usage: vogt session unblocked [-h] [--id ID] --reason REASON
@@ -2067,6 +2141,69 @@ options:
                         Remove terminal escape codes so the text is readable.
                         Pass false for the raw escape stream.
 
+$ vogt watch --help
+[exit 0]
+usage: vogt watch [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    create      Wait on an event instead of polling (WI-2036): arm a watch,
+                then hibernate, and Vogt wakes the session and types the
+                outcome when the trigger fires. Triggers: pr (project, number;
+                on merged/closed), ci (project, sha or pr, and checks: the
+                required check names, each observed and concluded — Vogt does
+                not read branch protection), work_item (reaches a state,
+                default terminal), session (another session ended, or also
+                declared done). The watch is stored, so it survives a restart.
+                Wakes your own session unless `session` names another.
+                session_hibernate's wake_on arms one in the same call.
+    list        Watches, newest first, by state (active, fired, failed,
+                cancelled, expired) or by the session they wake, with each
+                one's outcome and whether its wake message was delivered.
+    cancel      Cancel an active watch. A person, the watch's owner or the
+                session it would wake may.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt watch create --help
+[exit 0]
+usage: vogt watch create [-h] --trigger TRIGGER [--session SESSION]
+                         [--note NOTE] [--ttl-seconds TTL_SECONDS] --reason
+                         REASON
+
+options:
+  -h, --help            show this help message and exit
+  --trigger TRIGGER
+  --session SESSION     The session to wake (ses_… or engine UUID). Default:
+                        your own session, from your token.
+  --note NOTE           Appended to the wake message, e.g. what to do next.
+  --ttl-seconds TTL_SECONDS
+                        How long the watch stays armed: default 24 h, at most
+                        14 d. Past it the watch reads `expired` and wakes
+                        nobody.
+  --reason REASON       Why this write is being made (audited).
+
+$ vogt watch list --help
+[exit 0]
+usage: vogt watch list [-h] [--state {active,fired,failed,cancelled,expired}]
+                       [--session SESSION] [--limit LIMIT]
+
+options:
+  -h, --help            show this help message and exit
+  --state {active,fired,failed,cancelled,expired}
+  --session SESSION     Only watches that wake this session.
+  --limit LIMIT
+
+$ vogt watch cancel --help
+[exit 0]
+usage: vogt watch cancel [-h] --id ID --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          The watch id (wat_…).
+  --reason REASON  Why this write is being made (audited).
+
 $ vogt decision --help
 [exit 0]
 usage: vogt decision [-h] <subcommand> ...
@@ -2112,8 +2249,8 @@ options:
 
 $ vogt decision answer --help
 [exit 0]
-usage: vogt decision answer [-h] --id ID --label LABEL [--note NOTE]
-                            --reason REASON
+usage: vogt decision answer [-h] --id ID --label LABEL [--note NOTE] --reason
+                            REASON
 
 options:
   -h, --help       show this help message and exit
@@ -2171,8 +2308,8 @@ options:
 
 $ vogt agent-cli update --help
 [exit 0]
-usage: vogt agent-cli update [-h] --tool TOOL --version VERSION
-                             --reason REASON
+usage: vogt agent-cli update [-h] --tool TOOL --version VERSION --reason
+                             REASON
 
 options:
   -h, --help         show this help message and exit
@@ -2379,8 +2516,8 @@ $ vogt user passwd --help
 usage: vogt user passwd [-h] --username USERNAME
                         [--password-file PASSWORD__FILE | --password-stdin]
                         [--scopes SCOPES]
-                        [--revoke-sessions | --no-revoke-sessions]
-                        --reason REASON
+                        [--revoke-sessions | --no-revoke-sessions] --reason
+                        REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2405,8 +2542,8 @@ options:
 
 $ vogt backup --help
 [exit 0]
-usage: vogt backup [-h] [--destination DESTINATION] [--label LABEL]
-                   --reason REASON
+usage: vogt backup [-h] [--destination DESTINATION] [--label LABEL] --reason
+                   REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2417,8 +2554,8 @@ options:
 
 $ vogt restore --help
 [exit 0]
-usage: vogt restore [-h] --source SOURCE [--confirm | --no-confirm]
-                    --reason REASON
+usage: vogt restore [-h] --source SOURCE [--confirm | --no-confirm] --reason
+                    REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2447,8 +2584,8 @@ options:
 
 $ vogt export --help
 [exit 0]
-usage: vogt export [-h] --destination DESTINATION [--project PROJECT]
-                   --reason REASON
+usage: vogt export [-h] --destination DESTINATION [--project PROJECT] --reason
+                   REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2523,8 +2660,8 @@ options:
 
 $ vogt forge writeback --help
 [exit 0]
-usage: vogt forge writeback [-h] --project PROJECT
-                            --policy {none,comment_only,full} --reason REASON
+usage: vogt forge writeback [-h] --project PROJECT --policy
+                            {none,comment_only,full} --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2582,8 +2719,8 @@ options:
 
 $ vogt forge account link --help
 [exit 0]
-usage: vogt forge account link [-h] [--host HOST] --token TOKEN
-                               --reason REASON
+usage: vogt forge account link [-h] [--host HOST] --token TOKEN --reason
+                               REASON
 
 options:
   -h, --help       show this help message and exit
@@ -2710,6 +2847,28 @@ options:
   --project PROJECT  Project slug. Omit for every configured lane.
   --lane LANE        One lane by name, e.g. `dev`. Omit for all.
 
+$ vogt usage --help
+[exit 0]
+usage: vogt usage [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    board       Usage board: each configured provider account's reported rate-
+                limit windows, limit hits and reset times (Claude, Codex),
+                each LiteLLM key's spend, and the keys at or over their day-
+                spend alert. Read now from the accounts' transcripts and
+                LiteLLM /key/info; nothing is stored.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt usage board --help
+[exit 0]
+usage: vogt usage board [-h]
+
+options:
+  -h, --help  show this help message and exit
+
 $ vogt inbox --help
 [exit 0]
 usage: vogt inbox [-h] <subcommand> ...
@@ -2758,8 +2917,8 @@ options:
 
 $ vogt inbox snooze --help
 [exit 0]
-usage: vogt inbox snooze [-h] --entry-key ENTRY_KEY --until UNTIL
-                         --reason REASON
+usage: vogt inbox snooze [-h] --entry-key ENTRY_KEY --until UNTIL --reason
+                         REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2775,6 +2934,56 @@ options:
   -h, --help            show this help message and exit
   --entry-key ENTRY_KEY
   --reason REASON
+
+$ vogt charter --help
+[exit 0]
+usage: vogt charter [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    get         Read the charter (standing instructions injected into every
+                session brief) of the workspace, a project or an initiative
+                (scope + ref slug). history=true adds earlier versions.
+    set         Set the charter of the workspace, a project or an initiative:
+                Markdown injected into every session brief started there
+                (workspace, then project, then initiative, then the brief) and
+                into Codex developer_instructions. Writes the next version;
+                empty body clears; optional expected_version.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt charter get --help
+[exit 0]
+usage: vogt charter get [-h] --scope {workspace,project,initiative}
+                        [--ref REF] [--history | --no-history] [--limit LIMIT]
+
+options:
+  -h, --help            show this help message and exit
+  --scope {workspace,project,initiative}
+                        workspace, project or initiative.
+  --ref REF             Project or initiative slug; omitted for workspace.
+  --history, --no-history
+                        Also return earlier versions, newest first.
+  --limit LIMIT
+
+$ vogt charter set --help
+[exit 0]
+usage: vogt charter set [-h] --scope {workspace,project,initiative}
+                        [--ref REF] --body BODY
+                        [--expected-version EXPECTED_VERSION] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --scope {workspace,project,initiative}
+                        workspace, project or initiative.
+  --ref REF             Project or initiative slug; omitted for workspace.
+  --body BODY           The standing instructions, in Markdown. Empty clears
+                        it.
+  --expected-version EXPECTED_VERSION
+                        Write only if the current version is this (0: never
+                        set).
+  --reason REASON       Why this write is being made (audited).
 
 $ vogt preference --help
 [exit 0]
@@ -2801,8 +3010,8 @@ options:
 $ vogt preference set --help
 [exit 0]
 usage: vogt preference set [-h] --key KEY --value VALUE
-                           [--expected-version EXPECTED_VERSION]
-                           --reason REASON
+                           [--expected-version EXPECTED_VERSION] --reason
+                           REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2889,8 +3098,8 @@ options:
 
 $ vogt chat send --help
 [exit 0]
-usage: vogt chat send [-h] --id ID --text TEXT [--wait-s WAIT_S]
-                      --reason REASON
+usage: vogt chat send [-h] --id ID --text TEXT [--wait-s WAIT_S] --reason
+                      REASON
 
 options:
   -h, --help       show this help message and exit
@@ -2903,8 +3112,8 @@ options:
 $ vogt chat decide --help
 [exit 0]
 usage: vogt chat decide [-h] --id ID --approval-id APPROVAL_ID
-                        [--allow | --no-allow] [--message MESSAGE]
-                        --reason REASON
+                        [--allow | --no-allow] [--message MESSAGE] --reason
+                        REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2936,8 +3145,8 @@ options:
 
 $ vogt chat archive --help
 [exit 0]
-usage: vogt chat archive [-h] --id ID [--archived | --no-archived]
-                         --reason REASON
+usage: vogt chat archive [-h] --id ID [--archived | --no-archived] --reason
+                         REASON
 
 options:
   -h, --help            show this help message and exit
