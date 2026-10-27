@@ -35,7 +35,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO / "tests" / "parity" / "script.json"
@@ -914,127 +914,140 @@ def _run_http(
         # never reused, so later sequences shift, and it races `auth.logout`
         # into a 500 (WI-1152). With the scheduler off, no sweep row is written
         # and the declared dump compares verbatim.
-        server = subprocess.Popen(
-            [
-                binary,
-                "--data-dir",
-                str(data),
-                "serve",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--no-schedule",
-            ],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            base = f"http://127.0.0.1:{port}"
-            _wait_until(f"{base}/health/live", server)
-            credentials: dict[str, str] = {}
-            secrets: list[str] = []
-            for step in steps:
-                if "dump" in step:
-                    # The store is read while the server runs: sqlite serves
-                    # the committed rows, and nothing writes between steps.
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as server_log:
+            server = subprocess.Popen(
+                [
+                    binary,
+                    "--data-dir",
+                    str(data),
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--no-schedule",
+                ],
+                env=env,
+                stdout=server_log,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            try:
+                base = f"http://127.0.0.1:{port}"
+                _wait_until(f"{base}/health/live", server, server_log)
+                credentials: dict[str, str] = {}
+                secrets: list[str] = []
+                for step in steps:
+                    if "dump" in step:
+                        # The store is read while the server runs: sqlite serves
+                        # the committed rows, and nothing writes between steps.
+                        recorded.append(
+                            {
+                                "operation": step["operation"],
+                                "result": _normalise(
+                                    _dump(data, _dump_names(step), step.get("tables")),
+                                    Path(scratch),
+                                    data,
+                                ),
+                            }
+                        )
+                        continue
+                    spec = step["http"]
+                    headers = dict(spec.get("headers") or {})
+                    if "auth" in spec:
+                        kind = spec["auth"]
+                        if kind not in credentials:
+                            raise SystemExit(
+                                f"{step['operation']} needs a {kind} credential"
+                            )
+                        headers["Authorization"] = f"Bearer {credentials[kind]}"
+                    body = (
+                        _substitute(spec["body"], {}, Path(scratch))
+                        if spec.get("body") is not None
+                        else None
+                    )
+                    payload_bytes = (
+                        json.dumps(body).encode() if body is not None else None
+                    )
+                    if payload_bytes is not None:
+                        headers.setdefault("Content-Type", "application/json")
+                    request = urllib.request.Request(
+                        f"{base}{spec['path'].replace('{root}', scratch)}",
+                        data=payload_bytes,
+                        method=spec["method"],
+                        headers=headers,
+                    )
+                    try:
+                        with urllib.request.urlopen(request) as response:
+                            status, payload = response.status, response.read()
+                    except urllib.error.HTTPError as error:
+                        status, payload = error.code, error.read()
+                    result: Any = None
+                    if payload:
+                        try:
+                            result = json.loads(payload)
+                        except json.JSONDecodeError:
+                            result = {
+                                "unparseable": payload.decode(errors="replace")[:300]
+                            }
                     recorded.append(
                         {
                             "operation": step["operation"],
+                            "status": status,
                             "result": _normalise(
-                                _dump(data, _dump_names(step), step.get("tables")),
-                                Path(scratch),
-                                data,
+                                result, Path(scratch), data, step["operation"]
                             ),
                         }
                     )
-                    continue
-                spec = step["http"]
-                headers = dict(spec.get("headers") or {})
-                if "auth" in spec:
-                    kind = spec["auth"]
-                    if kind not in credentials:
+                    if "status" in spec and status != spec["status"]:
                         raise SystemExit(
-                            f"{step['operation']} needs a {kind} credential"
+                            f"{step['operation']} over HTTP answered {status}, "
+                            f"wanted {spec['status']}: {result!r}"
                         )
-                    headers["Authorization"] = f"Bearer {credentials[kind]}"
-                body = (
-                    _substitute(spec["body"], {}, Path(scratch))
-                    if spec.get("body") is not None
-                    else None
-                )
-                payload_bytes = json.dumps(body).encode() if body is not None else None
-                if payload_bytes is not None:
-                    headers.setdefault("Content-Type", "application/json")
-                request = urllib.request.Request(
-                    f"{base}{spec['path'].replace('{root}', scratch)}",
-                    data=payload_bytes,
-                    method=spec["method"],
-                    headers=headers,
-                )
-                try:
-                    with urllib.request.urlopen(request) as response:
-                        status, payload = response.status, response.read()
-                except urllib.error.HTTPError as error:
-                    status, payload = error.code, error.read()
-                result: Any = None
-                if payload:
-                    try:
-                        result = json.loads(payload)
-                    except json.JSONDecodeError:
-                        result = {"unparseable": payload.decode(errors="replace")[:300]}
-                recorded.append(
-                    {
-                        "operation": step["operation"],
-                        "status": status,
-                        "result": _normalise(
-                            result, Path(scratch), data, step["operation"]
-                        ),
-                    }
-                )
-                if "status" in spec and status != spec["status"]:
-                    raise SystemExit(
-                        f"{step['operation']} over HTTP answered {status}, "
-                        f"wanted {spec['status']}: {result!r}"
-                    )
-                if "error_code" in spec:
-                    http_error = (
-                        result.get("error") if isinstance(result, dict) else None
-                    )
-                    code = (
-                        http_error.get("code") if isinstance(http_error, dict) else None
-                    )
-                    if code != spec["error_code"]:
-                        raise SystemExit(
-                            f"{step['operation']} over HTTP answered error code "
-                            f"{code!r}, wanted {spec['error_code']!r}"
+                    if "error_code" in spec:
+                        http_error = (
+                            result.get("error") if isinstance(result, dict) else None
                         )
-                if "capture" in spec:
-                    # `admin` is the install's operator token, `token` the one
-                    # token.issue mints, and `session` the login's session. The
-                    # steps name which one they present.
-                    if "secret" not in result:
-                        raise SystemExit(
-                            f"{step['operation']} answered {status} without a secret: "
-                            f"{result!r}"
+                        code = (
+                            http_error.get("code")
+                            if isinstance(http_error, dict)
+                            else None
                         )
-                    credentials[spec["capture"]] = result["secret"]
-                    secrets.append(result["secret"])
-            # The declared tables only. The server was started with
-            # `--no-schedule`, so no background sweep writes into them.
-            dumped = _normalise(_dump(data), Path(scratch), data)["declared"]
-            _mark_token_hash(dumped, secrets)
-            recorded.append({"operation": "dump", "result": dumped})
-            audit = _audit_trail(data)
-        finally:
-            server.terminate()
-            server.wait(timeout=10)
+                        if code != spec["error_code"]:
+                            raise SystemExit(
+                                f"{step['operation']} over HTTP answered error code "
+                                f"{code!r}, wanted {spec['error_code']!r}"
+                            )
+                    if "capture" in spec:
+                        # `admin` is the install's operator token, `token` the one
+                        # token.issue mints, and `session` the login's session. The
+                        # steps name which one they present.
+                        if "secret" not in result:
+                            raise SystemExit(
+                                f"{step['operation']} answered {status} "
+                                "without a secret: "
+                                f"{result!r}"
+                            )
+                        credentials[spec["capture"]] = result["secret"]
+                        secrets.append(result["secret"])
+                # The declared tables only. The server was started with
+                # `--no-schedule`, so no background sweep writes into them.
+                dumped = _normalise(_dump(data), Path(scratch), data)["declared"]
+                _mark_token_hash(dumped, secrets)
+                recorded.append({"operation": "dump", "result": dumped})
+                audit = _audit_trail(data)
+            finally:
+                server.terminate()
+                server.wait(timeout=10)
     return recorded, audit
 
 
-def _wait_until(url: str, server: subprocess.Popen[str], attempts: int = 50) -> None:
+def _wait_until(
+    url: str,
+    server: subprocess.Popen[str],
+    server_log: IO[str],
+    attempts: int = 50,
+) -> None:
     import urllib.request
 
     for _ in range(attempts):
@@ -1043,7 +1056,8 @@ def _wait_until(url: str, server: subprocess.Popen[str], attempts: int = 50) -> 
                 return
         except (urllib.error.URLError, ConnectionError):
             if server.poll() is not None:
-                reason = (server.stderr.read() if server.stderr else "") or "exited"
+                server_log.seek(0)
+                reason = server_log.read() or "exited"
                 raise SystemExit(
                     f"server exited before answering {url}: {reason}"
                 ) from None
