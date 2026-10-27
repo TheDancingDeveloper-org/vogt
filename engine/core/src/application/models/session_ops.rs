@@ -358,7 +358,9 @@ pub struct HibernateSessionParams {
     #[schemars(length(min = 1))]
     pub reason: String,
 }
-fn default_hibernate_wake_on_ttl() -> i64 { 86_400 }
+fn default_hibernate_wake_on_ttl() -> i64 {
+    86_400
+}
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WakeSessionParams {

@@ -992,8 +992,8 @@ fn pydantic_shape(value: &mut serde_json::Value) {
             // factory, so it is dropped unless the field asks to keep it.
             // Done on every object, including one nested under `$defs`.
             let keep_default = map.remove("x-keep-default").is_some();
-            let empty = map.get("default") == Some(&json!([]))
-                || map.get("default") == Some(&json!({}));
+            let empty =
+                map.get("default") == Some(&json!([])) || map.get("default") == Some(&json!({}));
             if !keep_default && empty {
                 map.remove("default");
             }
@@ -1312,4 +1312,3 @@ mod tests {
         );
     }
 }
-
