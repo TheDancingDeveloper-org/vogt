@@ -1488,7 +1488,7 @@ mod tests {
 
     /// Move this thread's clock past every TTL, as Python's tests patch
     /// `_clock` to `monotonic() + 100`.
-
+    ///
     /// Move a directory's mtime forward. A file written in the same tick as
     /// the scan leaves a coarse filesystem stamp unchanged (WI-2242).
     fn bump_mtime(path: &Path) {
