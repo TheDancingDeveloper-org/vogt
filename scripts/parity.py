@@ -35,7 +35,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO / "tests" / "parity" / "script.json"
@@ -914,6 +914,9 @@ def _run_http(
         # never reused, so later sequences shift, and it races `auth.logout`
         # into a 500 (WI-1152). With the scheduler off, no sweep row is written
         # and the declared dump compares verbatim.
+        server_output = tempfile.TemporaryFile(  # noqa: SIM115
+            mode="w+", encoding="utf-8"
+        )
         server = subprocess.Popen(
             [
                 binary,
@@ -927,13 +930,13 @@ def _run_http(
                 "--no-schedule",
             ],
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=server_output,
+            stderr=subprocess.STDOUT,
             text=True,
         )
         try:
             base = f"http://127.0.0.1:{port}"
-            _wait_until(f"{base}/health/live", server)
+            _wait_until(f"{base}/health/live", server, server_output)
             credentials: dict[str, str] = {}
             secrets: list[str] = []
             for step in steps:
@@ -1031,10 +1034,16 @@ def _run_http(
         finally:
             server.terminate()
             server.wait(timeout=10)
+            server_output.close()
     return recorded, audit
 
 
-def _wait_until(url: str, server: subprocess.Popen[str], attempts: int = 50) -> None:
+def _wait_until(
+    url: str,
+    server: subprocess.Popen[str],
+    server_output: TextIO,
+    attempts: int = 50,
+) -> None:
     import urllib.request
 
     for _ in range(attempts):
@@ -1043,7 +1052,8 @@ def _wait_until(url: str, server: subprocess.Popen[str], attempts: int = 50) -> 
                 return
         except (urllib.error.URLError, ConnectionError):
             if server.poll() is not None:
-                reason = (server.stderr.read() if server.stderr else "") or "exited"
+                server_output.seek(0)
+                reason = server_output.read() or "exited"
                 raise SystemExit(
                     f"server exited before answering {url}: {reason}"
                 ) from None
