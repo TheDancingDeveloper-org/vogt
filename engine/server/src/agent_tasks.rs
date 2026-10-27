@@ -4380,7 +4380,12 @@ fn git_final_sha(cwd: &str, branch: Option<&str>) -> Option<String> {
 /// final sha, reduced to files/insertions/deletions.
 fn git_diff_stats(cwd: &str, base: Option<&str>, head: &str) -> Option<DiffStat> {
     let base = base.unwrap_or(EMPTY_TREE_SHA);
-    let numstat = git_capture(cwd, &["diff", "--numstat", &format!("{base}..{head}")])?;
+    // Two revisions, not `base..head`. The two-dot form is `diff $(merge-base
+    // base head) head`, and merge-base has nothing to walk from when the run
+    // started on an unborn HEAD (no commit yet, so base is the empty tree).
+    // Git 2.54's runners then report no diffstat for a commit the run itself
+    // just made. `diff <base> <head>` compares the two trees directly.
+    let numstat = git_capture(cwd, &["diff", "--numstat", base, head])?;
     Some(parse_numstat(&numstat))
 }
 
