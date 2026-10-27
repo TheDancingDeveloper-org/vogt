@@ -1000,8 +1000,12 @@ def _run_http(
                         f"wanted {spec['status']}: {result!r}"
                     )
                 if "error_code" in spec:
-                    http_error = result.get("error") if isinstance(result, dict) else None
-                    code = http_error.get("code") if isinstance(http_error, dict) else None
+                    http_error = (
+                        result.get("error") if isinstance(result, dict) else None
+                    )
+                    code = (
+                        http_error.get("code") if isinstance(http_error, dict) else None
+                    )
                     if code != spec["error_code"]:
                         raise SystemExit(
                             f"{step['operation']} over HTTP answered error code "
