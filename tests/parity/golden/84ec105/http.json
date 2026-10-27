@@ -285,7 +285,7 @@
           },
           {
             "applied_at": "2026-01-02T03:04:05+00:00",
-            "checksum": "43a896371451a866a6b6407ca61833a1d17e5a5f592e506024e634a6af73ea66",
+            "checksum": "39c513695672864f65465500b0db7d9ecd09728be5bb251bd805cfe5c977ab69",
             "id": "0025_charters"
           },
           {
@@ -4262,7 +4262,7 @@
         },
         {
           "applied_at": "2026-01-02T03:04:05+00:00",
-          "checksum": "43a896371451a866a6b6407ca61833a1d17e5a5f592e506024e634a6af73ea66",
+          "checksum": "39c513695672864f65465500b0db7d9ecd09728be5bb251bd805cfe5c977ab69",
           "id": "0025_charters"
         },
         {

@@ -45,3 +45,11 @@ Main keeps moving while the port lives on `rust-core`. Once a week:
 | parity | Python and Rust both green: cli 170, http 89, mcp 170 steps; `--only dump`, `--only actor`, `--only schema`; crossopen; contract; selftest; `errors --check`; `gen_registry.py --check`; `gen_validator_corpus.py --check`. |
 | ledger | 36 rows since `21c95f67`. 10 are no-ops (version bumps, CI policy, engine-shell tests, typing); 3 were already ported (078e979c); the other 23 are ported in WI-1081. The halves that need infrastructure the Rust core lacks are follow-ups WI-2021 (scheduler), WI-2022 (digest rows), WI-2023 (Codex resubmit loop) and WI-2024 (WI-1590 model policy, `project.update agent_policy`). No new migrations. |
 | accepted differences | [`accepted-differences.md`](accepted-differences.md) |
+
+### 2026-10-27 (WI-2623, merge-base moved by #1193)
+
+| | |
+| --- | --- |
+| sync | `origin/main` @`84ec1058` fast-forwarded into rust-core through #1193. New merge base `84ec105`. |
+| golden | `tests/parity/golden/84ec105` recorded from the Python core on cli, http, mcp and the schema slice. `09d3c55` deleted. Contract fixtures (cli-help, CONFIG.md, config.example.toml) and `errors.json` regenerated from Python. |
+| parity | Python green against `84ec105`: cli, http 89, mcp 170; `--only actor`, `--only schema`; selftest; `errors --check`; `contract --impl python`. Rust green: http 89, mcp 170, `--only dump`, `--only schema`, crossopen. `contract --impl rust` still differs: the Rust CLI help lists `charter` and `watch` and wraps long usage lines differently, and Rust renders no CONFIG.md. |

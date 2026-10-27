@@ -236,7 +236,7 @@
           },
           {
             "applied_at": "2026-01-02T03:04:05+00:00",
-            "checksum": "43a896371451a866a6b6407ca61833a1d17e5a5f592e506024e634a6af73ea66",
+            "checksum": "39c513695672864f65465500b0db7d9ecd09728be5bb251bd805cfe5c977ab69",
             "id": "0025_charters"
           },
           {
@@ -353,12 +353,10 @@
         ]
       }
     },
-    "exit": 0,
     "operation": "dump.after_init"
   },
   {
     "body": {
-      "clone": null,
       "counts": {
         "actors": 3,
         "audit": 3,
@@ -369,14 +367,13 @@
       },
       "data_dir": "<volatile>",
       "declared_schema_version": 27,
-      "disk": null,
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "principal": "local:parity",
       "revision": 2,
       "vogt_version": "0.7.20"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "status"
   },
   {
@@ -388,7 +385,7 @@
       "observed_schema_expected": 6,
       "observed_schema_version": 6
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "migrate"
   },
   {
@@ -564,13 +561,13 @@
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "workflow.list"
   },
   {
     "body": {
       "actor": {
-        "created_at": "2026-01-02T03:04:05Z",
+        "created_at": "2026-01-02T03:04:07Z",
         "disabled": false,
         "display_name": "Parity Agent",
         "id": "act_0004",
@@ -578,14 +575,14 @@
         "kind": "agent"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "actor.create"
   },
   {
     "body": {
       "actors": [
         {
-          "created_at": "2026-01-02T03:04:05Z",
+          "created_at": "2026-01-02T03:04:07Z",
           "disabled": false,
           "display_name": "Parity Agent",
           "id": "act_0004",
@@ -618,19 +615,19 @@
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "actor.list"
   },
   {
     "body": {
       "label": {
         "color": "#d73a4a",
-        "created_at": "2026-01-02T03:04:05Z",
+        "created_at": "2026-01-02T03:04:09Z",
         "id": "lbl_0001",
         "name": "parity"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "label.create"
   },
   {
@@ -638,18 +635,17 @@
       "labels": [
         {
           "color": "#d73a4a",
-          "created_at": "2026-01-02T03:04:05Z",
+          "created_at": "2026-01-02T03:04:09Z",
           "id": "lbl_0001",
           "name": "parity"
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "label.list"
   },
   {
     "body": {
-      "checked_at": null,
       "contract_version": "v1",
       "criteria": [
         {
@@ -657,112 +653,97 @@
           "detail": "directory exists",
           "rule": "path.exists",
           "satisfied": true,
-          "target": "<root>",
-          "tracked": null
+          "target": "<root>"
         },
         {
           "applicable": true,
           "detail": "AGENTS.md is missing",
           "rule": "required_file",
           "satisfied": false,
-          "target": "AGENTS.md",
-          "tracked": null
+          "target": "AGENTS.md"
         },
         {
           "applicable": true,
           "detail": "README.md is missing",
           "rule": "required_file",
           "satisfied": false,
-          "target": "README.md",
-          "tracked": null
+          "target": "README.md"
         },
         {
           "applicable": true,
           "detail": "LICENSE is missing",
           "rule": "required_file",
           "satisfied": false,
-          "target": "LICENSE",
-          "tracked": null
+          "target": "LICENSE"
         },
         {
           "applicable": true,
           "detail": "docs/ is missing",
           "rule": "required_dir",
           "satisfied": false,
-          "target": "docs",
-          "tracked": null
+          "target": "docs"
         },
         {
           "applicable": true,
           "detail": "design/ is missing",
           "rule": "required_dir",
           "satisfied": false,
-          "target": "design",
-          "tracked": null
+          "target": "design"
         },
         {
           "applicable": true,
           "detail": "src/ is missing",
           "rule": "required_dir",
           "satisfied": false,
-          "target": "src",
-          "tracked": null
+          "target": "src"
         }
       ],
-      "detail": null,
       "failing": [
         {
           "applicable": true,
           "detail": "AGENTS.md is missing",
           "rule": "required_file",
           "satisfied": false,
-          "target": "AGENTS.md",
-          "tracked": null
+          "target": "AGENTS.md"
         },
         {
           "applicable": true,
           "detail": "README.md is missing",
           "rule": "required_file",
           "satisfied": false,
-          "target": "README.md",
-          "tracked": null
+          "target": "README.md"
         },
         {
           "applicable": true,
           "detail": "LICENSE is missing",
           "rule": "required_file",
           "satisfied": false,
-          "target": "LICENSE",
-          "tracked": null
+          "target": "LICENSE"
         },
         {
           "applicable": true,
           "detail": "docs/ is missing",
           "rule": "required_dir",
           "satisfied": false,
-          "target": "docs",
-          "tracked": null
+          "target": "docs"
         },
         {
           "applicable": true,
           "detail": "design/ is missing",
           "rule": "required_dir",
           "satisfied": false,
-          "target": "design",
-          "tracked": null
+          "target": "design"
         },
         {
           "applicable": true,
           "detail": "src/ is missing",
           "rule": "required_dir",
           "satisfied": false,
-          "target": "src",
-          "tracked": null
+          "target": "src"
         }
       ],
       "inapplicable": [],
       "path": "<root>",
-      "project": null,
       "recommendations": [
         {
           "instruction": "`project scaffold` writes AGENTS.md into this project without overwriting anything that is already there.",
@@ -804,12 +785,11 @@
       "recorded": false,
       "status": "non_compliant"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "contract.evaluate"
   },
   {
     "body": {
-      "checked_at": null,
       "contract_version": "v1",
       "criteria": [
         {
@@ -817,24 +797,20 @@
           "detail": "the path does not exist or is not a directory, so no criterion below was evaluated \u2014 this is 'not checked', not 'does not comply'",
           "rule": "path.exists",
           "satisfied": false,
-          "target": "<root>/does-not-exist",
-          "tracked": null
+          "target": "<root>/does-not-exist"
         }
       ],
-      "detail": null,
       "failing": [
         {
           "applicable": true,
           "detail": "the path does not exist or is not a directory, so no criterion below was evaluated \u2014 this is 'not checked', not 'does not comply'",
           "rule": "path.exists",
           "satisfied": false,
-          "target": "<root>/does-not-exist",
-          "tracked": null
+          "target": "<root>/does-not-exist"
         }
       ],
       "inapplicable": [],
       "path": "<root>/does-not-exist",
-      "project": null,
       "recommendations": [
         {
           "instruction": "decide what <root>/does-not-exist should contain for this project and add it. Nothing here can write it for you.",
@@ -846,7 +822,7 @@
       "recorded": false,
       "status": "not_checked"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "contract.evaluate"
   },
   {
@@ -866,21 +842,14 @@
           "commit_identity": "",
           "deployed_setup": "",
           "forbidden_text": [],
-          "landing": null,
           "main_branches": [],
           "merge_deploys_prod": false,
-          "review": null,
           "rules": [],
-          "session_wall_clock_minutes": null,
-          "test_recipe": "",
-          "verification": null
+          "test_recipe": ""
         },
-        "compliance_checked_at": null,
         "compliance_status": "not_checked",
-        "contract_adopted_at": "2026-01-02T03:04:05Z",
-        "contract_version": null,
-        "created_at": "2026-01-02T03:04:05Z",
-        "current_version": null,
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
         "exclusions": [
           ".venv/",
           "node_modules/",
@@ -894,16 +863,15 @@
         "lifecycle_state": "incubating",
         "link_state": "unlinked",
         "name": "Parity",
-        "repo_url": null,
         "root_path": "<root>/proj",
         "slug": "parity",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:11Z",
         "write_back": "none"
       },
       "skipped_paths": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "project.create"
   },
   {
@@ -914,21 +882,14 @@
           "commit_identity": "",
           "deployed_setup": "",
           "forbidden_text": [],
-          "landing": null,
           "main_branches": [],
           "merge_deploys_prod": false,
-          "review": null,
           "rules": [],
-          "session_wall_clock_minutes": null,
-          "test_recipe": "",
-          "verification": null
+          "test_recipe": ""
         },
-        "compliance_checked_at": null,
         "compliance_status": "not_checked",
-        "contract_adopted_at": "2026-01-02T03:04:05Z",
-        "contract_version": null,
-        "created_at": "2026-01-02T03:04:05Z",
-        "current_version": null,
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
         "exclusions": [
           ".venv/",
           "node_modules/",
@@ -942,15 +903,14 @@
         "lifecycle_state": "incubating",
         "link_state": "unlinked",
         "name": "Parity",
-        "repo_url": null,
         "root_path": "<root>/proj",
         "slug": "parity",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:11Z",
         "write_back": "none"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "project.get"
   },
   {
@@ -962,21 +922,14 @@
             "commit_identity": "",
             "deployed_setup": "",
             "forbidden_text": [],
-            "landing": null,
             "main_branches": [],
             "merge_deploys_prod": false,
-            "review": null,
             "rules": [],
-            "session_wall_clock_minutes": null,
-            "test_recipe": "",
-            "verification": null
+            "test_recipe": ""
           },
-          "compliance_checked_at": null,
           "compliance_status": "not_checked",
-          "contract_adopted_at": "2026-01-02T03:04:05Z",
-          "contract_version": null,
-          "created_at": "2026-01-02T03:04:05Z",
-          "current_version": null,
+          "contract_adopted_at": "2026-01-02T03:04:11Z",
+          "created_at": "2026-01-02T03:04:11Z",
           "exclusions": [
             ".venv/",
             "node_modules/",
@@ -990,11 +943,10 @@
           "lifecycle_state": "incubating",
           "link_state": "unlinked",
           "name": "Parity",
-          "repo_url": null,
           "root_path": "<root>/proj",
           "slug": "parity",
           "trust_state": "unverified",
-          "updated_at": "2026-01-02T03:04:05Z",
+          "updated_at": "2026-01-02T03:04:11Z",
           "writable": false,
           "writable_reason": "not forge-linked: work.create refuses with project_not_linked. Pass local_only=true for a local record, or link (`forge link`) or publish (`forge publish`) the project.",
           "write_back": "none"
@@ -1002,7 +954,7 @@
       ],
       "total": 1
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "project.list"
   },
   {
@@ -1013,21 +965,14 @@
           "commit_identity": "",
           "deployed_setup": "",
           "forbidden_text": [],
-          "landing": null,
           "main_branches": [],
           "merge_deploys_prod": false,
-          "review": null,
           "rules": [],
-          "session_wall_clock_minutes": null,
-          "test_recipe": "",
-          "verification": null
+          "test_recipe": ""
         },
-        "compliance_checked_at": null,
         "compliance_status": "not_checked",
-        "contract_adopted_at": "2026-01-02T03:04:05Z",
-        "contract_version": null,
-        "created_at": "2026-01-02T03:04:05Z",
-        "current_version": null,
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
         "exclusions": [
           ".venv/",
           "node_modules/",
@@ -1045,11 +990,11 @@
         "root_path": "<root>/proj",
         "slug": "parity",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:13Z",
         "write_back": "none"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "project.update"
   },
   {
@@ -1060,21 +1005,14 @@
           "commit_identity": "",
           "deployed_setup": "",
           "forbidden_text": [],
-          "landing": null,
           "main_branches": [],
           "merge_deploys_prod": false,
-          "review": null,
           "rules": [],
-          "session_wall_clock_minutes": null,
-          "test_recipe": "",
-          "verification": null
+          "test_recipe": ""
         },
-        "compliance_checked_at": null,
         "compliance_status": "not_checked",
-        "contract_adopted_at": "2026-01-02T03:04:05Z",
-        "contract_version": null,
-        "created_at": "2026-01-02T03:04:05Z",
-        "current_version": null,
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
         "exclusions": [
           ".venv/",
           "node_modules/",
@@ -1092,11 +1030,11 @@
         "root_path": "<root>/proj",
         "slug": "parity",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:15Z",
         "write_back": "none"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "project.transition"
   },
   {
@@ -1114,7 +1052,7 @@
         "<root>/proj/src"
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "project.scaffold"
   },
   {
@@ -1125,21 +1063,13 @@
           "commit_identity": "",
           "deployed_setup": "",
           "forbidden_text": [],
-          "landing": null,
           "main_branches": [],
           "merge_deploys_prod": false,
-          "review": null,
           "rules": [],
-          "session_wall_clock_minutes": null,
-          "test_recipe": "",
-          "verification": null
+          "test_recipe": ""
         },
-        "compliance_checked_at": null,
         "compliance_status": "not_checked",
-        "contract_adopted_at": null,
-        "contract_version": null,
-        "created_at": "2026-01-02T03:04:05Z",
-        "current_version": null,
+        "created_at": "2026-01-02T03:04:18Z",
         "exclusions": [
           ".venv/",
           "node_modules/",
@@ -1153,15 +1083,14 @@
         "lifecycle_state": "active",
         "link_state": "unlinked",
         "name": "Second",
-        "repo_url": null,
         "root_path": "<root>/instance/repos/second",
         "slug": "second",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:18Z",
         "write_back": "none"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "project.register"
   },
   {
@@ -1193,7 +1122,7 @@
             "kind": "agent"
           },
           {
-            "created_at": "2026-01-02T03:04:05+00:00",
+            "created_at": "2026-01-02T03:04:07+00:00",
             "disabled": 0,
             "display_name": "Parity Agent",
             "id": "act_0004",
@@ -1209,7 +1138,7 @@
             "entity_kind": "instance",
             "id": "aud_0001",
             "operation": "instance.init",
-            "payload_digest": "<payload-digest>",
+            "payload_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             "reason": "instance bootstrap",
             "revision": 0,
             "txn_id": "txn_0001"
@@ -1221,7 +1150,7 @@
             "entity_kind": "token",
             "id": "aud_0002",
             "operation": "token.adopt",
-            "payload_digest": "<payload-digest>",
+            "payload_digest": "sha256:59549779aa0cda6825e03092b441cacac09d0003597ed7fd262fc918fdedf350",
             "reason": "adopting the operator-supplied core token at init",
             "revision": 1,
             "txn_id": "txn_0002"
@@ -1233,91 +1162,91 @@
             "entity_kind": "token",
             "id": "aud_0003",
             "operation": "token.adopt",
-            "payload_digest": "<payload-digest>",
+            "payload_digest": "sha256:f1942d83b32c6907f41a7053a5e2b379b085799a1b1a2bb7dd9e2a327080cefc",
             "reason": "adopting the operator-supplied agent token at init",
             "revision": 2,
             "txn_id": "txn_0003"
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:08+00:00",
             "entity_id": "act_0004",
             "entity_kind": "actor",
             "id": "aud_0004",
             "operation": "actor.create",
-            "payload_digest": "<payload-digest>",
+            "payload_digest": "sha256:13c248cfc7facfe4a7022b16e588334355643842ebef9a6a9f0fd8979954320f",
             "reason": "parity harness",
             "revision": 3,
             "txn_id": "txn_0004"
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:10+00:00",
             "entity_id": "lbl_0001",
             "entity_kind": "label",
             "id": "aud_0005",
             "operation": "label.create",
-            "payload_digest": "<payload-digest>",
+            "payload_digest": "sha256:f6f8e5c46129b1e6924fd1039c61d459516692bcd37e593e81ec685aae3abe8e",
             "reason": "parity harness",
             "revision": 4,
             "txn_id": "txn_0005"
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:12+00:00",
             "entity_id": "prj_0001",
             "entity_kind": "project",
             "id": "aud_0006",
             "operation": "project.register",
-            "payload_digest": "<payload-digest>",
+            "payload_digest": "<path-bearing>",
             "reason": "parity harness",
             "revision": 5,
             "txn_id": "txn_0006"
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:14+00:00",
             "entity_id": "prj_0001",
             "entity_kind": "project",
             "id": "aud_0007",
             "operation": "project.update",
-            "payload_digest": "<payload-digest>",
+            "payload_digest": "sha256:ae82e5173b8742e169a3285c8159ed74d6637b2b5fc4259831577b42adfe0b9b",
             "reason": "parity harness",
             "revision": 6,
             "txn_id": "txn_0007"
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:16+00:00",
             "entity_id": "prj_0001",
             "entity_kind": "project",
             "id": "aud_0008",
             "operation": "project.transition",
-            "payload_digest": "<payload-digest>",
+            "payload_digest": "sha256:5ec56e625d3344c6095f0135416ff80d15243ad8c1f715bd3bcee7f490bf180f",
             "reason": "parity harness",
             "revision": 7,
             "txn_id": "txn_0008"
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:05+00:00",
+            "at": "2026-01-02T03:04:17+00:00",
             "entity_id": "prj_0001",
             "entity_kind": "project",
             "id": "aud_0009",
             "operation": "project.scaffold",
-            "payload_digest": "<payload-digest>",
+            "payload_digest": "sha256:5babe85b671951396e7f888444c164894a9f7741e1543128204fea1723505130",
             "reason": "parity harness",
             "revision": 8,
             "txn_id": "txn_0009"
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:19+00:00",
             "entity_id": "prj_0002",
             "entity_kind": "project",
             "id": "aud_0010",
             "operation": "project.register",
-            "payload_digest": "<payload-digest>",
+            "payload_digest": "<path-bearing>",
             "reason": "parity harness",
             "revision": 9,
             "txn_id": "txn_0010"
@@ -1346,7 +1275,7 @@
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:08+00:00",
             "audit_id": "aud_0004",
             "entity_id": "act_0004",
             "entity_kind": "actor",
@@ -1356,7 +1285,7 @@
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:10+00:00",
             "audit_id": "aud_0005",
             "entity_id": "lbl_0001",
             "entity_kind": "label",
@@ -1366,7 +1295,7 @@
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:12+00:00",
             "audit_id": "aud_0006",
             "entity_id": "prj_0001",
             "entity_kind": "project",
@@ -1376,7 +1305,7 @@
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:14+00:00",
             "audit_id": "aud_0007",
             "entity_id": "prj_0001",
             "entity_kind": "project",
@@ -1386,7 +1315,7 @@
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:16+00:00",
             "audit_id": "aud_0008",
             "entity_id": "prj_0001",
             "entity_kind": "project",
@@ -1396,7 +1325,7 @@
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:05+00:00",
+            "at": "2026-01-02T03:04:17+00:00",
             "audit_id": "aud_0009",
             "entity_id": "prj_0001",
             "entity_kind": "project",
@@ -1406,7 +1335,7 @@
           },
           {
             "actor_id": "act_0001",
-            "at": "2026-01-02T03:04:06+00:00",
+            "at": "2026-01-02T03:04:19+00:00",
             "audit_id": "aud_0010",
             "entity_id": "prj_0002",
             "entity_kind": "project",
@@ -1418,7 +1347,7 @@
         "labels": [
           {
             "color": "#d73a4a",
-            "created_at": "2026-01-02T03:04:05+00:00",
+            "created_at": "2026-01-02T03:04:09+00:00",
             "id": "lbl_0001",
             "name": "parity"
           }
@@ -1571,7 +1500,7 @@
           },
           {
             "applied_at": "2026-01-02T03:04:05+00:00",
-            "checksum": "43a896371451a866a6b6407ca61833a1d17e5a5f592e506024e634a6af73ea66",
+            "checksum": "39c513695672864f65465500b0db7d9ecd09728be5bb251bd805cfe5c977ab69",
             "id": "0025_charters"
           },
           {
@@ -1590,9 +1519,9 @@
             "agent_policy": "{\"forbidden_text\":[],\"merge_deploys_prod\":false,\"main_branches\":[],\"base_branch\":\"\",\"commit_identity\":\"\",\"test_recipe\":\"\",\"deployed_setup\":\"\",\"rules\":[],\"session_wall_clock_minutes\":null,\"landing\":null,\"review\":null,\"verification\":null}",
             "compliance_checked_at": null,
             "compliance_status": "not_checked",
-            "contract_adopted_at": "2026-01-02T03:04:05+00:00",
+            "contract_adopted_at": "2026-01-02T03:04:11+00:00",
             "contract_version": null,
-            "created_at": "2026-01-02T03:04:05+00:00",
+            "created_at": "2026-01-02T03:04:11+00:00",
             "current_version": null,
             "exclusions": "[\".venv/\", \"node_modules/\", \"target/\", \"dist/\", \"build/\", \".git/\", \".claude/\"]",
             "id": "prj_0001",
@@ -1603,7 +1532,7 @@
             "root_path": "<root>/proj",
             "slug": "parity",
             "trust_state": "unverified",
-            "updated_at": "2026-01-02T03:04:05+00:00",
+            "updated_at": "2026-01-02T03:04:15+00:00",
             "write_back": "none"
           },
           {
@@ -1612,7 +1541,7 @@
             "compliance_status": "not_checked",
             "contract_adopted_at": null,
             "contract_version": null,
-            "created_at": "2026-01-02T03:04:05+00:00",
+            "created_at": "2026-01-02T03:04:18+00:00",
             "current_version": null,
             "exclusions": "[\".venv/\", \"node_modules/\", \"target/\", \"dist/\", \"build/\", \".git/\", \".claude/\"]",
             "id": "prj_0002",
@@ -1623,7 +1552,7 @@
             "root_path": "<root>/instance/repos/second",
             "slug": "second",
             "trust_state": "unverified",
-            "updated_at": "2026-01-02T03:04:05+00:00",
+            "updated_at": "2026-01-02T03:04:18+00:00",
             "write_back": "none"
           }
         ],
@@ -1730,7 +1659,6 @@
         ]
       }
     },
-    "exit": 0,
     "operation": "dump.after_project_and_label"
   },
   {
@@ -1742,14 +1670,10 @@
         "detail": "swept, but no CI checks were observed \u2014 either this project has none, or the optional forge adapter is not configured",
         "earlier_failures": 0,
         "failing": [],
-        "revision": null,
         "revisions_observed": 0,
         "status": "no_checks"
       },
-      "compliance_checked_at": null,
       "compliance_status": "not_checked",
-      "current_version": null,
-      "declared_version": null,
       "declared_work": 0,
       "dependencies": {
         "detail": "`dep-refs` has not walked this project; its references are not collected, which is not the same as none",
@@ -1759,13 +1683,10 @@
         "unresolved": 0
       },
       "freshness": {
-        "age_seconds": null,
         "collectors": {},
         "detail": "no collector has completed a sweep yet",
-        "oldest_relevant_sweep": null,
         "status": "never_swept"
       },
-      "observed_version": null,
       "observed_work": 0,
       "open_bugs": 0,
       "open_work": 0,
@@ -1775,21 +1696,14 @@
           "commit_identity": "",
           "deployed_setup": "",
           "forbidden_text": [],
-          "landing": null,
           "main_branches": [],
           "merge_deploys_prod": false,
-          "review": null,
           "rules": [],
-          "session_wall_clock_minutes": null,
-          "test_recipe": "",
-          "verification": null
+          "test_recipe": ""
         },
-        "compliance_checked_at": null,
         "compliance_status": "not_checked",
-        "contract_adopted_at": "2026-01-02T03:04:05Z",
-        "contract_version": null,
-        "created_at": "2026-01-02T03:04:05Z",
-        "current_version": null,
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
         "exclusions": [
           ".venv/",
           "node_modules/",
@@ -1807,28 +1721,26 @@
         "root_path": "<root>/proj",
         "slug": "parity",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:15Z",
         "write_back": "none"
       },
-      "top_backlog": [],
-      "version_matches": null
+      "top_backlog": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "project.brief"
   },
   {
     "body": {
       "backlog_total_considered": 0,
       "drift_present": false,
-      "generated_at": "2026-01-02T03:04:08Z",
+      "generated_at": "2026-01-02T03:04:25Z",
       "inbox_active": 0,
       "inbox_active_unfiltered": 0,
-      "inbox_filter": null,
       "projects_total": 2,
       "revision": 9,
       "work_total": 0
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "place.metrics"
   },
   {
@@ -1836,31 +1748,29 @@
       "configured": 0,
       "detail": "deploy_lanes is not configured, so deployed versions are not collected",
       "freshness": {
-        "age_seconds": null,
         "collectors": {},
         "detail": "no collector has completed a sweep yet",
-        "oldest_relevant_sweep": null,
         "status": "never_swept"
       },
       "lanes": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "deployed.versions"
   },
   {
     "body": {
       "initiative": {
         "body": "",
-        "created_at": "2026-01-02T03:04:05Z",
+        "created_at": "2026-01-02T03:04:26Z",
         "id": "ini_0001",
         "slug": "platform",
         "state": "open",
         "title": "Platform",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:26Z",
         "weight": 0
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "initiative.create"
   },
   {
@@ -1868,33 +1778,33 @@
       "initiatives": [
         {
           "body": "",
-          "created_at": "2026-01-02T03:04:05Z",
+          "created_at": "2026-01-02T03:04:26Z",
           "id": "ini_0001",
           "slug": "platform",
           "state": "open",
           "title": "Platform",
-          "updated_at": "2026-01-02T03:04:05Z",
+          "updated_at": "2026-01-02T03:04:26Z",
           "weight": 0
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "initiative.list"
   },
   {
     "body": {
       "initiative": {
         "body": "",
-        "created_at": "2026-01-02T03:04:05Z",
+        "created_at": "2026-01-02T03:04:26Z",
         "id": "ini_0001",
         "slug": "platform",
         "state": "open",
         "title": "Platform work",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:28Z",
         "weight": 0
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "initiative.update"
   },
   {
@@ -1903,27 +1813,29 @@
       "state": "open",
       "tracking_issues": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "initiative.publish"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no initiative with slug 'missing'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "initiative.publish"
   },
   {
     "body": {
       "preferences": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "preference.get"
   },
   {
     "body": {
       "preference": {
         "key": "inbox.filter",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:31Z",
         "value": {
           "actor": "any",
           "sources": [
@@ -1936,13 +1848,15 @@
         "version": 1
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "preference.set"
   },
   {
-    "body": null,
+    "body": {
+      "text": "preference_version_conflict: preference 'inbox.filter' is at version 1, not 0; re-read it and apply the change on top of the current value"
+    },
     "error_code": "preference_version_conflict",
-    "exit": 1,
+    "is_error": true,
     "operation": "preference.set"
   },
   {
@@ -1950,10 +1864,8 @@
       "by_reason": {},
       "detail": "nothing collected \u2014 either there is nothing to say, or the configured token cannot read notifications; `coverage` distinguishes the two",
       "freshness": {
-        "age_seconds": null,
         "collectors": {},
         "detail": "no collector has completed a sweep yet",
-        "oldest_relevant_sweep": null,
         "status": "never_swept"
       },
       "notifications": [],
@@ -1961,7 +1873,7 @@
       "total": 0,
       "unread": 0
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "notifications"
   },
   {
@@ -1976,7 +1888,6 @@
         "agent": {
           "count": 0,
           "detail": "no session engine is configured",
-          "observed_at": null,
           "projects": 0,
           "registered": 2,
           "source": "agent",
@@ -1985,7 +1896,6 @@
         "ci": {
           "count": 0,
           "detail": "this collector has not completed a sweep",
-          "observed_at": null,
           "projects": 0,
           "registered": 2,
           "source": "ci",
@@ -1994,7 +1904,6 @@
         "drift": {
           "count": 0,
           "detail": "open proposals in the declared store",
-          "observed_at": null,
           "projects": 0,
           "registered": 2,
           "source": "drift",
@@ -2003,7 +1912,6 @@
         "github": {
           "count": 0,
           "detail": "this collector has not completed a sweep",
-          "observed_at": null,
           "projects": 0,
           "registered": 2,
           "source": "github",
@@ -2015,218 +1923,154 @@
       "engine_status": "not_configured",
       "entries": [],
       "github_scope": "registered projects only",
-      "high_water": {
-        "agent": null,
-        "ci": null,
-        "drift": null,
-        "github": null
-      },
+      "high_water": {},
       "instance_scope": "registered projects only",
-      "next_cursor": null,
-      "snapshot_at": "2026-01-02T03:04:05Z"
+      "snapshot_at": "2026-01-02T03:04:33Z"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "inbox.list"
   },
   {
-    "body": null,
+    "body": {
+      "text": "inbox_entry_not_found: no current Inbox entry 'nope'"
+    },
     "error_code": "inbox_entry_not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "inbox.archive"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_snooze: snooze deadline must be in the future"
+    },
     "error_code": "invalid_snooze",
-    "exit": 1,
+    "is_error": true,
     "operation": "inbox.snooze"
   },
   {
-    "body": null,
+    "body": {
+      "text": "inbox_entry_not_found: no current Inbox entry 'nope'"
+    },
     "error_code": "inbox_entry_not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "inbox.restore"
   },
   {
     "body": {
       "branches": [],
-      "claim_check": null,
       "comments": [],
-      "git": null,
       "item": {
-        "assignee_actor_id": null,
-        "assignee_identity_ref": null,
         "body": "",
-        "created_at": "2026-01-02T03:04:05Z",
-        "effort": null,
+        "created_at": "2026-01-02T03:04:35Z",
         "id": "wrk_0001",
-        "initiative_id": null,
         "kind": "chore",
         "labels": [],
         "origin": "created",
         "priority": "p2",
-        "project_id": null,
-        "project_slug": null,
         "ref": "WI-1",
         "relations": [],
         "state": "open",
-        "superseded_by": null,
         "title": "parity item",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z"
+        "updated_at": "2026-01-02T03:04:35Z"
       },
       "live_sessions": [],
       "sessions": [],
       "walked": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "work.create"
   },
   {
     "body": {
       "branches": [],
-      "claim_check": null,
       "comments": [],
-      "git": null,
       "item": {
-        "assignee_actor_id": null,
-        "assignee_identity_ref": null,
         "body": "",
-        "created_at": "2026-01-02T03:04:05Z",
-        "effort": null,
+        "created_at": "2026-01-02T03:04:35Z",
         "id": "wrk_0001",
-        "initiative_id": null,
         "kind": "chore",
         "labels": [],
         "origin": "created",
         "priority": "p1",
-        "project_id": null,
-        "project_slug": null,
         "ref": "WI-1",
         "relations": [],
         "state": "open",
-        "superseded_by": null,
         "title": "parity item renamed",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z"
+        "updated_at": "2026-01-02T03:04:37Z"
       },
       "live_sessions": [],
       "sessions": [],
       "walked": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "work.update"
   },
   {
     "body": {
-      "branches": [],
-      "claim_check": null,
-      "comments": [],
-      "git": null,
-      "item": {
-        "assignee_actor_id": null,
-        "assignee_identity_ref": null,
-        "body": "",
-        "created_at": "2026-01-02T03:04:05Z",
-        "effort": null,
-        "id": "wrk_0002",
-        "initiative_id": null,
-        "kind": "chore",
-        "labels": [
-          "parity"
-        ],
-        "origin": "created",
-        "priority": "p2",
-        "project_id": null,
-        "project_slug": null,
-        "ref": "WI-2",
-        "relations": [],
-        "state": "open",
-        "superseded_by": null,
-        "title": "labelled item",
-        "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z"
-      },
-      "live_sessions": [],
-      "sessions": [],
-      "walked": []
+      "text": "invalid_params: labels: Input should be a valid list. work_create takes required: kind, title, reason; optional: body, priority, effort, project, initiative, assignee, labels, local_only"
     },
-    "exit": 0,
-    "operation": "work.create"
-  },
-  {
-    "body": null,
-    "error_code": "project_not_linked",
-    "exit": 1,
+    "error_code": "invalid_params",
+    "is_error": true,
     "operation": "work.create"
   },
   {
     "body": {
-      "detail": null,
+      "text": "project_not_linked: work.create needs a forge-linked project, and 'parity' is not linked: link it (`forge link`, or re-import through `project import`) or publish it (`forge publish`) first; or pass `local_only: true` to keep a native item in this project. Native items (WI-n) on this project still take comments, transitions (including to done) and field edits by ref."
+    },
+    "error_code": "project_not_linked",
+    "is_error": true,
+    "operation": "work.create"
+  },
+  {
+    "body": {
       "items": [
         {
           "kind": "chore",
           "priority": "p1",
-          "project_slug": null,
           "ref": "WI-1",
           "state": "open",
           "title": "parity item renamed"
-        },
-        {
-          "kind": "chore",
-          "priority": "p2",
-          "project_slug": null,
-          "ref": "WI-2",
-          "state": "open",
-          "title": "labelled item"
         }
       ],
-      "link_state": null,
       "mode": "summary",
-      "next_offset": null,
-      "total": 2
+      "total": 1
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "work.list"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "work.list"
   },
   {
     "body": {
       "branches": [],
-      "claim_check": null,
       "comments": [],
-      "git": null,
       "item": {
-        "assignee_actor_id": null,
-        "assignee_identity_ref": null,
         "body": "",
-        "created_at": "2026-01-02T03:04:05Z",
-        "effort": null,
+        "created_at": "2026-01-02T03:04:35Z",
         "id": "wrk_0001",
-        "initiative_id": null,
         "kind": "chore",
         "labels": [],
         "origin": "created",
         "priority": "p1",
-        "project_id": null,
-        "project_slug": null,
         "ref": "WI-1",
         "relations": [],
         "state": "open",
-        "superseded_by": null,
         "title": "parity item renamed",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z"
+        "updated_at": "2026-01-02T03:04:37Z"
       },
       "live_sessions": [],
       "sessions": [],
       "walked": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "work.get"
   },
   {
@@ -2235,253 +2079,124 @@
         "actor_display_name": "parity",
         "actor_id": "act_0001",
         "body": "parity note",
-        "created_at": "2026-01-02T03:04:05Z",
-        "handoff": null,
+        "created_at": "2026-01-02T03:04:42Z",
         "id": "cmt_0001",
         "kind": "note",
         "work_item_id": "wrk_0001"
       },
       "write_back": "skipped"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "work.comment"
   },
   {
     "body": {
       "branches": [],
-      "claim_check": null,
       "comments": [],
-      "git": null,
       "item": {
-        "assignee_actor_id": null,
-        "assignee_identity_ref": null,
         "body": "",
-        "created_at": "2026-01-02T03:04:05Z",
-        "effort": null,
+        "created_at": "2026-01-02T03:04:35Z",
         "id": "wrk_0001",
-        "initiative_id": null,
         "kind": "chore",
         "labels": [],
         "origin": "created",
         "priority": "p1",
-        "project_id": null,
-        "project_slug": null,
         "ref": "WI-1",
         "relations": [],
         "state": "in_progress",
-        "superseded_by": null,
         "title": "parity item renamed",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z"
+        "updated_at": "2026-01-02T03:04:45Z"
       },
       "live_sessions": [],
       "sessions": [],
       "walked": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "work.transition"
   },
   {
     "body": {
-      "branches": [],
-      "claim_check": null,
-      "comments": [],
-      "git": null,
-      "item": {
-        "assignee_actor_id": null,
-        "assignee_identity_ref": null,
-        "body": "",
-        "created_at": "2026-01-02T03:04:05Z",
-        "effort": null,
-        "id": "wrk_0001",
-        "initiative_id": null,
-        "kind": "chore",
-        "labels": [],
-        "origin": "created",
-        "priority": "p1",
-        "project_id": null,
-        "project_slug": null,
-        "ref": "WI-1",
-        "relations": [
-          {
-            "kind": "relates_to",
-            "related_id": "wrk_0002",
-            "related_ref": "WI-2",
-            "related_state": "open",
-            "related_title": "labelled item"
-          }
-        ],
-        "state": "in_progress",
-        "superseded_by": null,
-        "title": "parity item renamed",
-        "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z"
-      },
-      "live_sessions": [],
-      "sessions": [],
-      "walked": []
+      "text": "not_found: no work item 'WI-2'"
     },
-    "exit": 0,
+    "error_code": "not_found",
+    "is_error": true,
     "operation": "work.relate"
   },
   {
     "body": {
-      "branches": [],
-      "claim_check": null,
-      "comments": [],
-      "git": null,
-      "item": {
-        "assignee_actor_id": null,
-        "assignee_identity_ref": null,
-        "body": "",
-        "created_at": "2026-01-02T03:04:05Z",
-        "effort": null,
-        "id": "wrk_0001",
-        "initiative_id": null,
-        "kind": "chore",
-        "labels": [],
-        "origin": "created",
-        "priority": "p1",
-        "project_id": null,
-        "project_slug": null,
-        "ref": "WI-1",
-        "relations": [],
-        "state": "in_progress",
-        "superseded_by": null,
-        "title": "parity item renamed",
-        "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z"
-      },
-      "live_sessions": [],
-      "sessions": [],
-      "walked": []
+      "text": "not_found: no work item 'WI-2'"
     },
-    "exit": 0,
+    "error_code": "not_found",
+    "is_error": true,
     "operation": "work.unrelate"
   },
   {
     "body": {
-      "backlog_candidates": 2,
+      "backlog_candidates": 1,
       "cells": [
         {
-          "items": [
-            {
-              "assignee_actor_id": null,
-              "assignee_identity_ref": null,
-              "body": "",
-              "created_at": "2026-01-02T03:04:05Z",
-              "effort": null,
-              "id": "wrk_0002",
-              "initiative_id": null,
-              "kind": "chore",
-              "labels": [
-                "parity"
-              ],
-              "origin": "created",
-              "priority": "p2",
-              "project_id": null,
-              "project_slug": null,
-              "ref": "WI-2",
-              "relations": [],
-              "state": "open",
-              "superseded_by": null,
-              "title": "labelled item",
-              "trust_state": "unverified",
-              "updated_at": "2026-01-02T03:04:05Z"
-            }
-          ],
+          "items": [],
           "lane_key": "",
-          "next_cursor": null,
           "state": "open",
-          "total": 1
+          "total": 0
         }
       ],
       "column_totals": {
-        "in_progress": 1,
-        "open": 1
+        "in_progress": 1
       },
-      "declared_total": 2,
+      "declared_total": 1,
       "excluded_unlinked": 0,
       "lane_totals": {
-        "": 2
+        "": 1
       },
-      "link_state": null,
-      "revision": 20,
-      "snapshot": "eyJmaW5nZXJwcmludCI6InNoYTI1Njo2N2JkMGQ3MTUxN2JlYThkM2VkNmJjYWE0ZTFmZTY2YzYyNTM5MGRkNjg2ODI3MjM1Njk4MTUxMDg2ZDc0MDYzIiwiaGlnaF93YXRlciI6WyIyMDI2LTAxLTAyVDAzOjA0OjA1KzAwOjAwIiwiV0ktMiJdLCJraW5kIjoic25hcHNob3QiLCJyZXZpc2lvbiI6MjAsInNuYXBzaG90X2F0IjoiMjAyNi0wMS0wMlQwMzowNDowNSswMDowMCJ9",
-      "snapshot_at": "2026-01-02T03:04:05Z",
-      "total": 2
+      "revision": 17,
+      "snapshot": "eyJmaW5nZXJwcmludCI6InNoYTI1Njo2N2JkMGQ3MTUxN2JlYThkM2VkNmJjYWE0ZTFmZTY2YzYyNTM5MGRkNjg2ODI3MjM1Njk4MTUxMDg2ZDc0MDYzIiwiaGlnaF93YXRlciI6WyIyMDI2LTAxLTAyVDAzOjA0OjM1KzAwOjAwIiwiV0ktMSJdLCJraW5kIjoic25hcHNob3QiLCJyZXZpc2lvbiI6MTcsInNuYXBzaG90X2F0IjoiMjAyNi0wMS0wMlQwMzowNDo0NyswMDowMCJ9",
+      "snapshot_at": "2026-01-02T03:04:47Z",
+      "total": 1
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "board.list"
   },
   {
     "body": {
       "closed_upstream": 0,
-      "declared": 2,
+      "declared": 1,
       "excluded_unlinked": 0,
       "freshness": {
-        "age_seconds": null,
         "collectors": {},
         "detail": "no collector has completed a sweep yet",
-        "oldest_relevant_sweep": null,
         "status": "never_swept"
       },
       "items": [
         {
-          "adopted_as": null,
           "classified": true,
-          "item": null,
           "kind": "chore",
           "labels": [],
-          "observation_kind": null,
-          "observed_at": null,
           "origin": "declared",
           "priority": "p1",
-          "project_slug": null,
           "ref": "WI-1",
           "score": 52.0,
-          "source_url": null,
           "state": "in_progress",
           "title": "parity item renamed",
           "trust_state": "unverified",
-          "updated_at": "2026-01-02T03:04:05Z"
-        },
-        {
-          "adopted_as": null,
-          "classified": true,
-          "item": null,
-          "kind": "chore",
-          "labels": [
-            "parity"
-          ],
-          "observation_kind": null,
-          "observed_at": null,
-          "origin": "declared",
-          "priority": "p2",
-          "project_slug": null,
-          "ref": "WI-2",
-          "score": 22.0,
-          "source_url": null,
-          "state": "open",
-          "title": "labelled item",
-          "trust_state": "unverified",
-          "updated_at": "2026-01-02T03:04:05Z"
+          "updated_at": "2026-01-02T03:04:45Z"
         }
       ],
-      "link_state": null,
-      "next_offset": null,
       "observed": 0,
       "scope": "global",
       "suppressed": 0,
-      "total_considered": 2
+      "total_considered": 1
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "backlog"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "backlog"
   },
   {
@@ -2490,33 +2205,33 @@
       "declared": 0,
       "excluded_unlinked": 0,
       "freshness": {
-        "age_seconds": null,
         "collectors": {},
         "detail": "no collector has completed a sweep yet",
-        "oldest_relevant_sweep": null,
         "status": "never_swept"
       },
       "items": [],
-      "link_state": null,
-      "next_offset": null,
       "observed": 0,
       "scope": "global",
       "suppressed": 0,
       "total_considered": 0
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "bugs"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "bugs"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "deps"
   },
   {
@@ -2524,17 +2239,16 @@
       "comments": 1,
       "export_format_version": 2,
       "path": "<root>/export.json",
-      "project": null,
       "projects": 2,
-      "work_items": 2
+      "work_items": 1
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "export"
   },
   {
     "body": {
       "applied": false,
-      "base": "2026-01-02T03:04:05Z",
+      "base": "2026-01-02T03:04:54Z",
       "base_source": "an export of this same instance: its exported_at",
       "by_entity": {
         "actor": {
@@ -2576,7 +2290,7 @@
           "conflict": 0,
           "created": 0,
           "skipped": 0,
-          "unchanged": 2,
+          "unchanged": 1,
           "updated": 0
         }
       },
@@ -2586,15 +2300,14 @@
       "detail": "Dry run: nothing was written. Pass --apply --confirm to merge.",
       "export_format_version": 2,
       "instance_id": "ins_0001",
-      "project": null,
       "projects": 2,
       "skipped": 0,
       "source": "<root>/export.json",
-      "unchanged": 11,
+      "unchanged": 10,
       "updated": 0,
-      "work_items": 2
+      "work_items": 1
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "import"
   },
   {
@@ -2605,21 +2318,14 @@
           "commit_identity": "",
           "deployed_setup": "",
           "forbidden_text": [],
-          "landing": null,
           "main_branches": [],
           "merge_deploys_prod": false,
-          "review": null,
           "rules": [],
-          "session_wall_clock_minutes": null,
-          "test_recipe": "",
-          "verification": null
+          "test_recipe": ""
         },
-        "compliance_checked_at": null,
         "compliance_status": "not_checked",
-        "contract_adopted_at": "2026-01-02T03:04:05Z",
-        "contract_version": null,
-        "created_at": "2026-01-02T03:04:05Z",
-        "current_version": null,
+        "contract_adopted_at": "2026-01-02T03:04:11Z",
+        "created_at": "2026-01-02T03:04:11Z",
         "exclusions": [
           ".venv/",
           "node_modules/",
@@ -2637,11 +2343,11 @@
         "root_path": "<root>/proj",
         "slug": "parity",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:56Z",
         "write_back": "full"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "forge.writeback"
   },
   {
@@ -2649,18 +2355,16 @@
       "actions": [
         {
           "action": "comment",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:43Z",
           "detail": "write-back is off for this project",
           "id": "wbk_0001",
           "outcome": "skipped",
           "policy": "none",
-          "reason": "parity",
-          "source_url": null,
-          "subject_key": null
+          "reason": "parity"
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "forge.actions"
   },
   {
@@ -2668,73 +2372,87 @@
       "actions": [
         {
           "action": "comment",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:43Z",
           "detail": "write-back is off for this project",
           "id": "wbk_0001",
           "outcome": "skipped",
           "policy": "none",
-          "reason": "parity",
-          "source_url": null,
-          "subject_key": null
+          "reason": "parity"
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "forge.actions"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: 'no.such.host' is not a configured forge host; add it to forge_token_files before listing repositories"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "forge.repos"
   },
   {
     "body": {
       "accounts": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "forge.account_status"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: 'no.such.host' has no provider to validate a token against; configure the host under forge_token_files first"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "forge.account_link"
   },
   {
-    "body": null,
+    "body": {
+      "text": "forge_link_refused: cannot link 'parity': no configured forge reads example.invalid; this build reads github.com only, so nothing was collected here and no conclusion should be drawn from the counts. Set a supported repo_url with `project update`, or import the repository through `project import`."
+    },
     "error_code": "forge_link_refused",
-    "exit": 1,
+    "is_error": true,
     "operation": "forge.link"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "forge.link"
   },
   {
-    "body": null,
+    "body": {
+      "text": "forge_publish_refused: 'parity' already names a repository (https://example.invalid/parity.git); publish never overwrites that association \u2014 attach to it with `forge link`, or clear the repo_url first if it is wrong"
+    },
     "error_code": "forge_publish_refused",
-    "exit": 1,
+    "is_error": true,
     "operation": "forge.publish"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "forge.publish"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: 'no.such.host' is not a configured forge host; add it to forge_token_files before importing by host"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "forge.import"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: no forge credential is available for this host \u2014 neither a linked account (`forge account link`) nor the instance file token  \u2014 so there is nothing to clone github.com/acme/widget with"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "forge.import"
   },
   {
@@ -2751,19 +2469,23 @@
       "supported": false,
       "unchanged": 0
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "forge.onboard"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no project with slug 'missing'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "forge.onboard"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: 'no.such.host' has no provider to validate a token against; configure the host under forge_token_files first"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "forge.account_unlink"
   },
   {
@@ -2826,69 +2548,49 @@
       "title": "parity item renamed",
       "total": 52.0
     },
-    "exit": 0,
-    "operation": "why"
-  },
-  {
-    "body": null,
-    "error_code": "not_found",
-    "exit": 1,
+    "is_error": false,
     "operation": "why"
   },
   {
     "body": {
-      "detail": null,
+      "text": "not_found: no work item or observed subject 'WI-404'"
+    },
+    "error_code": "not_found",
+    "is_error": true,
+    "operation": "why"
+  },
+  {
+    "body": {
       "items": [
         {
-          "assignee_actor_id": null,
-          "assignee_identity_ref": null,
           "body": "",
-          "created_at": "2026-01-02T03:04:05Z",
-          "effort": null,
+          "created_at": "2026-01-02T03:04:35Z",
           "id": "wrk_0001",
-          "initiative_id": null,
           "kind": "chore",
           "labels": [],
           "origin": "created",
           "priority": "p1",
-          "project_id": null,
-          "project_slug": null,
           "ref": "WI-1",
           "relations": [],
           "state": "in_progress",
-          "superseded_by": null,
           "title": "parity item renamed",
           "trust_state": "unverified",
-          "updated_at": "2026-01-02T03:04:05Z"
+          "updated_at": "2026-01-02T03:04:45Z"
         }
       ],
-      "link_state": null,
       "mode": "full",
-      "next_offset": 1,
-      "total": 2
+      "total": 1
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "work.list"
   },
   {
     "body": {
-      "detail": null,
-      "items": [
-        {
-          "kind": "chore",
-          "priority": "p2",
-          "project_slug": null,
-          "ref": "WI-2",
-          "state": "open",
-          "title": "labelled item"
-        }
-      ],
-      "link_state": null,
+      "items": [],
       "mode": "summary",
-      "next_offset": null,
-      "total": 2
+      "total": 1
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "work.list"
   },
   {
@@ -2897,25 +2599,17 @@
         {
           "kind": "chore",
           "priority": "p1",
-          "project_slug": null,
           "ref": "WI-1",
           "state": "in_progress",
           "title": "parity item renamed"
-        },
-        {
-          "kind": "chore",
-          "priority": "p2",
-          "project_slug": null,
-          "ref": "WI-2",
-          "state": "open",
-          "title": "labelled item"
         }
       ],
       "missing": [
-        "WI-404"
+        "WI-404",
+        "WI-2"
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "work.get_many"
   },
   {
@@ -2924,84 +2618,88 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:05Z",
+          "at": "2026-01-02T03:04:58Z",
           "entity_id": "prj_0001",
           "entity_kind": "project",
-          "id": "aud_0023",
+          "id": "aud_0020",
           "operation": "forge.onboard",
           "payload_digest": "sha256:de96f57714a400d1aa3ccb1208c8d7f796cabd99d0fff7de7fdc85927be5ef34",
           "reason": "parity harness",
-          "revision": 22,
-          "txn_id": "txn_0024"
-        },
-        {
-          "actor_id": "act_0001",
-          "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:06Z",
-          "entity_id": "prj_0001",
-          "entity_kind": "project",
-          "id": "aud_0022",
-          "operation": "project.writeback",
-          "payload_digest": "sha256:5160587a6bd4fd6e1c8cfdfbe9e7b71a0aff7cb411b75e8ad277bea16adfdf65",
-          "reason": "parity harness",
-          "revision": 21,
+          "revision": 19,
           "txn_id": "txn_0023"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:05Z",
-          "entity_id": "wrk_0001",
-          "entity_kind": "work_item",
-          "id": "aud_0021",
-          "operation": "work.unrelate",
-          "payload_digest": "sha256:919ba7f4a526f308300142a25947bcafa3b9df9267bbef6a486125710e1f95b4",
-          "reason": "parity",
-          "revision": 20,
+          "at": "2026-01-02T03:04:57Z",
+          "entity_id": "prj_0001",
+          "entity_kind": "project",
+          "id": "aud_0019",
+          "operation": "project.writeback",
+          "payload_digest": "sha256:5160587a6bd4fd6e1c8cfdfbe9e7b71a0aff7cb411b75e8ad277bea16adfdf65",
+          "reason": "parity harness",
+          "revision": 18,
           "txn_id": "txn_0022"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:46Z",
           "entity_id": "wrk_0001",
           "entity_kind": "work_item",
-          "id": "aud_0020",
-          "operation": "work.relate",
-          "payload_digest": "sha256:919ba7f4a526f308300142a25947bcafa3b9df9267bbef6a486125710e1f95b4",
+          "id": "aud_0018",
+          "operation": "work.transition",
+          "payload_digest": "sha256:939b83a6dc5267e90a0a3a2a14a555a9e3f4e2aef4ad639c6cce2926b340b433",
           "reason": "parity",
-          "revision": 19,
-          "txn_id": "txn_0021"
+          "revision": 17,
+          "txn_id": "txn_0019"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:44Z",
+          "entity_id": "cmt_0001",
+          "entity_kind": "comment",
+          "id": "aud_0017",
+          "operation": "work.comment",
+          "payload_digest": "sha256:99be8e34fd97a59c4231a9a0486189f35b99c0ffe966b6ef8b063cb25178d164",
+          "reason": "parity",
+          "revision": 16,
+          "txn_id": "txn_0018"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:38Z",
           "entity_id": "wrk_0001",
           "entity_kind": "work_item",
-          "id": "aud_0019",
-          "operation": "work.transition",
-          "payload_digest": "sha256:e29def8eb3987143cc71db472521260af60e6205bd7f2d4cb0cad1c34d95484e",
+          "id": "aud_0016",
+          "operation": "work.update",
+          "payload_digest": "sha256:bb461bbf55ff1118209c5b8a84ee0c9282ea3d25cb9db35ab8b07f3a62770b98",
           "reason": "parity",
-          "revision": 18,
-          "txn_id": "txn_0020"
+          "revision": 15,
+          "txn_id": "txn_0017"
         }
       ],
-      "total": 23
+      "total": 20
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "audit.list"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: WI-1 belongs to no project, so there is no branch to bind it to"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "work.bind_branch"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no observed subject 'gh:parity-org/parity#404'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "work.adopt"
   },
   {
@@ -3012,21 +2710,13 @@
           "commit_identity": "",
           "deployed_setup": "",
           "forbidden_text": [],
-          "landing": null,
           "main_branches": [],
           "merge_deploys_prod": false,
-          "review": null,
           "rules": [],
-          "session_wall_clock_minutes": null,
-          "test_recipe": "",
-          "verification": null
+          "test_recipe": ""
         },
-        "compliance_checked_at": null,
         "compliance_status": "not_checked",
-        "contract_adopted_at": null,
-        "contract_version": null,
-        "created_at": "2026-01-02T03:04:05Z",
-        "current_version": null,
+        "created_at": "2026-01-02T03:05:01Z",
         "exclusions": [
           ".venv/",
           "node_modules/",
@@ -3040,15 +2730,14 @@
         "lifecycle_state": "active",
         "link_state": "unlinked",
         "name": "Broken",
-        "repo_url": null,
         "root_path": "<root>/instance/repos/broken",
         "slug": "broken",
         "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:05:01Z",
         "write_back": "none"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "project.register"
   },
   {
@@ -3060,7 +2749,7 @@
       "total": 0,
       "truncated": false
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "session.list"
   },
   {
@@ -3071,15 +2760,14 @@
       },
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
       "rows": [],
-      "swept_at": "2026-01-02T03:04:05Z"
+      "swept_at": "2026-01-02T03:05:04Z"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "session.sweep"
   },
   {
     "body": {
       "dep_refs": 0,
-      "disk": null,
       "projects": 3,
       "reports": [
         {
@@ -3124,13 +2812,12 @@
       "scope": "all registered projects",
       "subjects": 5
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "sweep"
   },
   {
     "body": {
       "dep_refs": 0,
-      "disk": null,
       "projects": 3,
       "reports": [
         {
@@ -3148,27 +2835,24 @@
       "scope": "all registered projects",
       "subjects": 5
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "sweep"
   },
   {
     "body": {
       "collectors": [
         {
-          "age_seconds": null,
           "collector": "contract-checker",
           "detail": "this collector has not completed a sweep",
           "last_sweep_scope": 0,
-          "last_swept_at": "<volatile>",
           "never_swept": 0,
           "projects": 0,
           "registered": 3,
           "status": "never_run"
         },
         {
-          "age_seconds": -2,
+          "age_seconds": 18,
           "collector": "dep-refs",
-          "detail": null,
           "last_sweep_scope": 3,
           "last_swept_at": "<volatile>",
           "never_swept": 0,
@@ -3177,7 +2861,7 @@
           "status": "ok"
         },
         {
-          "age_seconds": -5,
+          "age_seconds": 2,
           "collector": "git-local",
           "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
           "last_sweep_scope": 3,
@@ -3188,9 +2872,8 @@
           "status": "partial"
         },
         {
-          "age_seconds": -8,
+          "age_seconds": 12,
           "collector": "mirrored-source",
-          "detail": null,
           "last_sweep_scope": 3,
           "last_swept_at": "<volatile>",
           "never_swept": 0,
@@ -3199,9 +2882,8 @@
           "status": "ok"
         },
         {
-          "age_seconds": -11,
+          "age_seconds": 9,
           "collector": "source-markers",
-          "detail": null,
           "last_sweep_scope": 3,
           "last_swept_at": "<volatile>",
           "never_swept": 0,
@@ -3217,7 +2899,7 @@
       ],
       "unswept_project_ids": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "coverage"
   },
   {
@@ -3229,7 +2911,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "kind": "dep_scan",
             "observation_id": "obs_0001",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0003",
             "promoted": 0,
@@ -3241,7 +2923,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "kind": "dep_scan",
             "observation_id": "obs_0002",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -3253,7 +2935,7 @@
             "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
             "kind": "dep_scan",
             "observation_id": "obs_0003",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -3265,7 +2947,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "kind": "git.checkout",
             "observation_id": "obs_0004",
-            "observed_at": "2026-01-02T03:04:09+00:00",
+            "observed_at": "2026-01-02T03:05:09+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -3277,7 +2959,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "kind": "git.checkout",
             "observation_id": "obs_0005",
-            "observed_at": "2026-01-02T03:04:09+00:00",
+            "observed_at": "2026-01-02T03:05:09+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -3344,7 +3026,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "id": "obs_0001",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0003",
             "promoted": 0,
@@ -3357,7 +3039,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "id": "obs_0002",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -3370,7 +3052,7 @@
             "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
             "id": "obs_0003",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -3383,7 +3065,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "id": "obs_0004",
             "kind": "git.checkout",
-            "observed_at": "2026-01-02T03:04:09+00:00",
+            "observed_at": "2026-01-02T03:05:09+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -3396,7 +3078,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "id": "obs_0005",
             "kind": "git.checkout",
-            "observed_at": "2026-01-02T03:04:09+00:00",
+            "observed_at": "2026-01-02T03:05:09+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -3409,147 +3091,158 @@
           {
             "collector": "dep-refs",
             "detail": null,
-            "finished_at": "2026-01-02T03:04:07+00:00",
+            "finished_at": "2026-01-02T03:05:07+00:00",
             "id": "swp_0001",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:04:05+00:00",
+            "started_at": "2026-01-02T03:05:05+00:00",
             "stats": "{\"projects\": 3, \"new\": 3, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "git-local",
             "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
-            "finished_at": "2026-01-02T03:04:10+00:00",
+            "finished_at": "2026-01-02T03:05:10+00:00",
             "id": "swp_0002",
             "outcome": "partial",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:04:08+00:00",
+            "started_at": "2026-01-02T03:05:08+00:00",
             "stats": "{\"projects\": 3, \"new\": 2, \"unchanged\": 0, \"failed_projects\": 1}"
           },
           {
             "collector": "mirrored-source",
             "detail": null,
-            "finished_at": "2026-01-02T03:04:13+00:00",
+            "finished_at": "2026-01-02T03:05:13+00:00",
             "id": "swp_0003",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:04:11+00:00",
+            "started_at": "2026-01-02T03:05:11+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "source-markers",
             "detail": null,
-            "finished_at": "2026-01-02T03:04:16+00:00",
+            "finished_at": "2026-01-02T03:05:16+00:00",
             "id": "swp_0004",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:04:14+00:00",
+            "started_at": "2026-01-02T03:05:14+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "git-local",
             "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
-            "finished_at": "2026-01-02T03:04:07+00:00",
+            "finished_at": "2026-01-02T03:05:23+00:00",
             "id": "swp_0005",
             "outcome": "partial",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:04:05+00:00",
+            "started_at": "2026-01-02T03:05:21+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 2, \"failed_projects\": 1}"
           }
         ]
       }
     },
-    "exit": 0,
     "operation": "dump.observed"
   },
   {
     "body": {
       "bytes": 0,
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
-      "session_id": null,
       "text": "",
       "total_bytes": 0,
       "truncated": false
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "session.log_tail"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.start"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.input"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.screen"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.wait"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.answer"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.hibernate"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.keep_awake"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.set_role"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.wake"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no session 'ses_00000000000000000000000000'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.stop"
   },
   {
     "body": {
       "grant": {
-        "capability": null,
-        "decided_at": null,
-        "decided_by": null,
-        "decision_reason": null,
-        "expires_at": null,
         "id": "grt_0001",
         "kind": "credential",
         "project_id": "parity-project",
         "reason": "parity",
         "requested_at": "2026-01-02T03:04:05Z",
         "requested_by": "local:parity",
-        "revoked_at": null,
-        "revoked_by": null,
         "secret_name": "PARITY_TOKEN",
         "state": "pending",
         "target": "parity-worker",
@@ -3558,25 +3251,22 @@
         "var": "GRANT_PARITY_TOKEN"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "session.grant_request"
   },
   {
     "body": {
       "grant": {
-        "capability": null,
-        "decided_at": "2026-01-02T03:04:05Z",
+        "decided_at": "2026-01-02T03:04:08Z",
         "decided_by": "local:parity",
         "decision_reason": "parity",
-        "expires_at": "2026-01-02T03:05:05Z",
+        "expires_at": "2026-01-02T03:05:08Z",
         "id": "grt_0001",
         "kind": "credential",
         "project_id": "parity-project",
         "reason": "parity",
         "requested_at": "2026-01-02T03:04:05Z",
         "requested_by": "local:parity",
-        "revoked_at": null,
-        "revoked_by": null,
         "secret_name": "PARITY_TOKEN",
         "state": "approved",
         "target": "parity-worker",
@@ -3585,24 +3275,23 @@
         "var": "GRANT_PARITY_TOKEN"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "session.grant_decide"
   },
   {
     "body": {
       "grant": {
-        "capability": null,
-        "decided_at": "2026-01-02T03:04:05Z",
+        "decided_at": "2026-01-02T03:04:08Z",
         "decided_by": "local:parity",
         "decision_reason": "parity",
-        "expires_at": "2026-01-02T03:05:05Z",
+        "expires_at": "2026-01-02T03:05:08Z",
         "id": "grt_0001",
         "kind": "credential",
         "project_id": "parity-project",
         "reason": "parity",
         "requested_at": "2026-01-02T03:04:05Z",
         "requested_by": "local:parity",
-        "revoked_at": "2026-01-02T03:04:05Z",
+        "revoked_at": "2026-01-02T03:04:11Z",
         "revoked_by": "local:parity",
         "secret_name": "PARITY_TOKEN",
         "state": "revoked",
@@ -3612,14 +3301,14 @@
         "var": "GRANT_PARITY_TOKEN"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "session.grant_revoke"
   },
   {
     "body": {
       "grants": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "session.grant_list"
   },
   {
@@ -3627,19 +3316,23 @@
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
       "sessions": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "session.history_list"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no session 'ses_00000000000000000000000000'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.bind_work"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no session 'ses_00000000000000000000000000'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.last_reply"
   },
   {
@@ -3647,85 +3340,97 @@
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
       "matches": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "session.search_output"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.report_blocked"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.report_unblocked"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.changes"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.wait_any"
   },
   {
-    "body": null,
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, so there is nothing to open a terminal on (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.commit_for"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no session 'ses_00000000000000000000000000'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.economics"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no session 'ses_00000000000000000000000000'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "session.digest"
   },
   {
     "body": {
       "detail": "agent activity is not collected: no transcript roots are configured (set `agent_activity_roots`)",
       "events": [],
-      "indexed_at": null,
-      "next_offset": null,
       "total": 0
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "agent_activity.search"
   },
   {
     "body": {
       "detail": "agent activity is not collected: no transcript roots are configured (set `agent_activity_roots`)",
-      "indexed_at": null,
-      "next_offset": null,
       "sessions": [],
       "total": 0
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "agent_activity.summary"
   },
   {
-    "body": null,
-    "error": "error: engine_unavailable: no session engine is configured, and chats run on it (set VOGT_ENGINE_URL)",
+    "body": {
+      "text": "engine_unavailable: no session engine is configured, and chats run on it (set VOGT_ENGINE_URL)"
+    },
     "error_code": "engine_unavailable",
-    "exit": 1,
+    "is_error": true,
     "operation": "chat.list"
   },
   {
-    "body": null,
-    "error": "error: invalid_request: 'nope' is not a chat id (a UUID, from chat.list or chat.create)",
+    "body": {
+      "text": "invalid_request: 'nope' is not a chat id (a UUID, from chat.list or chat.create)"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "chat.get"
   },
   {
@@ -3743,7 +3448,7 @@
         "username": "ada"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "user.create"
   },
   {
@@ -3763,7 +3468,7 @@
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "user.list"
   },
   {
@@ -3777,11 +3482,11 @@
           "work.write",
           "project.write"
         ],
-        "updated_at": "2026-01-02T03:04:05Z",
+        "updated_at": "2026-01-02T03:04:07Z",
         "username": "ada"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "user.set_password"
   },
   {
@@ -3790,14 +3495,10 @@
       "token": {
         "actor_id": "act_0005",
         "actor_identity_ref": "human:ada",
-        "created_at": "2026-01-02T03:04:05Z",
-        "expires_at": null,
+        "created_at": "2026-01-02T03:04:09Z",
         "id": "tok_0003",
         "kind": "api",
-        "last_used_at": null,
         "name": "claude-code",
-        "revoked_at": null,
-        "revoked_reason": null,
         "scopes": [
           "read",
           "work.write"
@@ -3805,14 +3506,15 @@
       },
       "warning": "This is the only time the secret is shown. Store it in a file and point VOGT_TOKEN_FILE at it \u2014 never in argv or a URL."
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "token.issue"
   },
   {
-    "body": null,
-    "error": "error: invalid arguments for token.issue:",
-    "error_code": null,
-    "exit": 2,
+    "body": {
+      "text": "invalid_params: expires_in_days: Input should be greater than or equal to 1. token_issue takes required: actor, name, reason; optional: scopes, expires_in_days"
+    },
+    "error_code": "invalid_params",
+    "is_error": true,
     "operation": "token.issue"
   },
   {
@@ -3822,13 +3524,9 @@
           "actor_id": "act_0003",
           "actor_identity_ref": "agent:vogt-sessions",
           "created_at": "2026-01-02T03:04:15Z",
-          "expires_at": null,
           "id": "tok_0002",
           "kind": "api",
-          "last_used_at": null,
           "name": "bootstrap agent token",
-          "revoked_at": null,
-          "revoked_reason": null,
           "scopes": [
             "read",
             "work.write",
@@ -3840,13 +3538,9 @@
           "actor_id": "act_0002",
           "actor_identity_ref": "agent:vogt-engine",
           "created_at": "2026-01-02T03:04:11Z",
-          "expires_at": null,
           "id": "tok_0001",
           "kind": "api",
-          "last_used_at": null,
           "name": "bootstrap core token",
-          "revoked_at": null,
-          "revoked_reason": null,
           "scopes": [
             "read",
             "work.write",
@@ -3856,14 +3550,10 @@
         {
           "actor_id": "act_0005",
           "actor_identity_ref": "human:ada",
-          "created_at": "2026-01-02T03:04:05Z",
-          "expires_at": null,
+          "created_at": "2026-01-02T03:04:09Z",
           "id": "tok_0003",
           "kind": "api",
-          "last_used_at": null,
           "name": "claude-code",
-          "revoked_at": null,
-          "revoked_reason": null,
           "scopes": [
             "read",
             "work.write"
@@ -3871,7 +3561,7 @@
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "token.list"
   },
   {
@@ -3880,12 +3570,10 @@
         "actor_id": "act_0003",
         "actor_identity_ref": "agent:vogt-sessions",
         "created_at": "2026-01-02T03:04:15Z",
-        "expires_at": null,
         "id": "tok_0002",
         "kind": "api",
-        "last_used_at": null,
         "name": "bootstrap agent token",
-        "revoked_at": "2026-01-02T03:04:05Z",
+        "revoked_at": "2026-01-02T03:04:11Z",
         "revoked_reason": "parity harness",
         "scopes": [
           "read",
@@ -3895,7 +3583,7 @@
         ]
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "token.revoke"
   },
   {
@@ -3909,10 +3597,9 @@
         "read",
         "work.write",
         "writeback"
-      ],
-      "token": null
+      ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "auth.whoami"
   },
   {
@@ -3923,23 +3610,25 @@
       "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "path": "<root>/backup",
-      "taken_at": "2026-01-02T03:04:05Z"
+      "taken_at": "2026-01-02T03:04:13Z"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "backup"
   },
   {
-    "body": null,
-    "error": "error: conflict: <root>/backup already exists and is not empty",
+    "body": {
+      "text": "conflict: <root>/backup already exists and is not empty"
+    },
     "error_code": "conflict",
-    "exit": 1,
+    "is_error": true,
     "operation": "backup"
   },
   {
-    "body": null,
-    "error": "error: invalid_request: this replaces the stores in <root>/instance with the backup taken at 2026-01-02T03:04:05+00:00. Pass --confirm.",
+    "body": {
+      "text": "invalid_request: this replaces the stores in <root>/instance with the backup taken at 2026-01-02T03:04:13+00:00. Pass --confirm."
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "restore"
   },
   {
@@ -3950,10 +3639,10 @@
       "import_root_then": "<root>/instance/repos",
       "instance_id": "ins_0001",
       "migrations_applied": [],
-      "restored_from": "2026-01-02T03:04:05Z",
+      "restored_from": "2026-01-02T03:04:13Z",
       "source": "<root>/backup"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "restore"
   },
   {
@@ -3961,7 +3650,7 @@
       "sessions_revoked": 0,
       "username": "ada"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "user.remove"
   },
   {
@@ -4004,7 +3693,7 @@
         },
         {
           "actor_id": "act_0001",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:08Z",
           "audit_id": "aud_0004",
           "entity_id": "act_0004",
           "entity_kind": "actor",
@@ -4017,7 +3706,7 @@
         },
         {
           "actor_id": "act_0001",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:10Z",
           "audit_id": "aud_0005",
           "entity_id": "lbl_0001",
           "entity_kind": "label",
@@ -4029,7 +3718,7 @@
         },
         {
           "actor_id": "act_0001",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:12Z",
           "audit_id": "aud_0006",
           "entity_id": "prj_0001",
           "entity_kind": "project",
@@ -4043,7 +3732,7 @@
       ],
       "next_cursor": 5
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "events.list"
   },
   {
@@ -4069,7 +3758,7 @@
         },
         {
           "actor_id": "act_0001",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:08Z",
           "audit_id": "aud_0004",
           "entity_id": "act_0004",
           "entity_kind": "actor",
@@ -4083,7 +3772,7 @@
       ],
       "next_cursor": 3
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "events.list"
   },
   {
@@ -4092,54 +3781,54 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:19Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0032",
+          "id": "aud_0029",
           "operation": "user.remove",
           "payload_digest": "sha256:6cb1b570d1a756565af0191ec35d1fed1dc103ed9b82afa000b68a0172b6f711",
           "reason": "parity harness",
-          "revision": 31,
-          "txn_id": "txn_0040"
+          "revision": 28,
+          "txn_id": "txn_0039"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:12Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0031",
+          "id": "aud_0028",
           "operation": "token.revoke",
-          "payload_digest": "sha256:5b5962b852bf72720c110fabfda9bea2589305bb33f47f25d1361ce815fa78c9",
+          "payload_digest": "sha256:e1a436439a74c0ffa0daaa578d5dde514af515614906711d69da732f2165d206",
           "reason": "parity harness",
-          "revision": 30,
-          "txn_id": "txn_0038"
-        },
-        {
-          "actor_id": "act_0001",
-          "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:06Z",
-          "entity_id": "tok_0003",
-          "entity_kind": "token",
-          "id": "aud_0030",
-          "operation": "token.issue",
-          "payload_digest": "sha256:095bcb2a75c36880ea4d27397304f88e0afd90440f45bee38fabb4431e383f55",
-          "reason": "parity harness",
-          "revision": 29,
+          "revision": 27,
           "txn_id": "txn_0037"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:10Z",
+          "entity_id": "tok_0003",
+          "entity_kind": "token",
+          "id": "aud_0027",
+          "operation": "token.issue",
+          "payload_digest": "sha256:095bcb2a75c36880ea4d27397304f88e0afd90440f45bee38fabb4431e383f55",
+          "reason": "parity harness",
+          "revision": 26,
+          "txn_id": "txn_0036"
+        },
+        {
+          "actor_id": "act_0001",
+          "actor_identity_ref": "local:parity",
+          "at": "2026-01-02T03:04:08Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0029",
+          "id": "aud_0026",
           "operation": "user.set_password",
           "payload_digest": "sha256:6782e2b5fa4d26772e8b2eeacbf82bb2c48960ddb25c736b28001d387114acf5",
           "reason": "parity harness",
-          "revision": 28,
-          "txn_id": "txn_0036"
+          "revision": 25,
+          "txn_id": "txn_0035"
         },
         {
           "actor_id": "act_0001",
@@ -4147,17 +3836,17 @@
           "at": "2026-01-02T03:04:06Z",
           "entity_id": "act_0005",
           "entity_kind": "user",
-          "id": "aud_0028",
+          "id": "aud_0025",
           "operation": "user.create",
           "payload_digest": "sha256:67e02676f1f6d286e8b3624b34c5496ed548e0ac92c3485f85c350f4c54dcce7",
           "reason": "parity harness",
-          "revision": 27,
-          "txn_id": "txn_0035"
+          "revision": 24,
+          "txn_id": "txn_0034"
         }
       ],
-      "total": 32
+      "total": 29
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "audit.list"
   },
   {
@@ -4166,76 +3855,82 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:12Z",
           "entity_id": "tok_0002",
           "entity_kind": "token",
-          "id": "aud_0031",
+          "id": "aud_0028",
           "operation": "token.revoke",
-          "payload_digest": "sha256:5b5962b852bf72720c110fabfda9bea2589305bb33f47f25d1361ce815fa78c9",
+          "payload_digest": "sha256:e1a436439a74c0ffa0daaa578d5dde514af515614906711d69da732f2165d206",
           "reason": "parity harness",
-          "revision": 30,
-          "txn_id": "txn_0038"
+          "revision": 27,
+          "txn_id": "txn_0037"
         },
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "at": "2026-01-02T03:04:06Z",
+          "at": "2026-01-02T03:04:10Z",
           "entity_id": "tok_0003",
           "entity_kind": "token",
-          "id": "aud_0030",
+          "id": "aud_0027",
           "operation": "token.issue",
           "payload_digest": "sha256:095bcb2a75c36880ea4d27397304f88e0afd90440f45bee38fabb4431e383f55",
           "reason": "parity harness",
-          "revision": 29,
-          "txn_id": "txn_0037"
+          "revision": 26,
+          "txn_id": "txn_0036"
         }
       ],
-      "total": 32
+      "total": 29
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "audit.list"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: <root>/backup is a backup of this instance (ins_0001); a clone copies another instance. Use `restore` to put this one back."
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "clone"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: <root>/backup is a backup of this instance (ins_0001); a clone copies another instance. Use `restore` to put this one back."
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "clone"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: <root>/missing has no manifest.json; it is not a Vogt backup"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "clone"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: 'not a repo!' does not name a GitHub repository or a configured Forgejo repository; give owner/name, host/owner/name, or a repository URL"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "project.import"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: 'not a repo!' does not name a GitHub repository or a configured Forgejo repository; give owner/name, host/owner/name, or a repository URL"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "project.import"
   },
   {
     "body": {
       "decision": {
-        "answer": null,
-        "answered_at": null,
-        "answered_by": null,
         "asker": "local:parity",
-        "asker_session": null,
         "context": "CI is green.",
-        "created_at": "2026-01-02T03:04:05Z",
-        "expires_at": "2026-01-03T03:04:05Z",
+        "created_at": "2026-01-02T03:04:20Z",
+        "expires_at": "2026-01-03T03:04:20Z",
         "id": "dec_0001",
         "options": [
           {
@@ -4251,24 +3946,19 @@
         ],
         "question": "Merge the branch?",
         "reason": "parity harness",
-        "state": "pending",
-        "work_item": null
+        "state": "pending"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "decision.ask"
   },
   {
     "body": {
       "decision": {
-        "answer": null,
-        "answered_at": null,
-        "answered_by": null,
         "asker": "local:parity",
-        "asker_session": null,
         "context": "",
-        "created_at": "2026-01-02T03:04:05Z",
-        "expires_at": "2026-01-03T03:04:05Z",
+        "created_at": "2026-01-02T03:04:23Z",
+        "expires_at": "2026-01-03T03:04:23Z",
         "id": "dec_0002",
         "options": [
           {
@@ -4284,25 +3974,20 @@
         ],
         "question": "Ship the release?",
         "reason": "parity harness",
-        "state": "pending",
-        "work_item": null
+        "state": "pending"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "decision.ask"
   },
   {
     "body": {
       "decisions": [
         {
-          "answer": null,
-          "answered_at": null,
-          "answered_by": null,
           "asker": "local:parity",
-          "asker_session": null,
           "context": "",
-          "created_at": "2026-01-02T03:04:05Z",
-          "expires_at": "2026-01-03T03:04:05Z",
+          "created_at": "2026-01-02T03:04:23Z",
+          "expires_at": "2026-01-03T03:04:23Z",
           "id": "dec_0002",
           "options": [
             {
@@ -4318,18 +4003,13 @@
           ],
           "question": "Ship the release?",
           "reason": "parity harness",
-          "state": "pending",
-          "work_item": null
+          "state": "pending"
         },
         {
-          "answer": null,
-          "answered_at": null,
-          "answered_by": null,
           "asker": "local:parity",
-          "asker_session": null,
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:04:05Z",
-          "expires_at": "2026-01-03T03:04:05Z",
+          "created_at": "2026-01-02T03:04:20Z",
+          "expires_at": "2026-01-03T03:04:20Z",
           "id": "dec_0001",
           "options": [
             {
@@ -4345,26 +4025,21 @@
           ],
           "question": "Merge the branch?",
           "reason": "parity harness",
-          "state": "pending",
-          "work_item": null
+          "state": "pending"
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "decision.list"
   },
   {
     "body": {
       "decisions": [
         {
-          "answer": null,
-          "answered_at": null,
-          "answered_by": null,
           "asker": "local:parity",
-          "asker_session": null,
           "context": "",
-          "created_at": "2026-01-02T03:04:05Z",
-          "expires_at": "2026-01-03T03:04:05Z",
+          "created_at": "2026-01-02T03:04:23Z",
+          "expires_at": "2026-01-03T03:04:23Z",
           "id": "dec_0002",
           "options": [
             {
@@ -4380,18 +4055,13 @@
           ],
           "question": "Ship the release?",
           "reason": "parity harness",
-          "state": "pending",
-          "work_item": null
+          "state": "pending"
         },
         {
-          "answer": null,
-          "answered_at": null,
-          "answered_by": null,
           "asker": "local:parity",
-          "asker_session": null,
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:04:05Z",
-          "expires_at": "2026-01-03T03:04:05Z",
+          "created_at": "2026-01-02T03:04:20Z",
+          "expires_at": "2026-01-03T03:04:20Z",
           "id": "dec_0001",
           "options": [
             {
@@ -4407,12 +4077,11 @@
           ],
           "question": "Merge the branch?",
           "reason": "parity harness",
-          "state": "pending",
-          "work_item": null
+          "state": "pending"
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "decision.list"
   },
   {
@@ -4427,7 +4096,6 @@
         "agent": {
           "count": 2,
           "detail": "no session engine is configured",
-          "observed_at": null,
           "projects": 0,
           "registered": 3,
           "source": "agent",
@@ -4436,7 +4104,6 @@
         "ci": {
           "count": 0,
           "detail": "this collector has not completed a sweep",
-          "observed_at": null,
           "projects": 0,
           "registered": 3,
           "source": "ci",
@@ -4445,7 +4112,6 @@
         "drift": {
           "count": 0,
           "detail": "open proposals in the declared store",
-          "observed_at": null,
           "projects": 0,
           "registered": 3,
           "source": "drift",
@@ -4454,7 +4120,6 @@
         "github": {
           "count": 0,
           "detail": "this collector has not completed a sweep",
-          "observed_at": null,
           "projects": 0,
           "registered": 3,
           "source": "github",
@@ -4468,11 +4133,7 @@
         {
           "action": {
             "decision_id": "dec_0002",
-            "drift_id": null,
-            "grant_id": null,
-            "kind": "decision",
-            "session_id": null,
-            "subject_key": null
+            "kind": "decision"
           },
           "actor_kind": "human",
           "actor_login": "local:parity",
@@ -4481,30 +4142,19 @@
           "evidence_snapshot": "<volatile>",
           "freshness": "live",
           "kind": "decision.pending",
-          "observed_at": null,
-          "occurred_at": "2026-01-02T03:04:05Z",
-          "project_slug": null,
-          "proposed_change": null,
+          "occurred_at": "2026-01-02T03:04:23Z",
           "provisional": true,
-          "session_id": null,
-          "snooze_until": null,
           "source": "agent",
           "source_subject_key": "dec_0002",
-          "source_url": null,
           "summary": "local:parity asks: Ship the release? Options: Ship (recommended) | Wait.",
           "title": "Decision: Ship the release?",
           "triage_state": "active",
-          "trust_state": "unverified",
-          "work_item_ref": null
+          "trust_state": "unverified"
         },
         {
           "action": {
             "decision_id": "dec_0001",
-            "drift_id": null,
-            "grant_id": null,
-            "kind": "decision",
-            "session_id": null,
-            "subject_key": null
+            "kind": "decision"
           },
           "actor_kind": "human",
           "actor_login": "local:parity",
@@ -4513,35 +4163,24 @@
           "evidence_snapshot": "<volatile>",
           "freshness": "live",
           "kind": "decision.pending",
-          "observed_at": null,
-          "occurred_at": "2026-01-02T03:04:05Z",
-          "project_slug": null,
-          "proposed_change": null,
+          "occurred_at": "2026-01-02T03:04:20Z",
           "provisional": true,
-          "session_id": null,
-          "snooze_until": null,
           "source": "agent",
           "source_subject_key": "dec_0001",
-          "source_url": null,
           "summary": "local:parity asks: Merge the branch? Options: Merge (recommended) | Hold.",
           "title": "Decision: Merge the branch?",
           "triage_state": "active",
-          "trust_state": "unverified",
-          "work_item_ref": null
+          "trust_state": "unverified"
         }
       ],
       "github_scope": "registered projects only",
       "high_water": {
-        "agent": "2026-01-02T03:04:05Z",
-        "ci": null,
-        "drift": null,
-        "github": null
+        "agent": "2026-01-02T03:04:23Z"
       },
       "instance_scope": "registered projects only",
-      "next_cursor": null,
-      "snapshot_at": "2026-01-02T03:04:05Z"
+      "snapshot_at": "2026-01-02T03:04:30Z"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "inbox.list"
   },
   {
@@ -4551,13 +4190,12 @@
           "label": "Merge",
           "note": "reviewed"
         },
-        "answered_at": "2026-01-02T03:04:06Z",
+        "answered_at": "2026-01-02T03:04:36Z",
         "answered_by": "local:parity",
         "asker": "local:parity",
-        "asker_session": null,
         "context": "CI is green.",
-        "created_at": "2026-01-02T03:04:05Z",
-        "expires_at": "2026-01-03T03:04:05Z",
+        "created_at": "2026-01-02T03:04:20Z",
+        "expires_at": "2026-01-03T03:04:20Z",
         "id": "dec_0001",
         "options": [
           {
@@ -4573,36 +4211,35 @@
         ],
         "question": "Merge the branch?",
         "reason": "parity harness",
-        "state": "answered",
-        "work_item": null
+        "state": "answered"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "decision.answer"
   },
   {
-    "body": null,
+    "body": {
+      "text": "conflict: decision dec_0001 is answered, not pending"
+    },
     "error_code": "conflict",
-    "exit": 1,
+    "is_error": true,
     "operation": "decision.answer"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: 'Deploy' is not an option of dec_0002; it offers 'Ship', 'Wait'"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "decision.answer"
   },
   {
     "body": {
       "decision": {
-        "answer": null,
-        "answered_at": null,
-        "answered_by": null,
         "asker": "local:parity",
-        "asker_session": null,
         "context": "",
-        "created_at": "2026-01-02T03:04:05Z",
-        "expires_at": "2026-01-03T03:04:05Z",
+        "created_at": "2026-01-02T03:04:23Z",
+        "expires_at": "2026-01-03T03:04:23Z",
         "id": "dec_0002",
         "options": [
           {
@@ -4618,11 +4255,10 @@
         ],
         "question": "Ship the release?",
         "reason": "parity harness",
-        "state": "withdrawn",
-        "work_item": null
+        "state": "withdrawn"
       }
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "decision.withdraw"
   },
   {
@@ -4633,13 +4269,12 @@
             "label": "Merge",
             "note": "reviewed"
           },
-          "answered_at": "2026-01-02T03:04:06Z",
+          "answered_at": "2026-01-02T03:04:36Z",
           "answered_by": "local:parity",
           "asker": "local:parity",
-          "asker_session": null,
           "context": "CI is green.",
-          "created_at": "2026-01-02T03:04:05Z",
-          "expires_at": "2026-01-03T03:04:05Z",
+          "created_at": "2026-01-02T03:04:20Z",
+          "expires_at": "2026-01-03T03:04:20Z",
           "id": "dec_0001",
           "options": [
             {
@@ -4655,12 +4290,11 @@
           ],
           "question": "Merge the branch?",
           "reason": "parity harness",
-          "state": "answered",
-          "work_item": null
+          "state": "answered"
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "decision.list"
   },
   {
@@ -4675,7 +4309,6 @@
         "agent": {
           "count": 0,
           "detail": "no session engine is configured",
-          "observed_at": null,
           "projects": 0,
           "registered": 3,
           "source": "agent",
@@ -4684,7 +4317,6 @@
         "ci": {
           "count": 0,
           "detail": "this collector has not completed a sweep",
-          "observed_at": null,
           "projects": 0,
           "registered": 3,
           "source": "ci",
@@ -4693,7 +4325,6 @@
         "drift": {
           "count": 0,
           "detail": "open proposals in the declared store",
-          "observed_at": null,
           "projects": 0,
           "registered": 3,
           "source": "drift",
@@ -4702,7 +4333,6 @@
         "github": {
           "count": 0,
           "detail": "this collector has not completed a sweep",
-          "observed_at": null,
           "projects": 0,
           "registered": 3,
           "source": "github",
@@ -4714,29 +4344,27 @@
       "engine_status": "not_configured",
       "entries": [],
       "github_scope": "registered projects only",
-      "high_water": {
-        "agent": null,
-        "ci": null,
-        "drift": null,
-        "github": null
-      },
+      "high_water": {},
       "instance_scope": "registered projects only",
-      "next_cursor": null,
-      "snapshot_at": "2026-01-02T03:04:05Z"
+      "snapshot_at": "2026-01-02T03:04:44Z"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "inbox.list"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_preference: invalid inbox.filter value \u2014 sources.0: Input should be 'github', 'drift', 'ci' or 'agent'"
+    },
     "error_code": "invalid_preference",
-    "exit": 1,
+    "is_error": true,
     "operation": "preference.set"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_preference: invalid inbox.filter value \u2014 unknown: Extra inputs are not permitted"
+    },
     "error_code": "invalid_preference",
-    "exit": 1,
+    "is_error": true,
     "operation": "preference.set"
   },
   {
@@ -4744,7 +4372,7 @@
       "preferences": [
         {
           "key": "inbox.filter",
-          "updated_at": "2026-01-02T03:04:05Z",
+          "updated_at": "2026-01-02T03:04:31Z",
           "value": {
             "actor": "any",
             "sources": [
@@ -4758,7 +4386,7 @@
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "preference.get"
   },
   {
@@ -4767,13 +4395,15 @@
       "installer_present": false,
       "tools": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "agent_cli.list"
   },
   {
-    "body": null,
+    "body": {
+      "text": "invalid_request: no session engine is configured (VOGT_ENGINE_URL is unset)"
+    },
     "error_code": "invalid_request",
-    "exit": 1,
+    "is_error": true,
     "operation": "agent_cli.update"
   },
   {
@@ -4783,50 +4413,33 @@
       "configuration": "{\n  \"mcpServers\": {\n    \"vogt\": {\n      \"type\": \"http\",\n      \"url\": \"<set public_url first>\",\n      \"headers\": {\n        \"Authorization\": \"Bearer ${VOGT_TOKEN}\"\n      }\n    }\n  }\n}",
       "detail": "no public_url is configured, so this instance cannot say where to reach it. That is not something a server can work out: it binds a container port and is published somewhere else. Set VOGT_PUBLIC_URL (or public_url) to the address clients actually use \u2014 an exposure value, so it is never defaulted",
       "mcp_path": "/mcp",
-      "mcp_url": null,
       "requires_install": false,
       "supported_mcp_protocol_versions": [
         "2025-06-18",
         "2025-03-26",
         "2024-11-05"
-      ],
-      "url": null
+      ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "connect"
   },
   {
     "body": {
-      "agent_tasks": null,
-      "auto_agent_auth": null,
-      "disk": null,
       "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
-      "event_lag": {},
-      "fcm_enabled": null,
-      "gui_process_count": null,
-      "gui_stream_configured": null,
-      "history": null,
-      "push_subscription_count": null,
-      "release_url": null,
-      "session_count": null,
-      "source_ref": null,
-      "source_sha": null,
-      "state_dir": null,
-      "version": null,
-      "workspace_root": null
+      "event_lag": {}
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "engine.status"
   },
   {
     "body": {
       "adopted": true,
-      "adopted_at": "2026-01-02T03:04:05Z",
+      "adopted_at": "2026-01-02T03:04:11Z",
       "detail": "parity already had that posture; nothing changed",
       "project": "parity",
       "status": "not_checked"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "contract.adopt"
   },
   {
@@ -4835,7 +4448,7 @@
       "detail": "README.md is recorded as unmeetable by parity; it is reported, and not counted as a failure",
       "exemptions": [
         {
-          "declared_at": "2026-01-02T03:04:05Z",
+          "declared_at": "2026-01-02T03:04:47Z",
           "declared_by": "local:parity",
           "reason": "parity harness exemption",
           "rule": "required_file",
@@ -4844,15 +4457,13 @@
       ],
       "project": "parity"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "contract.inapplicable"
   },
   {
     "body": {
       "adopted": true,
-      "adopted_at": "2026-01-02T03:04:05Z",
-      "age_seconds": null,
-      "checked_at": null,
+      "adopted_at": "2026-01-02T03:04:11Z",
       "contract_version": "v1",
       "detail": "nobody has checked this project's contract; run `contract check`",
       "failing": [],
@@ -4862,19 +4473,18 @@
           "detail": "declared inapplicable to this project: parity harness exemption",
           "rule": "required_file",
           "satisfied": false,
-          "target": "README.md",
-          "tracked": null
+          "target": "README.md"
         }
       ],
       "project": "parity",
       "status": "not_checked"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "compliance"
   },
   {
     "body": {
-      "checked_at": "2026-01-02T03:04:05Z",
+      "checked_at": "2026-01-02T03:04:49Z",
       "contract_version": "v1",
       "criteria": [
         {
@@ -4882,59 +4492,51 @@
           "detail": "directory exists",
           "rule": "path.exists",
           "satisfied": true,
-          "target": "<root>/proj",
-          "tracked": null
+          "target": "<root>/proj"
         },
         {
           "applicable": true,
           "detail": "present",
           "rule": "required_file",
           "satisfied": true,
-          "target": "AGENTS.md",
-          "tracked": null
+          "target": "AGENTS.md"
         },
         {
           "applicable": true,
           "detail": "present",
           "rule": "required_file",
           "satisfied": true,
-          "target": "README.md",
-          "tracked": null
+          "target": "README.md"
         },
         {
           "applicable": true,
           "detail": "present",
           "rule": "required_file",
           "satisfied": true,
-          "target": "LICENSE",
-          "tracked": null
+          "target": "LICENSE"
         },
         {
           "applicable": true,
           "detail": "present",
           "rule": "required_dir",
           "satisfied": true,
-          "target": "docs",
-          "tracked": null
+          "target": "docs"
         },
         {
           "applicable": true,
           "detail": "present",
           "rule": "required_dir",
           "satisfied": true,
-          "target": "design",
-          "tracked": null
+          "target": "design"
         },
         {
           "applicable": true,
           "detail": "present",
           "rule": "required_dir",
           "satisfied": true,
-          "target": "src",
-          "tracked": null
+          "target": "src"
         }
       ],
-      "detail": null,
       "failing": [],
       "inapplicable": [],
       "path": "<root>/proj",
@@ -4943,7 +4545,7 @@
       "recorded": true,
       "status": "compliant"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "contract.check"
   },
   {
@@ -4953,48 +4555,45 @@
       "exemptions": [],
       "project": "parity"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "contract.applicable"
   },
   {
     "body": {
       "adopted": false,
-      "adopted_at": null,
       "detail": "this project has not adopted the contract, so there is nothing for it to comply with \u2014 this is not a fault. `contract adopt` opts in.",
       "project": "parity",
       "status": "not_applicable"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "contract.decline"
   },
   {
     "body": {
       "adopted": true,
-      "adopted_at": "2026-01-02T03:04:05Z",
+      "adopted_at": "2026-01-02T03:04:55Z",
       "detail": "the contract applies to this project from now on; `contract check` evaluates it",
       "project": "parity",
       "status": "not_checked"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "contract.adopt"
   },
   {
     "body": {
-      "detail": null,
       "observations": [
         {
           "collector": "git-local",
           "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
           "id": "obs_0004",
           "kind": "git.checkout",
-          "observed_at": "2026-01-02T03:04:09Z",
+          "observed_at": "2026-01-02T03:05:09Z",
           "payload": {
             "detail": "no .git directory; this project is a plain folder",
             "is_git_repository": false
           },
           "project_id": "prj_0001",
           "promoted": false,
-          "source_url": null,
           "subject_key": "git:parity",
           "sweep_id": ""
         },
@@ -5003,14 +4602,13 @@
           "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
           "id": "obs_0005",
           "kind": "git.checkout",
-          "observed_at": "2026-01-02T03:04:09Z",
+          "observed_at": "2026-01-02T03:05:09Z",
           "payload": {
             "detail": "no .git directory; this project is a plain folder",
             "is_git_repository": false
           },
           "project_id": "prj_0002",
           "promoted": false,
-          "source_url": null,
           "subject_key": "git:second",
           "sweep_id": ""
         },
@@ -5019,7 +4617,7 @@
           "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
           "id": "obs_0001",
           "kind": "dep_scan",
-          "observed_at": "2026-01-02T03:04:06Z",
+          "observed_at": "2026-01-02T03:05:06Z",
           "payload": {
             "manifests_read": 0,
             "references": 0,
@@ -5029,7 +4627,6 @@
           },
           "project_id": "prj_0003",
           "promoted": false,
-          "source_url": null,
           "subject_key": "depscan:broken",
           "sweep_id": ""
         },
@@ -5038,7 +4635,7 @@
           "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
           "id": "obs_0002",
           "kind": "dep_scan",
-          "observed_at": "2026-01-02T03:04:06Z",
+          "observed_at": "2026-01-02T03:05:06Z",
           "payload": {
             "manifests_read": 0,
             "references": 0,
@@ -5048,7 +4645,6 @@
           },
           "project_id": "prj_0001",
           "promoted": false,
-          "source_url": null,
           "subject_key": "depscan:parity",
           "sweep_id": ""
         },
@@ -5057,7 +4653,7 @@
           "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
           "id": "obs_0003",
           "kind": "dep_scan",
-          "observed_at": "2026-01-02T03:04:06Z",
+          "observed_at": "2026-01-02T03:05:06Z",
           "payload": {
             "manifests_read": 0,
             "references": 0,
@@ -5067,7 +4663,6 @@
           },
           "project_id": "prj_0002",
           "promoted": false,
-          "source_url": null,
           "subject_key": "depscan:second",
           "sweep_id": ""
         },
@@ -5076,51 +4671,44 @@
           "content_digest": "<path-bearing>",
           "id": "obs_0006",
           "kind": "contract.check",
-          "observed_at": "2026-01-02T03:04:05Z",
+          "observed_at": "2026-01-02T03:04:49Z",
           "payload": {
             "contract_version": "v1",
             "evaluated": [
               {
                 "rule": "path.exists",
                 "satisfied": true,
-                "target": "<root>/proj",
-                "tracked": null
+                "target": "<root>/proj"
               },
               {
                 "rule": "required_file",
                 "satisfied": true,
-                "target": "AGENTS.md",
-                "tracked": null
+                "target": "AGENTS.md"
               },
               {
                 "rule": "required_file",
                 "satisfied": true,
-                "target": "README.md",
-                "tracked": null
+                "target": "README.md"
               },
               {
                 "rule": "required_file",
                 "satisfied": true,
-                "target": "LICENSE",
-                "tracked": null
+                "target": "LICENSE"
               },
               {
                 "rule": "required_dir",
                 "satisfied": true,
-                "target": "docs",
-                "tracked": null
+                "target": "docs"
               },
               {
                 "rule": "required_dir",
                 "satisfied": true,
-                "target": "design",
-                "tracked": null
+                "target": "design"
               },
               {
                 "rule": "required_dir",
                 "satisfied": true,
-                "target": "src",
-                "tracked": null
+                "target": "src"
               }
             ],
             "failing": [],
@@ -5128,21 +4716,20 @@
           },
           "project_id": "prj_0001",
           "promoted": false,
-          "source_url": null,
           "subject_key": "contract:parity",
           "sweep_id": ""
         }
       ],
       "total": 6
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "observations.list"
   },
   {
     "body": {
       "suppression": "<volatile>"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "suppress"
   },
   {
@@ -5151,26 +4738,22 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "created_at": "2026-01-02T03:04:05Z",
+          "created_at": "2026-01-02T03:04:57Z",
           "id": "sup_0001",
           "match_kind": "exact",
           "reason": "parity harness",
-          "revoked_at": null,
-          "revoked_reason": null,
-          "scope_project_id": null,
-          "scope_project_slug": null,
           "subject_key_or_pattern": "git:parity"
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "suppression.list"
   },
   {
     "body": {
       "suppression": "<volatile>"
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "suppression.revoke"
   },
   {
@@ -5179,19 +4762,17 @@
         {
           "actor_id": "act_0001",
           "actor_identity_ref": "local:parity",
-          "created_at": "2026-01-02T03:04:05Z",
+          "created_at": "2026-01-02T03:04:57Z",
           "id": "sup_0001",
           "match_kind": "exact",
           "reason": "parity harness",
-          "revoked_at": "2026-01-02T03:04:05Z",
+          "revoked_at": "2026-01-02T03:04:59Z",
           "revoked_reason": "parity harness",
-          "scope_project_id": null,
-          "scope_project_slug": null,
           "subject_key_or_pattern": "git:parity"
         }
       ]
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "suppression.list"
   },
   {
@@ -5201,7 +4782,7 @@
       "kept_referenced": 0,
       "removed": 0
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "observations.prune"
   },
   {
@@ -5216,22 +4797,22 @@
       "raised": [],
       "superseded": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "drift.detect"
   },
   {
     "body": {
       "freshness": {
-        "age_seconds": -1,
+        "age_seconds": 13,
         "collectors": {
-          "contract-checker": "-1s ago (ok)",
-          "dep-refs": "-2s ago (ok)",
-          "git-local": "-5s ago (partial)",
-          "mirrored-source": "-8s ago (ok)",
-          "source-markers": "-11s ago (ok)"
+          "contract-checker": "13s ago (ok)",
+          "dep-refs": "-4s ago (ok)",
+          "git-local": "-20s ago (partial)",
+          "mirrored-source": "-10s ago (ok)",
+          "source-markers": "-13s ago (ok)"
         },
         "detail": "at least one collector reported a partial or failed sweep",
-        "oldest_relevant_sweep": "2026-01-02T03:04:06Z",
+        "oldest_relevant_sweep": "2026-01-02T03:04:50Z",
         "status": "partial"
       },
       "human_gated": {
@@ -5246,13 +4827,15 @@
       },
       "proposals": []
     },
-    "exit": 0,
+    "is_error": false,
     "operation": "drift.list"
   },
   {
-    "body": null,
+    "body": {
+      "text": "not_found: no drift proposal 'dft_0001'"
+    },
     "error_code": "not_found",
-    "exit": 1,
+    "is_error": true,
     "operation": "drift.resolve"
   },
   {
@@ -5261,11 +4844,11 @@
         "suppressions": [
           {
             "actor_id": "act_0001",
-            "created_at": "2026-01-02T03:04:05+00:00",
+            "created_at": "2026-01-02T03:04:57+00:00",
             "id": "sup_0001",
             "match_kind": "exact",
             "reason": "parity harness",
-            "revoked_at": "2026-01-02T03:04:05+00:00",
+            "revoked_at": "2026-01-02T03:04:59+00:00",
             "revoked_by_actor_id": "act_0001",
             "revoked_reason": "parity harness",
             "scope_project_id": null,
@@ -5280,7 +4863,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "kind": "dep_scan",
             "observation_id": "obs_0001",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0003",
             "promoted": 0,
@@ -5292,7 +4875,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "kind": "dep_scan",
             "observation_id": "obs_0002",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -5304,7 +4887,7 @@
             "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
             "kind": "dep_scan",
             "observation_id": "obs_0003",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -5316,7 +4899,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "kind": "git.checkout",
             "observation_id": "obs_0004",
-            "observed_at": "2026-01-02T03:04:09+00:00",
+            "observed_at": "2026-01-02T03:05:09+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -5328,7 +4911,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "kind": "git.checkout",
             "observation_id": "obs_0005",
-            "observed_at": "2026-01-02T03:04:09+00:00",
+            "observed_at": "2026-01-02T03:05:09+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -5340,7 +4923,7 @@
             "content_digest": "<path-bearing>",
             "kind": "contract.check",
             "observation_id": "obs_0006",
-            "observed_at": "2026-01-02T03:04:05+00:00",
+            "observed_at": "2026-01-02T03:04:49+00:00",
             "payload": "{\"contract_version\": \"v1\", \"evaluated\": [{\"rule\": \"path.exists\", \"satisfied\": true, \"target\": \"<root>/proj\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"AGENTS.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"README.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"LICENSE\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"docs\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"design\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"src\", \"tracked\": null}], \"failing\": [], \"status\": \"compliant\"}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -5354,7 +4937,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "id": "obs_0001",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0003",
             "promoted": 0,
@@ -5367,7 +4950,7 @@
             "content_digest": "sha256:af09c76d426d6e99f4350729e7969584f83fc572511e128eedce52b46eeab94f",
             "id": "obs_0002",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": true, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -5380,7 +4963,7 @@
             "content_digest": "sha256:efb8e7f9565a659b7236558520425790e45b29c9c53cc6687bad8156d87a0025",
             "id": "obs_0003",
             "kind": "dep_scan",
-            "observed_at": "2026-01-02T03:04:06+00:00",
+            "observed_at": "2026-01-02T03:05:06+00:00",
             "payload": "{\"manifests_read\": 0, \"references\": 0, \"root_exists\": false, \"unreadable_manifests\": [], \"unsupported_manifests\": []}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -5393,7 +4976,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "id": "obs_0004",
             "kind": "git.checkout",
-            "observed_at": "2026-01-02T03:04:09+00:00",
+            "observed_at": "2026-01-02T03:05:09+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -5406,7 +4989,7 @@
             "content_digest": "sha256:8dbc2923a29adb7ae1615b49a4ab4dc43d6bab026b898480c971647e4f376a4f",
             "id": "obs_0005",
             "kind": "git.checkout",
-            "observed_at": "2026-01-02T03:04:09+00:00",
+            "observed_at": "2026-01-02T03:05:09+00:00",
             "payload": "{\"detail\": \"no .git directory; this project is a plain folder\", \"is_git_repository\": false}",
             "project_id": "prj_0002",
             "promoted": 0,
@@ -5419,7 +5002,7 @@
             "content_digest": "<path-bearing>",
             "id": "obs_0006",
             "kind": "contract.check",
-            "observed_at": "2026-01-02T03:04:05+00:00",
+            "observed_at": "2026-01-02T03:04:49+00:00",
             "payload": "{\"contract_version\": \"v1\", \"evaluated\": [{\"rule\": \"path.exists\", \"satisfied\": true, \"target\": \"<root>/proj\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"AGENTS.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"README.md\", \"tracked\": null}, {\"rule\": \"required_file\", \"satisfied\": true, \"target\": \"LICENSE\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"docs\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"design\", \"tracked\": null}, {\"rule\": \"required_dir\", \"satisfied\": true, \"target\": \"src\", \"tracked\": null}], \"failing\": [], \"status\": \"compliant\"}",
             "project_id": "prj_0001",
             "promoted": 0,
@@ -5432,67 +5015,66 @@
           {
             "collector": "dep-refs",
             "detail": null,
-            "finished_at": "2026-01-02T03:04:07+00:00",
+            "finished_at": "2026-01-02T03:05:07+00:00",
             "id": "swp_0001",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:04:05+00:00",
+            "started_at": "2026-01-02T03:05:05+00:00",
             "stats": "{\"projects\": 3, \"new\": 3, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "git-local",
             "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
-            "finished_at": "2026-01-02T03:04:10+00:00",
+            "finished_at": "2026-01-02T03:05:10+00:00",
             "id": "swp_0002",
             "outcome": "partial",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:04:08+00:00",
+            "started_at": "2026-01-02T03:05:08+00:00",
             "stats": "{\"projects\": 3, \"new\": 2, \"unchanged\": 0, \"failed_projects\": 1}"
           },
           {
             "collector": "mirrored-source",
             "detail": null,
-            "finished_at": "2026-01-02T03:04:13+00:00",
+            "finished_at": "2026-01-02T03:05:13+00:00",
             "id": "swp_0003",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:04:11+00:00",
+            "started_at": "2026-01-02T03:05:11+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "source-markers",
             "detail": null,
-            "finished_at": "2026-01-02T03:04:16+00:00",
+            "finished_at": "2026-01-02T03:05:16+00:00",
             "id": "swp_0004",
             "outcome": "ok",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:04:14+00:00",
+            "started_at": "2026-01-02T03:05:14+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 0, \"failed_projects\": 0}"
           },
           {
             "collector": "git-local",
             "detail": "broken: CollectorError: git status could not be read in <root>/instance/repos/broken: fatal: not a git repository: <root>/nowhere",
-            "finished_at": "2026-01-02T03:04:07+00:00",
+            "finished_at": "2026-01-02T03:05:23+00:00",
             "id": "swp_0005",
             "outcome": "partial",
             "scope": "[\"prj_0003\", \"prj_0001\", \"prj_0002\"]",
-            "started_at": "2026-01-02T03:04:05+00:00",
+            "started_at": "2026-01-02T03:05:21+00:00",
             "stats": "{\"projects\": 3, \"new\": 0, \"unchanged\": 2, \"failed_projects\": 1}"
           },
           {
             "collector": "contract-checker",
             "detail": null,
-            "finished_at": "2026-01-02T03:04:06+00:00",
+            "finished_at": "2026-01-02T03:04:50+00:00",
             "id": "swp_0006",
             "outcome": "ok",
             "scope": "[\"prj_0001\"]",
-            "started_at": "2026-01-02T03:04:05+00:00",
+            "started_at": "2026-01-02T03:04:49+00:00",
             "stats": "{\"projects\": 1, \"new\": 1, \"unchanged\": 0}"
           }
         ]
       }
     },
-    "exit": 0,
     "operation": "dump.s5"
   }
 ]
