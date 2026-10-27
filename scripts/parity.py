@@ -209,11 +209,11 @@ def _schema(binary: str) -> dict[str, Any]:
     root = Path(tempfile.mkdtemp(prefix="vogt-parity-schema-"))
     try:
         data = _init_dir(binary, root)
-        stores: dict[str, Any] = {}
+        stores: dict[str, dict[str, Any]] = {}
         for name in ("declared", "observed"):
             conn = sqlite3.connect(data / f"{name}.sqlite3")
             try:
-                objects = {
+                objects: dict[str, Any] = {
                     f"{kind}:{obj}": {"table": table, "sql": sql}
                     for kind, obj, table, sql in conn.execute(
                         "SELECT type, name, tbl_name, sql FROM sqlite_master "
@@ -453,7 +453,9 @@ class _McpStdio:
         self.server.wait(timeout=10)
 
 
-def _run_mcp(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _run_mcp(
+    binary: str, steps: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Drive the steps that take parameters over MCP stdio.
 
     The binary serves `mcp stdio` on a fresh instance, and each step with
@@ -667,7 +669,9 @@ class _StandInEngine:
         self.server.server_close()
 
 
-def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _run_cli(
+    binary: str, steps: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     root = Path(tempfile.mkdtemp(prefix="vogt-parity-"))
     data = root / "instance"
     env = _child_env()
@@ -876,7 +880,9 @@ def _substitute(
     return {key: one(value) for key, value in params.items()}
 
 
-def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _run_http(
+    binary: str, steps: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Drive the steps that name a route over HTTP against a served instance.
 
     Steps without an ``http`` block are CLI steps and are skipped, so a run
@@ -994,8 +1000,8 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         f"wanted {spec['status']}: {result!r}"
                     )
                 if "error_code" in spec:
-                    error = result.get("error") if isinstance(result, dict) else None
-                    code = error.get("code") if isinstance(error, dict) else None
+                    http_error = result.get("error") if isinstance(result, dict) else None
+                    code = http_error.get("code") if isinstance(http_error, dict) else None
                     if code != spec["error_code"]:
                         raise SystemExit(
                             f"{step['operation']} over HTTP answered error code "
@@ -1318,18 +1324,18 @@ def _errors(golden: Path, check: bool) -> int:
     codes: dict[str, dict[str, set[Any]]] = {}
     for row in rows.values():
         for transport in ("cli", "http", "mcp"):
-            got = row.get(transport)
-            if not got or not got.get("error_code"):
+            cell = row.get(transport)
+            if not isinstance(cell, dict) or not cell.get("error_code"):
                 continue
             entry = codes.setdefault(
-                got["error_code"],
+                cell["error_code"],
                 {"cli_exit": set(), "http_status": set(), "transports": set()},
             )
             entry["transports"].add(transport)
-            if "exit" in got:
-                entry["cli_exit"].add(got["exit"])
-            if "status" in got:
-                entry["http_status"].add(got["status"])
+            if "exit" in cell:
+                entry["cli_exit"].add(cell["exit"])
+            if "status" in cell:
+                entry["http_status"].add(cell["status"])
     document = {
         "generated_by": "scripts/parity.py errors",
         "golden": golden.name,
@@ -1442,9 +1448,7 @@ def _mutate(value: Any, key: str) -> bool:
     return False
 
 
-def _diff(
-    golden: list[dict[str, Any]], recorded: list[dict[str, Any]], prefix: str
-) -> int:
+def _diff(golden: Any, recorded: Any, prefix: str) -> int:
     left = json.dumps(golden, indent=2, sort_keys=True).splitlines(keepends=True)
     right = json.dumps(recorded, indent=2, sort_keys=True).splitlines(keepends=True)
     if left == right:
