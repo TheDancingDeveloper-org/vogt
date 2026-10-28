@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1032,8 +1033,16 @@ def _run_http(
             recorded.append({"operation": "dump", "result": dumped})
             audit = _audit_trail(data)
         finally:
-            server.terminate()
-            server.wait(timeout=10)
+            # SIGINT, not SIGTERM. The Rust core treats SIGTERM as a drain and
+            # holds the process for its shutdown grace (10s), so terminate()
+            # plus a 10s wait races that grace and times out after a green run.
+            # SIGINT starts the same drain and a second signal ends it.
+            server.send_signal(signal.SIGINT)
+            try:
+                server.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                server.send_signal(signal.SIGINT)
+                server.wait(timeout=5)
             server_output.close()
     return recorded, audit
 
