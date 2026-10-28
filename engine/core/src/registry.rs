@@ -1201,4 +1201,78 @@ mod tests {
         assert!(registry.by_mcp_tool("nope").is_err());
         assert_eq!(registry.by_mcp_tool("work_get").unwrap().name, "work.get");
     }
+
+    /// Operations registered without a service. `run` turns each of these into
+    /// the "has not been ported" error, which HTTP reports as 501. An entry
+    /// here is a known gap, named with the work item that still owes the
+    /// service. A newly registered operation with no service and no entry fails
+    /// this test, so a stub cannot land quietly.
+    ///
+    /// `registry.dump` is implemented by the registry itself. `init` and `serve`
+    /// are process commands in `main` (`fn init`, `fn serve`), not registry
+    /// services, so a service arm is not how they are implemented.
+    const PROCESS_COMMANDS: &[&str] = &["init", "serve"];
+
+    const PENDING_SERVICES: &[(&str, &str)] = &[
+        ("instance.diagnostics", "WI-2666"),
+        ("session.report", "WI-2666"),
+        ("usage.board", "WI-2666"),
+    ];
+
+    #[test]
+    fn every_registered_operation_has_a_handler_or_a_named_gap() {
+        let registry = registry();
+        let pending: std::collections::HashMap<&str, &str> =
+            PENDING_SERVICES.iter().copied().collect();
+        assert_eq!(
+            pending.len(),
+            PENDING_SERVICES.len(),
+            "the pending-service allowlist names an operation twice"
+        );
+        let mut missing = Vec::new();
+        for operation in registry.iter() {
+            let implemented = PROCESS_COMMANDS.contains(&operation.name)
+                || match operation.handler {
+                    Handler::RegistryDump => true,
+                    Handler::NotPorted => service_for(operation.name).is_some(),
+                };
+            if implemented {
+                assert!(
+                    !pending.contains_key(operation.name),
+                    "{} has a handler, so it must leave the pending-service allowlist",
+                    operation.name
+                );
+                continue;
+            }
+            if !pending.contains_key(operation.name) {
+                missing.push(operation.name);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "registered without a service and not on the pending-service allowlist              (each entry needs the work item that still owes the service): {missing:?}"
+        );
+        for (name, work_item) in PENDING_SERVICES {
+            assert!(
+                registry.contains(name),
+                "{name} is allowlisted ({work_item}) but is not registered"
+            );
+            assert!(
+                work_item.starts_with("WI-") && work_item.len() > 3,
+                "{name}'s allowlist entry {work_item} is not a work-item ref"
+            );
+            let error = registry
+                .get(name)
+                .unwrap()
+                .run(None, serde_json::json!({}))
+                .unwrap_err();
+            let VogtError::InvalidRequest(message) = error else {
+                panic!("{name} did not fail as not-ported: {error:?}");
+            };
+            assert!(
+                message.contains("has not been ported"),
+                "{name} would not be reported as 501: {message}"
+            );
+        }
+    }
 }
