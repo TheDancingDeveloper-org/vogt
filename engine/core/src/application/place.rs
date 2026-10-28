@@ -16,10 +16,11 @@ use super::memo::StoreMemo;
 use super::services::inbox::inbox_badge;
 use super::services::now_of;
 use super::services::preferences::{saved_inbox_filter, InboxSavedFilter};
+use super::services::work::list_work_total;
 use super::views::backlog_total_considered;
 use crate::core::{Clock, IdFactory};
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ReadView, WorkFilter};
+use crate::storage::interface::{DeclaredStore, ReadView};
 
 /// The badge counts that are pure functions of the two stores.
 #[derive(Debug, Clone)]
@@ -56,11 +57,10 @@ where
     #[cfg(test)]
     COUNTS_COMPUTED.with(|n| n.set(n.get() + 1));
     let projects_total = ctx.declared.read()?.counts()?.projects;
-    let work_total = ctx.declared.read()?.count_work_items(&WorkFilter {
-        exclude_terminal: true,
-        limit: 1,
-        ..WorkFilter::default()
-    })?;
+    // Python asks `list_work(limit=1).total`: declared non-terminal rows plus
+    // upstream-truth items that no `work_link` has adopted. A raw declared
+    // count under-reports every linked project.
+    let work_total = list_work_total(ctx)?;
     let backlog_total = backlog_total_considered(ctx).ok();
     let drift_present = !ctx
         .declared

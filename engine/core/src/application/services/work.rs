@@ -1150,6 +1150,17 @@ struct Drawn {
     labels: Vec<String>,
 }
 
+/// The total `list_work` reports for its default parameters: non-terminal
+/// declared items plus upstream-truth items no `work_link` has adopted.
+/// `place.metrics` `work_total` is this number (`list_work(limit=1).total`).
+pub(crate) fn list_work_total<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+) -> Result<i64, VogtError> {
+    Ok(list_work(ctx, serde_json::json!({"limit": 1}))?["total"]
+        .as_i64()
+        .unwrap_or(0))
+}
+
 fn list_work<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     params: Value,
@@ -3010,7 +3021,8 @@ fn list_board<C: Clock, I: IdFactory>(
 mod tests {
     use super::{
         bind_branch, comment_work, create_work, gaps_for, get_many_work, get_work, list_board,
-        list_work, policy_gap, relate_work, transition_work, unrelate_work, update_work, work_page,
+        list_work, list_work_total, policy_gap, relate_work, transition_work, unrelate_work,
+        update_work, work_page,
     };
     use crate::application::context::{build_context, Built};
     use crate::core::{
@@ -3549,6 +3561,63 @@ mod tests {
             answer["missing"].as_array().unwrap().len(),
             super::WORK_GET_MANY_LIMIT
         );
+    }
+
+    #[test]
+    fn work_total_counts_open_declared_and_unadopted_upstream_items() {
+        // `place.metrics` `work_total` is `list_work(limit=1).total`: open
+        // declared items plus upstream-truth items no `work_link` adopted.
+        // A finished declared item does not count.
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        assert_eq!(list_work_total(ctx).unwrap(), 0);
+        create_work(
+            ctx,
+            json!({"kind": "feature", "title": "Open", "reason": "test"}),
+        )
+        .unwrap();
+        create_work(
+            ctx,
+            json!({"kind": "feature", "title": "Finished", "reason": "test"}),
+        )
+        .unwrap();
+        transition_work(
+            ctx,
+            json!({"ref": "WI-2", "to_state": "wont_do", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(list_work_total(ctx).unwrap(), 1);
+        assert_eq!(list_work(ctx, json!({"limit": 1})).unwrap()["total"], 1);
+
+        insert_project(&built, "beta", true, WriteBack::Disabled);
+        let sweep = ctx
+            .observed
+            .begin_sweep("forge", &["prj_beta".into()], moment())
+            .unwrap();
+        ctx.observed
+            .append(
+                &sweep.id,
+                &[crate::storage::observed_types::PendingObservation {
+                    kind: "forge.issue".into(),
+                    subject_key: "gh:acme/beta#7".into(),
+                    payload: serde_json::json!({
+                        "title": "upstream",
+                        "state": "open",
+                        "number": 7
+                    }),
+                    content_digest: "sha256:issue-7".into(),
+                    project_id: Some("prj_beta".into()),
+                    source_url: Some("https://github.com/acme/beta/issues/7".into()),
+                    promoted: false,
+                }],
+                moment(),
+            )
+            .unwrap();
+        ctx.observed.rebuild_latest().unwrap();
+        assert_eq!(list_work_total(ctx).unwrap(), 2);
+        assert_eq!(list_work(ctx, json!({"limit": 1})).unwrap()["total"], 2);
     }
 
     #[test]
