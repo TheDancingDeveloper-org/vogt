@@ -69,6 +69,7 @@
 # these build args back to their Docker Hub names still works and is the
 # escape hatch for a builder that cannot reach GHCR.
 ARG NODE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm
+ARG PYTHON_IMAGE=python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 # The static demo's *runtime* base, deliberately not `NODE_IMAGE`. Building the
 # PWA needs a toolchain; serving the built bytes does not — `demo-server.mjs`
 # imports only `node:` builtins. `node:22-bookworm` derives from
@@ -181,6 +182,28 @@ ENV DEMO_BIND=0.0.0.0 \
     DEMO_PORT=8910 \
     NODE_ENV=production
 ENTRYPOINT ["node", "/app/demo-server.mjs"]
+
+
+# ─── Stage 1b: Python core (the default until VOGT_CORE_IMPL=rust) ───────────
+# Same lockfile install as the root Dockerfile, so the console script in this
+# image is the published core, not a second resolution. Copied into the pod
+# below. Cost is the managed CPython plus the venv (on the order of the
+# core-only image); the alternative, a build-arg that drops this stage, would
+# make VOGT_CORE_IMPL=python a rebuild. See the note beside the vogt symlink.
+FROM ${PYTHON_IMAGE} AS python-core
+COPY --from=ghcr.io/astral-sh/uv:0.9.18@sha256:5713fa8217f92b80223bc83aac7db36ec80a84437dbc0d04bbc659cae030d8c9 /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON=3.13 \
+    UV_PYTHON_DOWNLOADS=automatic \
+    UV_PYTHON_INSTALL_DIR=/opt/vogt/python \
+    UV_PYTHON_PREFERENCE=only-managed \
+    UV_PROJECT_ENVIRONMENT=/opt/vogt/.venv
+WORKDIR /src
+COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./
+RUN uv sync --locked --no-install-project --no-dev
+COPY src/ ./src/
+RUN uv sync --locked --no-dev --no-editable
 
 # ─── Stage 2: rust binary with embedded web/ ────────────────────────────────
 FROM ${RUST_IMAGE} AS server-build
@@ -562,6 +585,8 @@ RUN set -eu; \
 # mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).
 COPY --from=server-build /usr/local/bin/vogt-engine /usr/local/bin/vogt-engine
 COPY --from=server-build /usr/local/bin/vogt-core /usr/local/bin/vogt-core
+COPY --from=python-core /opt/vogt /opt/vogt
+ENV PATH="/opt/vogt/.venv/bin:${PATH}"
 RUN chmod +x /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
 
 # The other half is the Rust core, built in `server-build` and copied above, so
@@ -572,6 +597,13 @@ RUN chmod +x /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
 #   vogt-core       — the name the entrypoint runs the core under.
 #   vogt-mcp-remote — the stdio bridge. The binary chooses its mode from argv[0],
 #                     so the name alone is what mcp-bootstrap and connect ask for.
+#
+# Both cores stay in this image (WI-2660). `VOGT_CORE_IMPL` (python|rust,
+# default python, read by entrypoint.sh) picks which one the supervisor runs,
+# so merging the rust binary is not the cutover and rollback is an env flip
+# plus a redeploy, not a rebuild. A build-arg that omitted one core would
+# shrink the layer by the unused binary (and, for python, the uv venv) but
+# would make rollback a rebuild — the wrong trade for the overlap window.
 #
 # `vogt-mcp` is not linked: the engine's own script of that name, copied below,
 # is what a session runs.
