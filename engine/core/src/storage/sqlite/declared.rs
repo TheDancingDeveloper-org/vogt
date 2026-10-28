@@ -475,7 +475,7 @@ where
         conn.execute_batch("BEGIN").map_err(sql_err)?;
         Ok(SqliteReadView {
             conn,
-            workflow_cache: std::cell::RefCell::new(BTreeMap::new()),
+            workflow_cache: std::sync::Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -493,7 +493,7 @@ where
         Ok(SqliteWrite {
             view: SqliteReadView {
                 conn,
-                workflow_cache: std::cell::RefCell::new(BTreeMap::new()),
+                workflow_cache: std::sync::Mutex::new(BTreeMap::new()),
             },
             ids: Arc::clone(&self.ids),
             txn_id,
@@ -505,7 +505,7 @@ where
 
 pub struct SqliteReadView {
     conn: Connection,
-    workflow_cache: std::cell::RefCell<BTreeMap<String, Workflow>>,
+    workflow_cache: std::sync::Mutex<BTreeMap<String, Workflow>>,
 }
 pub struct SqliteWrite<I: IdFactory> {
     view: SqliteReadView,
@@ -853,8 +853,14 @@ impl ReadView for SqliteReadView {
         )
     }
     fn workflow_for(&self, kind: &str) -> Result<Workflow, VogtError> {
-        if let Some(cached) = self.workflow_cache.borrow().get(kind) {
-            return Ok(cached.clone());
+        if let Some(cached) = self
+            .workflow_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(kind)
+            .cloned()
+        {
+            return Ok(cached);
         }
         let stored = self
             .conn
@@ -872,7 +878,8 @@ impl ReadView for SqliteReadView {
             None => default_workflow(kind),
         };
         self.workflow_cache
-            .borrow_mut()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(kind.to_string(), workflow.clone());
         Ok(workflow)
     }
@@ -2551,7 +2558,11 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
                 )
                 .map_err(sql_err)?;
         }
-        self.view.workflow_cache.borrow_mut().remove(&workflow.kind);
+        self.view
+            .workflow_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&workflow.kind);
         Ok(())
     }
     fn append_audit(

@@ -587,7 +587,9 @@ mod tests {
         )
     }
 
-    fn engine_with(handler: impl Fn(&str) -> (u16, Vec<u8>) + 'static) -> EngineClient {
+    fn engine_with(
+        handler: impl Fn(&str) -> (u16, Vec<u8>) + Send + Sync + 'static,
+    ) -> EngineClient {
         EngineClient::new(
             "http://engine.test",
             None,

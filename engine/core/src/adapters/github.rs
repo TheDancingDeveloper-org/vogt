@@ -39,12 +39,9 @@ pub struct GitHubIdentity {
 /// How the client talks, so tests never need a network. Returns the status,
 /// the body and the response headers (lower-cased).
 pub type Transport = Box<
-    dyn Fn(
-        &str,
-        &BTreeMap<String, String>,
-        &[u8],
-        &str,
-    ) -> (u16, Vec<u8>, BTreeMap<String, String>),
+    dyn Fn(&str, &BTreeMap<String, String>, &[u8], &str) -> (u16, Vec<u8>, BTreeMap<String, String>)
+        + Send
+        + Sync,
 >;
 
 /// Read-only access to one GitHub installation, plus the one mutating method.

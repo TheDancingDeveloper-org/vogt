@@ -492,7 +492,7 @@ fn bootstrap_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
     Ok(serde_json::Value::Object(out))
 }
 
-async fn dispatch<C: Clock, I: IdFactory>(
+async fn dispatch<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
@@ -559,7 +559,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
             return method_not_allowed(&state.registry, operation_path);
         }
     };
-    let found = state.registry.for_transport(Transport::Http);
+    let found = state.registry.operations_for(Transport::Http);
     let matched = found.iter().find(|operation| {
         operation.http_route().method == wanted && operation.http_route().path == operation_path
     });
@@ -604,7 +604,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
         }
         return not_found();
     }
-    let operation = matched.expect("just checked");
+    let operation = matched.expect("just checked").clone();
     if method == Method::HEAD {
         return method_not_allowed(&state.registry, operation_path);
     }
@@ -619,7 +619,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
     } else {
         "body"
     };
-    let params = match parse_params(operation, query.as_deref(), &content_type, &body) {
+    let params = match parse_params(&operation, query.as_deref(), &content_type, &body) {
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error, source),
     };
@@ -640,7 +640,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
     let granted = auth_gate::authorize(
         &request_store,
         AuthRequest {
-            operation,
+            operation: &operation,
             transport: Transport::Http,
             presented: presented.as_deref(),
             no_auth: state.no_auth,
@@ -700,7 +700,23 @@ async fn dispatch<C: Clock, I: IdFactory>(
                 .expect("a fixed response builds");
         }
     }
-    match operation.run(built.as_ref(), params) {
+    // `operation.run` does blocking rusqlite and blocking engine HTTP (a
+    // session wait is up to 120 s). Python runs the same work with
+    // `asyncio.to_thread`; on the tokio runtime it has to leave the worker
+    // threads, or a handful of waits starves `/health/live` and every other
+    // request. The store is Send: its per-connection cache is a Mutex.
+    let outcome =
+        match tokio::task::spawn_blocking(move || operation.run(built.as_ref(), params)).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("content-type", "text/plain; charset=utf-8")
+                    .body(Body::from("Internal Server Error"))
+                    .expect("a fixed response builds");
+            }
+        };
+    match outcome {
         Ok(value) => {
             let mut response = json_response(StatusCode::OK, value);
             if let Some(etag) = etag
@@ -925,7 +941,10 @@ fn request_store<C: Clock, I: IdFactory>(
     state: &AppState<C, I>,
     clock_for: ClockFor<C>,
 ) -> SqliteDeclaredStore<C, I> {
-    let store = state.store.lock().expect("the store lock is not poisoned");
+    let store = state
+        .store
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     SqliteDeclaredStore::shared(
         store.path().to_path_buf(),
         clock_for(store.clock()),
@@ -971,6 +990,12 @@ fn context_for_login<C: Clock, I: IdFactory>(
         Arc::clone(store.id_factory()),
         None,
     ))
+}
+
+/// The `/mcp` route caps its body at the same 1 MiB, and answers with the same
+/// envelope. It lives here so both routes share one response.
+pub(crate) fn mcp_payload_too_large() -> Response {
+    payload_too_large()
 }
 
 fn payload_too_large() -> Response {
@@ -2505,6 +2530,41 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| !message.is_empty()),
             "{body}"
+        );
+    }
+
+    /// A request that blocks inside `operation.run` runs on the blocking pool,
+    /// so a second request on the same runtime is answered while it is blocked.
+    /// The delay is a process-wide env var read inside `Operation::run`, so the
+    /// test clears the var even when it panics. Run it on its own: a sibling
+    /// test in the same process would also sleep.
+    #[test]
+    fn a_slow_operation_does_not_block_another_request() {
+        struct ClearBlock;
+        impl Drop for ClearBlock {
+            fn drop(&mut self) {
+                std::env::remove_var("VOGT_TEST_BLOCK_MS");
+            }
+        }
+        let _clear = ClearBlock;
+        std::env::set_var("VOGT_TEST_BLOCK_MS", "1500");
+        let served = test_harness::serve(true);
+        let addr = served.addr;
+        let slow = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let (status, _) = test_harness::send(addr, "GET", "/api/status", None, None);
+            (status, started.elapsed())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        let (status, body) = test_harness::send(addr, "GET", "/api/install/status", None, None);
+        let elapsed = started.elapsed();
+        let (slow_status, _) = slow.join().unwrap();
+        assert_eq!(slow_status, 200);
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(2000),
+            "a blocked operation stalled another request for {elapsed:?}"
         );
     }
 }
