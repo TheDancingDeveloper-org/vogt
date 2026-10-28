@@ -107,10 +107,10 @@ impl ForgejoClient {
             return Ok(Value::Null);
         }
         if status >= 400 {
-            return Err(VogtError::ForgejoUnavailable(format!(
-                "{} returned {status} for {verb} {path}",
-                self.host
-            )));
+            return Err(VogtError::ForgeHttpStatus {
+                status,
+                message: format!("{} returned {status} for {verb} {path}", self.host),
+            });
         }
         if response.iter().all(u8::is_ascii_whitespace) {
             return Ok(Value::Object(serde_json::Map::new()));

@@ -301,7 +301,7 @@ where
         (initiative, linked)
     };
     if linked {
-        return Err(VogtError::InvalidRequest(
+        return Err(VogtError::NotImplemented(
             "initiative.publish is not available in this build: its service has not been ported yet"
                 .to_string(),
         ));

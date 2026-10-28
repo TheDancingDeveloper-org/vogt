@@ -971,7 +971,8 @@ where
 }
 
 fn sql_err(err: rusqlite::Error) -> VogtError {
-    VogtError::MigrationError(err.to_string())
+    tracing::error!(error = %err, "storage query failed");
+    VogtError::MigrationError("Internal Server Error".to_string())
 }
 
 /// `socket.gethostname()`, which reads the kernel name rather than `$HOSTNAME`.

@@ -87,7 +87,18 @@ impl From<std::io::Error> for MigrateError {
 
 impl From<MigrateError> for crate::errors::VogtError {
     fn from(err: MigrateError) -> Self {
-        crate::errors::VogtError::MigrationError(err.to_string())
+        // A Message is our own sentence (duplicate number, checksum mismatch)
+        // and stays as written. Sql and Io carry rusqlite and filesystem text,
+        // which must not reach a response body.
+        match &err {
+            MigrateError::Message(message) => {
+                crate::errors::VogtError::MigrationError(message.clone())
+            }
+            MigrateError::Sql(_) | MigrateError::Io(_) => {
+                tracing::error!(error = %err, "migration failed");
+                crate::errors::VogtError::MigrationError("Internal Server Error".to_string())
+            }
+        }
     }
 }
 
