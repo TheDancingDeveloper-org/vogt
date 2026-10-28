@@ -343,6 +343,9 @@ fn summarize_asked<C: Clock, I: IdFactory>(
         stop_reason: None,
         last_reply_excerpt: None,
         running: None,
+        done_at: None,
+        latest_report: None,
+        economics: None,
     };
     if let Some(live) = live {
         apply_live(&mut summary, live);
@@ -405,6 +408,9 @@ fn unlinked_summary<C: Clock, I: IdFactory>(
         stop_reason: None,
         last_reply_excerpt: None,
         running: None,
+        done_at: None,
+        latest_report: None,
+        economics: None,
     };
     apply_live(&mut summary, session);
     Ok(summary)
@@ -470,6 +476,8 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.permission_mode = live.permission_mode.clone();
     summary.stopped_by = live.stopped_by.clone();
     summary.stop_reason = live.stop_reason.clone();
+    summary.done_at = live.done_at.clone();
+    summary.economics = live.economics.clone();
 }
 
 fn engine_of<C: Clock, I: IdFactory>(

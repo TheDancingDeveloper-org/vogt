@@ -1015,7 +1015,6 @@ mod tests {
         });
     }
 
-
     #[test]
     fn the_backlog_keeps_declared_items_past_the_store_page() {
         // The store's default work-list limit is 100. A ranked view must load

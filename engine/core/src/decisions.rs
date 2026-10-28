@@ -2215,6 +2215,7 @@ pub enum Attention {
     Approval,
     Blocked,
     Waiting,
+    Done,
     Stalled,
     Running,
     Idle,
@@ -2229,12 +2230,13 @@ impl Attention {
             Self::Approval => 0,
             Self::Blocked => 1,
             Self::Waiting => 2,
-            Self::Stalled => 3,
-            Self::Running => 4,
-            Self::Idle => 5,
-            Self::Hibernated => 6,
-            Self::Exited => 7,
-            Self::Unknown => 8,
+            Self::Done => 3,
+            Self::Stalled => 4,
+            Self::Running => 5,
+            Self::Idle => 6,
+            Self::Hibernated => 7,
+            Self::Exited => 8,
+            Self::Unknown => 9,
         }
     }
 
@@ -2249,6 +2251,7 @@ impl Attention {
             Self::Approval => "approval",
             Self::Blocked => "blocked",
             Self::Waiting => "waiting",
+            Self::Done => "done",
             Self::Stalled => "stalled",
             Self::Running => "running",
             Self::Idle => "idle",
@@ -2264,12 +2267,13 @@ impl Attention {
             "approval" => 0,
             "blocked" => 1,
             "waiting" => 2,
-            "stalled" => 3,
-            "running" => 4,
-            "idle" => 5,
-            "hibernated" => 6,
-            "exited" => 7,
-            _ => 8,
+            "done" => 3,
+            "stalled" => 4,
+            "running" => 5,
+            "idle" => 6,
+            "hibernated" => 7,
+            "exited" => 8,
+            _ => 9,
         }
     }
 
@@ -2307,6 +2311,7 @@ pub fn classify(
     last_output_at: Option<crate::core::Moment>,
     now: crate::core::Moment,
     stall_after_secs: i64,
+    done_at: Option<&str>,
 ) -> Verdict {
     let verdict = |attention: Attention, reason: String| Verdict { attention, reason };
     if activity == Some("hibernated") {
@@ -2357,6 +2362,12 @@ pub fn classify(
         );
     }
     if activity == Some("waiting-for-input") || (activity == Some("idle") && ready == Some(true)) {
+        if done_at.is_some_and(|text| !text.is_empty()) {
+            return verdict(
+                Attention::Done,
+                "said it is done (AUTOPILOT: DONE), at its prompt".to_string(),
+            );
+        }
         return verdict(
             Attention::Waiting,
             "at its prompt, waiting for the next instruction".to_string(),
@@ -2407,6 +2418,7 @@ mod oversight_tests {
             )),
             moment,
             600,
+            None,
         )
     }
 
@@ -2478,6 +2490,7 @@ mod oversight_tests {
                 ago(0),
                 moment,
                 600,
+                None,
             );
             assert_eq!(found.attention, *want, "{activity}");
         }
@@ -2491,6 +2504,7 @@ mod oversight_tests {
             ago(25),
             moment,
             600,
+            None,
         );
         assert_eq!(stalled.attention, Attention::Stalled);
         assert_eq!(stalled.reason, "running, but nothing printed for 25 min");
@@ -2505,6 +2519,7 @@ mod oversight_tests {
             ago(0),
             moment,
             600,
+            None,
         );
         assert_eq!(dialog.attention, Attention::Approval);
         assert!(dialog.reason.contains("Run rm?"));
@@ -2520,6 +2535,7 @@ mod oversight_tests {
             ago(0),
             moment,
             600,
+            None,
         );
         assert_eq!(empty.attention, Attention::Running);
     }
@@ -2533,6 +2549,7 @@ mod oversight_tests {
             Attention::Blocked,
             Attention::Unknown,
             Attention::Waiting,
+            Attention::Done,
             Attention::Stalled,
         ];
         let mut sorted = ranked.to_vec();
@@ -2543,6 +2560,7 @@ mod oversight_tests {
                 Attention::Approval,
                 Attention::Blocked,
                 Attention::Waiting,
+                Attention::Done,
                 Attention::Stalled,
                 Attention::Running,
                 Attention::Idle,
@@ -2572,6 +2590,7 @@ mod oversight_tests {
             None,
             now(),
             600,
+            None,
         );
         assert_eq!(gate.attention, Attention::Approval);
         assert_eq!(
@@ -2582,7 +2601,18 @@ mod oversight_tests {
 
     #[test]
     fn an_unasked_engine_is_unknown_and_a_dead_process_has_exited() {
-        let unknown = classify(None, Some(true), None, None, None, None, None, now(), 600);
+        let unknown = classify(
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            now(),
+            600,
+            None,
+        );
         assert_eq!(unknown.attention, Attention::Unknown);
 
         let ended = classify(
@@ -2595,6 +2625,7 @@ mod oversight_tests {
             None,
             now(),
             600,
+            None,
         );
         assert_eq!(ended.reason, "its process ended (crashed)");
     }
