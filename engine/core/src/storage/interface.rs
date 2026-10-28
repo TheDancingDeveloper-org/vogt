@@ -665,6 +665,9 @@ pub trait WriteTxn: ReadView {
         &mut self,
         preference: &ActorPreference,
     ) -> Result<(), crate::errors::VogtError>;
+    fn insert_charter(&mut self, charter: &Charter) -> Result<(), crate::errors::VogtError>;
+    fn insert_watch(&mut self, watch: &Watch) -> Result<(), crate::errors::VogtError>;
+    fn update_watch(&mut self, watch: &Watch) -> Result<(), crate::errors::VogtError>;
     fn mark_drift_superseded(
         &mut self,
         proposal_id: &str,
