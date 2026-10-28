@@ -558,12 +558,12 @@ mod tests {
     }
 
     use super::*;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    /// The same lock `config` tests hold while they rewrite the process
+    /// environment. A separate lock let the two modules interleave `set_var`.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::config::env_lock()
     }
 
     #[test]
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn resolve_prefers_cli_then_env_then_prompt() {
-        let _guard = env_lock().lock().expect("lock");
+        let _guard = env_lock();
         env::remove_var("FAKE_AGENT_SCENARIO");
         assert_eq!(
             resolve_scenario(Some("skip"), "FAKE_AGENT_SCENARIO: cost\n"),
@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn edit_step_appends_file() {
-        let _guard = env_lock().lock().expect("lock");
+        let _guard = env_lock();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn outcome_exit_code() {
-        let _guard = env_lock().lock().expect("lock");
+        let _guard = env_lock();
         env::set_var("FAKE_AGENT_EXIT_CODE", "7");
         let err = step_outcome().expect_err("exits");
         env::remove_var("FAKE_AGENT_EXIT_CODE");
