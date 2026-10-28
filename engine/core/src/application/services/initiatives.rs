@@ -273,11 +273,10 @@ fn apply_initiative_update<C: Clock + 'static, I: IdFactory + 'static>(
     })
 }
 
-/// `initiative.publish`. With no forge-linked projects the initiative spans,
-/// there is nothing to project and no forge client is needed: the result is an
-/// empty tracking list and the action is still audited. A linked project would
-/// need the forge adapter, which this build does not carry, so that case
-/// refuses with the not-ported error rather than skipping the repo silently.
+/// `initiative.publish`. Ports `publish_initiative`: one tracking issue per
+/// forge-linked repo the initiative spans. A repo that cannot be written is a
+/// `skipped` row, not a silent drop. Closing the initiative raises a drift
+/// proposal; it never closes the upstream issue.
 fn initiative_publish<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
@@ -285,33 +284,30 @@ where
 {
     let slug = require_string(&params, "slug")?;
     let reason = require_string(&params, "reason")?;
-    let (declared, _, principal, clock, ids, _) = context_parts(ctx);
-    let (initiative, linked) = {
-        let view = declared.read()?;
+    let (initiative, targets, mut skipped) = {
+        let view = ctx.declared.read()?;
         let initiative = view.initiative_by_slug(&slug)?.ok_or_else(|| {
             VogtError::NotFound(format!(
                 "no initiative with slug {}",
                 crate::core::py_repr(&slug)
             ))
         })?;
-        let linked = view
-            .list_projects(10_000, 0)?
-            .into_iter()
-            .any(|project| project.link_state == crate::core::LinkState::Linked);
-        (initiative, linked)
+        let actor = view.actor_by_identity(&ctx.principal.identity_ref)?;
+        let (targets, skipped) = publish_targets(ctx, &view, actor.as_ref(), &initiative)?;
+        (initiative, targets, skipped)
     };
-    if linked {
-        return Err(VogtError::NotImplemented(
-            "initiative.publish is not available in this build: its service has not been ported yet"
-                .to_string(),
-        ));
+    let mut placed = Vec::new();
+    for target in targets {
+        placed.push(find_or_create(target, &initiative)?);
     }
+    let mut rows = reproject_placed(ctx, &initiative, &placed, true)?;
+    rows.append(&mut skipped);
     let result = json!({
         "slug": initiative.slug,
         "state": initiative.state.to_string(),
-        "tracking_issues": [],
+        "tracking_issues": rows,
     });
-    let mut writing = write_context(declared, principal, Arc::clone(&clock), Arc::clone(&ids));
+    let mut writing = crate::application::context::write_of(ctx);
     crate::application::writes::audited_action(
         &mut writing,
         "initiative.publish",
@@ -362,7 +358,7 @@ where
         return Ok(());
     }
 
-    let rows = reproject_placed(&initiative, &placed)?;
+    let rows = reproject_placed(ctx, &initiative, &placed, false)?;
     let outcome = json!({
         "slug": initiative.slug,
         "state": initiative.state.to_string(),
@@ -396,13 +392,15 @@ struct PlacedIssue {
     number: i64,
     source_url: Option<String>,
     current_body: String,
+    /// `adopted` when the marker already existed, `created` when this call opened it.
+    action: &'static str,
 }
 
 /// Far above any plausible initiative membership. Ports `_MEMBER_LIMIT`.
 const MEMBER_LIMIT: i64 = 10_000;
 
-/// The linked projects holding a member that can be written. Ports `_targets`;
-/// the skipped rows only matter to `initiative.publish`, so they are dropped.
+/// The linked projects holding a member that can be written. Ports `_targets`
+/// without the skipped rows, which only `initiative.publish` reports.
 fn projection_targets<C, I>(
     ctx: &AppContext<C, I>,
     view: &impl ReadView,
@@ -413,8 +411,23 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
+    Ok(publish_targets(ctx, view, actor, initiative)?.0)
+}
+
+/// Ports `_targets`, keeping the `skipped` rows `initiative.publish` returns.
+fn publish_targets<C, I>(
+    ctx: &AppContext<C, I>,
+    view: &impl ReadView,
+    actor: Option<&crate::core::Actor>,
+    initiative: &Initiative,
+) -> Result<(Vec<ProjectionTarget>, Vec<Value>), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
     use crate::adapters::forge::ForgeProvider;
     let mut targets = Vec::new();
+    let mut skipped = Vec::new();
     for project in crate::application::upstream::linked_projects(view, None)? {
         let members: Vec<_> =
             crate::application::upstream::upstream_items(ctx, view, &project, true, MEMBER_LIMIT)?
@@ -425,6 +438,13 @@ where
             continue;
         }
         if !crate::adapters::forge::permits(&project.write_back.to_string(), "create") {
+            skipped.push(skip_row(
+                &project,
+                &format!(
+                    "write-back policy {} does not permit opening a tracking issue — set it with `forge writeback`",
+                    crate::core::py_repr(&project.write_back.to_string())
+                ),
+            ));
             continue;
         }
         let (provider, identity) = crate::application::services::forge_writeback::writer_provider(
@@ -433,9 +453,17 @@ where
             project.repo_url.as_deref(),
         )?;
         let Some(provider) = provider else {
+            skipped.push(skip_row(
+                &project,
+                "no usable forge credential for its repository",
+            ));
             continue;
         };
         let Some(repo) = provider.parse(project.repo_url.as_deref()) else {
+            skipped.push(skip_row(
+                &project,
+                "no usable forge credential for its repository",
+            ));
             continue;
         };
         let numbered = members
@@ -450,28 +478,7 @@ where
             members: numbered,
         });
     }
-    Ok(targets)
-}
-
-/// The tracking issue Vogt already owns in this repo, adopted by marker.
-fn find_existing(
-    target: ProjectionTarget,
-    initiative: &Initiative,
-) -> Result<Option<PlacedIssue>, VogtError> {
-    use crate::adapters::forge::ForgeProvider;
-    use crate::adapters::forge::IssuesItem;
-    let issues = target.provider.issues_updated_since(&target.repo, None)?;
-    for issue in issues.into_iter().filter_map(IssuesItem::into_issue) {
-        if crate::decisions::body_has_marker(issue.body.as_deref(), &initiative.slug) {
-            return Ok(Some(PlacedIssue {
-                number: issue.number,
-                source_url: issue.source_url,
-                current_body: issue.body.unwrap_or_default(),
-                target,
-            }));
-        }
-    }
-    Ok(None)
+    Ok((targets, skipped))
 }
 
 fn task_lines(target: &ProjectionTarget) -> Vec<crate::decisions::TaskLine> {
@@ -493,11 +500,18 @@ fn task_lines(target: &ProjectionTarget) -> Vec<crate::decisions::TaskLine> {
 }
 
 /// Render each managed region with its siblings and edit only a changed body.
-/// Ports `_reproject_placed` with `propose_close=False`.
-fn reproject_placed(
+/// Ports `_reproject_placed`. `propose_close` raises a drift proposal per
+/// tracking issue when the initiative is closed; it never closes upstream.
+fn reproject_placed<C, I>(
+    ctx: &AppContext<C, I>,
     initiative: &Initiative,
     placed: &[PlacedIssue],
-) -> Result<Vec<Value>, VogtError> {
+    propose_close: bool,
+) -> Result<Vec<Value>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
     use crate::adapters::forge::ForgeProvider;
     // A dict keyed by project slug: a later repo of the same slug wins, as in Python.
     let mut siblings: Vec<(String, String)> = Vec::new();
@@ -512,6 +526,7 @@ fn reproject_placed(
         }
     }
     let mut rows = Vec::new();
+    let mut close_targets: Vec<&PlacedIssue> = Vec::new();
     for item in placed {
         let mut others: Vec<(&str, &str)> = siblings
             .iter()
@@ -542,18 +557,245 @@ fn reproject_placed(
             }
             detail = json!(format!("as {}", item.target.identity));
         }
+        let close_here = propose_close && initiative.state == crate::core::InitiativeState::Closed;
         rows.push(json!({
             "project_slug": item.target.project.slug,
             "repo_url": item.target.project.repo_url,
             "number": item.number,
             "source_url": item.source_url,
-            "action": "adopted",
-            "members": item.target.members.len(),
+            "action": item.action,
+            "members": item.target.members.len() as i64,
             "detail": detail,
-            "close_proposed": false,
+            "close_proposed": close_here,
         }));
+        if close_here {
+            close_targets.push(item);
+        }
+    }
+    if !close_targets.is_empty() {
+        propose_closes(ctx, initiative, &close_targets)?;
     }
     Ok(rows)
+}
+
+const INITIATIVE_TRACKING_CLOSE: &str = "initiative_tracking_close";
+
+fn skip_row(project: &crate::core::Project, detail: &str) -> Value {
+    json!({
+        "project_slug": project.slug,
+        "repo_url": project.repo_url,
+        "number": null,
+        "source_url": null,
+        "action": "skipped",
+        "members": 0,
+        "detail": detail,
+        "close_proposed": false,
+    })
+}
+
+fn projection_failed(slug: &str, detail: Option<&str>) -> VogtError {
+    VogtError::UpstreamWriteFailed(format!(
+        "projecting the initiative onto {} failed: {} — nothing was closed or deleted, and re-running `initiative publish` resumes",
+        crate::core::py_repr(slug),
+        detail.unwrap_or("no detail from the provider"),
+    ))
+}
+
+/// Adopt the marked tracking issue, or open one if there is none yet.
+fn find_or_create(
+    target: ProjectionTarget,
+    initiative: &Initiative,
+) -> Result<PlacedIssue, VogtError> {
+    use crate::adapters::forge::ForgeProvider;
+    if let Some(existing) = find_existing_ref(&target, initiative)? {
+        return Ok(existing_into(target, existing));
+    }
+    let region = crate::decisions::render_managed_region(
+        &initiative.slug,
+        &initiative.body,
+        &task_lines(&target),
+        &[],
+    );
+    let label = format!("initiative:{}", initiative.slug);
+    let sent =
+        target
+            .provider
+            .create_issue(&target.repo, &initiative.title, &region, Some(&[label]))?;
+    let number = sent
+        .subject_key
+        .as_deref()
+        .and_then(|key| target.provider.number_of(Some(key)));
+    if sent.outcome != crate::adapters::forge::WriteBackOutcome::Succeeded || number.is_none() {
+        return Err(projection_failed(
+            &target.project.slug,
+            sent.detail.as_deref(),
+        ));
+    }
+    Ok(PlacedIssue {
+        number: number.expect("checked"),
+        source_url: sent.source_url,
+        current_body: region,
+        target,
+        action: "created",
+    })
+}
+
+struct FoundIssue {
+    number: i64,
+    source_url: Option<String>,
+    current_body: String,
+}
+
+fn find_existing_ref(
+    target: &ProjectionTarget,
+    initiative: &Initiative,
+) -> Result<Option<FoundIssue>, VogtError> {
+    use crate::adapters::forge::ForgeProvider;
+    use crate::adapters::forge::IssuesItem;
+    let issues = target.provider.issues_updated_since(&target.repo, None)?;
+    for issue in issues.into_iter().filter_map(IssuesItem::into_issue) {
+        if crate::decisions::body_has_marker(issue.body.as_deref(), &initiative.slug) {
+            return Ok(Some(FoundIssue {
+                number: issue.number,
+                source_url: issue.source_url,
+                current_body: issue.body.unwrap_or_default(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn existing_into(target: ProjectionTarget, found: FoundIssue) -> PlacedIssue {
+    PlacedIssue {
+        target,
+        number: found.number,
+        source_url: found.source_url,
+        current_body: found.current_body,
+        action: "adopted",
+    }
+}
+
+fn find_existing(
+    target: ProjectionTarget,
+    initiative: &Initiative,
+) -> Result<Option<PlacedIssue>, VogtError> {
+    Ok(find_existing_ref(&target, initiative)?.map(|found| existing_into(target, found)))
+}
+
+fn propose_closes<C, I>(
+    ctx: &AppContext<C, I>,
+    initiative: &Initiative,
+    placed: &[&PlacedIssue],
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    use crate::adapters::forge::ForgeProvider;
+    let open_now = ctx.declared.read()?.list_drift(
+        Some("open"),
+        Some(INITIATIVE_TRACKING_CLOSE),
+        None,
+        MEMBER_LIMIT,
+    )?;
+    let already: std::collections::BTreeSet<String> = open_now
+        .iter()
+        .filter(|proposal| proposal.subject_id == initiative.id)
+        .filter_map(|proposal| {
+            proposal
+                .proposed_change
+                .get("subject_key")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    for item in placed {
+        let subject_key = item
+            .target
+            .provider
+            .subject_key(&item.target.repo, item.number);
+        if already.contains(&subject_key) {
+            continue;
+        }
+        raise_close(ctx, initiative, item, &subject_key)?;
+    }
+    Ok(())
+}
+
+fn raise_close<C, I>(
+    ctx: &AppContext<C, I>,
+    initiative: &Initiative,
+    item: &PlacedIssue,
+    subject_key: &str,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let id = ctx
+        .id_factory
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .next("dft");
+    let opened_at = ctx
+        .clock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .now();
+    let proposal = crate::core::DriftProposal {
+        id,
+        kind: INITIATIVE_TRACKING_CLOSE.to_string(),
+        subject_kind: "initiative".to_string(),
+        subject_id: initiative.id.clone(),
+        project_id: Some(item.target.project.id.clone()),
+        project_slug: Some(item.target.project.slug.clone()),
+        summary: format!(
+            "initiative {} is closed; its tracking issue #{} in {} is still open upstream — Vogt proposes closing it, never writes the close",
+            crate::core::py_repr(&initiative.slug),
+            item.number,
+            crate::core::py_repr(&item.target.project.slug),
+        ),
+        evidence_observation_id: None,
+        evidence_snapshot: Value::Null,
+        proposed_change: json!({
+            "entity": "tracking_issue",
+            "action": "close",
+            "initiative": initiative.slug,
+            "subject_key": subject_key,
+            "number": item.number,
+            "source_url": item.source_url,
+        }),
+        status: crate::core::DriftStatus::Open,
+        opened_at,
+        superseded_at: None,
+        superseded_detail: None,
+        resolved_by_actor_id: None,
+        resolved_by_identity_ref: None,
+        resolved_at: None,
+        resolution_reason: None,
+    };
+    let reason = format!(
+        "initiative {} closed: propose tracking-issue close",
+        crate::core::py_repr(&initiative.slug)
+    );
+    let mut write = crate::application::context::write_of(ctx);
+    crate::application::writes::audited_write(
+        &mut write,
+        "initiative.publish",
+        &reason,
+        move |txn, _actor| {
+            txn.insert_drift(&proposal)?;
+            Ok(crate::application::writes::WriteOutcome {
+                result: serde_json::to_value(&proposal).unwrap_or(Value::Null),
+                entity_kind: "drift_proposal".to_string(),
+                entity_id: proposal.id.clone(),
+                payload: serde_json::to_value(&proposal).unwrap_or(Value::Null),
+                event_kind: "drift.raised".to_string(),
+                summary: json!({"kind": proposal.kind, "initiative": initiative.slug}),
+            })
+        },
+    )?;
+    Ok(())
 }
 
 fn parse_state(text: &str) -> Result<InitiativeState, VogtError> {

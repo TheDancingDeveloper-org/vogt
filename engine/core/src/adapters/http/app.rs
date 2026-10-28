@@ -2053,16 +2053,16 @@ mod tests {
     }
 
     #[test]
-    fn no_auth_reaches_the_operation_and_an_unported_one_says_so() {
+    fn no_auth_reaches_a_ported_diagnostics_read() {
         let running = serve(true);
         let (status, body) = request(running.addr, "GET", "/api/instance/diagnostics", None);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(status, 501, "{body}");
-        assert_eq!(json["error"]["code"], "invalid_request");
-        assert!(json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("instance.diagnostics"));
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(json["status"], "degraded");
+        assert!(json["checks"]
+            .as_array()
+            .is_some_and(|checks| !checks.is_empty()));
+        assert_eq!(json["peer"]["status"], "not_requested");
     }
 
     #[test]

@@ -1824,7 +1824,11 @@ mod tests {
             "{}",
             result.stderr
         );
-        assert!(result.stderr.contains("not been ported"));
+        assert!(
+            result.stderr.contains("needs an instance context"),
+            "{}",
+            result.stderr
+        );
     }
 
     #[test]

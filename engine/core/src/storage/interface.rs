@@ -16,8 +16,8 @@ use crate::core::{
     Actor, ActorPreference, AuditRecord, AuthDecision, Charter, CodingSession, Comment,
     ContractExemption, Decision, DepRef, DriftProposal, Event, ForgeAccount, InboxTriage,
     Initiative, Label, Moment, Observation, PasswordCredential, Principal, Project, RelationKind,
-    SessionGrant, Suppression, Sweep, SweepOutcome, Token, Watch, WorkItem, WorkLink, WorkOverlay,
-    Workflow, WriteBackRecord,
+    SessionGrant, SessionReport, Suppression, Sweep, SweepOutcome, Token, Watch, WorkItem,
+    WorkLink, WorkOverlay, Workflow, WriteBackRecord,
 };
 use crate::storage::observed_types::{
     ActivityBatch, ActivityEventRow, ActivityIndexStats, ActivityQuery, ActivitySessionRow,
@@ -438,6 +438,19 @@ pub trait ReadView {
         &self,
         engine_session_id: &str,
     ) -> Result<Option<CodingSession>, crate::errors::VogtError>;
+    /// The newest report each of these engine sessions made, keyed by id.
+    /// A session that never reported is absent.
+    fn latest_session_reports(
+        &self,
+        engine_session_ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, SessionReport>, crate::errors::VogtError>;
+    fn list_session_reports(
+        &self,
+        engine_session_id: Option<&str>,
+        work_item_id: Option<&str>,
+        kind: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SessionReport>, crate::errors::VogtError>;
     fn list_session_grants(
         &self,
         state: Option<&str>,
@@ -646,6 +659,10 @@ pub trait WriteTxn: ReadView {
         grant: &SessionGrant,
     ) -> Result<(), crate::errors::VogtError>;
     fn insert_decision(&mut self, decision: &Decision) -> Result<(), crate::errors::VogtError>;
+    fn insert_session_report(
+        &mut self,
+        report: &SessionReport,
+    ) -> Result<(), crate::errors::VogtError>;
     fn update_decision(&mut self, decision: &Decision) -> Result<(), crate::errors::VogtError>;
     fn set_session_work_item(
         &mut self,

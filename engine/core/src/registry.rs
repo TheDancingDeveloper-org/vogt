@@ -153,6 +153,9 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "drift.resolve" => Some(crate::application::drift::drift_resolve_op),
         "session.bind_work" => Some(crate::application::session_work::bind_work_op),
         "session.report_blocked" => Some(crate::application::session_blocked::report_blocked_op),
+        "session.report" => Some(crate::application::session_report::report_op),
+        "usage.board" => Some(crate::application::usage::usage_board_op),
+        "instance.diagnostics" => Some(crate::application::instance::diagnostics_op),
         "session.report_unblocked" => {
             Some(crate::application::session_blocked::report_unblocked_op)
         }
@@ -1061,8 +1064,23 @@ mod tests {
     #[test]
     fn not_ported_is_a_failure() {
         let registry = registry();
-        let operation = registry.get("instance.diagnostics").unwrap();
-        let error = operation.run(None, serde_json::json!({})).unwrap_err();
+        // instance.diagnostics is ported: with no context it asks for one.
+        let diagnostics = registry.get("instance.diagnostics").unwrap();
+        let needs = diagnostics.run(None, serde_json::json!({})).unwrap_err();
+        assert!(
+            needs.message().contains("needs an instance context"),
+            "{}",
+            needs.message()
+        );
+        // An operation whose service has not landed still fails, and names itself.
+        let missing = registry
+            .iter()
+            .find(|operation| {
+                matches!(operation.handler, Handler::NotPorted)
+                    && service_for(operation.name).is_none()
+            })
+            .expect("an unported operation");
+        let error = missing.run(None, serde_json::json!({})).unwrap_err();
         assert!(
             error.message().contains("not been ported"),
             "{}",
@@ -1213,11 +1231,7 @@ mod tests {
     /// services, so a service arm is not how they are implemented.
     const PROCESS_COMMANDS: &[&str] = &["init", "serve"];
 
-    const PENDING_SERVICES: &[(&str, &str)] = &[
-        ("instance.diagnostics", "WI-2666"),
-        ("session.report", "WI-2666"),
-        ("usage.board", "WI-2666"),
-    ];
+    const PENDING_SERVICES: &[(&str, &str)] = &[] as &[(&str, &str)];
 
     #[test]
     fn every_registered_operation_has_a_handler_or_a_named_gap() {

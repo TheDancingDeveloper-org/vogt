@@ -490,3 +490,451 @@ fn stamp_if(clock: &mut Option<crate::core::StepClock>, due: bool) -> String {
         None => crate::core::to_iso(crate::core::utc_now()),
     }
 }
+
+/// Process start, the Rust stand-in for `PROCESS_STARTED_AT` in
+/// `observability.py`: the first time this process is asked, in UTC.
+fn process_started_at() -> crate::core::Moment {
+    use std::sync::OnceLock;
+    static STARTED: OnceLock<crate::core::Moment> = OnceLock::new();
+    *STARTED.get_or_init(crate::core::utc_now)
+}
+
+/// `instance.diagnostics`, as the registry calls it. Ports
+/// `instance_diagnostics` in `services/instance.py`.
+pub fn diagnostics_op(
+    ctx: &Built,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| diagnostics(ctx, params))
+}
+
+/// Is this instance what it should be, and is it well — in one read.
+///
+/// Every check reports rather than raises: a diagnostics read that fails when
+/// something is wrong would fail exactly when it is needed.
+fn diagnostics<C: Clock, I: IdFactory>(
+    ctx: &crate::application::context::AppContext<C, I>,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, VogtError> {
+    use crate::application::models::system::{DiagnosticsParams, DiagnosticsResult};
+    use crate::application::models::views::{
+        DiagnosticCheck, DiagnosticCheckStatus, DiagnosticsResultStatus, RecentLog, StoreMigration,
+    };
+    use crate::observability::{
+        capturing_problems, recent_problems, redact, RECENT_PROBLEMS_CAPACITY,
+    };
+
+    let params: DiagnosticsParams = serde_json::from_value(params).map_err(|err| {
+        VogtError::InvalidParams(format!("instance.diagnostics parameters: {err}"))
+    })?;
+    let mut checks: Vec<DiagnosticCheck> = Vec::new();
+    let mut migrations = std::collections::BTreeMap::new();
+    let mut instance_id = None;
+
+    for (name, applied, expected) in [
+        (
+            "declared",
+            ctx.declared.schema_version(),
+            ctx.declared.bundled_schema_version(),
+        ),
+        (
+            "observed",
+            ctx.observed.schema_version(),
+            ctx.observed.bundled_schema_version(),
+        ),
+    ] {
+        migrations.insert(
+            name.to_string(),
+            StoreMigration {
+                applied,
+                expected,
+                pending: (expected - applied).max(0),
+            },
+        );
+        checks.push(DiagnosticCheck {
+            name: format!("{name}_store"),
+            status: if applied == expected {
+                DiagnosticCheckStatus::Ok
+            } else {
+                DiagnosticCheckStatus::Failing
+            },
+            detail: if applied == expected {
+                None
+            } else {
+                Some(format!(
+                    "schema {applied}, this build expects {expected} — run migrate"
+                ))
+            },
+        });
+    }
+
+    match ctx.declared.read().and_then(|view| view.instance_id()) {
+        Ok(id) => instance_id = Some(id),
+        Err(error) => checks.push(DiagnosticCheck {
+            name: "instance".to_string(),
+            status: DiagnosticCheckStatus::Failing,
+            detail: Some(redact(error.message())),
+        }),
+    }
+
+    match &ctx.engine {
+        None => checks.push(DiagnosticCheck {
+            name: "engine".to_string(),
+            status: DiagnosticCheckStatus::NotConfigured,
+            detail: Some("no engine_url; session operations are unavailable".to_string()),
+        }),
+        Some(engine) => match engine.healthz() {
+            Ok(()) => checks.push(DiagnosticCheck {
+                name: "engine".to_string(),
+                status: DiagnosticCheckStatus::Ok,
+                detail: None,
+            }),
+            Err(error) => checks.push(DiagnosticCheck {
+                name: "engine".to_string(),
+                status: DiagnosticCheckStatus::Degraded,
+                detail: Some(error.message().to_string()),
+            }),
+        },
+    }
+
+    match crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock) {
+        Ok(freshness) => {
+            let status_name = freshness.get("status").and_then(|value| value.as_str());
+            let age = freshness
+                .get("age_seconds")
+                .and_then(|value| value.as_i64());
+            let detail_text = freshness
+                .get("detail")
+                .and_then(|value| value.as_str())
+                .filter(|text| !text.is_empty());
+            let detail = match age {
+                None => detail_text.map(str::to_string),
+                Some(seconds) => {
+                    let mut text = format!("oldest sweep {seconds}s ago");
+                    if let Some(extra) = detail_text {
+                        text.push_str("; ");
+                        text.push_str(extra);
+                    }
+                    Some(text)
+                }
+            };
+            checks.push(DiagnosticCheck {
+                name: "collection".to_string(),
+                status: if status_name == Some("fresh") {
+                    DiagnosticCheckStatus::Ok
+                } else {
+                    DiagnosticCheckStatus::Degraded
+                },
+                detail,
+            });
+        }
+        Err(error) => checks.push(DiagnosticCheck {
+            name: "collection".to_string(),
+            status: DiagnosticCheckStatus::Degraded,
+            detail: Some(redact(error.message())),
+        }),
+    }
+
+    let failing = checks
+        .iter()
+        .any(|check| matches!(check.status, DiagnosticCheckStatus::Failing));
+    let degraded = checks
+        .iter()
+        .any(|check| matches!(check.status, DiagnosticCheckStatus::Degraded));
+    let overall = if failing {
+        DiagnosticsResultStatus::Failing
+    } else if degraded {
+        DiagnosticsResultStatus::Degraded
+    } else {
+        DiagnosticsResultStatus::Ok
+    };
+
+    let started = process_started_at();
+    let now = crate::application::services::now_of(&ctx.clock);
+    let uptime = (now.seconds_since(started) as i64).max(0);
+    let result = DiagnosticsResult {
+        status: overall,
+        vogt_version: crate::VERSION.to_string(),
+        image_digest: ctx.config.image_digest.clone(),
+        instance_id,
+        started_at: started.to_json(),
+        uptime_seconds: uptime,
+        checks,
+        migrations,
+        recent_log: RecentLog {
+            capturing: capturing_problems(),
+            lines: recent_problems(params.log_lines.max(0) as usize),
+            capacity: RECENT_PROBLEMS_CAPACITY as i64,
+        },
+        peer: peer_diagnostics(ctx, params.peer, params.log_lines),
+    };
+    serde_json::to_value(result).map_err(|err| {
+        VogtError::InvalidRequest(format!("instance.diagnostics could not be encoded: {err}"))
+    })
+}
+
+fn peer_diagnostics<C: Clock, I: IdFactory>(
+    ctx: &crate::application::context::AppContext<C, I>,
+    asked: bool,
+    log_lines: i64,
+) -> crate::application::models::views::PeerDiagnostics {
+    use crate::application::models::views::{PeerDiagnostics, PeerDiagnosticsStatus};
+    if !asked {
+        return PeerDiagnostics {
+            status: PeerDiagnosticsStatus::NotRequested,
+            url: None,
+            detail: None,
+            diagnostics: None,
+        };
+    }
+    let Some(peer) = &ctx.peer else {
+        return PeerDiagnostics {
+            status: PeerDiagnosticsStatus::NotConfigured,
+            url: None,
+            detail: Some("set diagnostics_peer_url (and diagnostics_peer_token_file)".to_string()),
+            diagnostics: None,
+        };
+    };
+    match peer.diagnostics(log_lines) {
+        Ok(answer) => PeerDiagnostics {
+            status: PeerDiagnosticsStatus::Ok,
+            url: Some(peer.base_url().to_string()),
+            detail: None,
+            diagnostics: Some(answer),
+        },
+        Err(VogtError::PeerUnavailable { status, message }) => PeerDiagnostics {
+            status: match status.as_str() {
+                "refused" => PeerDiagnosticsStatus::Refused,
+                "invalid_response" => PeerDiagnosticsStatus::InvalidResponse,
+                _ => PeerDiagnosticsStatus::Unreachable,
+            },
+            url: Some(peer.base_url().to_string()),
+            detail: Some(message),
+            diagnostics: None,
+        },
+        Err(error) => PeerDiagnostics {
+            status: PeerDiagnosticsStatus::Unreachable,
+            url: Some(peer.base_url().to_string()),
+            detail: Some(error.message().to_string()),
+            diagnostics: None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use crate::adapters::engine::EngineClient;
+    use crate::adapters::peer::PeerClient;
+    use crate::application::context::{build_context, Built};
+    use crate::application::instance::diagnostics_op;
+    use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
+    use crate::observability::{configure_logging, recent_problems};
+    use crate::storage::interface::{DeclaredStore, ObservedStore};
+
+    fn principal() -> Principal {
+        Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()
+    }
+
+    fn opened(
+        engine: Option<EngineClient>,
+        peer: Option<PeerClient>,
+        digest: Option<&str>,
+    ) -> Built {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("vogt-diag-{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            image_digest: digest.map(str::to_string),
+            ..crate::config::VogtConfig::default()
+        };
+        let built = build_context(
+            config,
+            Some(principal()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            engine,
+            peer,
+            None,
+        )
+        .unwrap();
+        crate::with_ctx!(&built, |ctx| {
+            ctx.declared.migrate().unwrap();
+            ctx.declared.bootstrap(&principal()).unwrap();
+            ctx.observed.migrate().unwrap();
+        });
+        built
+    }
+
+    fn checks(answer: &serde_json::Value) -> BTreeMap<String, serde_json::Value> {
+        answer["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|check| (check["name"].as_str().unwrap().to_string(), check.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_healthy_instance_reports_identity_and_a_degraded_collection() {
+        let built = opened(None, None, None);
+        let answer = diagnostics_op(&built, json!({})).unwrap();
+        assert_eq!(answer["vogt_version"], crate::VERSION);
+        assert!(answer["image_digest"].is_null());
+        assert!(answer["instance_id"].as_str().unwrap().starts_with("ins_"));
+        assert!(answer["uptime_seconds"].as_i64().unwrap() >= 0);
+        assert_eq!(answer["migrations"]["declared"]["pending"], 0);
+        assert_eq!(answer["migrations"]["observed"]["pending"], 0);
+        let named = checks(&answer);
+        assert_eq!(named["declared_store"]["status"], "ok");
+        assert_eq!(named["observed_store"]["status"], "ok");
+        assert_eq!(named["engine"]["status"], "not_configured");
+        assert!(named["engine"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("no engine_url"));
+        assert_eq!(named["collection"]["status"], "degraded");
+        assert_eq!(answer["status"], "degraded");
+        assert_eq!(answer["peer"]["status"], "not_requested");
+        assert!(answer["peer"]["diagnostics"].is_null());
+    }
+
+    #[test]
+    fn the_image_digest_is_the_one_the_deployment_stated() {
+        let built = opened(None, None, Some("sha256:abc"));
+        let answer = diagnostics_op(&built, json!({})).unwrap();
+        assert_eq!(answer["image_digest"], "sha256:abc");
+    }
+
+    #[test]
+    fn an_unreachable_engine_degrades_the_check_instead_of_failing_the_read() {
+        let transport: crate::adapters::engine::Transport =
+            Arc::new(|_url, _headers, _body, _method| (503, b"no".to_vec()));
+        let engine = EngineClient::new("http://e", None, Some(transport));
+        let built = opened(Some(engine), None, None);
+        let answer = diagnostics_op(&built, json!({})).unwrap();
+        let named = checks(&answer);
+        assert_eq!(named["engine"]["status"], "degraded");
+        assert!(named["engine"]["detail"].as_str().unwrap().contains("503"));
+    }
+
+    #[test]
+    fn a_healthy_engine_is_ok() {
+        let transport: crate::adapters::engine::Transport =
+            Arc::new(|url, _headers, _body, _method| {
+                assert!(url.ends_with("/healthz"), "{url}");
+                (200, br#"{"ok": true}"#.to_vec())
+            });
+        let engine = EngineClient::new("http://e", None, Some(transport));
+        let built = opened(Some(engine), None, None);
+        let answer = diagnostics_op(&built, json!({})).unwrap();
+        assert_eq!(checks(&answer)["engine"]["status"], "ok");
+    }
+
+    #[test]
+    fn recent_problems_are_redacted_and_bounded() {
+        configure_logging("info", "text");
+        tracing::warn!(
+            target: "vogt.diagnostics_test",
+            "push failed for https://bot:s3cret@github.com/x token=vogt_abcdefgh123"
+        );
+        tracing::error!(
+            target: "vogt.diagnostics_test",
+            "Authorization: Bearer abc.def.ghi rejected"
+        );
+        tracing::info!(target: "vogt.diagnostics_test", "an info line is not a problem");
+        let built = opened(None, None, None);
+        let answer = diagnostics_op(&built, json!({"log_lines": 2})).unwrap();
+        assert_eq!(answer["recent_log"]["capturing"], true);
+        let lines = answer["recent_log"]["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 2);
+        let joined = lines
+            .iter()
+            .map(|line| line.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!joined.contains("s3cret"));
+        assert!(!joined.contains("vogt_abcdefgh123"));
+        assert!(!joined.contains("abc.def.ghi"));
+        assert!(joined.contains("push failed"));
+        assert!(!joined.contains("an info line"));
+        let none = diagnostics_op(&built, json!({"log_lines": 0})).unwrap();
+        assert_eq!(none["recent_log"]["lines"].as_array().unwrap().len(), 0);
+        assert!(recent_problems(0).is_empty());
+    }
+
+    #[test]
+    fn a_peer_that_was_not_configured_is_said() {
+        let built = opened(None, None, None);
+        let answer = diagnostics_op(&built, json!({"peer": true})).unwrap();
+        assert_eq!(answer["peer"]["status"], "not_configured");
+        assert!(answer["peer"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("diagnostics_peer_url"));
+    }
+
+    #[test]
+    fn a_peer_answer_is_fetched_with_the_token_and_without_recursion() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let transport: crate::adapters::peer::Transport =
+            Box::new(move |url, headers, _body, method| {
+                assert_eq!(method, "GET");
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((url.to_string(), headers.get("Authorization").cloned()));
+                (200, br#"{"vogt_version":"9.9.9","status":"ok"}"#.to_vec())
+            });
+        // from_config reads the token from a file.
+        let dir = std::env::temp_dir().join(format!("vogt-peer-token-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let token_path = dir.join("peer.token");
+        std::fs::write(&token_path, "t0k\n").unwrap();
+        let peer = PeerClient::from_config(
+            Some("https://prod/api/vogt"),
+            Some(&token_path),
+            Some(transport),
+        )
+        .unwrap();
+        let built = opened(None, Some(peer), None);
+        let answer = diagnostics_op(&built, json!({"peer": true, "log_lines": 5})).unwrap();
+        assert_eq!(answer["peer"]["status"], "ok");
+        assert_eq!(answer["peer"]["diagnostics"]["vogt_version"], "9.9.9");
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen[0].0,
+            "https://prod/api/vogt/instance/diagnostics?peer=false&log_lines=5"
+        );
+        assert_eq!(seen[0].1.as_deref(), Some("Bearer t0k"));
+    }
+
+    #[test]
+    fn peer_failures_are_reported_not_raised() {
+        for (status, body, expected) in [
+            (401u16, b"".as_slice(), "refused"),
+            (502, b"", "unreachable"),
+            (200, b"<html>", "invalid_response"),
+            (200, b"[1]", "invalid_response"),
+        ] {
+            let body = body.to_vec();
+            let transport: crate::adapters::peer::Transport =
+                Box::new(move |_url, _headers, _body, _method| (status, body.clone()));
+            let peer = PeerClient::from_config(Some("https://p"), None, Some(transport)).unwrap();
+            let built = opened(None, Some(peer), None);
+            let answer = diagnostics_op(&built, json!({"peer": true})).unwrap();
+            assert_eq!(answer["peer"]["status"], expected, "{status}");
+            assert!(answer["peer"]["diagnostics"].is_null());
+        }
+    }
+}

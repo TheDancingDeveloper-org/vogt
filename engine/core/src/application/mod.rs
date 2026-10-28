@@ -38,10 +38,12 @@ pub mod session_commit;
 pub mod session_digest;
 pub mod session_economics;
 pub mod session_reads;
+pub mod session_report;
 pub mod session_work;
 pub mod suppressions;
 pub mod taxonomy;
 pub mod upstream;
+pub mod usage;
 pub mod views;
 #[cfg(test)]
 mod workspace_disk_test;

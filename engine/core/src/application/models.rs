@@ -172,6 +172,7 @@ pub const DERIVED: &[&str] = &[
 mod access;
 mod admin;
 mod caught_up;
+pub(crate) use caught_up::UsageBoardParams;
 mod chat;
 mod entities;
 mod forge;
@@ -179,8 +180,8 @@ mod project;
 mod records;
 mod session;
 mod session_ops;
-mod system;
-mod views;
+pub(crate) mod system;
+pub(crate) mod views;
 mod work;
 
 /// `(operation name, params schema, result schema)` for every name in
