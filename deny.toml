@@ -1,0 +1,58 @@
+# cargo-deny policy for the Rust core. Checked by rust-core.yml on every push
+# (WI-2674). The advisory ignores match the reasoned ones in ci.yml (WI-2373).
+
+[advisories]
+unmaintained = "workspace"
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2023-0071 (Marvin Attack): no fixed rsa release. Vogt never
+    # decrypts with RSA; it parses an unencrypted PKCS#1 or PKCS#8 key.
+    "RUSTSEC-2023-0071",
+    # RUSTSEC-2025-0134: rustls-pemfile is unmaintained, with no successor, and
+    # arrives through rustls-native-certs and axum-server.
+    "RUSTSEC-2025-0134",
+    # RUSTSEC-2026-0387: crypto-bigint 0.5.5 timing variability. jsonwebtoken
+    # and web-push pin elliptic-curve 0.13, which pins crypto-bigint 0.5.
+    # Accepted by the operator 2026-10-24; WI-2373 drops it at 0.14.
+    "RUSTSEC-2026-0387",
+]
+
+[licenses]
+allow = [
+    "AGPL-3.0-only",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "simplest-path"
+# The 13 crates that resolve twice (or more) under vogt-core, from
+# `cargo tree -d -p vogt-core`. Warning, not denied: collapsing them means
+# moving scrypt 0.12 / rsa 0.9 / aes 0.8 / hmac 0.12 onto the RustCrypto 0.2
+# line, and those crates have not published that. Plan: when scrypt, rsa and
+# hmac publish against digest 0.11 / cipher 0.5, bump them together and delete
+# this list. Until then the warning is the record.
+# base64 0.13 / 0.21 / 0.22 / 0.23
+# block-buffer, cipher, cpufeatures, crypto-common, digest (RustCrypto 0.1 vs 0.2)
+# hashbrown
+# hmac 0.12 / 0.13
+# inout
+# openssl-probe 0.1.6 (direct) and 0.2.1
+# sha2
+# syn
+# webpki-roots
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -115,6 +115,34 @@ jobs:
           # not. --offline uses the cache the job already warmed.
           ( cd "$stage/engine" && cargo check --offline -p vogt-core )
 
+
+  supply-chain:
+    name: cargo deny and cargo audit
+    # On every push, with rust and parity (WI-2674). cargo-deny reads deny.toml
+    # at the repo root. cargo audit uses the same reasoned ignores as ci.yml.
+    runs-on: [self-hosted, bigmem]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+
+      - name: install cargo-deny and cargo-audit
+        run: |
+          cargo install --locked cargo-deny --version 0.18.9
+          cargo install --locked cargo-audit --version 0.22.2
+
+      - name: cargo deny
+        run: cargo deny --all-features check
+
+      - name: cargo audit
+        working-directory: engine
+        run: |
+          set -euo pipefail
+          advisory_db="${RUNNER_TEMP:-/tmp}/rustsec-advisory-db"
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0             git clone --quiet --depth 1 https://github.com/RustSec/advisory-db.git "$advisory_db"
+          # Same three ignores as ci.yml, each with a reason in deny.toml.
+          cargo audit --no-fetch --db "$advisory_db" --deny warnings             --ignore RUSTSEC-2023-0071             --ignore RUSTSEC-2025-0134             --ignore RUSTSEC-2026-0387
   compose:
     name: compose smoke against the Rust core
     # Image build and stack walk only. The live browser run moved to
