@@ -26,8 +26,18 @@ and each merge forced sibling PRs to rebase and run it all again.
 | `engine/`, `docs/ENGINE.md` | the engine job's **rust** half: fmt, rust-version, cargo audit, clippy, nextest, doctests |
 | `web/` | the engine job's **web** half: pnpm audit, typecheck, vitest, demo Playwright, PWA build, bundle budget |
 | `voice/` | the voice job |
+| `engine/server/**`, `engine/contract/**` or `engine/core/**` | only the Rust member the diff touches: clippy, nextest and doctests run with `-p` |
+| `voice/{server,stt,tts,models}/**` | only that voice member, likewise scoped with `-p` |
 | `mobile/` | the android job |
 | anything else (docs, markdown) | nothing: the `ci` gate passes on skipped halves |
+
+Scoping narrows *which crates* are checked, never *what* is checked: a PR
+touching one member runs the same clippy, nextest and doctest steps as the
+queue, just with `-p <member>` instead of `--workspace`. Anything that cannot
+be attributed to one member (`engine/Cargo.toml`, a new crate, another
+`engine/` or `voice/` path) falls back to the full workspace, as does a scope
+that resolves to nothing. `cargo fmt`, the rust-version check and
+`cargo audit` read the whole manifest tree and are never scoped.
 
 Only the queue and `main` run these:
 
@@ -36,6 +46,56 @@ Only the queue and `main` run these:
   `mobile/` before it tests, so on a PR only a Python change can affect it.
 - a web-only change rebuilt into the engine. The crate embeds `web/dist`, but
   a web-only PR does not run clippy or nextest against the new bundle.
+
+### What makes a pull request fast
+
+- A shared rust-cache key per workspace (`engine-ci`, `voice-ci`). A pull
+  request restores the cache `main` saved instead of starting cold. Only a
+  push to `main` writes the cache back; the post-job save costs about two
+  minutes and a pull request's cache is never reused by another ref.
+- `setup-uv` is asked for its cache explicitly (`enable-cache: true`, keyed
+  on `uv.lock`). Its `auto` mode only caches on GitHub-hosted runners, and
+  these runners are self-hosted, so without the flag a Python job resolves
+  the environment again every time.
+- `cargo-nextest` for the Rust and voice tests. It runs each test in its own
+  process, so a hang is terminated by the workspace nextest config and
+  reported as a failure instead of holding the job to its timeout, and
+  `--no-fail-fast` lists every failure in one round. Doctests are not
+  nextest's job and keep their own step.
+
+Python's `pytest` stays serial on purpose. The suite is bound by SQLite file
+I/O rather than CPU, and its tests bind sockets and spawn subprocesses, so
+xdist would add failure modes without buying wall clock. `pytest -n auto` is
+not used: a PR already runs only the Python job the diff touches.
+
+### Release dry run
+
+`release.yml` runs only on a `v*` tag, so without a rehearsal the first
+execution of the release path is the release itself. `release-dry-run.yml`
+removes that: on a PR touching the files a release reads (the release, build,
+pod-base and mirror workflows, the Dockerfiles and their ignore files, the
+version manifests and the version/policy scripts) and nightly at 03:00 UTC on
+`main`, it runs
+
+- the release-shape tests, the workflow-policy gate, and
+  `check_product_version.py` with no tag (the manifests agree with each
+  other), and
+- a local build of the core, then of the merged stack on top of that local
+  core, starting both halves.
+
+There is nothing to leak: no login, no `packages: write`, no `secrets.`, no
+`id-token`, no `cosign`, no `push`, no tag and no GitHub Release. It is
+deliberately not a required check (it depends on a Docker runner and is slow),
+so it can only ever be advisory on a PR; its nightly run is what notices drift
+that no PR touches.
+
+### Quarantined jobs
+
+`runner-watchdog.yml` runs on a schedule only and is quarantined with
+`continue-on-error: true` while `gh` is absent from the self-hosted runner
+image (it exits 127). The red run stays visible in the Actions tab. Because
+the workflow has no pull-request or `merge_group` trigger, there is no
+required context to restrict.
 
 ### CodeQL
 
@@ -69,12 +129,42 @@ everything they do not touch, and a merge no longer re-runs every open PR.
 CodeQL no longer runs in the queue. Its single `bigmem` slot serialises the
 three languages within a release run.
 
+## How changes land
+
+1. Branch from `origin/main`. Run the targeted gates for what you touched.
+2. Push and open the pull request. It runs only the path-scoped checks: fast
+   feedback on the changed halves, not the whole suite.
+3. Review happens on the pull request. The proposed tree is not retested by a
+   second review run.
+4. `land-pr` enqueues it. The merge queue runs the full suite on the exact
+   tree `main` will become: Python 3.11 and 3.13, the core alone, Rust and
+   the PWA, voice, the Android shell, and the `ci` gate.
+5. Merge only when `ci`, `dependency review` and `runner-policy` are green.
+   Those are the required status checks on `main`. A red queue run dequeues
+   the pull request; fix it and enqueue again.
+6. Versions move only at release. Feature pull requests do not bump them, and
+   a `v*` tag is cut from `main`.
+
+The `ci` gate takes seconds; the queue run is the expensive part and is
+deliberately not duplicated on every push to a pull request.
+
 ## Landing
 
 `land-pr` (workspace `.agent-tools/bin/land-pr`) detects a merge queue from
 the base branch's rulesets. It enqueues with `gh pr merge --auto` and follows
 the entry's `merge_group` runs. On a failed run it prints the failing job's
 log and exits 1. The PR is never rebased by hand while it is queued.
+
+The required status checks on `main` are `ci`, `dependency review` and
+`runner-policy`. Those are the three contexts a change must produce; every
+other job (`build`, `e2e`, `release`, `codeql`) is a separate workflow and is
+not required. Feature pull requests do not bump the product version: the
+version moves only in a release change, and the product-version check in CI
+asserts the manifests currently agree rather than that they changed.
+
+Run targeted checks before pushing — the test file you touched, the one crate
+you touched, the one surface you touched — and let the queue run the full
+suite. `scripts/check.sh <surface>` is the convenience form.
 
 ## Turning the queue on (operator)
 

@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 RELEASE = WORKFLOWS / "release.yml"
 BUILD = WORKFLOWS / "build.yml"
+DRY_RUN = WORKFLOWS / "release-dry-run.yml"
 
 pytestmark = pytest.mark.skipif(
     not RELEASE.is_file(), reason="workflows are absent from the core-only test image"
@@ -35,18 +36,33 @@ def _release() -> str:
     return RELEASE.read_text(encoding="utf-8")
 
 
+def _dry_run() -> str:
+    return DRY_RUN.read_text(encoding="utf-8")
+
+
+def _dry_run_code() -> str:
+    """The dry run without its comments: they name what it deliberately omits."""
+    return "\n".join(
+        line for line in _dry_run().splitlines() if not line.lstrip().startswith("#")
+    )
+
+
 def _group(pattern: str, text: str, flags: int = 0) -> str:
     match = re.search(pattern, text, flags)
     assert match, pattern
     return match.group(1)
 
 
-def _job_block(text: str, job_id: str) -> str:
+def _job_block_in(text: str, job_id: str, path: str) -> str:
     match = re.search(
         rf"^  {re.escape(job_id)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)", text, re.M | re.S
     )
-    assert match, f"release.yml has no job {job_id!r}"
+    assert match, f"{path} has no job {job_id!r}"
     return match.group(1)
+
+
+def _job_block(text: str, job_id: str) -> str:
+    return _job_block_in(text, job_id, "release.yml")
 
 
 def test_release_builds_no_image() -> None:
@@ -188,3 +204,61 @@ def test_core_and_stack_are_built_once_and_tagged_after_smoke() -> None:
     # smoke leaves. vogt and vogt-stack are in the package list it sweeps.
     retention = (WORKFLOWS / "ghcr-retention.yml").read_text(encoding="utf-8")
     assert "vogt vogt-stack" in retention
+
+
+def test_the_dry_run_publishes_nothing() -> None:
+    """A dry run on a PR has no credential, so it must not be able to publish."""
+    text = _dry_run_code()
+    for forbidden in (
+        "secrets.",
+        "docker/login-action",
+        "packages: write",
+        "id-token",
+        "cosign",
+        "docker/build-push-action",
+        "docker push",
+        "--push",
+        "imagetools create",
+    ):
+        assert forbidden not in text, forbidden
+
+
+def test_the_dry_run_runs_on_release_inputs_and_nightly() -> None:
+    text = _dry_run()
+    workflow = parse_workflow(str(DRY_RUN), text)
+    assert {"pull_request", "schedule", "workflow_dispatch"} <= workflow.events
+    # A nightly run on main is what catches drift that no PR touches.
+    assert re.search(r'^\s+schedule:\n\s+- cron: "0 3 \* \* \*"$', text, re.M)
+    for path in (
+        ".github/workflows/release.yml",
+        ".github/workflows/build.yml",
+        "Dockerfile",
+        "engine/Dockerfile",
+        "engine/Dockerfile.pod",
+        "pyproject.toml",
+        "uv.lock",
+        "scripts/check_product_version.py",
+    ):
+        assert f'      - "{path}"' in text, path
+
+
+def test_every_dry_run_job_times_out_on_a_self_hosted_runner() -> None:
+    text = _dry_run()
+    workflow = parse_workflow(str(DRY_RUN), text)
+    assert timeout_problems(workflow) == []
+    for line in text.splitlines():
+        if line.strip().startswith("runs-on:"):
+            assert "self-hosted" in line
+
+
+def test_the_dry_run_builds_this_tree_and_never_a_published_core() -> None:
+    block = _job_block_in(_dry_run(), "build", "release-dry-run.yml")
+    # The core is built here and consumed by tag, so the stack is exercised
+    # against this checkout rather than a core already in the registry.
+    assert "docker build -f Dockerfile -t vogt-dry-run-core ." in block
+    assert "--build-arg CORE_IMAGE=vogt-dry-run-core" in block
+    assert "--build-arg VOGT_PRODUCT_VERSION=dry-run" in block
+    # Both halves are started, which is what caught the unrunnable releases.
+    assert "docker run --rm --entrypoint vogt vogt-dry-run-stack --version" in block
+    assert "docker run --rm --entrypoint vogt-engine vogt-dry-run-stack --help" in block
+
