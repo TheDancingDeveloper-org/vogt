@@ -116,8 +116,11 @@ LABEL org.opencontainers.image.title="vogt" \
 # to run at all and the collector recording an observation it had never read
 # — so it is installed here, and the image's own smoke test
 # asks the built image for it rather than trusting this line.
+# `wget` is the health probe. `vogt-lifecycle health` GETs the readiness URL
+# with wget or curl and fails closed if neither is on PATH. python:3.13-slim
+# ships neither, so without this the compose healthcheck exits 127 forever.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git wget \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 1000 vogt \
