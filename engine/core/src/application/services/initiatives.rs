@@ -122,9 +122,20 @@ where
     let (declared, _, _, _, _, _) = context_parts(ctx);
     let view = declared.read()?;
     let rows = view.list_initiatives(limit, offset)?;
-    Ok(json!({
-        "initiatives": rows.iter().map(initiative_json).collect::<Vec<_>>(),
-    }))
+    // `summary` blanks each body. Anything else, including the default `full`,
+    // keeps it. Python copies the row and sets body to "" only in that case.
+    let summary = params.get("mode").and_then(Value::as_str) == Some("summary");
+    let initiatives = rows
+        .iter()
+        .map(|row| {
+            let mut shown = row.clone();
+            if summary {
+                shown.body.clear();
+            }
+            initiative_json(&shown)
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "initiatives": initiatives }))
 }
 
 fn initiative_update<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
