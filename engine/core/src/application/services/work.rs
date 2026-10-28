@@ -3265,10 +3265,16 @@ mod tests {
             std::env::temp_dir().join(format!("vogt-work-app-{}-{}", std::process::id(), unique()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        use rsa::RsaPrivateKey;
         let key = dir.join("app.pem");
+        let private = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
         std::fs::write(
             &key,
-            "-----BEGIN RSA PRIVATE KEY-----\nAQ==\n-----END RSA PRIVATE KEY-----\n",
+            private
+                .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)
+                .unwrap()
+                .as_bytes(),
         )
         .unwrap();
         let config = crate::config::VogtConfig {

@@ -352,112 +352,21 @@ fn expand_user(path: &Path) -> std::path::PathBuf {
     path.to_path_buf()
 }
 
-/// True when `bytes` is a PEM whose first private-key block is an RSA key.
+/// True when `bytes` is a PEM that decodes as an unencrypted RSA private key.
 ///
-/// PKCS#1 (`RSA PRIVATE KEY`) is RSA by label. PKCS#8 (`PRIVATE KEY`) is RSA
-/// when its algorithm OID is `rsaEncryption` (1.2.840.113549.1.1.1), the same
-/// distinction `cryptography`'s `load_pem_private_key` makes before
-/// `isinstance(..., RSAPrivateKey)`. An EC or encrypted key is not.
+/// Ports `GitHubAppAuth.from_key_file`: `load_pem_private_key(..., password=None)`
+/// then `isinstance(..., RSAPrivateKey)`. PKCS#1 (`RSA PRIVATE KEY`) and PKCS#8
+/// (`PRIVATE KEY`) both count when the key is actually RSA. An encrypted key, an
+/// EC or other non-RSA key, and a body that does not decode are `false`. The
+/// parse error is dropped: its text can echo key material, and this gate never
+/// logs or returns it.
 fn rsa_private_key_pem(bytes: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(bytes);
-    let mut lines = text.lines();
-    let label = loop {
-        let Some(line) = lines.next() else {
-            return false;
-        };
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("-----BEGIN ") {
-            if let Some(label) = rest.strip_suffix("-----") {
-                break label.trim().to_owned();
-            }
-        }
-    };
-    if label == "RSA PRIVATE KEY" {
-        return true;
-    }
-    if label != "PRIVATE KEY" {
-        return false;
-    }
-    let mut body = String::new();
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed.starts_with("-----END ") {
-            break;
-        }
-        if !trimmed.is_empty() {
-            body.push_str(trimmed);
-        }
-    }
-    let Ok(der) =
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body.as_bytes())
-    else {
-        return false;
-    };
-    pkcs8_is_rsa(&der)
-}
-
-/// `rsaEncryption` inside a PKCS#8 `PrivateKeyInfo` algorithm identifier.
-const RSA_ENCRYPTION_OID: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
-
-fn pkcs8_is_rsa(der: &[u8]) -> bool {
-    // PrivateKeyInfo ::= SEQUENCE { version INTEGER, algorithm AlgorithmIdentifier, ... }
-    // AlgorithmIdentifier ::= SEQUENCE { algorithm OBJECT IDENTIFIER, ... }
-    let Some(body) = der_sequence(der) else {
-        return false;
-    };
-    let Some(after_version) = der_skip(body) else {
-        return false;
-    };
-    let Some(algorithm) = der_sequence(after_version) else {
-        return false;
-    };
-    let Some(oid) = der_oid(algorithm) else {
-        return false;
-    };
-    oid == RSA_ENCRYPTION_OID
-}
-
-fn der_sequence(bytes: &[u8]) -> Option<&[u8]> {
-    der_tag(bytes, 0x30).map(|(_, inner)| inner)
-}
-
-fn der_oid(bytes: &[u8]) -> Option<&[u8]> {
-    der_tag(bytes, 0x06).map(|(_, inner)| inner)
-}
-
-fn der_skip(bytes: &[u8]) -> Option<&[u8]> {
-    let (rest, _, _) = der_tlv(bytes)?;
-    Some(rest)
-}
-
-fn der_tag(bytes: &[u8], tag: u8) -> Option<(&[u8], &[u8])> {
-    let (rest, found, inner) = der_tlv(bytes)?;
-    if found != tag {
-        return None;
-    }
-    Some((rest, inner))
-}
-
-fn der_tlv(bytes: &[u8]) -> Option<(&[u8], u8, &[u8])> {
-    let (&tag, rest) = bytes.split_first()?;
-    let (&first, rest) = rest.split_first()?;
-    let (len, rest) = if first < 0x80 {
-        (first as usize, rest)
-    } else {
-        let octets = (first & 0x7f) as usize;
-        if octets == 0 || octets > 3 || rest.len() < octets {
-            return None;
-        }
-        let mut len = 0usize;
-        for byte in &rest[..octets] {
-            len = (len << 8) | *byte as usize;
-        }
-        (len, &rest[octets..])
-    };
-    if rest.len() < len {
-        return None;
-    }
-    Some((&rest[len..], tag, &rest[..len]))
+    use rsa::pkcs1::DecodeRsaPrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::RsaPrivateKey;
+    RsaPrivateKey::from_pkcs1_pem(std::str::from_utf8(bytes).unwrap_or(""))
+        .or_else(|_| RsaPrivateKey::from_pkcs8_pem(std::str::from_utf8(bytes).unwrap_or("")))
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -575,55 +484,49 @@ mod tests {
     }
 
     #[test]
-    fn usable_app_key_accepts_an_rsa_pem_and_rejects_anything_else() {
+    fn usable_app_key_decodes_rsa_and_rejects_the_rest() {
         let dir = std::env::temp_dir().join(format!("vogt-app-key-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let rsa = dir.join("app.pem");
-        // A one-byte PKCS#1 body is enough: the label is what makes it RSA.
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        use rsa::pkcs8::EncodePrivateKey;
+        let mut rng = rsa::rand_core::OsRng;
+        let key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pkcs1 = dir.join("pkcs1.pem");
         std::fs::write(
-            &rsa,
-            "-----BEGIN RSA PRIVATE KEY-----\nAQ==\n-----END RSA PRIVATE KEY-----\n",
+            &pkcs1,
+            key.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF).unwrap(),
         )
         .unwrap();
-        assert!(GitHubClient::usable_app_key(&rsa));
+        assert!(GitHubClient::usable_app_key(&pkcs1));
         let pkcs8 = dir.join("pkcs8.pem");
-        // SEQUENCE { INTEGER 0, SEQUENCE { OID rsaEncryption } }, hand-built.
-        // 30 0d 02 01 00 30 08 06 09 2a 86 48 86 f7 0d 01 01 01
         std::fs::write(
             &pkcs8,
-            "-----BEGIN PRIVATE KEY-----\nMA0CAQQwCAYJKoZIhvcNAQEB\n-----END PRIVATE KEY-----\n",
-        )
-        .unwrap();
-        // The base64 above may not be a valid encoding of that DER; build it.
-        let der = [
-            0x30, 0x0d, 0x02, 0x01, 0x00, 0x30, 0x08, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7,
-            0x0d, 0x01, 0x01, 0x01,
-        ];
-        // length of inner sequence is 8 but OID is 11 bytes; rebuild properly below.
-        let _ = der;
-        let oid = [
-            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
-        ];
-        let alg = [&[0x30, oid.len() as u8][..], &oid[..]].concat();
-        let version = [0x02, 0x01, 0x00];
-        let inner = [&version[..], &alg[..]].concat();
-        let info = [&[0x30, inner.len() as u8][..], &inner[..]].concat();
-        use base64::Engine;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&info);
-        std::fs::write(
-            &pkcs8,
-            format!("-----BEGIN PRIVATE KEY-----\n{encoded}\n-----END PRIVATE KEY-----\n"),
+            key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap(),
         )
         .unwrap();
         assert!(GitHubClient::usable_app_key(&pkcs8));
+        let encrypted = dir.join("encrypted.pem");
+        std::fs::write(
+            &encrypted,
+            "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,00000000000000000000000000000000\n\nAQIDBA==\n-----END RSA PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        assert!(!GitHubClient::usable_app_key(&encrypted));
         let ec = dir.join("ec.pem");
         std::fs::write(
             &ec,
-            "-----BEGIN EC PRIVATE KEY-----\nAQ==\n-----END EC PRIVATE KEY-----\n",
+            "-----BEGIN EC PRIVATE KEY-----\nMHQCAQEEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoE\n-----END EC PRIVATE KEY-----\n",
         )
         .unwrap();
         assert!(!GitHubClient::usable_app_key(&ec));
+        let garbage = dir.join("garbage.pem");
+        std::fs::write(
+            &garbage,
+            "-----BEGIN RSA PRIVATE KEY-----\nnot-a-key\n-----END RSA PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        assert!(!GitHubClient::usable_app_key(&garbage));
         assert!(!GitHubClient::usable_app_key(&dir.join("missing.pem")));
         let _ = std::fs::remove_dir_all(&dir);
     }

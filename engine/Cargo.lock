@@ -4405,6 +4405,7 @@ dependencies = [
  "openssl-probe 0.1.6",
  "portable-pty",
  "regex",
+ "rsa",
  "rusqlite",
  "rustls",
  "rustls-native-certs",
