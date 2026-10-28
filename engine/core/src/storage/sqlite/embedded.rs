@@ -45,4 +45,5 @@ pub const OBSERVED: &[(&str, &str)] = &[
     ("0004_forge_sync", include_str!("../../../../../src/vogt/storage/sqlite/migrations/observed/0004_forge_sync.sql")),
     ("0005_perf_indexes", include_str!("../../../../../src/vogt/storage/sqlite/migrations/observed/0005_perf_indexes.sql")),
     ("0006_agent_activity", include_str!("../../../../../src/vogt/storage/sqlite/migrations/observed/0006_agent_activity.sql")),
+    ("0007_coverage_index", include_str!("../../../../../src/vogt/storage/sqlite/migrations/observed/0007_coverage_index.sql")),
 ];

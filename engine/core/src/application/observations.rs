@@ -294,19 +294,26 @@ fn optional_text(value: Option<&Value>) -> Value {
 
 /// Attach slugs, so a reference reads without a second lookup.
 fn named(view: &dyn ReadView, refs: &[crate::core::DepRef]) -> Result<Vec<Value>, VogtError> {
+    // One project load, as Python attaches slugs from the project map rather
+    // than two `project_by_id` round-trips per dependency row.
+    let projects: std::collections::HashMap<String, crate::core::Project> = view
+        .list_projects(10_000, 0)?
+        .into_iter()
+        .map(|project| (project.id.clone(), project))
+        .collect();
     let mut named = Vec::with_capacity(refs.len());
     for row in refs {
         let mut value = serde_json::to_value(row).map_err(|err| {
             VogtError::InvalidRequest(format!("a dependency reference will not serialise: {err}"))
         })?;
-        let from_slug = view
-            .project_by_id(&row.from_project_id)?
-            .map(|project| project.slug);
+        let from_slug = projects
+            .get(&row.from_project_id)
+            .map(|project| project.slug.clone());
         let to_slug = row
             .to_project_id
             .as_deref()
-            .and_then(|id| view.project_by_id(id).ok().flatten())
-            .map(|project| project.slug);
+            .and_then(|id| projects.get(id))
+            .map(|project| project.slug.clone());
         if let Some(object) = value.as_object_mut() {
             object.insert("from_project_slug".to_string(), json!(from_slug));
             object.insert("to_project_slug".to_string(), json!(to_slug));

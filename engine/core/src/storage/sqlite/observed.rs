@@ -369,16 +369,24 @@ where
         // The newest *completed* sweep per collector. A running sweep says
         // nothing about coverage yet, and freshness computed from one would
         // claim an answer newer than the evidence behind it.
+        //
+        // Python loads every finished row and keeps the first per collector
+        // (`observed.py` coverage). The window returns that same row — the
+        // greatest (finished_at, id) — without decoding the history behind it.
         let conn = self.open(false)?;
+        // Greatest (finished_at, id) per collector, the row Python keeps with
+        // `setdefault` after `ORDER BY collector, finished_at DESC, id DESC`.
+        // `MAX(finished_at)` rides `idx_sweeps_finished`; a window or a
+        // correlated `NOT EXISTS` still walked the whole history.
         let rows = many(
             &conn,
-            "SELECT * FROM sweeps WHERE finished_at IS NOT NULL ORDER BY collector, finished_at DESC, id DESC",
+            "SELECT sweep.* FROM sweeps AS sweep              JOIN (                  SELECT best.collector, MAX(sweeps.id) AS id                  FROM (                      SELECT collector, MAX(finished_at) AS finished_at                      FROM sweeps                      WHERE finished_at IS NOT NULL                      GROUP BY collector                  ) AS best                  JOIN sweeps                      ON sweeps.collector = best.collector                     AND sweeps.finished_at = best.finished_at                  GROUP BY best.collector              ) AS winner ON winner.id = sweep.id",
             [],
             row_sweep,
         )?;
         let mut newest: BTreeMap<String, Sweep> = BTreeMap::new();
         for sweep in rows {
-            newest.entry(sweep.collector.clone()).or_insert(sweep);
+            newest.insert(sweep.collector.clone(), sweep);
         }
         Ok(newest)
     }
@@ -388,21 +396,59 @@ where
         // the scopes of finished sweeps. Ascending, so a later sweep
         // overwrites an earlier one; a collector with zero findings still
         // appears, because the question is what looked at what.
+        //
+        // Consecutive sweeps that store the same scope text are one run.
+        // Python overwrites the same project list on every row of that run,
+        // so only the run's last finished moment survives. Parsing and
+        // writing the map once per run is the same answer without walking
+        // the scope text of every historical row in Rust.
         let conn = self.open(false)?;
-        let rows = many(
-            &conn,
-            "SELECT * FROM sweeps WHERE finished_at IS NOT NULL ORDER BY collector, finished_at ASC, id ASC",
-            [],
-            row_sweep,
-        )?;
+        let mut statement = conn
+            .prepare(
+                "SELECT collector, scope, finished_at, started_at FROM sweeps \
+                 WHERE finished_at IS NOT NULL \
+                 ORDER BY collector ASC, finished_at ASC, id ASC",
+            )
+            .map_err(sql_err)?;
+        let rows = statement
+            .query_map([], |row| {
+                let finished =
+                    opt_moment(row, "finished_at")?.unwrap_or(moment(row, "started_at")?);
+                Ok((
+                    row.get::<_, String>("collector")?,
+                    row.get::<_, String>("scope")?,
+                    finished,
+                ))
+            })
+            .map_err(sql_err)?;
         let mut seen: BTreeMap<String, BTreeMap<String, Moment>> = BTreeMap::new();
-        for sweep in rows {
-            let finished = sweep.finished_at.unwrap_or(sweep.started_at);
-            let per_project = seen.entry(sweep.collector).or_default();
-            for project_id in sweep.scope {
+        let mut run: Option<(String, String, Vec<String>, Moment)> = None;
+        let flush = |seen: &mut BTreeMap<String, BTreeMap<String, Moment>>,
+                     run: &mut Option<(String, String, Vec<String>, Moment)>| {
+            let Some((collector, _scope, projects, finished)) = run.take() else {
+                return;
+            };
+            let per_project = seen.entry(collector).or_default();
+            for project_id in projects {
                 per_project.insert(project_id, finished);
             }
+        };
+        for row in rows {
+            let (collector, scope, finished) = row.map_err(sql_err)?;
+            match run.as_mut() {
+                Some((prev_collector, prev_scope, _, prev_finished))
+                    if prev_collector == &collector && prev_scope == &scope =>
+                {
+                    *prev_finished = finished;
+                }
+                _ => {
+                    flush(&mut seen, &mut run);
+                    let projects = scope_project_ids(&scope);
+                    run = Some((collector, scope, projects, finished));
+                }
+            }
         }
+        flush(&mut seen, &mut run);
         Ok(seen)
     }
 
@@ -1100,6 +1146,23 @@ fn many<T>(
     rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)
 }
 
+fn scope_project_ids(scope: &str) -> Vec<String> {
+    // Same filter as `row_sweep`: a JSON array, string elements only.
+    // Anything else is an empty scope, which is what a non-array cell was.
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(scope) else {
+        return Vec::new();
+    };
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn row_sweep(row: &Row<'_>) -> rusqlite::Result<Sweep> {
     let scope = json_cell(row, "scope")?;
     let stats = json_cell(row, "stats")?;
@@ -1424,6 +1487,34 @@ mod tests {
         let by_project = store.coverage_by_project().unwrap();
         assert_eq!(by_project["git"]["proj_1"], later);
         assert!(!by_project["git"].contains_key("proj_2"));
+
+        // A repeated scope is one run: the later moment wins without a
+        // second parse changing the set. An interleaved different scope
+        // must not be collapsed with it.
+        let wide = store
+            .begin_sweep("git", &["proj_1".into(), "proj_2".into()], later)
+            .unwrap();
+        let wide_done = Moment::from_unix(1_700_001_000, 0);
+        store
+            .finish_sweep(&wide.id, SweepOutcome::Ok, &[], wide_done, None)
+            .unwrap();
+        let again = store
+            .begin_sweep("git", &["proj_1".into()], wide_done)
+            .unwrap();
+        let again_done = Moment::from_unix(1_700_001_100, 0);
+        store
+            .finish_sweep(&again.id, SweepOutcome::Ok, &[], again_done, None)
+            .unwrap();
+        let same = store
+            .begin_sweep("git", &["proj_1".into()], again_done)
+            .unwrap();
+        let same_done = Moment::from_unix(1_700_001_200, 0);
+        store
+            .finish_sweep(&same.id, SweepOutcome::Ok, &[], same_done, None)
+            .unwrap();
+        let by_project = store.coverage_by_project().unwrap();
+        assert_eq!(by_project["git"]["proj_1"], same_done);
+        assert_eq!(by_project["git"]["proj_2"], wide_done);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
