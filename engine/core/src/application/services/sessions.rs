@@ -2124,13 +2124,21 @@ where
             {
                 return Err(refused);
             }
+            let Some(screen) = screen else {
+                // The activity check above only reaches here when a screen was
+                // returned and it says hibernated. A missing screen is the
+                // engine disagreeing with itself, not a reason to panic.
+                return Err(VogtError::EngineUnavailable(
+                    "the session engine reported a hibernated session with no screen".to_string(),
+                ));
+            };
             return Ok(SessionWaitResult {
                 id: params.id.clone(),
                 engine_session_id: engine_id.clone(),
                 outcome: "hibernated".to_string(),
                 matched: false,
                 waited_ms: 0,
-                screen: screen_result(&params.id, &engine_id, &screen.expect("checked")),
+                screen: screen_result(&params.id, &engine_id, &screen),
             });
         }
         other => other?,
@@ -3950,7 +3958,14 @@ where
         return Ok(SessionResult { session: summary });
     }
 
-    let session = found.session.unwrap();
+    let Some(session) = found.session else {
+        // The branch above returns when there is no declared session. Getting
+        // here without one means the resolution changed under us.
+        return Err(VogtError::NotFound(format!(
+            "no session {}",
+            py_repr(&engine_id)
+        )));
+    };
     let removed = engine.remove_session(&engine_id)?;
     let mut writing = write_of(ctx);
     let session_id = session.id.clone();

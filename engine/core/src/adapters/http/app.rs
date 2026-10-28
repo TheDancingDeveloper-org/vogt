@@ -676,6 +676,11 @@ async fn dispatch<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
                 .expect("a fixed response builds");
         }
     };
+    // Python's `resolve` names the actor here, after authentication and before
+    // the handler, so the access line can say who called. The access-log
+    // middleware opened the request scope; this writes into it. A refusal
+    // above never gets here, and stays unattributed, the same as Python.
+    crate::observability::set_request_actor(Some(principal.identity_ref.clone()));
     let built = context_for(&request_store, &state, &grant, principal, build);
     // Conditional reads answer after authentication and authorization: an old
     // validator must never turn a refused request into a 304.

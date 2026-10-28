@@ -19,12 +19,14 @@ use std::time::Instant;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::HeaderValue;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use http_body::{Frame, SizeHint};
 
 use crate::config::VogtConfig;
+use futures_util::FutureExt;
+
 use crate::observability::{
     accepted_request_id, current_actor, with_request_id, REQUEST_ID_HEADER,
 };
@@ -98,9 +100,17 @@ pub async fn access_log(
         .unwrap_or_default();
 
     // The actor is set by authentication inside the handler, so it is read
-    // inside the request's scope, once the response has been produced.
+    // inside the request's scope, once the response has been produced. A panic
+    // in that handler is caught here too: the scope is already open, so the
+    // line still names who called, and the process stays up.
     let (mut response, actor) = with_request_id(request_id.clone(), async {
-        let response = next.run(request).await;
+        let response = std::panic::AssertUnwindSafe(next.run(request))
+            .catch_unwind()
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(payload) => panic_response(&path, &payload),
+        };
         (response, current_actor().unwrap_or_default())
     })
     .await;
@@ -135,6 +145,31 @@ pub async fn access_log(
             bytes: 0,
         }),
     )
+}
+
+/// A structured 500 for a panic. The message is logged, redacted, and never
+/// copied into the body: a panic can name a path or a value the client must
+/// not see. `code` is `internal`, the code a storage failure already uses.
+fn panic_response(path: &str, payload: &Box<dyn std::any::Any + Send>) -> Response {
+    let message = if let Some(text) = payload.downcast_ref::<String>() {
+        crate::observability::redact(text)
+    } else if let Some(text) = payload.downcast_ref::<&str>() {
+        crate::observability::redact(text)
+    } else {
+        "a panic with no message".to_string()
+    };
+    tracing::error!(
+        target: "vogt.http",
+        path = %path,
+        panic = %message,
+        "a request panicked"
+    );
+    let body = serde_json::json!({"error": {"code": "internal", "message": "internal error"}});
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("a fixed response builds")
 }
 
 fn round1(value: f64) -> f64 {
@@ -257,5 +292,82 @@ mod tests {
         assert!(!settings.enabled);
         assert_eq!(settings.slow_request_ms, 250.0);
         assert_eq!(settings.quiet_paths, vec!["/health/ready".to_string()]);
+    }
+
+    /// Authentication writes the actor inside the request scope, and the access
+    /// line reads it back from there. A handler that sets it, the way the API
+    /// handler does after `principal_for`, is what the line attributes.
+    #[tokio::test]
+    async fn the_access_line_reads_the_actor_authentication_set() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let slot = std::sync::Arc::clone(&seen);
+        let router = layer(
+            axum::Router::new().route(
+                "/who",
+                axum::routing::get(move || {
+                    let slot = std::sync::Arc::clone(&slot);
+                    async move {
+                        crate::observability::set_request_actor(Some("local:ada".to_string()));
+                        let actor = current_actor().unwrap_or_default();
+                        *slot.lock().unwrap() = actor.clone();
+                        actor
+                    }
+                }),
+            ),
+            AccessLogSettings::from_config(&VogtConfig::default()),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let (status, body) = reqwest_get(&format!("http://{addr}/who")).await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "local:ada");
+        assert_eq!(seen.lock().unwrap().as_str(), "local:ada");
+    }
+
+    /// A handler that panics answers 500 with the structured body, and the
+    /// process serves the next request. The message stays in the log.
+    #[tokio::test]
+    async fn a_panicking_handler_returns_a_structured_500_and_the_next_request_is_served() {
+        let router = layer(
+            axum::Router::new()
+                .route(
+                    "/boom",
+                    axum::routing::get(|| async {
+                        panic!("boom token=secret");
+                        #[allow(unreachable_code)]
+                        ""
+                    }),
+                )
+                .route("/ok", axum::routing::get(|| async { "ok" })),
+            AccessLogSettings::from_config(&VogtConfig::default()),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest_get(&format!("http://{addr}/boom")).await;
+        assert_eq!(client.0, 500);
+        assert!(client.1.contains(r#""code":"internal""#), "{}", client.1);
+        assert!(!client.1.contains("token"), "{}", client.1);
+        let again = reqwest_get(&format!("http://{addr}/ok")).await;
+        assert_eq!(again.0, 200, "the process survived the panic");
+        assert_eq!(again.1, "ok");
+    }
+
+    async fn reqwest_get(url: &str) -> (u16, String) {
+        // ureq is the crate's HTTP client and it is synchronous; a thread keeps
+        // it off this runtime. An error status is still a response.
+        let url = url.to_string();
+        tokio::task::spawn_blocking(move || match ureq::get(&url).call() {
+            Ok(response) => (response.status(), response.into_string().unwrap()),
+            Err(ureq::Error::Status(status, response)) => (status, response.into_string().unwrap()),
+            Err(err) => panic!("the request did not connect: {err}"),
+        })
+        .await
+        .unwrap()
     }
 }
