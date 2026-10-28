@@ -51,9 +51,25 @@ pub fn fresh_id(prefix: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0);
+    fresh_id_at(prefix, millis, fill_entropy)
+}
+
+/// 80 bits from the OS. A failure is fatal: the old `/dev/urandom` read left the
+/// buffer zeroed, which minted a timestamp-only id anyone can guess and that
+/// collides inside one millisecond.
+fn fill_entropy(bytes: &mut [u8]) -> Result<(), getrandom::Error> {
+    getrandom::getrandom(bytes)
+}
+
+fn fresh_id_at(
+    prefix: &str,
+    millis: u64,
+    fill: fn(&mut [u8]) -> Result<(), getrandom::Error>,
+) -> String {
     let mut bytes = [0u8; 10];
-    let _ = std::fs::File::open("/dev/urandom")
-        .and_then(|mut source| std::io::Read::read_exact(&mut source, &mut bytes));
+    fill(&mut bytes).unwrap_or_else(|err| {
+        panic!("the operating system refused to supply random bytes for a fresh id: {err}")
+    });
     let mut randomness = 0u128;
     for byte in bytes {
         randomness = (randomness << 8) | u128::from(byte);
@@ -2099,6 +2115,30 @@ pub struct Sweep {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fresh_id_uses_entropy_and_never_a_zero_random_half() {
+        let first = fresh_id("tst");
+        let second = fresh_id("tst");
+        assert_ne!(first, second, "two fresh ids collided");
+        for id in [&first, &second] {
+            let body = id.strip_prefix("tst_").expect("prefix");
+            assert_eq!(body.len(), 26);
+            assert_ne!(
+                &body[TIME_CHARS..],
+                "0000000000000000",
+                "random half is all zeros, which is the old /dev/urandom fallback"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "refused to supply random bytes")]
+    fn fresh_id_panics_when_entropy_is_unavailable() {
+        fn refuse(_: &mut [u8]) -> Result<(), getrandom::Error> {
+            Err(getrandom::Error::UNSUPPORTED)
+        }
+        let _ = fresh_id_at("tst", 1_700_000_000_000, refuse);
+    }
 
     use super::*;
 
