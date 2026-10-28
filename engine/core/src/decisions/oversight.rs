@@ -24,6 +24,7 @@ pub enum Attention {
 }
 
 impl Attention {
+    #[allow(dead_code)] // The overseer table sorts by this; the test does too.
     pub fn order(self) -> u8 {
         match self {
             Self::Approval => 0,
@@ -40,6 +41,7 @@ impl Attention {
     }
 
     /// The classes a person, or a driver acting for one, must act on.
+    #[allow(dead_code)] // The sweep filter uses this; the test asserts it.
     pub fn needs_you(self) -> bool {
         matches!(self, Self::Approval | Self::Blocked | Self::Waiting)
     }

@@ -330,6 +330,7 @@ fn branch_activity_detail(seconds: Option<i64>) -> String {
     }
 }
 
+#[allow(dead_code)] // The backlog sorts with this; the ranking test asserts the order.
 pub fn rank(mut scores: Vec<Score>) -> Vec<Score> {
     scores.sort_by(|left, right| {
         right

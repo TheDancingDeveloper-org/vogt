@@ -538,6 +538,7 @@ impl OperationRegistry {
         Ok(registry)
     }
 
+    #[allow(dead_code)] // Registry coverage tests assert the operation count.
     pub fn len(&self) -> usize {
         self.operations.len()
     }

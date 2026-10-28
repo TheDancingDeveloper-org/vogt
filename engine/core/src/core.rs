@@ -4,7 +4,6 @@
 //! `crate::core::` paths are unchanged. Nothing here reads storage or
 //! configuration.
 
-#![allow(dead_code)]
 pub mod session_economics;
 pub mod usage_board;
 

@@ -1198,8 +1198,8 @@ fn invalid(operation: &str, problems: &[FieldError]) -> VogtError {
     VogtError::InvalidRequest(text)
 }
 
-#[cfg(test)]
 /// A location step as JSON: a field stays a string, an index becomes a number.
+#[cfg(test)]
 fn loc_json(step: &crate::errors::Loc) -> serde_json::Value {
     match step {
         crate::errors::Loc::Field(name) => serde_json::Value::String(name.clone()),
@@ -1207,6 +1207,7 @@ fn loc_json(step: &crate::errors::Loc) -> serde_json::Value {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 

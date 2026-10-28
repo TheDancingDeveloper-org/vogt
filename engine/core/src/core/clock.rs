@@ -1,6 +1,7 @@
 //! Clock, timestamps and the deterministic test hooks. Ports the time helpers
 //! of `src/vogt/core/`.
 
+#![allow(dead_code)] // Domain vocabulary the bin re-exports; tests and later services use what the bin does not.
 use std::collections::BTreeMap;
 
 use crate::errors::VogtError;

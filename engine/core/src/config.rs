@@ -376,6 +376,7 @@ pub struct VogtConfig {
 /// installation auth, the usage board (WI-2666), cold-wake compaction
 /// (WI-2588), the session-scratch project, the autopilot result-report gate,
 /// and `image_digest` on `instance.diagnostics` (WI-2666).
+#[allow(dead_code)] // Read by the unread-key regression in this module's tests.
 pub const UNREAD_KEYS: &[(&str, &str)] = &[
     ("sweep_interval_seconds", "WI-2021"),
     ("watch_interval_seconds", "WI-2021"),
