@@ -35,7 +35,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, ClassVar, TextIO
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO / "tests" / "parity" / "script.json"
@@ -605,9 +605,9 @@ class _StandInState:
     run never sees another's sessions.
     """
 
-    sessions: dict[str, dict[str, Any]] = {}
-    chats: dict[str, dict[str, Any]] = {}
-    _next = 0
+    sessions: ClassVar[dict[str, dict[str, Any]]] = {}
+    chats: ClassVar[dict[str, dict[str, Any]]] = {}
+    _next: ClassVar[int] = 0
 
     @classmethod
     def reset(cls) -> None:
@@ -695,10 +695,18 @@ class _StandInHandler(BaseHTTPRequestHandler):
                 {"sessions": list(_StandInState.sessions.values()), "hidden_count": 0},
             )
         if parts == ["api", "sessions", "changes"]:
-            return self._reply(200, {"changes": [], "next_cursor": 0, "truncated": False})
+            return self._reply(
+                200, {"changes": [], "next_cursor": 0, "truncated": False}
+            )
         if parts == ["api", "sessions", "wait-any"]:
-            return self._reply(200, {"outcome": "timeout", "change": None, "next_cursor": 0})
-        if parts[:2] == ["api", "sessions"] and len(parts) == 4 and parts[3] == "screen":
+            return self._reply(
+                200, {"outcome": "timeout", "change": None, "next_cursor": 0}
+            )
+        if (
+            parts[:2] == ["api", "sessions"]
+            and len(parts) == 4
+            and parts[3] == "screen"
+        ):
             return self._reply(
                 200,
                 {
@@ -736,30 +744,70 @@ class _StandInHandler(BaseHTTPRequestHandler):
         payload = self._json()
         if parts == ["api", "sessions"]:
             session_id = _StandInState.fresh("eng")
-            return self._reply(200, self._remember(session_id, name=str(payload.get("name") or session_id)))
+            return self._reply(
+                200,
+                self._remember(session_id, name=str(payload.get("name") or session_id)),
+            )
         if parts == ["api", "git", "op"]:
             return self._reply(
-                200, {"commit": "0123456789abcdef0123456789abcdef01234567", "digest": "1 file", "diff_stat": ""}
+                200,
+                {
+                    "commit": "0123456789abcdef0123456789abcdef01234567",
+                    "digest": "1 file",
+                    "diff_stat": "",
+                },
             )
-        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "grants":
+        if (
+            len(parts) == 4
+            and parts[:2] == ["api", "sessions"]
+            and parts[3] == "grants"
+        ):
             return self._reply(200, payload)
         if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "input":
             self._remember(parts[2])
             return self._reply(200, {"written": True})
-        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "answer":
+        if (
+            len(parts) == 4
+            and parts[:2] == ["api", "sessions"]
+            and parts[3] == "answer"
+        ):
             return self._reply(200, self._remember(parts[2]))
-        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "hibernate":
-            return self._reply(200, self._remember(parts[2], activity="hibernated", alive=False))
+        if (
+            len(parts) == 4
+            and parts[:2] == ["api", "sessions"]
+            and parts[3] == "hibernate"
+        ):
+            return self._reply(
+                200, self._remember(parts[2], activity="hibernated", alive=False)
+            )
         if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "wake":
-            return self._reply(200, self._remember(parts[2], activity="idle", alive=True))
-        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "keep-awake":
-            return self._reply(200, self._remember(parts[2], keep_awake=bool(payload.get("keep_awake"))))
+            return self._reply(
+                200, self._remember(parts[2], activity="idle", alive=True)
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["api", "sessions"]
+            and parts[3] == "keep-awake"
+        ):
+            return self._reply(
+                200,
+                self._remember(parts[2], keep_awake=bool(payload.get("keep_awake"))),
+            )
         if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "role":
-            return self._reply(200, self._remember(parts[2], role=str(payload.get("role") or "worker")))
-        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "blocked":
+            return self._reply(
+                200, self._remember(parts[2], role=str(payload.get("role") or "worker"))
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["api", "sessions"]
+            and parts[3] == "blocked"
+        ):
             return self._reply(200, self._remember(parts[2]))
         if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "kill":
-            return self._reply(200, self._remember(parts[2], activity="exited", alive=False, exit_code=0))
+            return self._reply(
+                200,
+                self._remember(parts[2], activity="exited", alive=False, exit_code=0),
+            )
         if parts == ["api", "chats"]:
             chat_id = _StandInState.fresh("chat")
             chat = _chat_body(chat_id, title=str(payload.get("title") or "parity"))
@@ -770,10 +818,19 @@ class _StandInHandler(BaseHTTPRequestHandler):
             if chat is None:
                 return self._reply(404, None)
             return self._reply(200, {"chat": chat, "entries": [], "finished": True})
-        if len(parts) == 5 and parts[:2] == ["api", "chats"] and parts[3] == "approvals":
+        if (
+            len(parts) == 5
+            and parts[:2] == ["api", "chats"]
+            and parts[3] == "approvals"
+        ):
             return self._reply(
                 200,
-                {"id": parts[4], "tool_name": "parity", "summary": "parity", "allow": payload.get("allow")},
+                {
+                    "id": parts[4],
+                    "tool_name": "parity",
+                    "summary": "parity",
+                    "allow": payload.get("allow"),
+                },
             )
         if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "model":
             chat = _StandInState.chats.get(parts[2])
@@ -781,7 +838,11 @@ class _StandInHandler(BaseHTTPRequestHandler):
                 return self._reply(404, None)
             chat["model"] = payload.get("model")
             return self._reply(200, chat)
-        if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "interrupt":
+        if (
+            len(parts) == 4
+            and parts[:2] == ["api", "chats"]
+            and parts[3] == "interrupt"
+        ):
             chat = _StandInState.chats.get(parts[2])
             if chat is None:
                 return self._reply(404, None)
@@ -807,12 +868,18 @@ class _StandInHandler(BaseHTTPRequestHandler):
         parts = self._parts()
         payload = self._json()
         if parts[:2] == ["api", "sessions"] and len(parts) == 3:
-            return self._reply(200, self._remember(parts[2], name=str(payload.get("name") or parts[2])))
+            return self._reply(
+                200, self._remember(parts[2], name=str(payload.get("name") or parts[2]))
+            )
         self._reply(404, None)
 
     def do_DELETE(self) -> None:
         parts = self._parts()
-        if len(parts) == 5 and parts[:2] == ["api", "sessions"] and parts[3] == "grants":
+        if (
+            len(parts) == 5
+            and parts[:2] == ["api", "sessions"]
+            and parts[3] == "grants"
+        ):
             return self._reply(200, {"revoked": True})
         if parts[:2] == ["api", "sessions"] and len(parts) == 3:
             _StandInState.sessions.pop(parts[2], None)
@@ -1022,7 +1089,9 @@ def _flags(params: dict[str, Any]) -> list[str]:
             for entry in value:
                 argv += [
                     flag,
-                    json.dumps(entry) if isinstance(entry, (dict, list)) else str(entry),
+                    json.dumps(entry)
+                    if isinstance(entry, (dict, list))
+                    else str(entry),
                 ]
         elif isinstance(value, dict):
             # A nested object (watch.create's trigger) must be JSON, not
@@ -1328,7 +1397,7 @@ def _walk(
                 walked[key] = "<volatile>"
             else:
                 walked[key] = _walk(item, rules, paths, operation, False, key)
-        
+
         if walked.get("operation") in path_bearing and "payload_digest" in walked:
             walked["payload_digest"] = "<path-bearing>"
         if walked.get("kind") in path_bearing_kinds and "content_digest" in walked:
@@ -1344,8 +1413,7 @@ def _walk(
         return walked
     if isinstance(value, list):
         return [
-            _walk(item, rules, paths, operation, False, _walk_parent)
-            for item in value
+            _walk(item, rules, paths, operation, False, _walk_parent) for item in value
         ]
     if isinstance(value, str):
         for needle, token in paths.items():
