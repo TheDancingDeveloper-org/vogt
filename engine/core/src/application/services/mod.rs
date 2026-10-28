@@ -30,6 +30,7 @@ pub mod install;
 pub mod native_migration;
 pub mod work;
 
+pub mod charters;
 pub mod decisions;
 pub mod import_merge;
 pub mod inbox;
@@ -39,6 +40,7 @@ pub mod notifications;
 pub mod preferences;
 #[allow(dead_code)]
 pub mod sessions;
+pub mod watches;
 
 /// The session resolver for callers outside `services`.
 ///
@@ -63,6 +65,8 @@ use crate::core::{Clock, IdFactory, Moment, Principal};
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
 use std::sync::Arc;
 
+#[cfg(test)]
+mod caught_up_reads_test;
 #[cfg(test)]
 mod decisions_test;
 #[cfg(test)]

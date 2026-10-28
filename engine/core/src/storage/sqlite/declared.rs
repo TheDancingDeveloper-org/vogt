@@ -10,10 +10,11 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::core::{
     default_workflow, from_iso, to_iso, Actor, ActorKind, ActorPreference, AuditRecord,
-    AuthDecision, Clock, CodingSession, Comment, ContractExemption, Decision, DriftProposal, Event,
-    ForgeAccount, IdFactory, InboxTriage, Initiative, InitiativeState, Label, Moment,
-    PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression, Token,
-    WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackAction, WriteBackOutcome, WriteBackRecord,
+    AuthDecision, Charter, Clock, CodingSession, Comment, ContractExemption, Decision,
+    DriftProposal, Event, ForgeAccount, IdFactory, InboxTriage, Initiative, InitiativeState, Label,
+    Moment, PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression, Token,
+    Watch, WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackAction, WriteBackOutcome,
+    WriteBackRecord,
 };
 use crate::errors::VogtError;
 use crate::storage::interface::{
@@ -1340,6 +1341,68 @@ impl ReadView for SqliteReadView {
             row_session_grant,
         )
     }
+    fn charter(&self, scope_kind: &str, scope_id: &str) -> Result<Option<Charter>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT * FROM charters WHERE scope_kind = ? AND scope_id = ? ORDER BY version DESC LIMIT 1",
+            [scope_kind, scope_id],
+            row_charter,
+        )
+    }
+    fn charter_history(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Charter>, VogtError> {
+        many(
+            &self.conn,
+            "SELECT * FROM charters WHERE scope_kind = ? AND scope_id = ? ORDER BY version DESC LIMIT ?",
+            params![scope_kind, scope_id, limit],
+            row_charter,
+        )
+    }
+    fn watch(&self, watch_id: &str) -> Result<Option<Watch>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT * FROM watches WHERE id = ?",
+            [watch_id],
+            row_watch,
+        )
+    }
+    fn list_watches(
+        &self,
+        state: Option<&str>,
+        target_session: Option<&str>,
+        owner_actor_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Watch>, VogtError> {
+        let mut clauses: Vec<String> = Vec::new();
+        let mut bound: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        for (column, value) in [
+            ("state", state),
+            ("target_session", target_session),
+            ("owner_actor_id", owner_actor_id),
+        ] {
+            if let Some(value) = value {
+                clauses.push(format!("{column} = ?"));
+                bound.push(Box::new(value.to_string()));
+            }
+        }
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", clauses.join(" AND "))
+        };
+        bound.push(Box::new(limit));
+        let refs: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|v| v.as_ref()).collect();
+        many(
+            &self.conn,
+            &format!("SELECT * FROM watches {where_sql}ORDER BY created_at DESC, id DESC LIMIT ?"),
+            refs.as_slice(),
+            row_watch,
+        )
+    }
     fn decision(&self, decision_id: &str) -> Result<Option<Decision>, VogtError> {
         one(
             &self.conn,
@@ -1689,6 +1752,24 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
         c: i64,
     ) -> Result<Vec<SessionGrant>, VogtError> {
         self.view.list_session_grants(a, b, c)
+    }
+    fn charter(&self, a: &str, b: &str) -> Result<Option<Charter>, VogtError> {
+        self.view.charter(a, b)
+    }
+    fn charter_history(&self, a: &str, b: &str, c: i64) -> Result<Vec<Charter>, VogtError> {
+        self.view.charter_history(a, b, c)
+    }
+    fn watch(&self, a: &str) -> Result<Option<Watch>, VogtError> {
+        self.view.watch(a)
+    }
+    fn list_watches(
+        &self,
+        a: Option<&str>,
+        b: Option<&str>,
+        c: Option<&str>,
+        d: i64,
+    ) -> Result<Vec<Watch>, VogtError> {
+        self.view.list_watches(a, b, c, d)
     }
     fn decision(&self, a: &str) -> Result<Option<Decision>, VogtError> {
         self.view.decision(a)
@@ -2781,6 +2862,46 @@ fn row_session(row: &Row<'_>) -> rusqlite::Result<CodingSession> {
         purpose: row.get("purpose")?,
         started_by_session: row.get("started_by_session")?,
         started_by_kind: row.get("started_by_kind")?,
+    })
+}
+
+fn row_charter(row: &Row<'_>) -> rusqlite::Result<Charter> {
+    Ok(Charter {
+        scope_kind: vocab_cell(row, "scope_kind")?,
+        scope_id: row.get("scope_id")?,
+        version: row.get("version")?,
+        body: row.get("body")?,
+        author_actor_id: row.get("author_actor_id")?,
+        created_at: moment(row, "created_at")?,
+        reason: row.get("reason")?,
+    })
+}
+
+fn opt_json_cell(row: &Row<'_>, column: &str) -> rusqlite::Result<Option<serde_json::Value>> {
+    match row.get::<_, Option<String>>(column)? {
+        None => Ok(None),
+        Some(text) => serde_json::from_str(&text).map(Some).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        }),
+    }
+}
+
+fn row_watch(row: &Row<'_>) -> rusqlite::Result<Watch> {
+    Ok(Watch {
+        id: row.get("id")?,
+        owner_actor_id: row.get("owner_actor_id")?,
+        target_session: row.get("target_session")?,
+        kind: row.get("kind")?,
+        trigger: json_cell(row, "trigger_json")?,
+        note: row.get("note")?,
+        state: vocab_cell(row, "state")?,
+        created_at: moment(row, "created_at")?,
+        expires_at: moment(row, "expires_at")?,
+        fired_at: opt_moment(row, "fired_at")?,
+        outcome: opt_json_cell(row, "outcome_json")?,
+        attempts: row.get("attempts")?,
+        last_error: row.get("last_error")?,
+        reason: row.get("reason")?,
     })
 }
 

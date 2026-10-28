@@ -256,6 +256,8 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "decision.ask" => Some(crate::application::services::decisions::ask_decision_op),
         "decision.answer" => Some(crate::application::services::decisions::answer_decision_op),
         "decision.list" => Some(crate::application::services::decisions::list_decisions_op),
+        "charter.get" => Some(crate::application::services::charters::charter_get_op),
+        "watch.list" => Some(crate::application::services::watches::watch_list_op),
         "decision.withdraw" => Some(crate::application::services::decisions::withdraw_decision_op),
         "inbox.list" => Some(crate::application::services::inbox::inbox_list_op),
         "inbox.archive" => Some(crate::application::services::inbox::inbox_archive_op),
