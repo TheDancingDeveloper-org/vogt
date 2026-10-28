@@ -383,8 +383,9 @@ jobs:
     # The only place a golden is written (WI-2661). A worker commit that
     # re-records one is how three sessions wrote three goldens in a day, each
     # with a different Python. Dispatch with record_golden=true; UV_PYTHON is
-    # pinned at the workflow env to the image's 3.13. contents: write is this
-    # job only, and only so it can open the PR.
+    # pinned at the workflow env to the image's 3.13. contents: write and
+    # pull-requests: write are this job only, and only so it can push the
+    # golden branch and open the PR.
     if: github.event_name == 'workflow_dispatch' && inputs.record_golden
     runs-on: [self-hosted]
     timeout-minutes: 30
@@ -392,10 +393,14 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      # The dispatched ref (github.sha), not a hard-coded rust-core. Recording
+      # against rust-core's merge-base with main, then checking that branch
+      # out, deleted every file the dispatched ref had that rust-core did not
+      # (run 40783776513: migration 0007 and the existing goldens).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-          ref: rust-core
+          ref: ${{ github.sha }}
 
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
@@ -404,17 +409,23 @@ jobs:
       - name: record under the pinned Python and open a PR
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DISPATCHED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           uv sync --locked --group dev
-          base=$(git merge-base HEAD origin/main)
-          short=${base:0:7}
+          # Record onto the commit that was dispatched, and name the golden
+          # after it. Never branch from a different base.
+          test "$(git rev-parse HEAD)" = "$DISPATCHED_SHA"
+          short=$(git rev-parse --short=7 HEAD)
           out="tests/parity/golden/${short}"
-          rm -rf "$out"
+          mkdir -p "$out"
           uv run python scripts/parity.py record --impl python --out "$out"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$out"
+          # Only this golden's directory. Adding the whole tree is how the
+          # last run committed deletions of files outside it.
+          git add -- "$out"
           if git diff --cached --quiet; then
             echo "golden ${short} already matches this recording"
             exit 0
@@ -423,7 +434,18 @@ jobs:
           git checkout -B "$branch"
           git commit -m "test: record parity golden ${short} (CI, UV_PYTHON=${UV_PYTHON})"
           git push --force-with-lease origin "$branch"
-          gh pr create --base rust-core --head "$branch" \
-            --title "test: record parity golden ${short}" \
-            --body "Recorded by the record-golden job under UV_PYTHON=${UV_PYTHON}. Workers do not commit goldens (WI-2661)." \
-            || gh pr view "$branch" --json url --jq .url
+          # The self-hosted runner has no gh (exit 127 on run 40783776513).
+          # Open the PR, or print the one already open, through the REST API.
+          api="https://api.github.com/repos/${REPO}"
+          owner="${REPO%%/*}"
+          curl_api() { curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$@"; }
+          existing=$(curl_api "${api}/pulls?head=${owner}:${branch}&base=rust-core&state=open" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["html_url"] if d else "")')
+          if [ -n "$existing" ]; then
+            echo "$existing"
+            exit 0
+          fi
+          TITLE="test: record parity golden ${short}" BODY="Recorded by the record-golden job under UV_PYTHON=${UV_PYTHON}. Workers do not commit goldens (WI-2661)." HEAD="$branch" \
+            python3 -c 'import json,os; print(json.dumps({"title":os.environ["TITLE"],"body":os.environ["BODY"],"head":os.environ["HEAD"],"base":"rust-core"}))' \
+            | curl_api -X POST "${api}/pulls" --data @- \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["html_url"])'
