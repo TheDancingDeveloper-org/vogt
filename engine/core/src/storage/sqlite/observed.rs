@@ -64,6 +64,7 @@ where
     C: Clock,
     I: IdFactory,
 {
+    #[allow(dead_code)] // Tests build a store this way; the server uses `shared`.
     pub fn new(path: PathBuf, clock: C, ids: I) -> Self {
         Self::shared(
             path,

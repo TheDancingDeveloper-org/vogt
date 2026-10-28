@@ -1,6 +1,7 @@
 //! The workflow machine and project lifecycle. Ports the workflow of
 //! `src/vogt/core/`.
 
+#![allow(dead_code)] // Domain vocabulary the bin re-exports; tests and later services use what the bin does not.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::errors::VogtError;

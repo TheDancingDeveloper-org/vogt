@@ -9,6 +9,7 @@
 //! history since the latest compaction. This takes text and returns numbers:
 //! it opens no file, asks no clock, and stores nothing.
 
+#![allow(dead_code)] // Domain vocabulary the bin re-exports; tests and later services use what the bin does not.
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Map, Value};

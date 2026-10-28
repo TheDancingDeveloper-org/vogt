@@ -1,6 +1,7 @@
 //! A session's own short, typed report (WI-2039). Ports the matching
 //! entities in `src/vogt/core/entities.py`.
 
+#![allow(dead_code)] // Domain vocabulary the bin re-exports; tests and later services use what the bin does not.
 use super::Moment;
 
 /// The structured half of a session report (WI-2039). A field left unset was

@@ -1,5 +1,6 @@
 //! Id minting and slugify. Ports the id helpers of `src/vogt/core/`.
 
+#![allow(dead_code)] // Domain vocabulary the bin re-exports; tests and later services use what the bin does not.
 const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const TIME_CHARS: usize = 10;
 const RANDOM_CHARS: usize = 16;

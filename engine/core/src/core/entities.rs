@@ -1,7 +1,9 @@
 //! Entity vocabulary and records. Ports the models of `src/vogt/core/`.
 
+#![allow(dead_code)] // Domain vocabulary the bin re-exports; tests and later services use what the bin does not.
 use std::collections::BTreeMap;
 
+#[allow(unused_imports)] // The test module below is the only reader of the first, second and last.
 use super::{from_iso, require_text, ActorKind, Moment, DECLARABLE_RELATION_KINDS};
 
 macro_rules! vocab {
