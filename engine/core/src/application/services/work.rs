@@ -1468,6 +1468,10 @@ fn get_work<C: Clock, I: IdFactory>(
         "git": git,
         "walked": [],
         "live_sessions": [],
+        // Always present, null when no transition recorded a claim. Python's
+        // WorkResult serializes the field even when it is None; omitting the
+        // key fails a client that decodes the schema.
+        "claim_check": Value::Null,
     }))
 }
 
@@ -3274,6 +3278,7 @@ mod tests {
         let fetched = get_work(ctx, json!({"ref": "WI-1"})).unwrap();
         assert_eq!(fetched["comments"][0]["body"], "noted");
         assert_eq!(fetched["item"]["ref"], "WI-1");
+        assert!(fetched["claim_check"].is_null());
     }
 
     #[test]
