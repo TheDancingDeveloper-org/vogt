@@ -142,6 +142,7 @@ impl GitHubClient {
         if status >= 400 {
             return Err(VogtError::ForgeHttpStatus {
                 status,
+                forge: Some(crate::errors::Forge::GitHub),
                 message: format!("GitHub returned {status} for {verb} {path}"),
             });
         }

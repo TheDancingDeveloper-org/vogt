@@ -1266,7 +1266,7 @@ mod tests {
                 .unwrap()
                 .run(None, serde_json::json!({}))
                 .unwrap_err();
-            let VogtError::InvalidRequest(message) = error else {
+            let VogtError::NotImplemented(message) = error else {
                 panic!("{name} did not fail as not-ported: {error:?}");
             };
             assert!(

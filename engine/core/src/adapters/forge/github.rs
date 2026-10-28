@@ -577,6 +577,11 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
                     py_repr(name)
                 )));
             }
+            // Any other refusal is GitHub's own unavailable error, the way
+            // Python re-raises `GitHubUnavailable` when the status is not 422.
+            Err(VogtError::ForgeHttpStatus { message, .. }) => {
+                return Err(VogtError::GitHubUnavailable(message));
+            }
             other => other?,
         };
         let owner = response
@@ -977,6 +982,7 @@ fn forge_fail(message: &str) -> VogtError {
         if message.contains(&status.to_string()) {
             return VogtError::ForgeHttpStatus {
                 status,
+                forge: Some(crate::errors::Forge::GitHub),
                 message: message.to_owned(),
             };
         }
@@ -1304,6 +1310,19 @@ mod tests {
         let provider = GitHubProvider::new(fixture);
         let error = provider.create_repo("widget", true, None).unwrap_err();
         assert!(matches!(error, VogtError::RemoteRepoExists(_)), "{error:?}");
+    }
+
+    #[test]
+    fn create_repo_turns_any_other_refusal_into_github_unavailable() {
+        // A 500 is not "the name exists". Python re-raises GitHubUnavailable,
+        // whose code is github_unavailable, not upstream_write_failed.
+        let mut fixture = Fixture::new(vec![]);
+        fixture.fail_with = Some("GitHub answered 500".to_owned());
+        let error = GitHubProvider::new(fixture)
+            .create_repo("widget", true, None)
+            .unwrap_err();
+        assert_eq!(error.code(), "github_unavailable", "{error:?}");
+        assert!(matches!(error, VogtError::GitHubUnavailable(_)));
     }
 
     #[test]

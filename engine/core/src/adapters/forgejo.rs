@@ -109,6 +109,7 @@ impl ForgejoClient {
         if status >= 400 {
             return Err(VogtError::ForgeHttpStatus {
                 status,
+                forge: Some(crate::errors::Forge::Forgejo),
                 message: format!("{} returned {status} for {verb} {path}", self.host),
             });
         }

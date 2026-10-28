@@ -566,6 +566,12 @@ impl<T: ForgeTransport> ForgeProvider for ForgejoProvider<T> {
                     py_repr(name)
                 )));
             }
+            // Any other refusal is Forgejo's own unavailable error, the way
+            // Python re-raises `ForgejoUnavailable` when the status is neither
+            // 409 nor 422.
+            Err(VogtError::ForgeHttpStatus { message, .. }) => {
+                return Err(VogtError::ForgejoUnavailable(message));
+            }
             other => other?,
         };
         let owner = login(response.get("owner")).ok_or_else(|| {
@@ -813,6 +819,7 @@ fn forge_fail(message: &str) -> VogtError {
         if message.contains(&status.to_string()) {
             return VogtError::ForgeHttpStatus {
                 status,
+                forge: Some(crate::errors::Forge::Forgejo),
                 message: message.to_owned(),
             };
         }
@@ -1090,7 +1097,10 @@ mod tests {
                 .borrow_mut()
                 .push((method, path.to_owned(), body.cloned()));
             if let Some(message) = &self.write_error {
-                return Err(VogtError::UpstreamWriteFailed(message.clone()));
+                // The real client turns a non-2xx body into ForgeHttpStatus
+                // stamped with this forge; the fixture must too, or a test of
+                // the unavailable mapping never reaches it.
+                return Err(forge_fail(message));
             }
             // A write answers with the created object: number, URL and, for a
             // repository create, the owner and visibility.
@@ -1462,6 +1472,17 @@ mod tests {
             "the first push must be clean"
         );
         assert_eq!(body["description"], serde_json::json!("d"));
+    }
+
+    #[test]
+    fn create_repo_turns_any_other_refusal_into_forgejo_unavailable() {
+        // A 500 is neither 409 nor 422. Python re-raises ForgejoUnavailable,
+        // whose code is forgejo_unavailable, not upstream_write_failed.
+        let mut provider = recorded(vec![]);
+        provider.transport.write_error = Some("Forgejo answered 500".to_owned());
+        let error = provider.create_repo("widgets", true, None).unwrap_err();
+        assert_eq!(error.code(), "forgejo_unavailable", "{error:?}");
+        assert!(matches!(error, VogtError::ForgejoUnavailable(_)));
     }
 
     #[test]
