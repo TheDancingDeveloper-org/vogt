@@ -427,19 +427,23 @@ fn status<C: Clock, I: IdFactory>(
             "cloned_at": stamp.cloned_at.to_json(),
             "backup_taken_at": stamp.backup_taken_at.to_json(),
         })),
-        // The workspace volume, when a session engine answers. Absent is a
-        // different fact from a volume that is fine (WI-1304).
+        // The workspace volume: the engine's row when one is configured,
+        // otherwise a local stat of the data directory's volume.
         "disk": workspace_disk(ctx),
     }))
 }
 
-/// The engine's report of the workspace volume, or nothing when it cannot be
-/// asked or the row is malformed. A failure to answer is logged and read as absent, never as an error
-/// in status.
+/// The workspace volume. A configured engine is asked first; its row is
+/// absent when it cannot answer or the payload is malformed, which is a
+/// different fact from a volume that is fine (WI-1304). With no engine at
+/// all, the core stats the volume its data directory lives on so a disk
+/// warning still exists (preview gap: `status.disk` was always null).
 pub(crate) fn workspace_disk<C: Clock, I: IdFactory>(
     ctx: &crate::application::context::AppContext<C, I>,
 ) -> Option<serde_json::Value> {
-    let engine = ctx.engine.as_ref()?;
+    let Some(engine) = ctx.engine.as_ref() else {
+        return local_workspace_disk(&ctx.config.resolved_data_dir());
+    };
     match engine.operational_status() {
         // Read as Python's `EngineDiskStatus` reads it: a row with a field of
         // the wrong type, or one it does not know, is no row.
@@ -452,6 +456,55 @@ pub(crate) fn workspace_disk<C: Clock, I: IdFactory>(
             None
         }
     }
+}
+
+/// Same threshold the engine uses when `VOGT_ENGINE_DISK_WARN_PERCENT` is unset.
+const DISK_WARN_PERCENT: u8 = 85;
+
+/// Usage of the volume `path` lives on. `None` when the path cannot be stated,
+/// so a missing directory stays "not collected" rather than a zero-byte alarm.
+fn local_workspace_disk(path: &std::path::Path) -> Option<serde_json::Value> {
+    let usage = volume_usage(path)?;
+    Some(serde_json::json!({
+        "path": path.display().to_string(),
+        "total_bytes": usage.total_bytes,
+        "free_bytes": usage.free_bytes,
+        "used_percent": usage.used_percent,
+        "threshold_percent": DISK_WARN_PERCENT,
+        "needs_attention": usage.used_percent >= DISK_WARN_PERCENT,
+    }))
+}
+
+struct VolumeUsage {
+    total_bytes: u64,
+    free_bytes: u64,
+    used_percent: u8,
+}
+
+/// `statvfs` of `path`. Mirrors the engine server's `volume_usage`; core must
+/// not depend on the server crate.
+fn volume_usage(path: &std::path::Path) -> Option<VolumeUsage> {
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes()).ok()?;
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    let block = stat.f_frsize as u64;
+    let total = (stat.f_blocks as u64).saturating_mul(block);
+    let free = (stat.f_bavail as u64).saturating_mul(block);
+    let used = total.saturating_sub(free);
+    let percent = u8::try_from(
+        used.saturating_mul(100)
+            .checked_div(total)
+            .unwrap_or(0)
+            .min(100),
+    )
+    .unwrap_or(100);
+    Some(VolumeUsage {
+        total_bytes: total,
+        free_bytes: free,
+        used_percent: percent,
+    })
 }
 
 /// The config `init` adopts bootstrap tokens with. `init` was given this data
