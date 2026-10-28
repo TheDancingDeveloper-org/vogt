@@ -715,7 +715,7 @@ fn peer_diagnostics<C: Clock, I: IdFactory>(
         Err(error) => PeerDiagnostics {
             status: PeerDiagnosticsStatus::Unreachable,
             url: Some(peer.base_url().to_string()),
-            detail: Some(error.message().to_string()),
+            detail: Some(crate::observability::redact(error.message())),
             diagnostics: None,
         },
     }
