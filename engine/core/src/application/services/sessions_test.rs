@@ -334,6 +334,8 @@ fn a_dead_engine_hides_no_linked_sessions() {
             mode: "digest".to_string(),
             states: None,
             stall_after_minutes: 10,
+            include_hidden: false,
+            fields: None,
         },
     )
     .unwrap();
@@ -675,4 +677,297 @@ fn an_explicit_null_is_an_override_the_profile_does_not_fill() {
     assert_eq!(audit["overrides"], serde_json::json!(["worktree"]));
     assert_eq!(audit["worktree"], serde_json::Value::Null);
     assert_eq!(audit["repo_map"], true);
+}
+
+fn digest_params() -> ListSessionsParams {
+    ListSessionsParams {
+        project: None,
+        work_item: None,
+        include_stopped: false,
+        limit: 50,
+        offset: 0,
+        order: "started".to_string(),
+        mode: "digest".to_string(),
+        states: None,
+        stall_after_minutes: 10,
+        include_hidden: false,
+        fields: None,
+    }
+}
+
+fn listed_activities(body: &str) -> Vec<Option<String>> {
+    let script = script_with(vec![(200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let listed = list_sessions(ctx, &digest_params()).unwrap();
+    listed
+        .digests
+        .iter()
+        .map(|row| {
+            // activity is private; the public wire is the serialised row.
+            serde_json::to_value(row).unwrap()["activity"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+#[test]
+fn the_default_state_filter_drops_hibernated_stopped_and_exited() {
+    let body = r#"{
+        "sessions": [
+            {"id":"live","name":"live","cwd":"/w","activity":"idle","alive":true},
+            {"id":"asleep","name":"asleep","cwd":"/w","activity":"hibernated","alive":false,"hibernated":true},
+            {"id":"halted","name":"halted","cwd":"/w","activity":"stopped","alive":false},
+            {"id":"gone","name":"gone","cwd":"/w","activity":"exited","alive":false}
+        ],
+        "hidden_count": 2
+    }"#;
+    let script = script_with(vec![(200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let listed = list_sessions(ctx, &digest_params()).unwrap();
+    assert_eq!(listed.hidden_count, 2);
+    let activities: Vec<_> = listed
+        .digests
+        .iter()
+        .map(|row| {
+            serde_json::to_value(row).unwrap()["activity"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(activities, vec!["idle".to_string()], "{activities:?}");
+    assert_eq!(listed.total, 1);
+    assert!(!listed.truncated);
+}
+
+#[test]
+fn an_empty_states_list_keeps_every_state() {
+    let body = r#"{
+        "sessions": [
+            {"id":"live","name":"live","cwd":"/w","activity":"idle","alive":true},
+            {"id":"asleep","name":"asleep","cwd":"/w","activity":"hibernated","alive":false,"hibernated":true},
+            {"id":"gone","name":"gone","cwd":"/w","activity":"exited","alive":false}
+        ]
+    }"#;
+    let script = script_with(vec![(200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = digest_params();
+    params.states = Some(Vec::new());
+    let listed = list_sessions(ctx, &params).unwrap();
+    assert_eq!(listed.digests.len(), 3, "{listed:?}");
+    assert_eq!(listed.total, 3);
+}
+
+#[test]
+fn full_mode_returns_summaries_and_no_digests() {
+    let body =
+        r#"{"sessions":[{"id":"live","name":"live","cwd":"/w","activity":"idle","alive":true}]}"#;
+    let script = script_with(vec![(200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = digest_params();
+    params.mode = "full".to_string();
+    let listed = list_sessions(ctx, &params).unwrap();
+    assert_eq!(listed.sessions.len(), 1);
+    assert!(listed.digests.is_empty());
+    assert!(!listed.sessions[0].linked);
+}
+
+#[test]
+fn paging_happens_after_the_state_filter() {
+    // Two hibernated rows would fill a page of two if the filter ran after
+    // the cut. The idle row must still be the first page.
+    let body = r#"{
+        "sessions": [
+            {"id":"a","name":"a","cwd":"/w","activity":"hibernated","alive":false,"hibernated":true},
+            {"id":"b","name":"b","cwd":"/w","activity":"hibernated","alive":false,"hibernated":true},
+            {"id":"c","name":"c","cwd":"/w","activity":"idle","alive":true}
+        ]
+    }"#;
+    let script = script_with(vec![(200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = digest_params();
+    params.limit = 1;
+    let listed = list_sessions(ctx, &params).unwrap();
+    assert_eq!(listed.total, 1);
+    assert!(!listed.truncated);
+    let id = serde_json::to_value(&listed.digests[0]).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(id, "c");
+}
+
+#[test]
+fn total_and_truncated_describe_the_filtered_set() {
+    let body = r#"{
+        "sessions": [
+            {"id":"a","name":"a","cwd":"/w","activity":"idle","alive":true},
+            {"id":"b","name":"b","cwd":"/w","activity":"running","alive":true},
+            {"id":"c","name":"c","cwd":"/w","activity":"idle","alive":true}
+        ]
+    }"#;
+    let script = script_with(vec![(200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = digest_params();
+    params.limit = 2;
+    let listed = list_sessions(ctx, &params).unwrap();
+    assert_eq!(listed.total, 3);
+    assert!(listed.truncated);
+    assert_eq!(listed.digests.len(), 2);
+}
+
+#[test]
+fn an_unlinked_engine_session_survives_onto_page_two() {
+    // Linked declared rows fill page one. The unlinked engine row is joined
+    // before the page is cut, so offset 1 still returns it (Python sessions.py).
+    let start = script_with(vec![(
+        200,
+        r#"{"id":"eng-linked","name":"linked","cwd":"/work/tree","activity":"idle","alive":true}"#
+            .to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&start)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    start.answers.lock().unwrap().push((
+        200,
+        r#"{
+            "sessions": [
+                {"id":"eng-linked","name":"linked","cwd":"/work/tree","activity":"idle","alive":true},
+                {"id":"eng-free","name":"free","cwd":"/elsewhere","activity":"idle","alive":true}
+            ]
+        }"#
+        .to_string(),
+    ));
+    let mut params = digest_params();
+    params.limit = 1;
+    params.offset = 1;
+    let listed = list_sessions(ctx, &params).unwrap();
+    assert_eq!(listed.total, 2, "{listed:?}");
+    assert_eq!(listed.digests.len(), 1, "{listed:?}");
+    let row = serde_json::to_value(&listed.digests[0]).unwrap();
+    assert_eq!(row["id"].as_str(), Some("eng-free"), "{row}");
+}
+
+#[test]
+fn a_digest_carries_done_at_budget_report_and_extra_fields() {
+    let body = r#"{
+        "sessions": [{
+            "id": "eng-done",
+            "name": "done-one",
+            "cwd": "/w",
+            "activity": "waiting-for-input",
+            "alive": true,
+            "done_at": "2026-10-28T00:00:00Z",
+            "last_reply_excerpt": "a long reply that should not survive a report",
+            "economics": {"turns": 4, "compactions": 1, "usage_measured": false}
+        }]
+    }"#;
+    let script = script_with(vec![(200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let db = ctx.config.resolved_data_dir().join("declared.sqlite3");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let actor_id: String = conn
+        .query_row(
+            "SELECT id FROM actors WHERE identity_ref = 'local:test-user'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO session_reports (id, actor_id, engine_session_id, kind, summary, data, created_at)
+         VALUES ('rep-1', ?1, 'eng-done', 'result', 'landed it',
+                 '{\"branch\":\"backlog-1\",\"sha\":\"abcdef0123456789\",\"pr\":\"9\"}',
+                 '2026-10-28T00:00:01Z')",
+        [&actor_id],
+    )
+    .unwrap();
+    let mut params = digest_params();
+    params.fields = Some(vec!["name".to_string(), "command".to_string()]);
+    let listed = list_sessions(ctx, &params).unwrap();
+    assert_eq!(listed.digests.len(), 1);
+    let row = serde_json::to_value(&listed.digests[0]).unwrap();
+    assert_eq!(row["attention"].as_str(), Some("done"), "{row}");
+    assert_eq!(row["done_at"].as_str(), Some("2026-10-28T00:00:00Z"));
+    assert!(row["last_reply_excerpt"].is_null(), "{row}");
+    let report = row["report"].as_str().unwrap();
+    assert!(report.starts_with("result: landed it"), "{report}");
+    assert!(report.contains("sha=abcdef012345"), "{report}");
+    assert_eq!(row["budget"].as_str(), Some("4 turns, 1 compaction"));
+    let extra = &row["extra"];
+    assert_eq!(extra["name"].as_str(), Some("done-one"));
+    assert!(extra.get("command").is_none(), "{extra}");
+}
+
+#[test]
+fn declared_overflow_is_a_floor_on_total_and_stays_truncated() {
+    // One past the declared fetch ceiling. The extra row is not joined, but
+    // total is a floor and the page stays truncated (Python `_DECLARED_FETCH`).
+    let script = script_with(vec![(200, r#"{"sessions":[]}"#.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let db = ctx.config.resolved_data_dir().join("declared.sqlite3");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let actor_id: String = conn
+        .query_row(
+            "SELECT id FROM actors WHERE identity_ref = 'local:test-user'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let project_id: String = conn
+        .query_row("SELECT id FROM projects WHERE slug = 'beta'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    for index in 0..501 {
+        tx.execute(
+            "INSERT INTO coding_sessions (
+                id, engine_session_id, project_id, actor_id, cwd, reason, started_at
+             ) VALUES (?1, ?2, ?3, ?4, '/w', 'seed', ?5)",
+            (
+                format!("ses_{index:04}"),
+                format!("eng_{index:04}"),
+                &project_id,
+                &actor_id,
+                format!("2026-10-28T00:{:02}:{:02}Z", index / 60, index % 60),
+            ),
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let mut params = digest_params();
+    params.limit = 50;
+    let listed = list_sessions(ctx, &params).unwrap();
+    assert_eq!(listed.total, 501, "floor is the kept 500 plus one");
+    assert!(listed.truncated);
+    assert_eq!(listed.digests.len(), 50);
 }

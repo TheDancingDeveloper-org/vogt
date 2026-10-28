@@ -1,8 +1,8 @@
 //! Ports `tests/test_workspace_disk.py`: the workspace-volume row (WI-1304)
 //! that `status` and `sweep` carry as `disk` when the session engine answers
 //! `GET /api/status`, and leave absent when a configured engine cannot say.
-//! With no engine at all the core stats the data directory's volume itself,
-//! so the disk warning still exists. `engine.status` carries the engine's
+//! With no engine at all the row stays absent: Python returns null, and the
+//! core does not invent a local stat. `engine.status` carries the engine's
 //! row beside the rest of its report. A row pydantic's `EngineDiskStatus`
 //! would refuse (`{"used_percent": "x"}`) is no row on every surface.
 
@@ -100,8 +100,10 @@ fn status_and_sweep_carry_the_disk_row() {
 fn the_row_is_absent_when_the_engine_cannot_say() {
     for which in ["status", "sweep"] {
         // A configured engine that is down or answers garbage is "not
-        // collected". No engine is a different case: the core stats locally.
-        let cases: [(&str, Option<EngineClient>); 2] = [
+        // collected". No engine is the same: Python returns null rather than
+        // a locally invented stat.
+        let cases: [(&str, Option<EngineClient>); 3] = [
+            ("no-engine", None),
             ("engine-unavailable", Some(engine((503, "{}".to_string())))),
             ("engine-error", Some(engine((200, "[]".to_string())))),
         ];
@@ -109,28 +111,6 @@ fn the_row_is_absent_when_the_engine_cannot_say() {
             let built = opened(client);
             assert_eq!(surface(&built, which), Value::Null, "{which} {id}");
         }
-    }
-}
-
-#[test]
-fn no_engine_stats_the_data_directory_volume() {
-    for which in ["status", "sweep"] {
-        let built = opened(None);
-        let row = surface(&built, which);
-        let path = row["path"].as_str().expect("path");
-        assert!(path.contains("vogt-disk-"), "{which} {row}");
-        let total = row["total_bytes"].as_u64().expect("total");
-        assert!(total > 0, "{which} {row}");
-        let free = row["free_bytes"].as_u64().expect("free");
-        assert!(free <= total, "{which} {row}");
-        let used = row["used_percent"].as_u64().expect("used");
-        assert!(used <= 100, "{which} {row}");
-        assert_eq!(row["threshold_percent"], json!(85), "{which}");
-        assert_eq!(
-            row["needs_attention"],
-            json!(used >= 85),
-            "{which} {row}"
-        );
     }
 }
 

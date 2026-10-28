@@ -1251,6 +1251,8 @@ pub struct EngineSession {
     pub stop_reason: Option<String>,
     /// The named Claude Code account the session runs under, when one was.
     pub account: Option<String>,
+    /// When an autopilot session declared itself done this turn.
+    pub done_at: Option<String>,
     /// The engine tailer's own economics reading, when it sent an object.
     pub economics: Option<serde_json::Map<String, Value>>,
     /// The session's engine-enforced limits, when it sent an object. Absent
@@ -1309,6 +1311,7 @@ impl EngineSession {
             stopped_by: optional_str(stop.and_then(|stop| stop.get("by"))),
             stop_reason: optional_str(stop.and_then(|stop| stop.get("reason"))),
             account: optional_str(get("account")),
+            done_at: optional_str(get("done_at")),
             economics: get("economics").and_then(Value::as_object).cloned(),
             budget: get("budget").and_then(Value::as_object).cloned(),
         }

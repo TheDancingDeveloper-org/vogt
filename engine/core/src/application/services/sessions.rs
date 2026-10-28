@@ -190,6 +190,8 @@ where
         mode: optional_string(&params, "mode")?.unwrap_or_else(|| "digest".to_string()),
         states: optional_string_list(&params, "states")?,
         stall_after_minutes: optional_i64(&params, "stall_after_minutes", 10)?,
+        include_hidden: optional_bool(&params, "include_hidden")?.unwrap_or(false),
+        fields: optional_string_list(&params, "fields")?,
     };
     Ok(serde_json::to_value(list_sessions(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -549,6 +551,10 @@ pub struct ListSessionsParams {
     /// list keeps every state.
     pub states: Option<Vec<String>>,
     pub stall_after_minutes: i64,
+    /// Ask the engine for rows it hides from the default list (WI-1289).
+    pub include_hidden: bool,
+    /// Summary fields copied onto each digest row as `extra`.
+    pub fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -733,6 +739,15 @@ pub struct SessionSummary {
     pub running: Option<SessionRuntime>,
     pub resources: Option<SessionResources>,
     pub conversation_id: Option<String>,
+    /// Digest-only: when autopilot declared itself done. Not on the wire summary.
+    #[serde(skip)]
+    pub done_at: Option<String>,
+    /// Digest-only: the latest session report, as one line.
+    #[serde(skip)]
+    pub latest_report: Option<String>,
+    /// Digest-only: the engine economics object, when present.
+    #[serde(skip)]
+    pub economics: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 fn linked_default() -> bool {
@@ -1195,16 +1210,17 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let (live, detail) = match ctx.engine.as_ref() {
+    let (live, detail, hidden_count) = match ctx.engine.as_ref() {
         None => (
             Vec::new(),
             Some("no session engine is configured (VOGT_ENGINE_URL is unset)".to_string()),
+            0,
         ),
-        Some(engine) => match engine.list_sessions() {
+        Some(engine) => match engine.list_sessions_counted(params.include_hidden) {
             // Kept as a Vec: the engine's order is the order unlinked rows
             // append in, and a HashMap would shuffle it.
-            Ok(rows) => (rows, None),
-            Err(VogtError::EngineUnavailable(text)) => (Vec::new(), Some(text)),
+            Ok((rows, hidden)) => (rows, None, hidden as i64),
+            Err(VogtError::EngineUnavailable(text)) => (Vec::new(), Some(text), 0),
             Err(error) => return Err(error),
         },
     };
@@ -1217,7 +1233,12 @@ where
     let stall_after = params.stall_after_minutes.saturating_mul(60);
     let mut kept = Vec::new();
     for summary in joined.drain(..) {
-        if full || digest_kept(&summary, attention_name(&summary, now, stall_after), params.states.as_deref())
+        if full
+            || digest_kept(
+                &summary,
+                attention_name(&summary, now, stall_after),
+                params.states.as_deref(),
+            )
         {
             kept.push(summary);
         }
@@ -1253,12 +1274,18 @@ where
             engine: detail,
             total: reported,
             truncated,
-            hidden_count: 0,
+            hidden_count,
         });
     }
     let digests = page
         .iter()
-        .map(|summary| digest_of(summary, attention_name(summary, now, stall_after)))
+        .map(|summary| {
+            digest_of(
+                summary,
+                attention_name(summary, now, stall_after),
+                params.fields.as_deref(),
+            )
+        })
         .collect();
     Ok(SessionListResult {
         sessions: Vec::new(),
@@ -1266,7 +1293,7 @@ where
         engine: detail,
         total: reported,
         truncated,
-        hidden_count: 0,
+        hidden_count,
     })
 }
 
@@ -1280,20 +1307,34 @@ const DIGEST_LIVE: &[&str] = &[
 const EXCLUDED_STATES: &[&str] = &["hibernated", "stopped", "exited"];
 const DIGEST_CLIP: usize = 120;
 
-fn attention_name(summary: &SessionSummary, now: crate::core::Moment, stall_after_secs: i64) -> String {
+fn attention_name(
+    summary: &SessionSummary,
+    now: crate::core::Moment,
+    stall_after_secs: i64,
+) -> String {
     decisions::classify(
         summary.activity.as_deref(),
         summary.alive,
         Some(summary.activity.as_deref() == Some("waiting-for-input")),
-        summary.approval.as_ref().map(|approval| approval.question.as_str()),
-        summary.blocked.as_ref().map(|blocked| blocked.blocker.as_str()),
-        summary.approval.as_ref().map(|approval| approval.kind.as_str()),
+        summary
+            .approval
+            .as_ref()
+            .map(|approval| approval.question.as_str()),
+        summary
+            .blocked
+            .as_ref()
+            .map(|blocked| blocked.blocker.as_str()),
+        summary
+            .approval
+            .as_ref()
+            .map(|approval| approval.kind.as_str()),
         summary
             .last_output_at
             .as_deref()
             .and_then(|text| crate::core::from_iso(text).ok()),
         now,
         stall_after_secs,
+        summary.done_at.as_deref(),
     )
     .attention
     .as_str()
@@ -1305,7 +1346,10 @@ fn state_of(summary: &SessionSummary, attention: &str) -> Option<String> {
         return Some(if attention == "exited" {
             "exited".to_string()
         } else {
-            summary.activity.clone().unwrap_or_else(|| attention.to_string())
+            summary
+                .activity
+                .clone()
+                .unwrap_or_else(|| attention.to_string())
         });
     }
     summary.activity.clone().or_else(|| {
@@ -1344,9 +1388,19 @@ fn clip(text: &str) -> String {
 fn digest_of(
     summary: &SessionSummary,
     attention: String,
+    fields: Option<&[String]>,
 ) -> SessionDigestRow {
-    let blocked = summary.blocked.as_ref().map(|blocked| blocked.blocker.clone());
+    let blocked = summary
+        .blocked
+        .as_ref()
+        .map(|blocked| blocked.blocker.clone());
     let approval = summary.approval.as_ref();
+    let report = summary.latest_report.clone();
+    let excerpt = if report.is_some() {
+        None
+    } else {
+        summary.last_reply_excerpt.as_ref().map(|text| clip(text))
+    };
     SessionDigestRow {
         id: summary.id.clone(),
         name: summary.name.clone(),
@@ -1357,12 +1411,9 @@ fn digest_of(
         blocked_reason: blocked.as_ref().map(|text| clip(text)),
         blocked_detail: blocked.filter(|text| text.chars().count() > DIGEST_CLIP),
         turn_started_at: summary.turn_started_at.clone(),
-        done_at: None,
-        last_reply_excerpt: summary
-            .last_reply_excerpt
-            .as_ref()
-            .map(|text| clip(text)),
-        report: None,
+        done_at: summary.done_at.clone(),
+        last_reply_excerpt: excerpt,
+        report,
         template: summary.template.clone(),
         brief_file: None,
         question: approval.map(|approval| approval.question.clone()),
@@ -1371,12 +1422,182 @@ fn digest_of(
             if approval.options.is_empty() {
                 None
             } else {
-                Some(approval.options.iter().map(|option| option.label.clone()).collect())
+                Some(
+                    approval
+                        .options
+                        .iter()
+                        .map(|option| option.label.clone())
+                        .collect(),
+                )
             }
         }),
-        budget: None,
+        budget: budget_of(summary.economics.as_ref()),
         supervisor: None,
-        extra: None,
+        extra: digest_extra(summary, fields),
+    }
+}
+
+fn budget_of(economics: Option<&serde_json::Map<String, Value>>) -> Option<String> {
+    let payload = economics?;
+    if payload.is_empty() {
+        return None;
+    }
+    let int_of = |name: &str| -> i64 {
+        match payload.get(name) {
+            // Python `_int_of` accepts real ints and rejects bools. JSON has
+            // no bool-as-number, so a number is enough; a float is not an int.
+            Some(Value::Number(number)) if number.is_i64() => number.as_i64().unwrap_or(0),
+            _ => 0,
+        }
+    };
+    let reading = crate::core::session_economics::SessionEconomics {
+        turns: int_of("turns"),
+        context_tokens: int_of("context_tokens"),
+        peak_context_tokens: int_of("peak_context_tokens"),
+        compactions: int_of("compactions"),
+        tool_result_bytes: match payload.get("tool_result_bytes") {
+            Some(Value::Object(tools)) => tools
+                .iter()
+                .filter_map(|(name, value)| value.as_i64().map(|number| (name.clone(), number)))
+                .collect(),
+            _ => Default::default(),
+        },
+        reads_repeated: int_of("reads_repeated"),
+        output_tokens: int_of("output_tokens"),
+        usage_measured: payload.get("usage_measured") == Some(&Value::Bool(true)),
+        ..Default::default()
+    };
+    Some(reading.budget_line(None, None))
+}
+
+fn digest_extra(
+    summary: &SessionSummary,
+    fields: Option<&[String]>,
+) -> Option<serde_json::Map<String, Value>> {
+    let wanted = fields?;
+    if wanted.is_empty() {
+        return None;
+    }
+    let dumped = serde_json::to_value(summary).unwrap_or(Value::Null);
+    let object = dumped.as_object();
+    let mut extra = serde_json::Map::new();
+    for name in wanted {
+        if name == "command" {
+            continue;
+        }
+        if let Some(value) = object.and_then(|object| object.get(name)) {
+            extra.insert(name.clone(), value.clone());
+        }
+    }
+    if extra.is_empty() {
+        None
+    } else {
+        Some(extra)
+    }
+}
+
+/// Newest report per engine session, already formatted as the digest line.
+/// A missing table or a locked database is no report, not a failed list.
+fn latest_report_lines<C, I>(
+    ctx: &AppContext<C, I>,
+    ids: &[String],
+) -> std::collections::HashMap<String, String>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    use std::collections::HashMap;
+    let mut found = HashMap::new();
+    let wanted: Vec<&str> = ids
+        .iter()
+        .filter(|id| !id.is_empty())
+        .map(String::as_str)
+        .collect();
+    if wanted.is_empty() {
+        return found;
+    }
+    let path = ctx.declared.path().to_path_buf();
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return found;
+    };
+    let placeholders = std::iter::repeat_n("?", wanted.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT kind, summary, data, engine_session_id FROM (
+            SELECT r.kind, r.summary, r.data, r.engine_session_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY engine_session_id
+                       ORDER BY created_at DESC, id DESC
+                   ) AS rn
+            FROM session_reports r
+            WHERE engine_session_id IN ({placeholders})
+        ) WHERE rn = 1"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return found;
+    };
+    let rows = stmt.query_map(rusqlite::params_from_iter(wanted.iter()), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    });
+    let Ok(rows) = rows else {
+        return found;
+    };
+    for row in rows.flatten() {
+        let (kind, summary, data, engine_id) = row;
+        let Some(engine_id) = engine_id else { continue };
+        found.insert(engine_id, report_line(&kind, &summary, &data));
+    }
+    found
+}
+
+/// Python `reports.one_line`, clipped at 200 rather than the excerpt's 120.
+fn report_line(kind: &str, summary: &str, data: &str) -> String {
+    let parsed: serde_json::Value = serde_json::from_str(data).unwrap_or(Value::Null);
+    let mut extras = Vec::new();
+    if let Some(branch) = parsed
+        .get("branch")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        extras.push(format!("branch={branch}"));
+    }
+    if let Some(sha) = parsed
+        .get("sha")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        let short: String = sha.chars().take(12).collect();
+        extras.push(format!("sha={short}"));
+    }
+    if let Some(pr) = parsed.get("pr").filter(|value| !value.is_null()) {
+        let text = match pr {
+            Value::String(text) if !text.is_empty() => Some(text.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        };
+        if let Some(text) = text {
+            extras.push(format!("pr={text}"));
+        }
+    }
+    let mut line = format!("{kind}: {summary}");
+    if !extras.is_empty() {
+        line = format!("{line} [{}]", extras.join(" "));
+    }
+    let count = line.chars().count();
+    if count <= 200 {
+        line
+    } else {
+        let head: String = line.chars().take(199).collect();
+        format!("{head}…")
     }
 }
 
@@ -1414,7 +1635,10 @@ where
     )?;
     let declared_overflow = recorded.len() as i64 == DECLARED_FETCH;
     let recorded: Vec<_> = if declared_overflow {
-        recorded.into_iter().take((DECLARED_FETCH - 1) as usize).collect()
+        recorded
+            .into_iter()
+            .take((DECLARED_FETCH - 1) as usize)
+            .collect()
     } else {
         recorded
     };
@@ -1430,19 +1654,41 @@ where
         )?);
     }
     let unfiltered = project_id.is_none() && work_item_id.is_none();
-    if unfiltered && params.offset == 0 {
+    // Joined before the page is cut, matching Python: an offset applied here
+    // would drop unlinked sessions from every page but the first.
+    if unfiltered {
         let view = ctx.declared.read()?;
         for engine_session in live {
             // A hibernated session is asleep, not stopped: listed always. An
             // exited one is the engine's leftover, listed only when stopped
             // sessions were asked for. Linked rows are not filtered here —
             // the declared query already applied include_stopped.
-            if !engine_session.alive && !engine_session.hibernated() && !params.include_stopped {
+            // An empty states list asks for every state, including an
+            // unlinked session whose process has exited. Otherwise that
+            // leftover is listed only when stopped sessions were asked for.
+            let every_state = params.states.as_ref().is_some_and(Vec::is_empty);
+            if !engine_session.alive
+                && !engine_session.hibernated()
+                && !params.include_stopped
+                && !every_state
+            {
                 continue;
             }
             if view.session_by_engine_id(&engine_session.id)?.is_none() {
                 summaries.push(unlinked_summary(&view, engine_session)?);
             }
+        }
+    }
+    // The latest typed report per engine session, attached before the
+    // transcript loop so a report can replace the reply excerpt (WI-2039).
+    let ids: Vec<String> = summaries
+        .iter()
+        .map(|summary| summary.engine_session_id.clone())
+        .collect();
+    let reports = latest_report_lines(ctx, &ids);
+    for summary in &mut summaries {
+        if let Some(line) = reports.get(&summary.engine_session_id) {
+            summary.latest_report = Some(line.clone());
         }
     }
     // Outside the read transaction: this is file I/O, and an excerpt that
@@ -1543,6 +1789,8 @@ where
             mode: "full".to_string(),
             states: None,
             stall_after_minutes: params.stall_after_minutes,
+            include_hidden: false,
+            fields: None,
         },
         &live,
         None,
@@ -1578,6 +1826,7 @@ where
                 .and_then(|text| crate::core::from_iso(text).ok()),
             swept_at,
             stall,
+            summary.done_at.as_deref(),
         );
         rows.push(SessionSweepRow {
             attention: verdict.attention.as_str().to_string(),
@@ -2859,6 +3108,9 @@ where
         running: None,
         resources: None,
         conversation_id: None,
+        done_at: None,
+        latest_report: None,
+        economics: None,
     };
     if let Some(live) = live {
         apply_live(&mut summary, live);
@@ -2869,6 +3121,8 @@ where
 /// Copy the engine's live fields onto a summary.
 fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.activity = Some(live.activity.clone());
+    summary.done_at = live.done_at.clone();
+    summary.economics = live.economics.clone();
     summary.name = Some(live.name.clone());
     summary.command = live.command.clone();
     summary.exit_code = live.exit_code;
@@ -3110,6 +3364,9 @@ fn unlinked_summary(
         running: None,
         resources: None,
         conversation_id: None,
+        done_at: None,
+        latest_report: None,
+        economics: None,
     };
     apply_live(&mut summary, session);
     Ok(summary)
