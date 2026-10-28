@@ -94,8 +94,21 @@ pub enum VogtError {
     /// the same text. `create_repo` matches the status, not the digits.
     ForgeHttpStatus {
         status: u16,
+        /// Which forge refused. `create_repo` maps a status that is not the
+        /// "already exists" one (409/422) to that forge's own unavailable
+        /// error, the way Python re-raises `GitHubUnavailable` or
+        /// `ForgejoUnavailable`. A status with no forge stays
+        /// `upstream_write_failed`.
+        forge: Option<Forge>,
         message: String,
     },
+}
+
+/// Which forge a `ForgeHttpStatus` came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Forge {
+    GitHub,
+    Forgejo,
 }
 
 impl VogtError {
@@ -201,7 +214,15 @@ impl VogtError {
             Self::Forbidden(_) => "forbidden",
             Self::CollectorFailed(_) => "collector_failed",
             Self::NotImplemented(_) => "invalid_request",
-            Self::ForgeHttpStatus { .. } => "upstream_write_failed",
+            Self::ForgeHttpStatus {
+                forge: Some(Forge::GitHub),
+                ..
+            } => "github_unavailable",
+            Self::ForgeHttpStatus {
+                forge: Some(Forge::Forgejo),
+                ..
+            } => "forgejo_unavailable",
+            Self::ForgeHttpStatus { forge: None, .. } => "upstream_write_failed",
         }
     }
 
@@ -494,6 +515,7 @@ mod tests {
         // the variant, so a 409 in some other sentence cannot become a refusal.
         let refused = VogtError::ForgeHttpStatus {
             status: 409,
+            forge: None,
             message: "name already taken".to_string(),
         };
         assert!(matches!(
