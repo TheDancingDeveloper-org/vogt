@@ -3,8 +3,9 @@ name: rust-core
 # Gate for the Rust core. It runs on the long-lived `rust-core` branch and on
 # the WI-1076 integration (push to wi-1076-engine-core, pull requests into
 # wi-1443-main-sync), because that is where the compose job — including the
-# existing e2e and live Playwright — has to actually execute. It does not run
-# on main. The parity job checks the committed golden; it never writes one.
+# existing e2e and live Playwright — has to actually execute. Fast jobs have
+# no `if:`, so a pull request into main runs them too; only the live jobs are
+# gated. The parity job checks the committed golden; it never writes one.
 # A golden is recorded only by `record-golden`, dispatched with
 # record_golden=true under the pinned UV_PYTHON (WI-2661). `compose`,
 # `playwright` and `coverage` run in the merge queue and nightly, not on
@@ -17,8 +18,8 @@ on:
     branches: [rust-core, wi-1076-engine-core, wi-1443-main-sync]
   pull_request:
     # main is listed so the cutover PR (head rust-core, base main) starts
-    # this workflow at all. Fast jobs still skip pull requests; Playwright
-    # is the only job whose condition matches that one PR.
+    # this workflow at all. Fast jobs have no if:, so they run on that pull
+    # request too; Playwright is the only job gated to that one PR.
     branches: [rust-core, wi-1443-main-sync, main]
   # The live suite and coverage run here, not on every push (WI-2677).
   merge_group:
@@ -166,14 +167,16 @@ jobs:
     # Not required, and not on every push. Nightly, manual, the merge queue,
     # and the one pull request that cuts rust-core into main (WI-2677).
     # head_ref is the branch name, not a SHA, so this does not match any
-    # other pull request into main.
+    # other pull request into main. The head-repo check refuses a fork
+    # branch that happens to be named rust-core (self-hosted runners).
     if: >-
       github.event_name == 'merge_group' ||
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
        github.base_ref == 'main' &&
-       github.head_ref == 'rust-core')
+       github.head_ref == 'rust-core' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, docker]
     timeout-minutes: 60
     steps:

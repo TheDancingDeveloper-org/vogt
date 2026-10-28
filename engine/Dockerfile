@@ -594,8 +594,11 @@ COPY --from=python-core /opt/vogt /opt/vogt
 #
 # Measured image size (`docker image inspect .Size`) of the local stack image
 # vogt-engine-e2e:local (id cb3998cfe1f9, built 2026-10-18 from this Dockerfile
-# before the PATH reorder): 7,555,153,795 B (7.56 GB). Appending the venv adds
-# no layer content, so the size does not move. The published comparison in
+# before the PATH reorder and before the python-core stage): 7,555,153,795 B
+# (7.56 GB). That figure predates shipping both cores. Rebuilt at the line tip
+# on 2026-10-28 (`docker build -f engine/Dockerfile -t vogt-engine-size:tip .`,
+# id cc83e72569e0, both cores, venv appended): 7,677,095,176 B (7.68 GB),
+# +121,941,381 B over that baseline. The published comparison in
 # docs/rust-port/stack-image-numbers.md (2026-10-19, INSTALL_AI_CLIENTS=false)
 # is 7,536,275,581 B (7.54 GB) against the Python core image at 7,620,979,615 B
 # (7.62 GB).
@@ -660,9 +663,6 @@ COPY engine/deploy/git-forgejo.sh /usr/local/bin/git-forgejo
 COPY engine/deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
 COPY engine/deploy/cargo-cache.sh /usr/local/bin/vogt-cargo-cache
 COPY engine/deploy/policy-hook.sh /usr/local/bin/vogt-policy-hook
-# `vogt-mcp` must be the engine script, not the Python console script the venv
-# also installs. The venv is last on PATH (above), and this asserts the winner.
-RUN test "$(command -v vogt-mcp)" = /usr/local/bin/vogt-mcp
 RUN chmod +x \
     /usr/local/bin/vogt-lifecycle \
     /usr/local/bin/vogt-entrypoint \
@@ -680,6 +680,11 @@ RUN chmod +x \
     /usr/local/bin/vogt-cargo-cache \
     /usr/local/bin/vogt-policy-hook \
     /usr/local/bin/git-forgejo
+# `vogt-mcp` must be the engine script, not the Python console script the venv
+# also installs. The venv is last on PATH, and this asserts the winner. It runs
+# after chmod: a copied script is not executable until then, and `command -v`
+# skips a non-executable file, so the check before chmod resolved the venv copy.
+RUN test "$(command -v vogt-mcp)" = /usr/local/bin/vogt-mcp
 
 # One port. vogt-core listens on loopback inside this namespace and is not
 # exposed here, because there is nothing to expose it to: the engine is the
