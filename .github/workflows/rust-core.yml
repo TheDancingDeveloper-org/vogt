@@ -4,8 +4,9 @@ name: rust-core
 # the WI-1076 integration (push to wi-1076-engine-core, pull requests into
 # wi-1443-main-sync), because that is where the compose job — including the
 # existing e2e and live Playwright — has to actually execute. It does not run
-# on main. The parity job is a placeholder until the black-box harness (P0.3)
-# exists.
+# on main. The parity job checks the committed golden; it never writes one.
+# A golden is recorded only by `record-golden`, dispatched with
+# record_golden=true under the pinned UV_PYTHON (WI-2661).
 
 on:
   push:
@@ -13,6 +14,11 @@ on:
   pull_request:
     branches: [rust-core, wi-1443-main-sync]
   workflow_dispatch:
+    inputs:
+      record_golden:
+        description: "Record the parity golden and open a PR (pinned UV_PYTHON). Workers must not commit goldens."
+        type: boolean
+        default: false
 
 concurrency:
   group: rust-core-${{ github.workflow }}-${{ github.ref }}
@@ -251,7 +257,8 @@ jobs:
     name: parity
     # Proves the harness against both cores. The Rust binary is built in this
     # job, because the rust job runs on a different runner and its target
-    # directory is not here.
+    # directory is not here. This job only checks committed goldens; it never
+    # writes one. Recording is the record-golden job (WI-2661).
     runs-on: [self-hosted]
     timeout-minutes: 20
     steps:
@@ -366,3 +373,52 @@ jobs:
       - name: line coverage
         working-directory: engine
         run: cargo llvm-cov -p vogt-core --fail-under-lines 80
+  record-golden:
+    name: record the parity golden
+    # The only place a golden is written (WI-2661). A worker commit that
+    # re-records one is how three sessions wrote three goldens in a day, each
+    # with a different Python. Dispatch with record_golden=true; UV_PYTHON is
+    # pinned at the workflow env to the image's 3.13. contents: write is this
+    # job only, and only so it can open the PR.
+    if: github.event_name == 'workflow_dispatch' && inputs.record_golden
+    runs-on: [self-hosted]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: rust-core
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: "0.11.23"
+
+      - name: record under the pinned Python and open a PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          uv sync --locked --group dev
+          base=$(git merge-base HEAD origin/main)
+          short=${base:0:7}
+          out="tests/parity/golden/${short}"
+          rm -rf "$out"
+          uv run python scripts/parity.py record --impl python --out "$out"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$out"
+          if git diff --cached --quiet; then
+            echo "golden ${short} already matches this recording"
+            exit 0
+          fi
+          branch="golden/${short}"
+          git checkout -B "$branch"
+          git commit -m "test: record parity golden ${short} (CI, UV_PYTHON=${UV_PYTHON})"
+          git push --force-with-lease origin "$branch"
+          gh pr create --base rust-core --head "$branch" \
+            --title "test: record parity golden ${short}" \
+            --body "Recorded by the record-golden job under UV_PYTHON=${UV_PYTHON}. Workers do not commit goldens (WI-2661)." \
+            || gh pr view "$branch" --json url --jq .url
