@@ -294,22 +294,48 @@ fn validate_count(key: &str, object: &Map<String, Value>, value: &Value) -> Resu
 }
 
 /// Pydantic's string-to-int: trim, allow `_` grouping and a trailing `.0`.
-/// `Some(Number)` is the normalised integer (i64, or the original digits when
-/// they do not fit). `None` is not an integer.
+/// `Some(Number)` is the normalised integer. `None` is not an integer.
+///
+/// A leading or trailing underscore, or a doubled one, is rejected (`"_1"`,
+/// `"1_"`, `"1__000"`). A value bigger than `i64` (`2**63`) is kept as an
+/// exact JSON integer: `arbitrary_precision` makes `Number` parse the digits
+/// instead of a float.
 fn lax_int(text: &str) -> Option<Value> {
-    let text = text.trim().replace('_', "");
-    if let Ok(number) = text.parse::<i64>() {
-        return Some(Value::from(number));
-    }
-    let body = text.strip_suffix(".0")?;
-    if body.is_empty() || !body.bytes().all(|byte| byte.is_ascii_digit()) {
+    let text = text.trim();
+    // Pydantic's grouping: `_` may sit between digits (`1_000`, `0_1`). It
+    // may not lead, trail, double, or sit next to the decimal point (`_1`,
+    // `1_`, `1__000`, `1._0`).
+    if text.starts_with('_')
+        || text.ends_with('_')
+        || text.contains("__")
+        || text.contains("._")
+        || text.contains("_.")
+    {
         return None;
     }
-    if let Ok(number) = body.parse::<i64>() {
+    let text = text.replace('_', "");
+    if let Some((whole, frac)) = text.split_once('.') {
+        if whole.is_empty() || !frac.bytes().all(|byte| byte == b'0') {
+            return None;
+        }
+        return integer_number(whole);
+    }
+    integer_number(&text)
+}
+
+/// `whole` is the digit text, optionally signed. `i64` stays a small JSON
+/// number; anything larger is the exact digit string.
+fn integer_number(whole: &str) -> Option<Value> {
+    let unsigned = whole.strip_prefix('+').unwrap_or(whole);
+    let digits = unsigned.strip_prefix('-').unwrap_or(unsigned);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if let Ok(number) = whole.parse::<i64>() {
         return Some(Value::from(number));
     }
-    // Bigger than i64. Python keeps the integer; store the digits.
-    Some(Value::Number(text.parse().ok()?))
+    // `+` is not JSON. The rest is digits, so this is an exact integer.
+    serde_json::from_str(unsigned).ok()
 }
 
 /// The code defaults (design C10).
@@ -624,5 +650,15 @@ mod tests {
             validate(BUDGET_RESTARTS_KEY, &two_pow_63).unwrap(),
             two_pow_63
         );
+        // Leading and trailing underscores are not integers. A big integer
+        // stays the digits, not a float.
+        assert!(validate(BUDGET_RESTARTS_KEY, &json!({"value": "_1"})).is_err());
+        assert!(validate(BUDGET_RESTARTS_KEY, &json!({"value": "1_"})).is_err());
+        let big = validate(
+            BUDGET_RESTARTS_KEY,
+            &json!({"value": "9223372036854775808"}),
+        )
+        .unwrap();
+        assert_eq!(big["value"].to_string(), "9223372036854775808");
     }
 }

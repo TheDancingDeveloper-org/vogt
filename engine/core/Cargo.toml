@@ -20,7 +20,7 @@ regex = "1"
 fancy-regex = "0.14"
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "arbitrary_precision"] }
 # Derives every operation schema from the models in `application/models`.
 schemars = "1.2.3"
 toml = "0.8"
