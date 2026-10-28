@@ -331,10 +331,17 @@ fn a_dead_engine_hides_no_linked_sessions() {
             limit: 50,
             offset: 0,
             order: "started".to_string(),
+            mode: "digest".to_string(),
+            states: None,
+            stall_after_minutes: 10,
         },
     )
     .unwrap();
-    assert_eq!(listed.sessions.len(), 1, "{listed:?}");
+    // Digest mode is the default: the link is a digest row, not a summary.
+    // A dead engine leaves liveness unknown, and unknown is a live digest state.
+    assert!(listed.sessions.is_empty(), "{listed:?}");
+    assert_eq!(listed.digests.len(), 1, "{listed:?}");
+    assert!(listed.total >= 1, "{listed:?}");
     assert!(
         listed.engine.is_some(),
         "a dead engine must be reported, not rendered as a clean list"
