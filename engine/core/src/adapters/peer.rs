@@ -52,6 +52,10 @@ impl PeerClient {
         })
     }
 
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// The peer's own `instance.diagnostics`, without asking it for *its* peer.
     pub fn diagnostics(&self, log_lines: i64) -> Result<Value, VogtError> {
         let url = format!(

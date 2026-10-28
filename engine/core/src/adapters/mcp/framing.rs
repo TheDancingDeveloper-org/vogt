@@ -693,7 +693,7 @@ mod tests {
         );
         assert_eq!(response["result"]["isError"], true);
         let text = response["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("not available"), "{text}");
+        assert!(text.contains("needs an instance context"), "{text}");
     }
 
     #[test]

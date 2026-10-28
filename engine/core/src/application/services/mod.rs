@@ -96,7 +96,7 @@ macro_rules! dispatch {
 }
 pub(super) use dispatch;
 
-pub(super) fn now_of(clock: &std::sync::Arc<std::sync::Mutex<impl Clock>>) -> Moment {
+pub(crate) fn now_of(clock: &std::sync::Arc<std::sync::Mutex<impl Clock>>) -> Moment {
     clock
         .lock()
         .expect("the shared clock is not poisoned")

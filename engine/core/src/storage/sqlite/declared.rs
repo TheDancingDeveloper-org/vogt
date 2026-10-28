@@ -12,9 +12,9 @@ use crate::core::{
     default_workflow, from_iso, to_iso, Actor, ActorKind, ActorPreference, AuditRecord,
     AuthDecision, Charter, Clock, CodingSession, Comment, ContractExemption, Decision,
     DriftProposal, Event, ForgeAccount, IdFactory, InboxTriage, Initiative, InitiativeState, Label,
-    Moment, PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression, Token,
-    Watch, WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackAction, WriteBackOutcome,
-    WriteBackRecord,
+    Moment, PasswordCredential, Principal, Project, RelationKind, SessionGrant, SessionReport,
+    Suppression, Token, Watch, WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackAction,
+    WriteBackOutcome, WriteBackRecord,
 };
 use crate::errors::VogtError;
 use crate::storage::interface::{
@@ -1320,6 +1320,70 @@ impl ReadView for SqliteReadView {
             row_session,
         )
     }
+
+    fn latest_session_reports(
+        &self,
+        engine_session_ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, SessionReport>, VogtError> {
+        let mut found = std::collections::BTreeMap::new();
+        for chunk in engine_session_ids.chunks(500) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let params: Vec<Box<dyn rusqlite::ToSql>> = chunk
+                .iter()
+                .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::ToSql>)
+                .collect();
+            let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+            for report in many(
+                &self.conn,
+                &format!(
+                    "SELECT * FROM (SELECT r.*, ROW_NUMBER() OVER (PARTITION BY engine_session_id ORDER BY created_at DESC, id DESC) AS rn FROM session_reports r WHERE engine_session_id IN ({placeholders})) WHERE rn = 1"
+                ),
+                refs.as_slice(),
+                row_session_report,
+            )? {
+                if let Some(engine) = report.engine_session_id.clone() {
+                    found.insert(engine, report);
+                }
+            }
+        }
+        Ok(found)
+    }
+    fn list_session_reports(
+        &self,
+        engine_session_id: Option<&str>,
+        work_item_id: Option<&str>,
+        kind: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SessionReport>, VogtError> {
+        let mut clauses: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        for (column, value) in [
+            ("engine_session_id", engine_session_id),
+            ("work_item_id", work_item_id),
+            ("kind", kind),
+        ] {
+            if let Some(value) = value {
+                clauses.push(format!("{column} = ?"));
+                params.push(Box::new(value.to_string()));
+            }
+        }
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", clauses.join(" AND "))
+        };
+        params.push(Box::new(limit));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        many(
+            &self.conn,
+            &format!("SELECT * FROM session_reports {where_sql}ORDER BY created_at DESC, id DESC LIMIT ?"),
+            refs.as_slice(),
+            row_session_report,
+        )
+    }
     fn list_session_grants(
         &self,
         state: Option<&str>,
@@ -1753,6 +1817,22 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
     }
     fn session_by_engine_id(&self, a: &str) -> Result<Option<CodingSession>, VogtError> {
         self.view.session_by_engine_id(a)
+    }
+
+    fn latest_session_reports(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, SessionReport>, VogtError> {
+        self.view.latest_session_reports(ids)
+    }
+    fn list_session_reports(
+        &self,
+        a: Option<&str>,
+        b: Option<&str>,
+        c: Option<&str>,
+        d: i64,
+    ) -> Result<Vec<SessionReport>, VogtError> {
+        self.view.list_session_reports(a, b, c, d)
     }
     fn list_session_grants(
         &self,
@@ -2401,6 +2481,21 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .map(|_| ())
             .map_err(sql_err)
     }
+    fn insert_session_report(&mut self, report: &SessionReport) -> Result<(), VogtError> {
+        let data = crate::decisions::python_json_dumps(
+            &serde_json::to_value(&report.fields).map_err(|err| {
+                VogtError::MigrationError(format!("session report fields: {err}"))
+            })?,
+            false,
+        );
+        self.view.conn.execute(
+            "INSERT INTO session_reports (id, actor_id, engine_session_id, work_item_id, kind, summary, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                report.id, report.actor_id, report.engine_session_id, report.work_item_id,
+                report.kind, report.summary, data, to_iso(report.created_at),
+            ],
+        ).map(|_| ()).map_err(sql_err)
+    }
     fn insert_decision(&mut self, decision: &Decision) -> Result<(), VogtError> {
         self.view.conn.execute(
             "INSERT INTO decisions (id, asker_actor_id, asker_session, work_item_id, question, options_json, context, state, answer_json, answered_by_actor_id, created_at, answered_at, expires_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2890,6 +2985,23 @@ fn row_auth_decision(row: &Row<'_>) -> rusqlite::Result<AuthDecision> {
         identity_ref: row.get("identity_ref")?,
         transport: row.get("transport")?,
         detail: row.get("detail")?,
+    })
+}
+
+fn row_session_report(row: &Row<'_>) -> rusqlite::Result<SessionReport> {
+    let data: String = row.get("data")?;
+    let fields = serde_json::from_str(&data).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    Ok(SessionReport {
+        id: row.get("id")?,
+        actor_id: row.get("actor_id")?,
+        engine_session_id: row.get("engine_session_id")?,
+        work_item_id: row.get("work_item_id")?,
+        kind: row.get("kind")?,
+        summary: row.get("summary")?,
+        fields,
+        created_at: moment(row, "created_at")?,
     })
 }
 
