@@ -261,4 +261,3 @@ def test_the_dry_run_builds_this_tree_and_never_a_published_core() -> None:
     # Both halves are started, which is what caught the unrunnable releases.
     assert "docker run --rm --entrypoint vogt vogt-dry-run-stack --version" in block
     assert "docker run --rm --entrypoint vogt-engine vogt-dry-run-stack --help" in block
-
