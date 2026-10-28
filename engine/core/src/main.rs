@@ -850,24 +850,31 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 let handle = axum_server::Handle::new();
                 let signal = handle.clone();
                 tokio::spawn(async move {
-                    // `shutdown` already bounds the grace. Passing `None` here
-                    // would start a second, unbounded drain after that.
+                    // Stop accepting on the signal. The select below is what
+                    // bounds the drain: axum-server's own grace is how long it
+                    // tries to finish connections, and the select drops the
+                    // serve future if one of them never ends.
                     wait_for_stop().await;
                     signal.graceful_shutdown(Some(SHUTDOWN_GRACE));
                 });
-                axum_server::bind_rustls(addr, tls)
+                let serve = axum_server::bind_rustls(addr, tls)
                     .handle(handle)
-                    .serve(router.into_make_service_with_connect_info::<SocketAddr>())
-                    .await
+                    .serve(router.into_make_service_with_connect_info::<SocketAddr>());
+                bounded_serve(serve, wait_for_stop(), SHUTDOWN_GRACE).await
             }
             None => {
                 let listener = tokio::net::TcpListener::bind(addr).await?;
-                axum::serve(
+                // `wait_for_stop`, not `shutdown`: axum's graceful shutdown
+                // stops accepting and then drains with no bound of its own.
+                // Sleeping the grace inside that future would keep accepting
+                // for the whole grace, and an SSE or MCP stream would hold
+                // the process past it. The select below is the bound.
+                let serve = axum::serve(
                     listener,
                     router.into_make_service_with_connect_info::<SocketAddr>(),
                 )
-                .with_graceful_shutdown(shutdown())
-                .await
+                .with_graceful_shutdown(wait_for_stop());
+                bounded_serve(serve, wait_for_stop(), SHUTDOWN_GRACE).await
             }
         }
     });
@@ -901,17 +908,25 @@ fn resolve_data_dir(given: Option<PathBuf>) -> Result<PathBuf, String> {
 /// shorter than a typical stop timeout and long enough for a store write.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Wait until SIGTERM or SIGINT, then for the grace. The first signal starts
-/// the drain (the listeners stop accepting); the grace is how long in-flight
-/// requests have to finish and the store has to flush. A second signal, or
-/// the grace expiring, ends the wait so the process can exit.
-async fn shutdown() {
-    wait_for_stop().await;
-    let grace = tokio::time::sleep(SHUTDOWN_GRACE);
-    tokio::pin!(grace);
+/// Run `serve` until it ends, or until `stop` plus `grace`. The signal is also
+/// what the listener's graceful shutdown waits on, so the listener stops
+/// accepting at the same moment this grace starts. When the grace expires the
+/// serve future is dropped, which closes a connection that never finishes (an
+/// SSE or MCP stream) instead of hanging shutdown.
+async fn bounded_serve<F, S>(serve: F, stop: S, grace: std::time::Duration) -> std::io::Result<()>
+where
+    F: std::future::IntoFuture<Output = std::io::Result<()>>,
+    S: std::future::Future<Output = ()>,
+{
+    let serve = serve.into_future();
+    tokio::pin!(serve);
+    tokio::pin!(stop);
     tokio::select! {
-        () = &mut grace => {}
-        () = wait_for_stop() => {}
+        result = &mut serve => result,
+        () = async {
+            stop.await;
+            tokio::time::sleep(grace).await;
+        } => Ok(()),
     }
 }
 
@@ -1083,20 +1098,72 @@ mod data_dir_tests {
 
 #[cfg(test)]
 mod shutdown_tests {
-    use super::{wait_for_stop, SHUTDOWN_GRACE};
+    use std::convert::Infallible;
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    use super::{bounded_serve, wait_for_stop, SHUTDOWN_GRACE};
 
     /// The drain is bounded, and a wait with no signal stays pending rather
     /// than returning at once. Sending a real signal would stop the test
     /// process, so this proves the wait is the signal future and the grace is
-    /// the bound `shutdown` selects on.
+    /// the bound `bounded_serve` selects on.
     #[tokio::test]
     async fn the_drain_waits_on_a_signal_and_the_grace_is_bounded() {
-        assert!(SHUTDOWN_GRACE <= std::time::Duration::from_secs(30));
-        assert!(SHUTDOWN_GRACE >= std::time::Duration::from_secs(1));
+        assert!(SHUTDOWN_GRACE <= Duration::from_secs(30));
+        assert!(SHUTDOWN_GRACE >= Duration::from_secs(1));
         let started = std::time::Instant::now();
-        tokio::time::timeout(std::time::Duration::from_millis(50), wait_for_stop())
+        tokio::time::timeout(Duration::from_millis(50), wait_for_stop())
             .await
             .expect_err("no signal was sent, so the wait is still pending");
         assert!(started.elapsed() < SHUTDOWN_GRACE);
+    }
+
+    /// An open long-poll must not hold shutdown past the grace. The production
+    /// grace is ten seconds and waits on a real signal, which would stop this
+    /// process, so this drives `bounded_serve` with a short grace and a
+    /// handler that never returns.
+    #[tokio::test]
+    async fn an_open_long_poll_does_not_outlive_the_grace() {
+        let app = axum::Router::new().route(
+            "/hold",
+            axum::routing::get(|| async {
+                std::future::pending::<Result<axum::http::StatusCode, Infallible>>().await
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let grace = Duration::from_millis(200);
+        let stop_after = Duration::from_millis(50);
+        let server = tokio::spawn(async move {
+            let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+                tokio::time::sleep(stop_after).await;
+            });
+            bounded_serve(serve, tokio::time::sleep(stop_after), grace).await
+        });
+        let client = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(addr).expect("long-poll connects");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+            stream
+                .write_all(b"GET /hold HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("request is written");
+            let mut buf = [0_u8; 64];
+            // The handler never responds. Dropping the serve future does not
+            // have to close an already-accepted socket, so this read is
+            // capped; the assertion is that the server task returns.
+            let _ = stream.read(&mut buf);
+        });
+        // Let the long-poll connect before the stop signal.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let started = std::time::Instant::now();
+        server.await.unwrap().unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < grace + Duration::from_millis(500),
+            "shutdown took {elapsed:?}, past the short grace"
+        );
+        // The accepted socket can outlive the dropped serve future. Detach
+        // the read so this test does not wait on that.
+        drop(client);
     }
 }
