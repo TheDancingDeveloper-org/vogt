@@ -1,2674 +1,2869 @@
 {
- "why": "A slice of the in-process SCRIPT that a fresh process can replay without a stand-in forge. The full script stays in tests/test_parity.py until the forge stand-in has an out-of-process form.",
- "init": {
-  "why": "bootstrap token adoption runs in init, before the first step, in every transport",
-  "files": {
-   "core-token": "vogt_bootstrap_core_secret_long_enough_0123",
-   "agent-token": "vogt_agent_bootstrap_secret_long_enough_4567",
-   "ada-password": "correct horse battery",
-   "ada-passphrase": "another passphrase",
-   "instance/repos/broken/.git": "gitdir: {root}/nowhere\n"
-  },
-  "env": {
-   "VOGT_BOOTSTRAP_CORE_TOKEN_FILE": "{root}/core-token",
-   "VOGT_BOOTSTRAP_AGENT_TOKEN_FILE": "{root}/agent-token"
-  }
- },
- "steps": [
-  {
-   "operation": "status",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "migrate",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "workflow.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "actor.create",
-   "params": {
-    "identity_ref": "agent:parity",
-    "kind": "agent",
-    "display_name": "Parity Agent",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "actor.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "label.create",
-   "params": {
-    "name": "parity",
-    "color": "#d73a4a",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "label.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "http.health.live",
-   "http": {
-    "method": "GET",
-    "path": "/health/live",
-    "status": 200
-   }
-  },
-  {
-   "operation": "http.health.ready",
-   "http": {
-    "method": "GET",
-    "path": "/health/ready",
-    "status": 200
-   }
-  },
-  {
-   "operation": "http.version",
-   "http": {
-    "method": "GET",
-    "path": "/version",
-    "status": 200
-   }
-  },
-  {
-   "operation": "http.connection_info",
-   "http": {
-    "method": "GET",
-    "path": "/connection-info",
-    "status": 200
-   }
-  },
-  {
-   "operation": "contract.evaluate",
-   "params": {
-    "path": "{root}"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "contract.evaluate",
-   "params": {
-    "path": "{root}/does-not-exist"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "project.create",
-   "params": {
-    "name": "Parity",
-    "root_path": "{root}/proj",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "project.get",
-   "params": {
-    "slug": "parity"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "project.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "project.update",
-   "params": {
-    "slug": "parity",
-    "repo_url": "https://example.invalid/parity.git",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "project.transition",
-   "params": {
-    "slug": "parity",
-    "to_state": "active",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "project.scaffold",
-   "params": {
-    "project": "parity",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "project.register",
-   "params": {
-    "name": "Second",
-    "root_path": "{root}/instance/repos/second",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "dump.after_project_and_label",
-   "dump": true
-  },
-  {
-   "operation": "project.brief",
-   "params": {
-    "slug": "parity"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "place.metrics",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "deployed.versions",
-   "cli": [
-    "deployed-versions"
-   ],
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "initiative.create",
-   "params": {
-    "title": "Platform",
-    "reason": "starting the theme"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "initiative.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "initiative.update",
-   "params": {
-    "slug": "platform",
-    "title": "Platform work",
-    "reason": "renamed"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "initiative.publish",
-   "params": {
-    "slug": "platform",
-    "reason": "ship it"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "initiative.publish",
-   "params": {
-    "slug": "missing",
-    "reason": "ship it"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "preference.get",
-   "params": {
-    "key": "inbox.filter"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "preference.set",
-   "params": {
-    "key": "inbox.filter",
-    "value": "{\"sources\": [\"ci\"]}",
-    "reason": "my default view"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "preference.set",
-   "params": {
-    "key": "inbox.filter",
-    "value": "{\"sources\": [\"drift\"]}",
-    "expected_version": 0,
-    "reason": "stale"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "preference_version_conflict"
-   }
-  },
-  {
-   "operation": "notifications",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "inbox.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "inbox.archive",
-   "params": {
-    "entry_key": "nope",
-    "reason": "missing"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "inbox_entry_not_found"
-   }
-  },
-  {
-   "operation": "inbox.snooze",
-   "params": {
-    "entry_key": "nope",
-    "until": "2020-01-01T00:00:00+00:00",
-    "reason": "too late"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_snooze"
-   }
-  },
-  {
-   "operation": "inbox.restore",
-   "params": {
-    "entry_key": "nope",
-    "reason": "back"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "inbox_entry_not_found"
-   }
-  },
-  {
-   "operation": "work.create",
-   "params": {
-    "kind": "chore",
-    "title": "parity item",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "work.update",
-   "params": {
-    "ref": "WI-1",
-    "title": "parity item renamed",
-    "priority": "p1",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "work.create",
-   "params": {
-    "kind": "chore",
-    "title": "labelled item",
-    "labels": "parity",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 0,
-    "mcp_error_code": "invalid_params"
-   }
-  },
-  {
-   "operation": "work.create",
-   "params": {
-    "kind": "chore",
-    "title": "refused item",
-    "project": "parity",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "project_not_linked"
-   }
-  },
-  {
-   "operation": "work.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "work.list",
-   "params": {
-    "project": "missing"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "work.get",
-   "params": {
-    "ref": "WI-1"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "work.comment",
-   "params": {
-    "ref": "WI-1",
-    "body": "parity note",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "work.transition",
-   "params": {
-    "ref": "WI-1",
-    "to_state": "in_progress",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "work.relate",
-   "params": {
-    "ref": "WI-1",
-    "target": "WI-2",
-    "kind": "relates_to",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 0,
-    "mcp_error_code": "not_found"
-   }
-  },
-  {
-   "operation": "work.unrelate",
-   "params": {
-    "ref": "WI-1",
-    "target": "WI-2",
-    "kind": "relates_to",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 0,
-    "mcp_error_code": "not_found"
-   }
-  },
-  {
-   "operation": "board.list",
-   "params": {
-    "cells": [
-     {
-      "lane_key": "",
-      "state": "open"
-     }
-    ]
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "backlog",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "backlog",
-   "params": {
-    "project": "missing"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "bugs",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "bugs",
-   "params": {
-    "project": "missing"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "deps",
-   "params": {
-    "project": "missing"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "export",
-   "params": {
-    "destination": "{root}/export.json",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "import",
-   "params": {
-    "source": "{root}/export.json",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "forge.writeback",
-   "params": {
-    "project": "parity",
-    "policy": "full",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "forge.actions",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "forge.actions",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "forge.repos",
-   "params": {
-    "host": "no.such.host"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   }
-  },
-  {
-   "operation": "forge.account_status",
-   "cli": [
-    "forge",
-    "account",
-    "status"
-   ],
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "forge.account_link",
-   "cli": [
-    "forge",
-    "account",
-    "link"
-   ],
-   "params": {
-    "host": "no.such.host",
-    "token": "not-a-token",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   }
-  },
-  {
-   "operation": "forge.link",
-   "params": {
-    "project": "parity",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "forge_link_refused"
-   }
-  },
-  {
-   "operation": "forge.link",
-   "params": {
-    "project": "missing",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "forge.publish",
-   "params": {
-    "project": "parity",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "forge_publish_refused"
-   }
-  },
-  {
-   "operation": "forge.publish",
-   "params": {
-    "project": "missing",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "forge.import",
-   "params": {
-    "owner": "acme",
-    "name": "widget",
-    "host": "no.such.host",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   }
-  },
-  {
-   "operation": "forge.import",
-   "params": {
-    "owner": "acme",
-    "name": "widget",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   }
-  },
-  {
-   "operation": "forge.onboard",
-   "params": {
-    "project": "parity",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "forge.onboard",
-   "params": {
-    "project": "missing",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "forge.account_unlink",
-   "cli": [
-    "forge",
-    "account",
-    "unlink"
-   ],
-   "params": {
-    "host": "no.such.host",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   }
-  },
-  {
-   "operation": "install.bootstrap",
-   "http": {
-    "method": "POST",
-    "path": "/api/install/bootstrap",
-    "body": {
-     "display_name": "Ada Lovelace"
+  "why": "A slice of the in-process SCRIPT that a fresh process can replay without a stand-in forge. The full script stays in tests/test_parity.py until the forge stand-in has an out-of-process form.",
+  "init": {
+    "why": "bootstrap token adoption runs in init, before the first step, in every transport",
+    "files": {
+      "core-token": "vogt_bootstrap_core_secret_long_enough_0123",
+      "agent-token": "vogt_agent_bootstrap_secret_long_enough_4567",
+      "ada-password": "correct horse battery",
+      "ada-passphrase": "another passphrase",
+      "instance/repos/broken/.git": "gitdir: {root}/nowhere\n"
     },
-    "capture": "admin",
-    "status": 200
-   }
+    "env": {
+      "VOGT_BOOTSTRAP_CORE_TOKEN_FILE": "{root}/core-token",
+      "VOGT_BOOTSTRAP_AGENT_TOKEN_FILE": "{root}/agent-token"
+    }
   },
-  {
-   "operation": "why",
-   "params": {
-    "ref": "WI-1"
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/why?ref=WI-1",
-    "auth": "admin",
-    "status": 404,
-    "error_code": "not_found"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "why",
-   "params": {
-    "ref": "WI-404"
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/why?ref=WI-404",
-    "auth": "admin",
-    "status": 404,
-    "error_code": "not_found"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "work.list",
-   "params": {
-    "mode": "full",
-    "limit": 1
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/work?mode=full&limit=1",
-    "auth": "admin",
-    "status": 200
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "work.list",
-   "params": {
-    "limit": 1,
-    "offset": 1
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/work?limit=1&offset=1",
-    "auth": "admin",
-    "status": 200
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "work.get_many",
-   "params": {
-    "refs": [
-     "WI-1",
-     "WI-404",
-     "WI-2"
-    ]
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/work/get-many?refs=WI-1&refs=WI-404&refs=WI-2",
-    "auth": "admin",
-    "status": 200
-   },
-   "expect": {
-    "exit": 0
-   },
-   "cli": [
-    "work",
-    "get-many"
-   ]
-  },
-  {
-   "operation": "audit.list",
-   "params": {
-    "limit": 5
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/audit?limit=5",
-    "auth": "admin",
-    "status": 200
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "work.bind_branch",
-   "params": {
-    "ref": "WI-1",
-    "branch": "wi-1-parity",
-    "reason": "parity"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/work/bind-branch",
-    "auth": "admin",
-    "body": {
-     "ref": "WI-1",
-     "branch": "wi-1-parity",
-     "reason": "parity"
+  "steps": [
+    {
+      "operation": "status",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 404,
-    "error_code": "not_found"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   },
-   "cli": [
-    "work",
-    "bind-branch"
-   ]
-  },
-  {
-   "operation": "work.adopt",
-   "params": {
-    "subject": "gh:parity-org/parity#404",
-    "reason": "parity"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/work/adopt",
-    "auth": "admin",
-    "body": {
-     "subject": "gh:parity-org/parity#404",
-     "reason": "parity"
+    {
+      "operation": "migrate",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 404,
-    "error_code": "not_found"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "project.register",
-   "http": {
-    "method": "POST",
-    "path": "/api/projects",
-    "auth": "admin",
-    "body": {
-     "name": "Second",
-     "root_path": "{root}/instance/repos/second",
-     "reason": "parity harness"
+    {
+      "operation": "workflow.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   },
-   "why": "HTTP has no project of its own: the same registration the CLI made for Second, here so the HTTP sweep has a project to sweep"
-  },
-  {
-   "operation": "project.register",
-   "params": {
-    "name": "Broken",
-    "root_path": "{root}/instance/repos/broken",
-    "reason": "parity harness"
-   },
-   "why": "a checkout whose .git cannot be read: git-local fails for this project, so its sweep is partial and coverage says so",
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/projects",
-    "auth": "admin",
-    "body": {
-     "name": "Broken",
-     "root_path": "{root}/instance/repos/broken",
-     "reason": "parity harness"
+    {
+      "operation": "actor.create",
+      "params": {
+        "identity_ref": "agent:parity",
+        "kind": "agent",
+        "display_name": "Parity Agent",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   }
-  },
-  {
-   "operation": "session.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "session.sweep",
-   "params": {},
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/sweep",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "sweep",
-   "params": {
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sweep",
-    "auth": "admin",
-    "body": {
-     "reason": "parity harness"
+    {
+      "operation": "actor.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   }
-  },
-  {
-   "operation": "sweep",
-   "params": {
-    "collectors": [
-     "git-local"
-    ],
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "why": "a named sweep runs one collector and leaves the coverage of the rest as it was",
-   "http": {
-    "method": "POST",
-    "path": "/api/sweep",
-    "auth": "admin",
-    "body": {
-     "collectors": [
-      "git-local"
-     ],
-     "reason": "parity harness"
+    {
+      "operation": "label.create",
+      "params": {
+        "name": "parity",
+        "color": "#d73a4a",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   }
-  },
-  {
-   "operation": "coverage",
-   "params": {},
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/coverage",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "dump.observed",
-   "dump": "observed",
-   "why": "the findings and coverage rows the sweeps above wrote, after every sweep has run",
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "session.log_tail",
-   "cli": [
-    "session",
-    "log"
-   ],
-   "params": {
-    "id": "ses_00000000000000000000000000"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/log?id=ses_00000000000000000000000000",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "session.start",
-   "params": {
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions",
-    "auth": "admin",
-    "body": {
-     "reason": "parity"
+    {
+      "operation": "label.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.input",
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "text": "hi",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/input",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "text": "hi",
-     "reason": "parity"
+    {
+      "operation": "http.health.live",
+      "http": {
+        "method": "GET",
+        "path": "/health/live",
+        "status": 200
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.screen",
-   "params": {
-    "id": "ses_00000000000000000000000000"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/screen?id=ses_00000000000000000000000000",
-    "auth": "admin",
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.wait",
-   "params": {
-    "id": "ses_00000000000000000000000000"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/wait?id=ses_00000000000000000000000000",
-    "auth": "admin",
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.answer",
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "option": 1,
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/answer",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "option": 1,
-     "reason": "parity"
+    {
+      "operation": "http.health.ready",
+      "http": {
+        "method": "GET",
+        "path": "/health/ready",
+        "status": 200
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.hibernate",
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/hibernate",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "reason": "parity"
+    {
+      "operation": "http.version",
+      "http": {
+        "method": "GET",
+        "path": "/version",
+        "status": 200
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.keep_awake",
-   "cli": [
-    "session",
-    "keep-awake"
-   ],
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "keep_awake": true,
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/keep-awake",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "keep_awake": true,
-     "reason": "parity"
+    {
+      "operation": "http.connection_info",
+      "http": {
+        "method": "GET",
+        "path": "/connection-info",
+        "status": 200
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.set_role",
-   "cli": [
-    "session",
-    "set-role"
-   ],
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "role": "worker",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/role",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "role": "worker",
-     "reason": "parity"
+    {
+      "operation": "contract.evaluate",
+      "params": {
+        "path": "{root}"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.wake",
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/wake",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "reason": "parity"
+    {
+      "operation": "contract.evaluate",
+      "params": {
+        "path": "{root}/does-not-exist"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.stop",
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/stop",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "reason": "parity"
+    {
+      "operation": "project.create",
+      "params": {
+        "name": "Parity",
+        "root_path": "{root}/proj",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 404,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "why": "a person asks for a grant on a live engine session; the stand-in engine answers the session as alive",
-   "operation": "session.grant_request",
-   "cli": [
-    "session",
-    "grant-request"
-   ],
-   "engine": true,
-   "params": {
-    "target": "parity-worker",
-    "kind": "credential",
-    "secret_name": "PARITY_TOKEN",
-    "project_id": "parity-project",
-    "uses": "once",
-    "ttl_seconds": 60,
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/grants",
-    "auth": "admin",
-    "body": {
-     "target": "parity-worker",
-     "kind": "credential",
-     "secret_name": "PARITY_TOKEN",
-     "project_id": "parity-project",
-     "uses": "once",
-     "ttl_seconds": 60,
-     "reason": "parity"
+    {
+      "operation": "project.get",
+      "params": {
+        "slug": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "why": "WI-983: the decision is a person's, and it reads the grant the request step made (a real grant, not a made-up id); the engine applies it before the record says approved",
-   "operation": "session.grant_decide",
-   "cli": [
-    "session",
-    "grant-decide"
-   ],
-   "engine": true,
-   "params": {
-    "id": "{seen:session.grant_request#grant.id}",
-    "decision": "approve",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "why": "the same real grant, now approved, is revoked: the engine takes it back and the record says revoked",
-   "operation": "session.grant_revoke",
-   "cli": [
-    "session",
-    "grant-revoke"
-   ],
-   "engine": true,
-   "params": {
-    "id": "{seen:session.grant_request#grant.id}",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "session.grant_list",
-   "cli": [
-    "session",
-    "grants"
-   ],
-   "params": {
-    "state": "pending"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/grants?state=pending",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "session.history_list",
-   "cli": [
-    "session",
-    "history"
-   ],
-   "params": {
-    "limit": 5
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/history?limit=5",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "session.bind_work",
-   "cli": [
-    "session",
-    "bind"
-   ],
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "work_item": "WI-1074",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/work-item",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "work_item": "WI-1074",
-     "reason": "parity"
+    {
+      "operation": "project.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 404,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "session.last_reply",
-   "cli": [
-    "session",
-    "last-reply"
-   ],
-   "params": {
-    "id": "ses_00000000000000000000000000"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/last-reply?id=ses_00000000000000000000000000",
-    "auth": "admin",
-    "status": 404,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "session.search_output",
-   "cli": [
-    "session",
-    "search"
-   ],
-   "params": {
-    "q": "parity"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/history/search?q=parity",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "session.report_blocked",
-   "cli": [
-    "session",
-    "blocked"
-   ],
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "blocker": "parity needs a person",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/blocked",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "blocker": "parity needs a person",
-     "reason": "parity"
+    {
+      "operation": "project.update",
+      "params": {
+        "slug": "parity",
+        "repo_url": "https://example.invalid/parity.git",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.report_unblocked",
-   "cli": [
-    "session",
-    "unblocked"
-   ],
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/unblocked",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "reason": "parity"
+    {
+      "operation": "project.transition",
+      "params": {
+        "slug": "parity",
+        "to_state": "active",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.changes",
-   "params": {
-    "since": 0,
-    "limit": 10
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/changes?since=0&limit=10",
-    "auth": "admin",
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.wait_any",
-   "cli": [
-    "session",
-    "wait-any"
-   ],
-   "params": {
-    "timeout_s": 1,
-    "cursor": 0
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/wait-any?timeout_s=1&cursor=0",
-    "auth": "admin",
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.commit_for",
-   "cli": [
-    "session",
-    "commit"
-   ],
-   "params": {
-    "id": "ses_00000000000000000000000000",
-    "message": "parity commit",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "engine_unavailable"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/sessions/commit",
-    "auth": "admin",
-    "body": {
-     "id": "ses_00000000000000000000000000",
-     "message": "parity commit",
-     "reason": "parity"
+    {
+      "operation": "project.scaffold",
+      "params": {
+        "project": "parity",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 502,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "session.economics",
-   "params": {
-    "id": "ses_00000000000000000000000000"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/economics?id=ses_00000000000000000000000000",
-    "auth": "admin",
-    "status": 404,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "session.digest",
-   "params": {
-    "id": "ses_00000000000000000000000000"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/sessions/digest?id=ses_00000000000000000000000000",
-    "auth": "admin",
-    "status": 404,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "agent_activity.search",
-   "cli": [
-    "agent-activity",
-    "search"
-   ],
-   "params": {
-    "limit": 5
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/agent-activity?limit=5",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "agent_activity.summary",
-   "cli": [
-    "agent-activity",
-    "summary"
-   ],
-   "params": {
-    "economics": true
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/agent-activity/summary?economics=true",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "label.create",
-   "http": {
-    "method": "POST",
-    "path": "/api/labels",
-    "auth": "admin",
-    "body": {
-     "name": "bug",
-     "reason": "seed"
+    {
+      "operation": "project.register",
+      "params": {
+        "name": "Second",
+        "root_path": "{root}/instance/repos/second",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   }
-  },
-  {
-   "operation": "token.issue",
-   "http": {
-    "method": "POST",
-    "path": "/api/tokens",
-    "auth": "admin",
-    "body": {
-     "actor": "human:ada-lovelace",
-     "name": "reader",
-     "scopes": "read",
-     "reason": "a read token"
+    {
+      "operation": "dump.after_project_and_label",
+      "dump": true
     },
-    "capture": "token",
-    "status": 200
-   }
-  },
-  {
-   "operation": "label.create",
-   "http": {
-    "method": "POST",
-    "path": "/api/labels",
-    "auth": "token",
-    "body": {
-     "name": "chore",
-     "reason": "should be refused"
+    {
+      "operation": "project.brief",
+      "params": {
+        "slug": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 403,
-    "error_code": "forbidden"
-   }
-  },
-  {
-   "operation": "auth.logout",
-   "http": {
-    "method": "POST",
-    "path": "/api/auth/logout",
-    "auth": "token",
-    "body": {
-     "reason": "done"
+    {
+      "operation": "place.metrics",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   }
-  },
-  {
-   "operation": "chat.list",
-   "params": {},
-   "expect": {
-    "exit": 1,
-    "capture_error": true,
-    "error_code": "engine_unavailable"
-   }
-  },
-  {
-   "operation": "chat.get",
-   "params": {
-    "id": "nope"
-   },
-   "expect": {
-    "exit": 1,
-    "capture_error": true,
-    "error_code": "invalid_request"
-   }
-  },
-  {
-   "operation": "user.create",
-   "params": {
-    "username": "ada",
-    "password": "correct horse battery",
-    "display_name": "Ada Lovelace",
-    "reason": "parity harness"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/users",
-    "auth": "admin",
-    "body": {
-     "username": "ada",
-     "password": "correct horse battery",
-     "display_name": "Ada Lovelace",
-     "reason": "parity harness"
+    {
+      "operation": "deployed.versions",
+      "cli": [
+        "deployed-versions"
+      ],
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   },
-   "expect": {
-    "exit": 0
-   },
-   "cli_params": {
-    "username": "ada",
-    "display_name": "Ada Lovelace",
-    "reason": "parity harness",
-    "password_file": "{root}/ada-password"
-   }
-  },
-  {
-   "operation": "user.list",
-   "params": {},
-   "http": {
-    "method": "GET",
-    "path": "/api/users",
-    "auth": "admin",
-    "status": 200
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "user.set_password",
-   "params": {
-    "username": "ada",
-    "password": "another passphrase",
-    "reason": "parity harness"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/users/password",
-    "auth": "admin",
-    "body": {
-     "username": "ada",
-     "password": "another passphrase",
-     "reason": "parity harness"
+    {
+      "operation": "initiative.create",
+      "params": {
+        "title": "Platform",
+        "reason": "starting the theme"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   },
-   "expect": {
-    "exit": 0
-   },
-   "cli_params": {
-    "username": "ada",
-    "reason": "parity harness",
-    "password_file": "{root}/ada-passphrase"
-   },
-   "cli": [
-    "user",
-    "passwd"
-   ]
-  },
-  {
-   "operation": "token.issue",
-   "params": {
-    "actor": "human:ada",
-    "name": "claude-code",
-    "scopes": "read,work.write",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "token.issue",
-   "params": {
-    "actor": "human:ada",
-    "name": "bad expiry",
-    "expires_in_days": 0,
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 2,
-    "capture_error": true,
-    "error_code": null,
-    "mcp_error_code": "invalid_params"
-   },
-   "why": "a non-positive expiry is a validation refusal, exit 2"
-  },
-  {
-   "operation": "token.list",
-   "params": {
-    "include_revoked": true
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/tokens?include_revoked=true",
-    "auth": "admin",
-    "status": 200
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "token.revoke",
-   "params": {
-    "id": "tok_0002",
-    "reason": "parity harness"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/tokens/revoke",
-    "auth": "admin",
-    "body": {
-     "id": "tok_0002",
-     "reason": "parity harness"
+    {
+      "operation": "initiative.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   },
-   "expect": {
-    "exit": 0,
-    "mcp_error_code": "not_found"
-   }
-  },
-  {
-   "operation": "auth.whoami",
-   "params": {},
-   "http": {
-    "method": "GET",
-    "path": "/api/auth/whoami",
-    "auth": "admin",
-    "status": 200
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "backup",
-   "params": {
-    "destination": "{root}/backup",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
-  },
-  {
-   "operation": "backup",
-   "params": {
-    "destination": "{root}/backup",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "capture_error": true,
-    "error_code": "conflict"
-   },
-   "why": "a second backup over a non-empty destination is refused and writes nothing"
-  },
-  {
-   "operation": "restore",
-   "params": {
-    "source": "{root}/backup",
-    "confirm": false,
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "capture_error": true,
-    "error_code": "invalid_request"
-   },
-   "why": "restore without --confirm is refused before anything is replaced"
-  },
-  {
-   "operation": "restore",
-   "params": {
-    "source": "{root}/backup",
-    "confirm": true,
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
-  },
-  {
-   "operation": "auth.login",
-   "http": {
-    "method": "POST",
-    "path": "/api/auth/login",
-    "body": {
-     "username": "ada",
-     "password": "another passphrase"
+    {
+      "operation": "initiative.update",
+      "params": {
+        "slug": "platform",
+        "title": "Platform work",
+        "reason": "renamed"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "capture": "session",
-    "status": 200
-   }
-  },
-  {
-   "operation": "auth.whoami",
-   "http": {
-    "method": "GET",
-    "path": "/api/auth/whoami",
-    "auth": "session",
-    "status": 200
-   }
-  },
-  {
-   "operation": "user.remove",
-   "params": {
-    "username": "ada",
-    "reason": "parity harness"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/users/remove",
-    "auth": "admin",
-    "body": {
-     "username": "ada",
-     "reason": "parity harness"
+    {
+      "operation": "initiative.publish",
+      "params": {
+        "slug": "platform",
+        "reason": "ship it"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "events.list",
-   "params": {
-    "after": 0,
-    "limit": 5
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/events?after=0&limit=5",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "events.list",
-   "params": {
-    "after": 1,
-    "limit": 2
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/events?after=1&limit=2",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "audit.list",
-   "params": {
-    "limit": 5
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/audit?limit=5",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "audit.list",
-   "params": {
-    "limit": 2,
-    "offset": 1
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/audit?limit=2&offset=1",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "clone",
-   "params": {
-    "source": "{root}/backup",
-    "confirm": false,
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   },
-   "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
-  },
-  {
-   "operation": "clone",
-   "params": {
-    "source": "{root}/backup",
-    "confirm": true,
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   },
-   "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
-  },
-  {
-   "operation": "clone",
-   "params": {
-    "source": "{root}/missing",
-    "confirm": true,
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   },
-   "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
-  },
-  {
-   "operation": "project.import",
-   "params": {
-    "repo": "not a repo!",
-    "reason": "parity harness",
-    "consolidate": false
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   },
-   "why": "a reference that names no repository is refused before any clone",
-   "http": {
-    "method": "POST",
-    "path": "/api/projects/import",
-    "auth": "admin",
-    "body": {
-     "repo": "not a repo!",
-     "reason": "parity harness",
-     "consolidate": false
+    {
+      "operation": "initiative.publish",
+      "params": {
+        "slug": "missing",
+        "reason": "ship it"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      }
     },
-    "status": 400,
-    "error_code": "invalid_request"
-   }
-  },
-  {
-   "operation": "project.import",
-   "params": {
-    "repo": "not a repo!",
-    "reason": "parity harness",
-    "consolidate": true
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   },
-   "why": "the reference check runs before consolidation, as in Python",
-   "http": {
-    "method": "POST",
-    "path": "/api/projects/import",
-    "auth": "admin",
-    "body": {
-     "repo": "not a repo!",
-     "reason": "parity harness",
-     "consolidate": true
+    {
+      "operation": "preference.get",
+      "params": {
+        "key": "inbox.filter"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 400,
-    "error_code": "invalid_request"
-   }
-  },
-  {
-   "operation": "decision.ask",
-   "params": {
-    "question": "Merge the branch?",
-    "options": [
-     {
-      "label": "Merge",
-      "description": "land it now",
-      "recommended": true
-     },
-     {
-      "label": "Hold",
-      "description": "wait for the review"
-     }
-    ],
-    "context": "CI is green.",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "why": "a person-run ask records the asker as the person; the id is the first dec_ issued"
-  },
-  {
-   "operation": "decision.ask",
-   "params": {
-    "question": "Ship the release?",
-    "options": [
-     {
-      "label": "Ship",
-      "recommended": true
-     },
-     {
-      "label": "Wait"
-     }
-    ],
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "decision.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "decision.list",
-   "params": {
-    "state": "pending"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "inbox.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "decision.answer",
-   "params": {
-    "id": "dec_0001",
-    "label": "Merge",
-    "note": "reviewed",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "decision.answer",
-   "params": {
-    "id": "dec_0001",
-    "label": "Hold",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "conflict"
-   },
-   "why": "an answered decision is no longer pending"
-  },
-  {
-   "operation": "decision.answer",
-   "params": {
-    "id": "dec_0002",
-    "label": "Deploy",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   },
-   "why": "the label must be one the decision offers"
-  },
-  {
-   "operation": "decision.withdraw",
-   "params": {
-    "id": "dec_0002",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "decision.list",
-   "params": {
-    "state": "answered"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "inbox.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "preference.set",
-   "params": {
-    "key": "inbox.filter",
-    "value": "{\"sources\": [\"bogus\"]}",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_preference"
-   },
-   "why": "B5: an inbox.filter value the Inbox model refuses is refused, not stored"
-  },
-  {
-   "operation": "preference.set",
-   "params": {
-    "key": "inbox.filter",
-    "value": "{\"unknown\": 1}",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_preference"
-   },
-   "why": "B5: the saved filter forbids unknown fields"
-  },
-  {
-   "operation": "preference.get",
-   "params": {
-    "key": "inbox.filter"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "why": "B5: a refused write leaves the stored filter as it was"
-  },
-  {
-   "why": "WI-1073: agent CLI versions are a stated answer even with no engine configured",
-   "operation": "agent_cli.list",
-   "cli": [
-    "agent-cli",
-    "list"
-   ],
-   "params": {},
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/agent-clis",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "why": "WI-1073: updating an agent CLI needs the engine; with none configured it is refused",
-   "operation": "agent_cli.update",
-   "cli": [
-    "agent-cli",
-    "update"
-   ],
-   "params": {
-    "tool": "claude-code",
-    "version": "image",
-    "reason": "parity"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "invalid_request"
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/agent-clis/update",
-    "auth": "admin",
-    "body": {
-     "tool": "claude-code",
-     "version": "image",
-     "reason": "parity"
+    {
+      "operation": "preference.set",
+      "params": {
+        "key": "inbox.filter",
+        "value": "{\"sources\": [\"ci\"]}",
+        "reason": "my default view"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 400,
-    "error_code": "invalid_request"
-   }
-  },
-  {
-   "why": "WI-1073: connect with no public_url says so rather than guessing; over HTTP it is not mounted under /api",
-   "operation": "connect",
-   "cli": [
-    "connect"
-   ],
-   "params": {},
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/connect",
-    "status": 404
-   }
-  },
-  {
-   "why": "WI-1080: with no engine configured, engine.status answers and says why in `engine`, never an error or an idle engine",
-   "operation": "engine.status",
-   "cli": [
-    "engine",
-    "status"
-   ],
-   "params": {},
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/engine/status",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "contract.adopt",
-   "params": {
-    "project": "parity",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/contract/adopt",
-    "auth": "admin",
-    "body": {
-     "project": "second",
-     "reason": "parity harness"
+    {
+      "operation": "preference.set",
+      "params": {
+        "key": "inbox.filter",
+        "value": "{\"sources\": [\"drift\"]}",
+        "expected_version": 0,
+        "reason": "stale"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "preference_version_conflict"
+      }
     },
-    "status": 200
-   },
-   "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
-  },
-  {
-   "operation": "contract.inapplicable",
-   "params": {
-    "project": "parity",
-    "rule": "required_file",
-    "target": "README.md",
-    "reason": "parity harness exemption"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/contract/inapplicable",
-    "auth": "admin",
-    "body": {
-     "project": "second",
-     "rule": "required_file",
-     "target": "README.md",
-     "reason": "parity harness exemption"
+    {
+      "operation": "notifications",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   },
-   "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
-  },
-  {
-   "operation": "compliance",
-   "params": {
-    "project": "parity"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "why": "an exempted criterion reports applicable false; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)",
-   "http": {
-    "method": "GET",
-    "path": "/api/compliance?project=second",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "contract.check",
-   "params": {
-    "project": "parity",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "why": "RB2-4: an exempted criterion reports applicable false; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)",
-   "http": {
-    "method": "POST",
-    "path": "/api/contract/check",
-    "auth": "admin",
-    "body": {
-     "project": "second",
-     "reason": "parity harness"
+    {
+      "operation": "inbox.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   }
-  },
-  {
-   "operation": "contract.applicable",
-   "params": {
-    "project": "parity",
-    "rule": "required_file",
-    "target": "README.md",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/contract/applicable",
-    "auth": "admin",
-    "body": {
-     "project": "second",
-     "rule": "required_file",
-     "target": "README.md",
-     "reason": "parity harness"
+    {
+      "operation": "inbox.archive",
+      "params": {
+        "entry_key": "nope",
+        "reason": "missing"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "inbox_entry_not_found"
+      }
     },
-    "status": 200
-   },
-   "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
-  },
-  {
-   "operation": "contract.decline",
-   "params": {
-    "project": "parity",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/contract/decline",
-    "auth": "admin",
-    "body": {
-     "project": "second",
-     "reason": "parity harness"
+    {
+      "operation": "inbox.snooze",
+      "params": {
+        "entry_key": "nope",
+        "until": "2020-01-01T00:00:00+00:00",
+        "reason": "too late"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_snooze"
+      }
     },
-    "status": 200
-   },
-   "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
-  },
-  {
-   "operation": "contract.adopt",
-   "params": {
-    "project": "parity",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/contract/adopt",
-    "auth": "admin",
-    "body": {
-     "project": "second",
-     "reason": "parity harness"
+    {
+      "operation": "inbox.restore",
+      "params": {
+        "entry_key": "nope",
+        "reason": "back"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "inbox_entry_not_found"
+      }
     },
-    "status": 200
-   },
-   "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
-  },
-  {
-   "operation": "observations.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/observations",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "suppress",
-   "params": {
-    "subject": "git:parity",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/suppressions",
-    "auth": "admin",
-    "body": {
-     "subject": "git:parity",
-     "reason": "parity harness"
+    {
+      "operation": "work.create",
+      "params": {
+        "kind": "chore",
+        "title": "parity item",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   }
-  },
-  {
-   "operation": "suppression.list",
-   "params": {
-    "include_revoked": true
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/suppressions?include_revoked=true",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "suppression.revoke",
-   "params": {
-    "id": "{seen:suppress#suppression.id}",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/suppressions/revoke",
-    "auth": "admin",
-    "body": {
-     "id": "sup_0001",
-     "reason": "parity harness"
+    {
+      "operation": "work.update",
+      "params": {
+        "ref": "WI-1",
+        "title": "parity item renamed",
+        "priority": "p1",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 200
-   }
-  },
-  {
-   "operation": "suppression.list",
-   "params": {
-    "include_revoked": true
-   },
-   "expect": {
-    "exit": 0
-   },
-   "why": "a revoked suppression stays listed with its revocation",
-   "http": {
-    "method": "GET",
-    "path": "/api/suppressions?include_revoked=true",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "observations.prune",
-   "params": {
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/observations/prune",
-    "auth": "admin",
-    "body": {
-     "reason": "parity harness"
+    {
+      "operation": "work.create",
+      "params": {
+        "kind": "chore",
+        "title": "labelled item",
+        "labels": "parity",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0,
+        "mcp_error_code": "invalid_params"
+      }
     },
-    "status": 200
-   }
-  },
-  {
-   "operation": "drift.detect",
-   "params": {
-    "auto_accept": false,
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "POST",
-    "path": "/api/drift/detect",
-    "auth": "admin",
-    "body": {
-     "auto_accept": false,
-     "reason": "parity harness"
+    {
+      "operation": "work.create",
+      "params": {
+        "kind": "chore",
+        "title": "refused item",
+        "project": "parity",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "project_not_linked"
+      }
     },
-    "status": 200
-   }
-  },
-  {
-   "operation": "drift.list",
-   "params": {},
-   "expect": {
-    "exit": 0
-   },
-   "http": {
-    "method": "GET",
-    "path": "/api/drift",
-    "auth": "admin",
-    "status": 200
-   }
-  },
-  {
-   "operation": "drift.resolve",
-   "params": {
-    "id": "dft_0001",
-    "resolution": "rejected",
-    "reason": "parity harness"
-   },
-   "expect": {
-    "exit": 1,
-    "error_code": "not_found"
-   },
-   "why": "no proposal was raised, so resolving one is refused as not found",
-   "http": {
-    "method": "POST",
-    "path": "/api/drift/resolve",
-    "auth": "admin",
-    "body": {
-     "id": "dft_0001",
-     "resolution": "rejected",
-     "reason": "parity harness"
+    {
+      "operation": "work.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
     },
-    "status": 404,
-    "error_code": "not_found"
-   }
-  },
-  {
-   "operation": "dump.s5",
-   "dump": true,
-   "tables": [
-    "suppressions",
-    "contract_exemptions",
-    "drift_proposals",
-    "observations",
-    "latest_observations",
-    "latest_dep_refs",
-    "sweeps"
-   ],
-   "why": "declared (suppressions, contract exemptions, drift proposals) and observed (observations, promotions, sweeps) after the S5 block"
-  }
- ]
+    {
+      "operation": "work.list",
+      "params": {
+        "project": "missing"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "work.get",
+      "params": {
+        "ref": "WI-1"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "work.comment",
+      "params": {
+        "ref": "WI-1",
+        "body": "parity note",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "work.transition",
+      "params": {
+        "ref": "WI-1",
+        "to_state": "in_progress",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "work.relate",
+      "params": {
+        "ref": "WI-1",
+        "target": "WI-2",
+        "kind": "relates_to",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0,
+        "mcp_error_code": "not_found"
+      }
+    },
+    {
+      "operation": "work.unrelate",
+      "params": {
+        "ref": "WI-1",
+        "target": "WI-2",
+        "kind": "relates_to",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0,
+        "mcp_error_code": "not_found"
+      }
+    },
+    {
+      "operation": "board.list",
+      "params": {
+        "cells": [
+          {
+            "lane_key": "",
+            "state": "open"
+          }
+        ]
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "backlog",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "backlog",
+      "params": {
+        "project": "missing"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "bugs",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "bugs",
+      "params": {
+        "project": "missing"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "deps",
+      "params": {
+        "project": "missing"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "export",
+      "params": {
+        "destination": "{root}/export.json",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "import",
+      "params": {
+        "source": "{root}/export.json",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "forge.writeback",
+      "params": {
+        "project": "parity",
+        "policy": "full",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "forge.actions",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "forge.actions",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "forge.repos",
+      "params": {
+        "host": "no.such.host"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      }
+    },
+    {
+      "operation": "forge.account_status",
+      "cli": [
+        "forge",
+        "account",
+        "status"
+      ],
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "forge.account_link",
+      "cli": [
+        "forge",
+        "account",
+        "link"
+      ],
+      "params": {
+        "host": "no.such.host",
+        "token": "not-a-token",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      }
+    },
+    {
+      "operation": "forge.link",
+      "params": {
+        "project": "parity",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "forge_link_refused"
+      }
+    },
+    {
+      "operation": "forge.link",
+      "params": {
+        "project": "missing",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "forge.publish",
+      "params": {
+        "project": "parity",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "forge_publish_refused"
+      }
+    },
+    {
+      "operation": "forge.publish",
+      "params": {
+        "project": "missing",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "forge.import",
+      "params": {
+        "owner": "acme",
+        "name": "widget",
+        "host": "no.such.host",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      }
+    },
+    {
+      "operation": "forge.import",
+      "params": {
+        "owner": "acme",
+        "name": "widget",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      }
+    },
+    {
+      "operation": "forge.onboard",
+      "params": {
+        "project": "parity",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "forge.onboard",
+      "params": {
+        "project": "missing",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "forge.account_unlink",
+      "cli": [
+        "forge",
+        "account",
+        "unlink"
+      ],
+      "params": {
+        "host": "no.such.host",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      }
+    },
+    {
+      "operation": "install.bootstrap",
+      "http": {
+        "method": "POST",
+        "path": "/api/install/bootstrap",
+        "body": {
+          "display_name": "Ada Lovelace"
+        },
+        "capture": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "why",
+      "params": {
+        "ref": "WI-1"
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/why?ref=WI-1",
+        "auth": "admin",
+        "status": 404,
+        "error_code": "not_found"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "why",
+      "params": {
+        "ref": "WI-404"
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/why?ref=WI-404",
+        "auth": "admin",
+        "status": 404,
+        "error_code": "not_found"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "work.list",
+      "params": {
+        "mode": "full",
+        "limit": 1
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/work?mode=full&limit=1",
+        "auth": "admin",
+        "status": 200
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "work.list",
+      "params": {
+        "limit": 1,
+        "offset": 1
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/work?limit=1&offset=1",
+        "auth": "admin",
+        "status": 200
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "work.get_many",
+      "params": {
+        "refs": [
+          "WI-1",
+          "WI-404",
+          "WI-2"
+        ]
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/work/get-many?refs=WI-1&refs=WI-404&refs=WI-2",
+        "auth": "admin",
+        "status": 200
+      },
+      "expect": {
+        "exit": 0
+      },
+      "cli": [
+        "work",
+        "get-many"
+      ]
+    },
+    {
+      "operation": "audit.list",
+      "params": {
+        "limit": 5
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/audit?limit=5",
+        "auth": "admin",
+        "status": 200
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "work.bind_branch",
+      "params": {
+        "ref": "WI-1",
+        "branch": "wi-1-parity",
+        "reason": "parity"
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/work/bind-branch",
+        "auth": "admin",
+        "body": {
+          "ref": "WI-1",
+          "branch": "wi-1-parity",
+          "reason": "parity"
+        },
+        "status": 404,
+        "error_code": "not_found"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      },
+      "cli": [
+        "work",
+        "bind-branch"
+      ]
+    },
+    {
+      "operation": "work.adopt",
+      "params": {
+        "subject": "gh:parity-org/parity#404",
+        "reason": "parity"
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/work/adopt",
+        "auth": "admin",
+        "body": {
+          "subject": "gh:parity-org/parity#404",
+          "reason": "parity"
+        },
+        "status": 404,
+        "error_code": "not_found"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "project.register",
+      "http": {
+        "method": "POST",
+        "path": "/api/projects",
+        "auth": "admin",
+        "body": {
+          "name": "Second",
+          "root_path": "{root}/instance/repos/second",
+          "reason": "parity harness"
+        },
+        "status": 200
+      },
+      "why": "HTTP has no project of its own: the same registration the CLI made for Second, here so the HTTP sweep has a project to sweep"
+    },
+    {
+      "operation": "project.register",
+      "params": {
+        "name": "Broken",
+        "root_path": "{root}/instance/repos/broken",
+        "reason": "parity harness"
+      },
+      "why": "a checkout whose .git cannot be read: git-local fails for this project, so its sweep is partial and coverage says so",
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/projects",
+        "auth": "admin",
+        "body": {
+          "name": "Broken",
+          "root_path": "{root}/instance/repos/broken",
+          "reason": "parity harness"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "session.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "session.sweep",
+      "params": {},
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/sweep",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "sweep",
+      "params": {
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/sweep",
+        "auth": "admin",
+        "body": {
+          "reason": "parity harness"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "sweep",
+      "params": {
+        "collectors": [
+          "git-local"
+        ],
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "why": "a named sweep runs one collector and leaves the coverage of the rest as it was",
+      "http": {
+        "method": "POST",
+        "path": "/api/sweep",
+        "auth": "admin",
+        "body": {
+          "collectors": [
+            "git-local"
+          ],
+          "reason": "parity harness"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "coverage",
+      "params": {},
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/coverage",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "dump.observed",
+      "dump": "observed",
+      "why": "the findings and coverage rows the sweeps above wrote, after every sweep has run",
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "session.log_tail",
+      "cli": [
+        "session",
+        "log"
+      ],
+      "params": {
+        "id": "ses_00000000000000000000000000"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/log?id=ses_00000000000000000000000000",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "why": "stand-in engine answers create so both cores prove a real start",
+      "operation": "session.start",
+      "engine": true,
+      "params": {
+        "reason": "parity",
+        "project": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions",
+        "auth": "admin",
+        "body": {
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.input",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "text": "hello",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "cli": [
+        "session",
+        "input"
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/input",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "text": "hi",
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.screen",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/screen?id=ses_00000000000000000000000000",
+        "auth": "admin",
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.wait",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "timeout_s": 1
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/wait?id=ses_00000000000000000000000000",
+        "auth": "admin",
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.answer",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "option": 1,
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/answer",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "option": 1,
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.hibernate",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/hibernate",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.keep_awake",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "keep_awake": true,
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "cli": [
+        "session",
+        "keep-awake"
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/keep-awake",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "keep_awake": true,
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.set_role",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "role": "worker",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "cli": [
+        "session",
+        "set-role"
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/role",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "role": "worker",
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.wake",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/wake",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "operation": "session.stop",
+      "params": {
+        "id": "ses_00000000000000000000000000",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/stop",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "reason": "parity"
+        },
+        "status": 404,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "why": "a person asks for a grant on a live engine session; the stand-in engine answers the session as alive",
+      "operation": "session.grant_request",
+      "cli": [
+        "session",
+        "grant-request"
+      ],
+      "engine": true,
+      "params": {
+        "target": "parity-worker",
+        "kind": "credential",
+        "secret_name": "PARITY_TOKEN",
+        "project_id": "parity-project",
+        "uses": "once",
+        "ttl_seconds": 60,
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/grants",
+        "auth": "admin",
+        "body": {
+          "target": "parity-worker",
+          "kind": "credential",
+          "secret_name": "PARITY_TOKEN",
+          "project_id": "parity-project",
+          "uses": "once",
+          "ttl_seconds": 60,
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "WI-983: the decision is a person's, and it reads the grant the request step made (a real grant, not a made-up id); the engine applies it before the record says approved",
+      "operation": "session.grant_decide",
+      "cli": [
+        "session",
+        "grant-decide"
+      ],
+      "engine": true,
+      "params": {
+        "id": "{seen:session.grant_request#grant.id}",
+        "decision": "approve",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "the same real grant, now approved, is revoked: the engine takes it back and the record says revoked",
+      "operation": "session.grant_revoke",
+      "cli": [
+        "session",
+        "grant-revoke"
+      ],
+      "engine": true,
+      "params": {
+        "id": "{seen:session.grant_request#grant.id}",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "session.grant_list",
+      "cli": [
+        "session",
+        "grants"
+      ],
+      "params": {
+        "state": "pending"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/grants?state=pending",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "session.history_list",
+      "cli": [
+        "session",
+        "history"
+      ],
+      "params": {
+        "limit": 5
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/history?limit=5",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "session.bind_work",
+      "cli": [
+        "session",
+        "bind"
+      ],
+      "params": {
+        "id": "ses_00000000000000000000000000",
+        "work_item": "WI-1074",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/work-item",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "work_item": "WI-1074",
+          "reason": "parity"
+        },
+        "status": 404,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "session.last_reply",
+      "cli": [
+        "session",
+        "last-reply"
+      ],
+      "params": {
+        "id": "ses_00000000000000000000000000"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/last-reply?id=ses_00000000000000000000000000",
+        "auth": "admin",
+        "status": 404,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "session.search_output",
+      "cli": [
+        "session",
+        "search"
+      ],
+      "params": {
+        "q": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/history/search?q=parity",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.report_blocked",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "blocker": "parity",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "cli": [
+        "session",
+        "blocked"
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/blocked",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "blocker": "parity needs a person",
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.report_unblocked",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "cli": [
+        "session",
+        "unblocked"
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/unblocked",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.changes",
+      "engine": true,
+      "params": {
+        "since": 0,
+        "limit": 10
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/changes?since=0&limit=10",
+        "auth": "admin",
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.wait_any",
+      "engine": true,
+      "params": {
+        "timeout_s": 1,
+        "cursor": 0
+      },
+      "expect": {
+        "exit": 0
+      },
+      "cli": [
+        "session",
+        "wait-any"
+      ],
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/wait-any?timeout_s=1&cursor=0",
+        "auth": "admin",
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "session.commit_for",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "message": "parity",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "cli": [
+        "session",
+        "commit"
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/sessions/commit",
+        "auth": "admin",
+        "body": {
+          "id": "ses_00000000000000000000000000",
+          "message": "parity commit",
+          "reason": "parity"
+        },
+        "status": 502,
+        "error_code": "engine_unavailable"
+      }
+    },
+    {
+      "operation": "session.economics",
+      "params": {
+        "id": "ses_00000000000000000000000000"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/economics?id=ses_00000000000000000000000000",
+        "auth": "admin",
+        "status": 404,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "session.digest",
+      "params": {
+        "id": "ses_00000000000000000000000000"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/sessions/digest?id=ses_00000000000000000000000000",
+        "auth": "admin",
+        "status": 404,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "why": "stop the session the stand-in started (the earlier stop is a not_found on a fake id)",
+      "operation": "session.stop",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.id}",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "rename the live engine session",
+      "operation": "session.rename",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "name": "parity-renamed",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "auth.decisions lists the allow/deny log (store-only; no engine)",
+      "operation": "auth.decisions",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "remove forgets the engine session after kill",
+      "operation": "session.remove",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.rename#session.engine_session_id}",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "agent_activity.search",
+      "cli": [
+        "agent-activity",
+        "search"
+      ],
+      "params": {
+        "limit": 5
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/agent-activity?limit=5",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "agent_activity.summary",
+      "cli": [
+        "agent-activity",
+        "summary"
+      ],
+      "params": {
+        "economics": true
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/agent-activity/summary?economics=true",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "label.create",
+      "http": {
+        "method": "POST",
+        "path": "/api/labels",
+        "auth": "admin",
+        "body": {
+          "name": "bug",
+          "reason": "seed"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "token.issue",
+      "http": {
+        "method": "POST",
+        "path": "/api/tokens",
+        "auth": "admin",
+        "body": {
+          "actor": "human:ada-lovelace",
+          "name": "reader",
+          "scopes": "read",
+          "reason": "a read token"
+        },
+        "capture": "token",
+        "status": 200
+      }
+    },
+    {
+      "operation": "label.create",
+      "http": {
+        "method": "POST",
+        "path": "/api/labels",
+        "auth": "token",
+        "body": {
+          "name": "chore",
+          "reason": "should be refused"
+        },
+        "status": 403,
+        "error_code": "forbidden"
+      }
+    },
+    {
+      "operation": "auth.logout",
+      "http": {
+        "method": "POST",
+        "path": "/api/auth/logout",
+        "auth": "token",
+        "body": {
+          "reason": "done"
+        },
+        "status": 200
+      }
+    },
+    {
+      "why": "stand-in engine success path",
+      "operation": "chat.list",
+      "engine": true,
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "create a chat against the stand-in",
+      "operation": "chat.create",
+      "engine": true,
+      "params": {
+        "reason": "parity",
+        "title": "parity-chat"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "send a message on the created chat",
+      "operation": "chat.send",
+      "engine": true,
+      "params": {
+        "id": "{seen:chat.create#chat.id}",
+        "text": "hello",
+        "reason": "parity",
+        "wait_s": 0
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "person decides a stand-in approval",
+      "operation": "chat.decide",
+      "engine": true,
+      "params": {
+        "id": "{seen:chat.create#chat.id}",
+        "approval_id": "apr_parity",
+        "allow": true,
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "switch the chat model",
+      "operation": "chat.set_model",
+      "cli": [
+        "chat",
+        "set-model"
+      ],
+      "engine": true,
+      "params": {
+        "id": "{seen:chat.create#chat.id}",
+        "model": "grok",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "interrupt the chat",
+      "operation": "chat.interrupt",
+      "engine": true,
+      "params": {
+        "id": "{seen:chat.create#chat.id}",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "archive the chat",
+      "operation": "chat.archive",
+      "engine": true,
+      "params": {
+        "id": "{seen:chat.create#chat.id}",
+        "archived": true,
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "promote the chat into a terminal session",
+      "operation": "chat.promote",
+      "engine": true,
+      "params": {
+        "id": "{seen:chat.create#chat.id}",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "arm a watch that wakes the started session when a second session ends; the trigger names a stand-in id the GET session route accepts",
+      "operation": "watch.create",
+      "engine": true,
+      "params": {
+        "session": "{seen:session.start#session.engine_session_id}",
+        "trigger": {
+          "kind": "session",
+          "session": "other-parity-session",
+          "until": "ended"
+        },
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "list the armed watch",
+      "operation": "watch.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "cancel the armed watch",
+      "operation": "watch.cancel",
+      "params": {
+        "id": "{seen:watch.create#watch.id}",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "chat.get",
+      "params": {
+        "id": "nope"
+      },
+      "expect": {
+        "exit": 1,
+        "capture_error": true,
+        "error_code": "invalid_request"
+      }
+    },
+    {
+      "operation": "user.create",
+      "params": {
+        "username": "ada",
+        "password": "correct horse battery",
+        "display_name": "Ada Lovelace",
+        "reason": "parity harness"
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/users",
+        "auth": "admin",
+        "body": {
+          "username": "ada",
+          "password": "correct horse battery",
+          "display_name": "Ada Lovelace",
+          "reason": "parity harness"
+        },
+        "status": 200
+      },
+      "expect": {
+        "exit": 0
+      },
+      "cli_params": {
+        "username": "ada",
+        "display_name": "Ada Lovelace",
+        "reason": "parity harness",
+        "password_file": "{root}/ada-password"
+      }
+    },
+    {
+      "operation": "user.list",
+      "params": {},
+      "http": {
+        "method": "GET",
+        "path": "/api/users",
+        "auth": "admin",
+        "status": 200
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "user.set_password",
+      "params": {
+        "username": "ada",
+        "password": "another passphrase",
+        "reason": "parity harness"
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/users/password",
+        "auth": "admin",
+        "body": {
+          "username": "ada",
+          "password": "another passphrase",
+          "reason": "parity harness"
+        },
+        "status": 200
+      },
+      "expect": {
+        "exit": 0
+      },
+      "cli_params": {
+        "username": "ada",
+        "reason": "parity harness",
+        "password_file": "{root}/ada-passphrase"
+      },
+      "cli": [
+        "user",
+        "passwd"
+      ]
+    },
+    {
+      "operation": "token.issue",
+      "params": {
+        "actor": "human:ada",
+        "name": "claude-code",
+        "scopes": "read,work.write",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "token.issue",
+      "params": {
+        "actor": "human:ada",
+        "name": "bad expiry",
+        "expires_in_days": 0,
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 2,
+        "capture_error": true,
+        "error_code": null,
+        "mcp_error_code": "invalid_params"
+      },
+      "why": "a non-positive expiry is a validation refusal, exit 2"
+    },
+    {
+      "operation": "token.list",
+      "params": {
+        "include_revoked": true
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/tokens?include_revoked=true",
+        "auth": "admin",
+        "status": 200
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "token.revoke",
+      "params": {
+        "id": "tok_0002",
+        "reason": "parity harness"
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/tokens/revoke",
+        "auth": "admin",
+        "body": {
+          "id": "tok_0002",
+          "reason": "parity harness"
+        },
+        "status": 200
+      },
+      "expect": {
+        "exit": 0,
+        "mcp_error_code": "not_found"
+      }
+    },
+    {
+      "operation": "auth.whoami",
+      "params": {},
+      "http": {
+        "method": "GET",
+        "path": "/api/auth/whoami",
+        "auth": "admin",
+        "status": 200
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "backup",
+      "params": {
+        "destination": "{root}/backup",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+    },
+    {
+      "operation": "backup",
+      "params": {
+        "destination": "{root}/backup",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "capture_error": true,
+        "error_code": "conflict"
+      },
+      "why": "a second backup over a non-empty destination is refused and writes nothing"
+    },
+    {
+      "operation": "restore",
+      "params": {
+        "source": "{root}/backup",
+        "confirm": false,
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "capture_error": true,
+        "error_code": "invalid_request"
+      },
+      "why": "restore without --confirm is refused before anything is replaced"
+    },
+    {
+      "operation": "restore",
+      "params": {
+        "source": "{root}/backup",
+        "confirm": true,
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+    },
+    {
+      "operation": "auth.login",
+      "http": {
+        "method": "POST",
+        "path": "/api/auth/login",
+        "body": {
+          "username": "ada",
+          "password": "another passphrase"
+        },
+        "capture": "session",
+        "status": 200
+      }
+    },
+    {
+      "operation": "auth.whoami",
+      "http": {
+        "method": "GET",
+        "path": "/api/auth/whoami",
+        "auth": "session",
+        "status": 200
+      }
+    },
+    {
+      "operation": "user.remove",
+      "params": {
+        "username": "ada",
+        "reason": "parity harness"
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/users/remove",
+        "auth": "admin",
+        "body": {
+          "username": "ada",
+          "reason": "parity harness"
+        },
+        "status": 200
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "events.list",
+      "params": {
+        "after": 0,
+        "limit": 5
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/events?after=0&limit=5",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "events.list",
+      "params": {
+        "after": 1,
+        "limit": 2
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/events?after=1&limit=2",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "audit.list",
+      "params": {
+        "limit": 5
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/audit?limit=5",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "audit.list",
+      "params": {
+        "limit": 2,
+        "offset": 1
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/audit?limit=2&offset=1",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "clone",
+      "params": {
+        "source": "{root}/backup",
+        "confirm": false,
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      },
+      "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+    },
+    {
+      "operation": "clone",
+      "params": {
+        "source": "{root}/backup",
+        "confirm": true,
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      },
+      "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+    },
+    {
+      "operation": "clone",
+      "params": {
+        "source": "{root}/missing",
+        "confirm": true,
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      },
+      "why": "LOCAL_ONLY in the registry: CLI and MCP only, not mounted on HTTP"
+    },
+    {
+      "operation": "project.import",
+      "params": {
+        "repo": "not a repo!",
+        "reason": "parity harness",
+        "consolidate": false
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      },
+      "why": "a reference that names no repository is refused before any clone",
+      "http": {
+        "method": "POST",
+        "path": "/api/projects/import",
+        "auth": "admin",
+        "body": {
+          "repo": "not a repo!",
+          "reason": "parity harness",
+          "consolidate": false
+        },
+        "status": 400,
+        "error_code": "invalid_request"
+      }
+    },
+    {
+      "operation": "project.import",
+      "params": {
+        "repo": "not a repo!",
+        "reason": "parity harness",
+        "consolidate": true
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      },
+      "why": "the reference check runs before consolidation, as in Python",
+      "http": {
+        "method": "POST",
+        "path": "/api/projects/import",
+        "auth": "admin",
+        "body": {
+          "repo": "not a repo!",
+          "reason": "parity harness",
+          "consolidate": true
+        },
+        "status": 400,
+        "error_code": "invalid_request"
+      }
+    },
+    {
+      "operation": "decision.ask",
+      "params": {
+        "question": "Merge the branch?",
+        "options": [
+          {
+            "label": "Merge",
+            "description": "land it now",
+            "recommended": true
+          },
+          {
+            "label": "Hold",
+            "description": "wait for the review"
+          }
+        ],
+        "context": "CI is green.",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "why": "a person-run ask records the asker as the person; the id is the first dec_ issued"
+    },
+    {
+      "operation": "decision.ask",
+      "params": {
+        "question": "Ship the release?",
+        "options": [
+          {
+            "label": "Ship",
+            "recommended": true
+          },
+          {
+            "label": "Wait"
+          }
+        ],
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "decision.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "decision.list",
+      "params": {
+        "state": "pending"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "inbox.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "decision.answer",
+      "params": {
+        "id": "dec_0001",
+        "label": "Merge",
+        "note": "reviewed",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "decision.answer",
+      "params": {
+        "id": "dec_0001",
+        "label": "Hold",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "conflict"
+      },
+      "why": "an answered decision is no longer pending"
+    },
+    {
+      "operation": "decision.answer",
+      "params": {
+        "id": "dec_0002",
+        "label": "Deploy",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      },
+      "why": "the label must be one the decision offers"
+    },
+    {
+      "operation": "decision.withdraw",
+      "params": {
+        "id": "dec_0002",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "decision.list",
+      "params": {
+        "state": "answered"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "inbox.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "preference.set",
+      "params": {
+        "key": "inbox.filter",
+        "value": "{\"sources\": [\"bogus\"]}",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_preference"
+      },
+      "why": "B5: an inbox.filter value the Inbox model refuses is refused, not stored"
+    },
+    {
+      "operation": "preference.set",
+      "params": {
+        "key": "inbox.filter",
+        "value": "{\"unknown\": 1}",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_preference"
+      },
+      "why": "B5: the saved filter forbids unknown fields"
+    },
+    {
+      "operation": "preference.get",
+      "params": {
+        "key": "inbox.filter"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "why": "B5: a refused write leaves the stored filter as it was"
+    },
+    {
+      "why": "WI-1073: agent CLI versions are a stated answer even with no engine configured",
+      "operation": "agent_cli.list",
+      "cli": [
+        "agent-cli",
+        "list"
+      ],
+      "params": {},
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/agent-clis",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "why": "WI-1073: updating an agent CLI needs the engine; with none configured it is refused",
+      "operation": "agent_cli.update",
+      "cli": [
+        "agent-cli",
+        "update"
+      ],
+      "params": {
+        "tool": "claude-code",
+        "version": "image",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "invalid_request"
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/agent-clis/update",
+        "auth": "admin",
+        "body": {
+          "tool": "claude-code",
+          "version": "image",
+          "reason": "parity"
+        },
+        "status": 400,
+        "error_code": "invalid_request"
+      }
+    },
+    {
+      "why": "WI-1073: connect with no public_url says so rather than guessing; over HTTP it is not mounted under /api",
+      "operation": "connect",
+      "cli": [
+        "connect"
+      ],
+      "params": {},
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/connect",
+        "status": 404
+      }
+    },
+    {
+      "why": "WI-1080: with no engine configured, engine.status answers and says why in `engine`, never an error or an idle engine",
+      "operation": "engine.status",
+      "cli": [
+        "engine",
+        "status"
+      ],
+      "params": {},
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/engine/status",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "contract.adopt",
+      "params": {
+        "project": "parity",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/contract/adopt",
+        "auth": "admin",
+        "body": {
+          "project": "second",
+          "reason": "parity harness"
+        },
+        "status": 200
+      },
+      "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
+    },
+    {
+      "operation": "contract.inapplicable",
+      "params": {
+        "project": "parity",
+        "rule": "required_file",
+        "target": "README.md",
+        "reason": "parity harness exemption"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/contract/inapplicable",
+        "auth": "admin",
+        "body": {
+          "project": "second",
+          "rule": "required_file",
+          "target": "README.md",
+          "reason": "parity harness exemption"
+        },
+        "status": 200
+      },
+      "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
+    },
+    {
+      "operation": "compliance",
+      "params": {
+        "project": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "why": "an exempted criterion reports applicable false; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)",
+      "http": {
+        "method": "GET",
+        "path": "/api/compliance?project=second",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "contract.check",
+      "params": {
+        "project": "parity",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "why": "RB2-4: an exempted criterion reports applicable false; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)",
+      "http": {
+        "method": "POST",
+        "path": "/api/contract/check",
+        "auth": "admin",
+        "body": {
+          "project": "second",
+          "reason": "parity harness"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "contract.applicable",
+      "params": {
+        "project": "parity",
+        "rule": "required_file",
+        "target": "README.md",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/contract/applicable",
+        "auth": "admin",
+        "body": {
+          "project": "second",
+          "rule": "required_file",
+          "target": "README.md",
+          "reason": "parity harness"
+        },
+        "status": 200
+      },
+      "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
+    },
+    {
+      "operation": "contract.decline",
+      "params": {
+        "project": "parity",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/contract/decline",
+        "auth": "admin",
+        "body": {
+          "project": "second",
+          "reason": "parity harness"
+        },
+        "status": 200
+      },
+      "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
+    },
+    {
+      "operation": "contract.adopt",
+      "params": {
+        "project": "parity",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/contract/adopt",
+        "auth": "admin",
+        "body": {
+          "project": "second",
+          "reason": "parity harness"
+        },
+        "status": 200
+      },
+      "why": "S5; over HTTP the registered project is 'second' (project.create of 'parity' is CLI/MCP-only)"
+    },
+    {
+      "operation": "observations.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/observations",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "suppress",
+      "params": {
+        "subject": "git:parity",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/suppressions",
+        "auth": "admin",
+        "body": {
+          "subject": "git:parity",
+          "reason": "parity harness"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "suppression.list",
+      "params": {
+        "include_revoked": true
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/suppressions?include_revoked=true",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "suppression.revoke",
+      "params": {
+        "id": "{seen:suppress#suppression.id}",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/suppressions/revoke",
+        "auth": "admin",
+        "body": {
+          "id": "sup_0001",
+          "reason": "parity harness"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "suppression.list",
+      "params": {
+        "include_revoked": true
+      },
+      "expect": {
+        "exit": 0
+      },
+      "why": "a revoked suppression stays listed with its revocation",
+      "http": {
+        "method": "GET",
+        "path": "/api/suppressions?include_revoked=true",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "observations.prune",
+      "params": {
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/observations/prune",
+        "auth": "admin",
+        "body": {
+          "reason": "parity harness"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "drift.detect",
+      "params": {
+        "auto_accept": false,
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/drift/detect",
+        "auth": "admin",
+        "body": {
+          "auto_accept": false,
+          "reason": "parity harness"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "drift.list",
+      "params": {},
+      "expect": {
+        "exit": 0
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/drift",
+        "auth": "admin",
+        "status": 200
+      }
+    },
+    {
+      "operation": "drift.resolve",
+      "params": {
+        "id": "dft_0001",
+        "resolution": "rejected",
+        "reason": "parity harness"
+      },
+      "expect": {
+        "exit": 1,
+        "error_code": "not_found"
+      },
+      "why": "no proposal was raised, so resolving one is refused as not found",
+      "http": {
+        "method": "POST",
+        "path": "/api/drift/resolve",
+        "auth": "admin",
+        "body": {
+          "id": "dft_0001",
+          "resolution": "rejected",
+          "reason": "parity harness"
+        },
+        "status": 404,
+        "error_code": "not_found"
+      }
+    },
+    {
+      "operation": "dump.s5",
+      "dump": true,
+      "tables": [
+        "suppressions",
+        "contract_exemptions",
+        "drift_proposals",
+        "observations",
+        "latest_observations",
+        "latest_dep_refs",
+        "sweeps"
+      ],
+      "why": "declared (suppressions, contract exemptions, drift proposals) and observed (observations, promotions, sweeps) after the S5 block"
+    }
+  ]
 }

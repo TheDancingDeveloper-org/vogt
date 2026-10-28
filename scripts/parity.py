@@ -597,9 +597,72 @@ def _child_env() -> dict[str, str]:
     return env
 
 
+class _StandInState:
+    """Sessions and chats the stand-in remembers, shared by every handler.
+
+    A ``ThreadingHTTPServer`` builds a fresh handler per request, so the state
+    lives on the class. ``reset`` runs when the stand-in starts, so one parity
+    run never sees another's sessions.
+    """
+
+    sessions: dict[str, dict[str, Any]] = {}
+    chats: dict[str, dict[str, Any]] = {}
+    _next = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.sessions = {}
+        cls.chats = {}
+        cls._next = 0
+
+    @classmethod
+    def fresh(cls, prefix: str) -> str:
+        cls._next += 1
+        # Chat ids must be UUIDs (`chat_id_of`); session ids the core treats
+        # as engine ids may be any non-empty string, so both shapes are hex.
+        if prefix == "chat":
+            return f"00000000-0000-4000-8000-{cls._next:012x}"
+        return f"eng-parity-{cls._next}"
+
+
+def _session_body(session_id: str, **over: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "id": session_id,
+        "name": session_id,
+        "activity": "idle",
+        "alive": True,
+        "cwd": "/work",
+        "exit_code": None,
+        "role": "worker",
+    }
+    body.update(over)
+    return body
+
+
+def _chat_body(chat_id: str, **over: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "id": chat_id,
+        "title": "parity",
+        "driver": "klaudia",
+        "creator": "local:parity",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "state": "idle",
+        "live": False,
+    }
+    body.update(over)
+    return body
+
+
 class _StandInHandler(BaseHTTPRequestHandler):
-    """The engine routes the grant steps reach: every session answers alive as
-    a worker, a grant apply is echoed back, and a revoke is acknowledged."""
+    """The engine routes the parity steps reach.
+
+    Grant steps keep their old answers: every named session is alive, a grant
+    apply is echoed, a revoke is acknowledged. The session and chat steps get
+    a success body both cores parse the same way, so the harness proves
+    ``session.start`` through ``session.stop`` and the chat and watch writes
+    rather than only ``engine_unavailable``.
+    """
 
     def _reply(self, status: int, payload: Any) -> None:
         body = json.dumps(payload).encode() if payload is not None else b""
@@ -612,43 +675,148 @@ class _StandInHandler(BaseHTTPRequestHandler):
     def _parts(self) -> list[str]:
         return self.path.split("?", 1)[0].strip("/").split("/")
 
+    def _json(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        parsed = json.loads(raw or b"{}")
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _remember(self, session_id: str, **over: Any) -> dict[str, Any]:
+        current = _StandInState.sessions.get(session_id, _session_body(session_id))
+        current.update(over)
+        _StandInState.sessions[session_id] = current
+        return current
+
     def do_GET(self) -> None:
         parts = self._parts()
-        if parts[:2] == ["api", "sessions"] and len(parts) == 3:
+        if parts == ["api", "sessions"]:
+            return self._reply(
+                200,
+                {"sessions": list(_StandInState.sessions.values()), "hidden_count": 0},
+            )
+        if parts == ["api", "sessions", "changes"]:
+            return self._reply(200, {"changes": [], "next_cursor": 0, "truncated": False})
+        if parts == ["api", "sessions", "wait-any"]:
+            return self._reply(200, {"outcome": "timeout", "change": None, "next_cursor": 0})
+        if parts[:2] == ["api", "sessions"] and len(parts) == 4 and parts[3] == "screen":
             return self._reply(
                 200,
                 {
                     "id": parts[2],
-                    "name": parts[2],
-                    "activity": "idle",
-                    "alive": True,
-                    "exit_code": None,
-                    "role": "worker",
-                    "cwd": "/work",
+                    "cols": 80,
+                    "rows": 24,
+                    "lines": [],
+                    "cursor": {"row": 0, "col": 0},
                 },
             )
+        if parts[:2] == ["api", "sessions"] and len(parts) == 4 and parts[3] == "wait":
+            return self._reply(
+                200,
+                {
+                    "outcome": "ready",
+                    "matched": "ready",
+                    "waited_ms": 0,
+                    "screen": {"id": parts[2], "lines": []},
+                },
+            )
+        if parts[:2] == ["api", "sessions"] and len(parts) == 3:
+            known = _StandInState.sessions.get(parts[2])
+            return self._reply(200, known or _session_body(parts[2]))
+        if parts == ["api", "chats"]:
+            return self._reply(200, list(_StandInState.chats.values()))
+        if parts[:2] == ["api", "chats"] and len(parts) == 3:
+            chat = _StandInState.chats.get(parts[2])
+            if chat is None:
+                return self._reply(404, None)
+            return self._reply(200, {**chat, "entries": [], "approvals": []})
         self._reply(404, None)
 
     def do_POST(self) -> None:
         parts = self._parts()
-        length = int(self.headers.get("Content-Length") or 0)
-        payload = json.loads(self.rfile.read(length) or b"{}")
-        if (
-            len(parts) == 4
-            and parts[:2] == ["api", "sessions"]
-            and parts[3] == "grants"
-        ):
+        payload = self._json()
+        if parts == ["api", "sessions"]:
+            session_id = _StandInState.fresh("eng")
+            return self._reply(200, self._remember(session_id, name=str(payload.get("name") or session_id)))
+        if parts == ["api", "git", "op"]:
+            return self._reply(
+                200, {"commit": "0123456789abcdef0123456789abcdef01234567", "digest": "1 file", "diff_stat": ""}
+            )
+        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "grants":
             return self._reply(200, payload)
+        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "input":
+            self._remember(parts[2])
+            return self._reply(200, {"written": True})
+        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "answer":
+            return self._reply(200, self._remember(parts[2]))
+        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "hibernate":
+            return self._reply(200, self._remember(parts[2], activity="hibernated", alive=False))
+        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "wake":
+            return self._reply(200, self._remember(parts[2], activity="idle", alive=True))
+        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "keep-awake":
+            return self._reply(200, self._remember(parts[2], keep_awake=bool(payload.get("keep_awake"))))
+        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "role":
+            return self._reply(200, self._remember(parts[2], role=str(payload.get("role") or "worker")))
+        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "blocked":
+            return self._reply(200, self._remember(parts[2]))
+        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "kill":
+            return self._reply(200, self._remember(parts[2], activity="exited", alive=False, exit_code=0))
+        if parts == ["api", "chats"]:
+            chat_id = _StandInState.fresh("chat")
+            chat = _chat_body(chat_id, title=str(payload.get("title") or "parity"))
+            _StandInState.chats[chat_id] = chat
+            return self._reply(200, {"chat": chat, "entries": [], "finished": False})
+        if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "messages":
+            chat = _StandInState.chats.get(parts[2])
+            if chat is None:
+                return self._reply(404, None)
+            return self._reply(200, {"chat": chat, "entries": [], "finished": True})
+        if len(parts) == 5 and parts[:2] == ["api", "chats"] and parts[3] == "approvals":
+            return self._reply(
+                200,
+                {"id": parts[4], "tool_name": "parity", "summary": "parity", "allow": payload.get("allow")},
+            )
+        if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "model":
+            chat = _StandInState.chats.get(parts[2])
+            if chat is None:
+                return self._reply(404, None)
+            chat["model"] = payload.get("model")
+            return self._reply(200, chat)
+        if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "interrupt":
+            chat = _StandInState.chats.get(parts[2])
+            if chat is None:
+                return self._reply(404, None)
+            return self._reply(200, chat)
+        if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "archive":
+            chat = _StandInState.chats.get(parts[2])
+            if chat is None:
+                return self._reply(404, None)
+            chat["archived"] = bool(payload.get("archived", True))
+            return self._reply(200, chat)
+        if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "promote":
+            chat = _StandInState.chats.get(parts[2])
+            if chat is None:
+                return self._reply(404, None)
+            session_id = _StandInState.fresh("eng")
+            return self._reply(
+                200,
+                {"chat": chat, "session": self._remember(session_id, name="promoted")},
+            )
+        self._reply(404, None)
+
+    def do_PATCH(self) -> None:
+        parts = self._parts()
+        payload = self._json()
+        if parts[:2] == ["api", "sessions"] and len(parts) == 3:
+            return self._reply(200, self._remember(parts[2], name=str(payload.get("name") or parts[2])))
         self._reply(404, None)
 
     def do_DELETE(self) -> None:
         parts = self._parts()
-        if (
-            len(parts) == 5
-            and parts[:2] == ["api", "sessions"]
-            and parts[3] == "grants"
-        ):
+        if len(parts) == 5 and parts[:2] == ["api", "sessions"] and parts[3] == "grants":
             return self._reply(200, {"revoked": True})
+        if parts[:2] == ["api", "sessions"] and len(parts) == 3:
+            _StandInState.sessions.pop(parts[2], None)
+            return self._reply(200, {"removed": True})
         self._reply(404, None)
 
     def log_message(self, *args: Any) -> None:
@@ -660,6 +828,7 @@ class _StandInEngine:
     `"engine": true`. Every other step runs with VOGT_ENGINE_URL unset."""
 
     def __enter__(self) -> str:
+        _StandInState.reset()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _StandInHandler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         return f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -853,8 +1022,12 @@ def _flags(params: dict[str, Any]) -> list[str]:
             for entry in value:
                 argv += [
                     flag,
-                    json.dumps(entry) if isinstance(entry, dict) else str(entry),
+                    json.dumps(entry) if isinstance(entry, (dict, list)) else str(entry),
                 ]
+        elif isinstance(value, dict):
+            # A nested object (watch.create's trigger) must be JSON, not
+            # Python's str(dict), which the CLI cannot parse.
+            argv += [flag, json.dumps(value)]
         else:
             argv += [flag, str(value)]
     return argv
@@ -877,7 +1050,16 @@ def _substitute(
         value = value.replace("{root}", str(root))
         return value
 
-    return {key: one(value) for key, value in params.items()}
+    def walk(value: Any) -> Any:
+        if isinstance(value, str):
+            return one(value)
+        if isinstance(value, dict):
+            return {key: walk(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        return value
+
+    return {key: walk(value) for key, value in params.items()}
 
 
 def _run_http(
@@ -1117,6 +1299,7 @@ def _walk(
     paths: dict[str, str],
     operation: str | None = None,
     top: bool = False,
+    _walk_parent: str | None = None,
 ) -> Any:
     if isinstance(value, dict):
         volatile = set(rules["volatile"]["keys"])
@@ -1130,17 +1313,22 @@ def _walk(
         digests = rules.get("digests", {})
         path_bearing = set(digests.get("path_bearing_operations", []))
         path_bearing_kinds = set(digests.get("path_bearing_observation_kinds", []))
-        walked = {
-            key: (
-                "<version>"
-                if blank_version and key == version_key and item in accepted
-                else "<volatile>"
-                if key in volatile
-                else _walk(item, rules, paths, operation, False)
-            )
-            for key, item in value.items()
-            if key not in drop
-        }
+        walked = {}
+        for key, item in value.items():
+            if key in drop:
+                continue
+            # A volatile rule is either a bare key (blanked wherever it
+            # appears) or ``parent.key`` (blanked only under that parent), so
+            # a key that also names a real field is not hidden everywhere.
+            path_key = f"{_walk_parent}.{key}" if _walk_parent else key
+            scoped = key in volatile or path_key in volatile
+            if blank_version and key == version_key and item in accepted:
+                walked[key] = "<version>"
+            elif scoped:
+                walked[key] = "<volatile>"
+            else:
+                walked[key] = _walk(item, rules, paths, operation, False, key)
+        
         if walked.get("operation") in path_bearing and "payload_digest" in walked:
             walked["payload_digest"] = "<path-bearing>"
         if walked.get("kind") in path_bearing_kinds and "content_digest" in walked:
@@ -1155,7 +1343,10 @@ def _walk(
             )
         return walked
     if isinstance(value, list):
-        return [_walk(item, rules, paths, operation, False) for item in value]
+        return [
+            _walk(item, rules, paths, operation, False, _walk_parent)
+            for item in value
+        ]
     if isinstance(value, str):
         for needle, token in paths.items():
             value = value.replace(needle, token)

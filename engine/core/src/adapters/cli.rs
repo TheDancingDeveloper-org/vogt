@@ -987,6 +987,17 @@ fn enum_choices(property: &Value) -> Option<Vec<String>> {
 
 fn is_json_value(property: &Value) -> bool {
     let types = schema_types(property);
+    // A nested model is a `$ref` (pydantic and schemars both), with no
+    // `type`. The flag is still one JSON object, matching the Python CLI
+    // once it `json.loads` a `BaseModel` field (`watch.create --trigger`).
+    if property.get("$ref").is_some() {
+        return true;
+    }
+    if let Some(branches) = property.get("anyOf").and_then(Value::as_array) {
+        if branches.iter().any(|branch| branch.get("$ref").is_some()) {
+            return true;
+        }
+    }
     types.iter().any(|kind| kind == "object" || kind == "array")
 }
 
