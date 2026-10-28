@@ -101,7 +101,8 @@ impl GitHubClient {
     /// the token file in those cases, and a token file that is also absent
     /// means no credential.
     pub fn usable_app_key(path: &Path) -> bool {
-        let Ok(bytes) = std::fs::read(path) else {
+        let resolved = expand_user(path);
+        let Ok(bytes) = std::fs::read(&resolved) else {
             return false;
         };
         rsa_private_key_pem(&bytes)
@@ -531,6 +532,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn usable_app_key_reads_the_expanded_path() {
+        // usable_app_key goes through expand_user, the same `~/` rule as
+        // Python's expanduser. Mutating HOME would race every other test, so
+        // this writes the key where expand_user already resolves `~/x`.
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let dir = Path::new(&home).join(format!(".vogt-app-key-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        let key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+        let named = dir.join("app.pem");
+        std::fs::write(
+            &named,
+            key.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF).unwrap(),
+        )
+        .unwrap();
+        let tilde = format!("~/.vogt-app-key-test-{}/app.pem", std::process::id());
+        let ok = GitHubClient::usable_app_key(Path::new(&tilde));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ok);
+    }
+
+    #[test]
     fn from_token_file_errors_when_the_file_cannot_be_read() {
         let dir = std::env::temp_dir().join(format!("vogt-github-token-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

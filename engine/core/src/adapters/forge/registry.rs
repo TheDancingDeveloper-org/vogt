@@ -300,7 +300,7 @@ fn build(
     kind: ForgeKind,
     host: &str,
     config: &VogtConfig,
-    transport: Option<Transport>,
+    mut transport: Option<Transport>,
 ) -> Result<Option<ForgeClient>, VogtError> {
     match kind {
         ForgeKind::GitHub => {
@@ -308,7 +308,10 @@ fn build(
             // `github_client_for`: a usable App key is a credential even when
             // no PAT file exists. The token is still what the client sends
             // until installation-token minting is ported; the writability
-            // gate only asks whether a credential resolves.
+            // gate only asks whether a credential resolves. The injected
+            // transport is what that client sends through, same as the
+            // token-file path below; it is moved only when this branch
+            // returns.
             if host == GITHUB_HOST {
                 if let Some(key) = config.github_app_private_key_file.as_deref() {
                     if config
@@ -319,10 +322,10 @@ fn build(
                     {
                         let client = match GitHubClient::from_token_file(
                             token_file_for(config, host),
-                            None,
+                            transport.take(),
                         )? {
                             Some(client) => client,
-                            None => GitHubClient::new(None, transport),
+                            None => GitHubClient::new(None, transport.take()),
                         };
                         return Ok(Some(ForgeClient::GitHub(GitHubProvider::new(client))));
                     }
