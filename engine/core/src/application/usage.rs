@@ -421,7 +421,7 @@ mod tests {
     fn worded_reset_lifts_after_a_later_answer() {
         let said = "You've hit your limit · resets 3pm (Europe/London)";
         let hit = json!({"timestamp": "2026-10-20T10:00:00+00:00", "isApiErrorMessage": true, "message": {"content": [{"text": said}]}}).to_string();
-        let still = usage_board::claude_reading(&[hit.clone()], now());
+        let still = usage_board::claude_reading(std::slice::from_ref(&hit), now());
         assert_eq!(
             still.windows[0].resets_text.as_deref(),
             Some("3pm (Europe/London)")
@@ -454,8 +454,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("usage-board-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut config = VogtConfig::default();
-        config.data_dir = dir;
+        let config = VogtConfig {
+            data_dir: dir,
+            ..VogtConfig::default()
+        };
         let ctx = build_context(
             config,
             Some(crate::core::local_principal("usage-test")),
@@ -483,15 +485,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("usage-board-key-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut config = VogtConfig::default();
-        config.data_dir = dir;
-        config.usage_litellm_url = Some("http://litellm.test".to_string());
-        config.usage_litellm_keys = vec![UsageKey {
-            name: "missing".to_string(),
-            key_env: "VOGT_TEST_UNSET_USAGE_KEY_2665".to_string(),
-            daily_alert_usd: None,
-        }];
-        config.usage_daily_spend_alert_usd = Some("25".to_string());
+        let config = VogtConfig {
+            data_dir: dir,
+            usage_litellm_url: Some("http://litellm.test".to_string()),
+            usage_litellm_keys: vec![UsageKey {
+                name: "missing".to_string(),
+                key_env: "VOGT_TEST_UNSET_USAGE_KEY_2665".to_string(),
+                daily_alert_usd: None,
+            }],
+            usage_daily_spend_alert_usd: Some("25".to_string()),
+            ..VogtConfig::default()
+        };
         let ctx = build_context(
             config,
             Some(crate::core::local_principal("usage-test")),

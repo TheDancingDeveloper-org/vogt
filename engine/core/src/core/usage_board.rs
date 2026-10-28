@@ -75,12 +75,12 @@ fn parse_time(value: &Value) -> Option<Moment> {
             let parsed = chrono::DateTime::parse_from_rfc3339(&normalized)
                 .or_else(|_| {
                     let fmt = "%Y-%m-%dT%H:%M:%S%.6f";
-                    chrono::NaiveDateTime::parse_from_str(&normalized, &fmt)
+                    chrono::NaiveDateTime::parse_from_str(&normalized, fmt)
                         .map(|naive| naive.and_utc().fixed_offset())
                 })
                 .or_else(|_| {
                     let fmt = "%Y-%m-%dT%H:%M:%S";
-                    chrono::NaiveDateTime::parse_from_str(&normalized, &fmt)
+                    chrono::NaiveDateTime::parse_from_str(&normalized, fmt)
                         .map(|naive| naive.and_utc().fixed_offset())
                 })
                 .ok()?;
