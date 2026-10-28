@@ -8,13 +8,18 @@ name: rust-core
 # A golden is recorded only by `record-golden`, dispatched with
 # record_golden=true under the pinned UV_PYTHON (WI-2661). `compose`,
 # `playwright` and `coverage` run in the merge queue and nightly, not on
-# every push (WI-2677).
+# every push (WI-2677). The 30-minute live Playwright run also starts on the
+# rust-core -> main pull request (the 1.c cutover); other pull requests do
+# not run it.
 
 on:
   push:
     branches: [rust-core, wi-1076-engine-core, wi-1443-main-sync]
   pull_request:
-    branches: [rust-core, wi-1443-main-sync]
+    # main is listed so the cutover PR (head rust-core, base main) starts
+    # this workflow at all. Fast jobs still skip pull requests; Playwright
+    # is the only job whose condition matches that one PR.
+    branches: [rust-core, wi-1443-main-sync, main]
   # The live suite and coverage run here, not on every push (WI-2677).
   merge_group:
   schedule:
@@ -158,9 +163,17 @@ jobs:
 
   playwright:
     name: live Playwright against the Rust core
-    # Not required, and not on every push: the 30-minute live run belongs in
-    # the merge queue or the nightly (WI-2677).
-    if: github.event_name == 'merge_group' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Not required, and not on every push. Nightly, manual, the merge queue,
+    # and the one pull request that cuts rust-core into main (WI-2677).
+    # head_ref is the branch name, not a SHA, so this does not match any
+    # other pull request into main.
+    if: >-
+      github.event_name == 'merge_group' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.base_ref == 'main' &&
+       github.head_ref == 'rust-core')
     runs-on: [self-hosted, docker]
     timeout-minutes: 60
     steps:
