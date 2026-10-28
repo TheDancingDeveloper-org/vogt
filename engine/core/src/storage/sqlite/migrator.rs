@@ -105,7 +105,7 @@ impl From<MigrateError> for crate::errors::VogtError {
 pub fn checksum_of(sql: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(sql.trim().as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize().as_slice())
 }
 
 /// Directory holding `declared/` and `observed/`, when `VOGT_MIGRATIONS_DIR`

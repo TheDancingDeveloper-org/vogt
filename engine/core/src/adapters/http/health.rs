@@ -198,7 +198,7 @@ async fn ready(State(state): State<Arc<HealthState>>) -> (StatusCode, Json<Readi
 fn error_reference(detail: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(detail.as_bytes());
-    format!("{:x}", hasher.finalize())[..12].to_string()
+    hex::encode(hasher.finalize().as_slice())[..12].to_string()
 }
 
 fn readiness(data_dir: &std::path::Path) -> Result<Readiness, MigrateError> {

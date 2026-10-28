@@ -24,7 +24,7 @@ serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 # Derives every operation schema from the models in `application/models`.
 schemars = "1.2.3"
 toml = "0.8"
-sha2 = "0.10"
+sha2 = "0.11"
 rsa = { version = "0.9.10", default-features = false, features = ["std", "pem"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 tracing = "0.1"
@@ -59,11 +59,11 @@ ureq = { version = "2", features = ["tls"], default-features = false }
 # and is unmaintained (RUSTSEC-2025-0134).
 rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
-openssl-probe = "0.1.6"
+openssl-probe = "0.2"
 portable-pty = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-hmac = "0.12"
+hmac = "0.13"
 aes = "0.8"
 cbc = "0.1"

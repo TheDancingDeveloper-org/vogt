@@ -228,5 +228,5 @@ fn fixed_notation(digits: &str, exp: i32) -> String {
 pub fn digest_of(payload: &Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(canonical_json(payload).as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    format!("sha256:{}", hex::encode(hasher.finalize().as_slice()))
 }

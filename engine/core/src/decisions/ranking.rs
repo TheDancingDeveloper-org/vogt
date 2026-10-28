@@ -665,7 +665,7 @@ pub fn rules_digest(contract: &Contract) -> String {
     .join("|");
     let mut hasher = Sha256::new();
     hasher.update(material.as_bytes());
-    format!("{:x}", hasher.finalize())[..6].to_string()
+    hex::encode(hasher.finalize().as_slice())[..6].to_string()
 }
 
 /// A contract whose rules differ from stock while still carrying the default
