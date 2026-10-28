@@ -238,6 +238,17 @@ fn an_initiative_round_trips() {
     let listed = initiatives::initiative_list_op(&built, json!({})).unwrap();
     assert_eq!(listed["initiatives"].as_array().unwrap().len(), 1);
 
+    let with_body = initiatives::initiative_update_op(
+        &built,
+        json!({"slug": "platform", "body": "the long form", "reason": "described"}),
+    )
+    .unwrap();
+    assert_eq!(with_body["initiative"]["body"], "the long form");
+    let summary = initiatives::initiative_list_op(&built, json!({"mode": "summary"})).unwrap();
+    assert_eq!(summary["initiatives"][0]["body"], "");
+    let full = initiatives::initiative_list_op(&built, json!({"mode": "full"})).unwrap();
+    assert_eq!(full["initiatives"][0]["body"], "the long form");
+
     let updated = initiatives::initiative_update_op(
         &built,
         json!({"slug": "platform", "title": "Platform work", "reason": "renamed"}),
