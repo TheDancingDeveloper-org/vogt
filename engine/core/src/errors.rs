@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn every_code_round_trips_with_its_status() {
-        assert_eq!(error_table().len(), 45);
+        assert_eq!(error_table().len(), 46);
         let mut seen = std::collections::BTreeSet::new();
         for (code, status) in error_table() {
             assert!(seen.insert(*code), "duplicate code {code}");
