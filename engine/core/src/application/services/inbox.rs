@@ -2153,3 +2153,65 @@ fn session_shapes(session: &CodingSession, grant: &SessionGrant) -> (String, Str
 
 #[allow(dead_code)]
 const _BRANCH_KIND: &str = BRANCH_CONCLUDED_KIND;
+
+#[cfg(test)]
+mod tests {
+    use super::{inbox_archive_op, inbox_list_op, inbox_restore_op};
+    use crate::application::services::services_test::opened;
+    use crate::errors::VogtError;
+    use serde_json::json;
+
+    /// An empty inbox distinguishes "nothing here" from a failed read: the
+    /// list succeeds and names no entry.
+    #[test]
+    fn an_empty_inbox_lists_nothing() {
+        let built = opened();
+        let listed = inbox_list_op(&built, json!({})).unwrap();
+        let entries = listed
+            .get("entries")
+            .or_else(|| listed.get("inbox"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(entries.is_empty(), "{listed}");
+    }
+
+    /// Archiving an entry that is not on the board is a typed miss, not a
+    /// stored triage row.
+    #[test]
+    fn archiving_an_unknown_entry_is_refused() {
+        let built = opened();
+        let refused = inbox_archive_op(
+            &built,
+            json!({"entry_key": "no-such-entry", "reason": "tidy"}),
+        );
+        assert!(
+            matches!(refused, Err(VogtError::InboxEntryNotFound(_))),
+            "{refused:?}"
+        );
+    }
+
+    /// A missing reason is refused before any triage row is written.
+    #[test]
+    fn archiving_without_a_reason_is_refused() {
+        let built = opened();
+        let refused = inbox_archive_op(&built, json!({"entry_key": "no-such-entry"}));
+        assert!(
+            matches!(
+                refused,
+                Err(VogtError::InvalidRequest(_) | VogtError::MissingReason(_))
+            ),
+            "{refused:?}"
+        );
+        // Restoring the same missing key is the same class of refusal once a
+        // reason is given: the entry has to exist.
+        let restore = inbox_restore_op(
+            &built,
+            json!({"entry_key": "no-such-entry", "reason": "back"}),
+        );
+        assert!(
+            matches!(restore, Err(VogtError::InboxEntryNotFound(_))),
+            "{restore:?}"
+        );
+    }
+}

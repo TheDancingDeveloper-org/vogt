@@ -731,8 +731,9 @@ mod diagnostics_tests {
     use crate::adapters::engine::EngineClient;
     use crate::adapters::peer::PeerClient;
     use crate::application::context::{build_context, Built};
-    use crate::application::instance::diagnostics_op;
+    use crate::application::instance::{diagnostics_op, migrate_op, status_op};
     use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
+    use crate::errors::VogtError;
     use crate::observability::{configure_logging, recent_problems};
     use crate::storage::interface::{DeclaredStore, ObservedStore};
 
@@ -936,5 +937,72 @@ mod diagnostics_tests {
             assert_eq!(answer["peer"]["status"], expected, "{status}");
             assert!(answer["peer"]["diagnostics"].is_null());
         }
+    }
+
+    /// `instance.status` names the instance and counts an empty register as zero.
+    #[test]
+    fn status_names_the_instance_and_counts_nothing() {
+        let built = opened(None, None, None);
+        let answer = status_op(&built, json!({})).unwrap();
+        assert_eq!(answer["vogt_version"], crate::VERSION);
+        assert!(answer["instance_id"].as_str().unwrap().starts_with("ins_"));
+        assert_eq!(answer["counts"]["projects"], 0);
+        assert_eq!(answer["counts"]["work_items"], 0);
+        assert!(answer["principal"].as_str().unwrap().starts_with("local:"));
+    }
+
+    /// Migrating an instance that is already at the head is a no-op that
+    /// reports nothing pending.
+    #[test]
+    fn migrating_an_up_to_date_instance_reports_nothing_pending() {
+        let built = opened(None, None, None);
+        let answer = migrate_op(&built, json!({})).unwrap();
+        assert_eq!(answer["migrations_applied"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            answer["declared_schema_version"],
+            answer["declared_schema_expected"]
+        );
+        assert_eq!(
+            answer["observed_schema_version"],
+            answer["observed_schema_expected"]
+        );
+        let status = status_op(&built, json!({})).unwrap();
+        assert!(status["instance_id"].as_str().unwrap().starts_with("ins_"));
+    }
+
+    /// `migrate` refuses an empty data directory rather than quietly creating
+    /// an instance. `init` is the operation that does that.
+    #[test]
+    fn migrating_an_uninitialized_data_dir_is_refused() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("vogt-migrate-empty-{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        let built = build_context(
+            config,
+            Some(principal()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let err = migrate_op(&built, json!({})).unwrap_err();
+        let VogtError::InvalidRequest(message) = err else {
+            panic!("expected InvalidRequest, got {err:?}");
+        };
+        assert!(
+            message.contains("no instance in this data directory"),
+            "{message}"
+        );
     }
 }

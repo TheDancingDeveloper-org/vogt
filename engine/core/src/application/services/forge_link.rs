@@ -130,3 +130,60 @@ where
     }
     Ok(json!({"project": linked, "migrated": migrated}))
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::link_op;
+    use crate::application::services::forge_ops_test::{insert_project, with_token_on};
+    use crate::application::services::services_test::opened;
+    use crate::errors::VogtError;
+
+    #[test]
+    fn linking_a_project_with_a_resolvable_credential_marks_it_linked() {
+        let built = with_token_on(&crate::application::forge_standin::StandInForge::one_of_each());
+        insert_project(
+            &built,
+            "widget",
+            Some("https://github.com/acme/widget"),
+            "/tmp",
+            false,
+        );
+        let linked = link_op(
+            &built,
+            json!({"project": "widget", "reason": "make it upstream-truth"}),
+        )
+        .unwrap();
+        assert_eq!(linked["project"]["link_state"], "linked", "{linked}");
+        assert_eq!(linked["migrated"], json!([]));
+    }
+
+    #[test]
+    fn linking_an_unknown_project_is_a_miss() {
+        let built = opened();
+        let refused = link_op(&built, json!({"project": "nope", "reason": "link it"}));
+        assert!(
+            matches!(refused, Err(VogtError::NotFound(_))),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn linking_without_a_credential_is_refused_before_anything_changes() {
+        let built = opened();
+        insert_project(
+            &built,
+            "widget",
+            Some("https://github.com/acme/widget"),
+            "/tmp",
+            false,
+        );
+        match link_op(&built, json!({"project": "widget", "reason": "link it"})) {
+            Err(VogtError::LinkRefused(message)) => {
+                assert!(message.contains("no usable credential"), "{message}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}

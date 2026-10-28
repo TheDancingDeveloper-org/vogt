@@ -820,3 +820,68 @@ fn initiative_json(initiative: &Initiative) -> Value {
         "updated_at": initiative.updated_at.to_json(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        initiative_create_op, initiative_list_op, initiative_publish_op, initiative_update_op,
+    };
+    use crate::application::services::services_test::opened;
+    use crate::errors::VogtError;
+    use serde_json::json;
+
+    /// Creating an initiative returns it, and listing it back finds the same slug.
+    #[test]
+    fn creating_an_initiative_lists_it_back() {
+        let built = opened();
+        let created = initiative_create_op(
+            &built,
+            json!({"title": "Platform", "reason": "starting the theme"}),
+        )
+        .unwrap();
+        assert_eq!(created["initiative"]["slug"], "platform");
+        let listed = initiative_list_op(&built, json!({})).unwrap();
+        assert_eq!(listed["initiatives"].as_array().unwrap().len(), 1);
+    }
+
+    /// An update that names nothing to change is refused, and so is a slug
+    /// that was never created.
+    #[test]
+    fn an_empty_update_and_an_unknown_slug_are_refused() {
+        let built = opened();
+        initiative_create_op(
+            &built,
+            json!({"title": "Platform", "reason": "starting the theme"}),
+        )
+        .unwrap();
+        let empty = initiative_update_op(&built, json!({"slug": "platform", "reason": "nothing"}));
+        assert!(
+            matches!(empty, Err(VogtError::InvalidRequest(_))),
+            "{empty:?}"
+        );
+        let missing = initiative_update_op(
+            &built,
+            json!({"slug": "no-such", "title": "x", "reason": "missing"}),
+        );
+        assert!(
+            matches!(missing, Err(VogtError::NotFound(_))),
+            "{missing:?}"
+        );
+    }
+
+    /// Publishing an initiative that spans no linked project writes nothing
+    /// upstream and says so with an empty tracking-issue list.
+    #[test]
+    fn publishing_with_nothing_linked_writes_nothing() {
+        let built = opened();
+        initiative_create_op(
+            &built,
+            json!({"title": "Platform", "reason": "starting the theme"}),
+        )
+        .unwrap();
+        let published =
+            initiative_publish_op(&built, json!({"slug": "platform", "reason": "ship it"}))
+                .unwrap();
+        assert_eq!(published["tracking_issues"].as_array().unwrap().len(), 0);
+    }
+}

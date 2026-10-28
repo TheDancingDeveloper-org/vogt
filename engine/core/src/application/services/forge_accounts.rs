@@ -213,3 +213,96 @@ fn present_string(params: &Value, field: &str) -> Result<String, VogtError> {
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{account_link_op, account_status_op, account_unlink_op};
+    use crate::application::services::services_test::{moment, opened, principal, unique};
+    use crate::errors::VogtError;
+    use crate::storage::interface::{DeclaredStore, ObservedStore};
+    use serde_json::json;
+
+    /// Linking without a key file is a typed not-configured error and stores nothing.
+    #[test]
+    fn linking_without_a_key_file_is_not_configured() {
+        let built = opened();
+        let refused = account_link_op(
+            &built,
+            json!({"token": "ghp_not_stored", "reason": "link me"}),
+        );
+        assert!(
+            matches!(refused, Err(VogtError::ForgeAccountsNotConfigured(_))),
+            "{refused:?}"
+        );
+        let status = account_status_op(&built, json!({})).unwrap();
+        assert!(!status.to_string().contains("ghp_not_stored"));
+        assert_eq!(status["accounts"].as_array().unwrap().len(), 0);
+    }
+
+    /// An unconfigured host is refused before the key is read and before the token is sent.
+    #[test]
+    fn an_unconfigured_host_is_rejected() {
+        let built = keyed();
+        let refused = account_link_op(
+            &built,
+            json!({
+                "host": "no.such.host",
+                "token": "ghp_not_stored",
+                "reason": "link me",
+            }),
+        );
+        match &refused {
+            Err(VogtError::InvalidRequest(message)) => {
+                assert!(message.contains("no.such.host"), "{message}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Unlinking a host the actor never linked is recorded as not having been linked,
+    /// and neither status nor the unlink answer carries a token.
+    #[test]
+    fn unlinking_nothing_says_it_was_not_linked() {
+        let built = opened();
+        let status = account_status_op(&built, json!({})).unwrap();
+        assert!(!status.to_string().contains("ghp_"));
+        let gone =
+            account_unlink_op(&built, json!({"host": "github.com", "reason": "gone"})).unwrap();
+        assert_eq!(gone["linked"], false, "{gone}");
+        assert!(gone["login"].is_null());
+        assert!(!gone.to_string().contains("ghp_"));
+    }
+
+    fn keyed() -> crate::application::context::Built {
+        use crate::application::context::{build_context, Built};
+        use crate::core::{SequentialIds, StepClock};
+        let dir =
+            std::env::temp_dir().join(format!("vogt-acct-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_file = dir.join("account.key");
+        std::fs::write(&key_file, "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=").unwrap();
+        let built = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir,
+                forge_account_key_file: Some(key_file),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(principal()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            panic!("expected a step clock");
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared.bootstrap(&principal()).unwrap();
+        ctx.observed.migrate().unwrap();
+        built
+    }
+}

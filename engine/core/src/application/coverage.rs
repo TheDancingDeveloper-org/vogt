@@ -134,3 +134,85 @@ fn clock_now<C: Clock>(clock: &std::sync::Arc<std::sync::Mutex<C>>) -> crate::co
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .now()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::coverage_op;
+    use crate::application::services::services_test::{moment, opened, principal, unique};
+    use crate::core::SweepOutcome;
+    use crate::storage::interface::ObservedStore;
+    use serde_json::json;
+
+    /// A fresh instance has run no collector. Every one is `never_run`, and
+    /// nothing is reported as swept.
+    #[test]
+    fn coverage_on_a_fresh_instance_says_nothing_has_run() {
+        let built = opened();
+        let answer = coverage_op(&built, json!({})).unwrap();
+        let collectors = answer["collectors"].as_array().unwrap();
+        assert!(!collectors.is_empty());
+        assert!(collectors.iter().all(|row| row["status"] == "never_run"));
+        assert_eq!(answer["swept_project_ids"].as_array().unwrap().len(), 0);
+    }
+
+    /// A finished sweep is counted, and a collector that has not run stays
+    /// `never_run` beside it.
+    #[test]
+    fn coverage_counts_a_collector_that_has_finished() {
+        let built = opened();
+        let crate::application::context::Built::StepSequential(ctx) = &built else {
+            panic!("expected a step clock");
+        };
+        let sweep = ctx
+            .observed
+            .begin_sweep("git-local", &[], moment())
+            .unwrap();
+        ctx.observed
+            .finish_sweep(&sweep.id, SweepOutcome::Ok, &[], moment(), None)
+            .unwrap();
+        let answer = coverage_op(&built, json!({})).unwrap();
+        let git = answer["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["collector"] == "git-local")
+            .expect("git-local is a core collector");
+        assert_eq!(git["status"], "ok");
+        let contract = answer["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["collector"] == "contract-checker")
+            .unwrap();
+        assert_eq!(contract["status"], "never_run");
+    }
+
+    /// Before the evidence tables exist the answer is empty: there is nothing
+    /// to have looked at, which is not a list of collectors that never ran.
+    #[test]
+    fn coverage_before_the_evidence_tables_exist_is_empty() {
+        use crate::application::context::build_context;
+        use crate::core::{SequentialIds, StepClock};
+        let dir =
+            std::env::temp_dir().join(format!("vogt-cov-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let built = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir,
+                ..crate::config::VogtConfig::default()
+            },
+            Some(principal()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let answer = coverage_op(&built, json!({})).unwrap();
+        assert_eq!(answer["collectors"].as_array().unwrap().len(), 0);
+        assert_eq!(answer["swept_project_ids"].as_array().unwrap().len(), 0);
+    }
+}

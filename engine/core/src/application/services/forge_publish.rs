@@ -205,3 +205,54 @@ where
         "migrated": migrated,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::publish_op;
+    use crate::application::services::forge_ops_test::insert_project;
+    use crate::application::services::services_test::opened;
+    use crate::errors::VogtError;
+
+    #[test]
+    fn publishing_an_already_linked_project_is_refused() {
+        let built = opened();
+        insert_project(
+            &built,
+            "demo",
+            Some("https://github.com/acme/demo"),
+            "/tmp",
+            true,
+        );
+        match publish_op(&built, json!({"project": "demo", "reason": "publish it"})) {
+            Err(VogtError::PublishRefused(message)) => {
+                assert!(message.contains("already linked"), "{message}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publishing_an_unknown_project_is_a_miss() {
+        let built = opened();
+        let refused = publish_op(&built, json!({"project": "nope", "reason": "publish it"}));
+        assert!(
+            matches!(refused, Err(VogtError::NotFound(_))),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_publish_call_without_a_reason_is_rejected() {
+        let built = opened();
+        let refused = publish_op(&built, json!({"project": "demo"}));
+        assert!(
+            matches!(
+                refused,
+                Err(VogtError::InvalidRequest(_) | VogtError::MissingReason(_))
+            ),
+            "{refused:?}"
+        );
+    }
+}

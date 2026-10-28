@@ -258,3 +258,78 @@ fn present_string(params: &Value, field: &str) -> Result<String, VogtError> {
         _ => Err(VogtError::InvalidRequest(format!("{field} is required"))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::onboard_op;
+    use crate::application::services::forge_ops_test::{insert_project, with_token_on};
+    use crate::application::services::services_test::opened;
+    use crate::errors::VogtError;
+    use serde_json::json;
+
+    /// Onboarding a readable project returns a tally and writes nothing upstream.
+    #[test]
+    fn onboard_reads_a_repository_and_reports_what_it_found() {
+        let standin = crate::application::forge_standin::StandInForge::one_of_each();
+        let built = with_token_on(&standin);
+        insert_project(
+            &built,
+            "widget",
+            Some("https://github.com/acme/widget"),
+            "/tmp",
+            false,
+        );
+        let done = onboard_op(
+            &built,
+            json!({"project": "widget", "reason": "backfill the history"}),
+        )
+        .unwrap();
+        assert_eq!(done["supported"], true);
+        assert_eq!(done["mutations"], 0);
+        assert_eq!(done["issues"], 1, "{done}");
+        let requests = standin.requests();
+        assert!(
+            requests.iter().all(|request| request.starts_with("GET ")),
+            "onboarding only reads: {requests:?}"
+        );
+    }
+
+    /// A host this instance cannot read is refused before any adapter is built.
+    #[test]
+    fn onboard_refuses_a_host_it_cannot_read() {
+        let standin = crate::application::forge_standin::StandInForge::one_of_each();
+        let built = with_token_on(&standin);
+        insert_project(
+            &built,
+            "stray",
+            Some("https://no.such.host/acme/widget"),
+            "/tmp",
+            false,
+        );
+        let refused = onboard_op(
+            &built,
+            json!({"project": "stray", "reason": "not a forge we read"}),
+        )
+        .unwrap();
+        assert_eq!(refused["supported"], false);
+        assert_eq!(refused["mutations"], 0);
+        assert!(
+            standin.requests().is_empty(),
+            "an unsupported host is never read"
+        );
+    }
+
+    /// `max_pages` is part of the contract even though the walk is not bounded by it.
+    #[test]
+    fn onboard_refuses_a_walk_depth_outside_the_contract() {
+        let built = opened();
+        let zero = onboard_op(
+            &built,
+            json!({"project": "widget", "reason": "no pages", "max_pages": 0}),
+        );
+        assert!(
+            matches!(zero, Err(VogtError::InvalidRequest(_))),
+            "{zero:?}"
+        );
+    }
+}
