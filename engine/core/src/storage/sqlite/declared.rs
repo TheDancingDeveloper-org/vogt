@@ -641,10 +641,7 @@ impl ReadView for SqliteReadView {
             refs.as_slice(),
             row_work_base,
         )?;
-        bases
-            .into_iter()
-            .map(|base| finish_work_item(&self.conn, base))
-            .collect()
+        hydrate_work_items(&self.conn, bases)
     }
     fn count_work_items(&self, filter: &WorkFilter) -> Result<i64, VogtError> {
         let (where_sql, params) = work_where(filter);
@@ -747,9 +744,13 @@ impl ReadView for SqliteReadView {
             refs.as_slice(),
             |row| Ok((row.get::<_, String>("board_lane")?, row_work_base(row)?)),
         )?;
-        for (lane_key, base) in rows {
-            let state = base.item.state.clone();
-            let item = finish_work_item(&self.conn, base)?;
+        let lanes: Vec<(String, String)> = rows
+            .iter()
+            .map(|(lane_key, base)| (lane_key.clone(), base.item.state.clone()))
+            .collect();
+        let items =
+            hydrate_work_items(&self.conn, rows.into_iter().map(|(_, base)| base).collect())?;
+        for ((lane_key, state), item) in lanes.into_iter().zip(items) {
             result.entry((lane_key, state)).or_default().push(item);
         }
         Ok(result)
@@ -3579,10 +3580,59 @@ fn row_work_base(row: &Row<'_>) -> rusqlite::Result<WorkBase> {
 }
 
 fn finish_work_item(conn: &Connection, base: WorkBase) -> Result<WorkItem, VogtError> {
-    let mut item = base.item;
-    item.labels = many(conn, "SELECT l.name FROM labels l JOIN work_item_labels wl ON wl.label_id = l.id WHERE wl.work_item_id = ? ORDER BY l.name", params![item.id], |row| row.get(0))?;
-    item.relations = many(conn, "SELECT r.kind, o.id AS related_id, o.ref AS related_ref, o.title AS related_title, o.state AS related_state FROM work_relations r JOIN work_items o ON o.id = r.related_id WHERE r.work_item_id = ? ORDER BY r.kind, o.ref", params![item.id], row_relation)?;
-    Ok(item)
+    Ok(hydrate_work_items(conn, vec![base])?
+        .pop()
+        .expect("one item"))
+}
+
+/// Attach labels and relations in two queries, not two per item. Ports
+/// `SqliteDeclaredStore._hydrate`. Order of `bases` is kept; labels stay
+/// ordered by name and relations by `(kind, ref)`, as the per-item queries did.
+fn hydrate_work_items(conn: &Connection, bases: Vec<WorkBase>) -> Result<Vec<WorkItem>, VogtError> {
+    if bases.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<String> = bases.iter().map(|base| base.item.id.clone()).collect();
+    let placeholders = vec!["?"; ids.len()].join(", ");
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let label_rows = many(
+        conn,
+        &format!(
+            "SELECT wl.work_item_id, l.name FROM work_item_labels wl JOIN labels l ON l.id = wl.label_id WHERE wl.work_item_id IN ({placeholders}) ORDER BY l.name"
+        ),
+        params.as_slice(),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    let mut labels: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (work_id, name) in label_rows {
+        labels.entry(work_id).or_default().push(name);
+    }
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let relation_rows = many(
+        conn,
+        &format!(
+            "SELECT r.work_item_id, r.kind, o.id AS related_id, o.ref AS related_ref, o.title AS related_title, o.state AS related_state FROM work_relations r JOIN work_items o ON o.id = r.related_id WHERE r.work_item_id IN ({placeholders}) ORDER BY r.kind, o.ref"
+        ),
+        params.as_slice(),
+        |row| Ok((row.get::<_, String>(0)?, row_relation(row)?)),
+    )?;
+    let mut relations: std::collections::BTreeMap<String, Vec<crate::core::Relation>> =
+        std::collections::BTreeMap::new();
+    for (work_id, relation) in relation_rows {
+        relations.entry(work_id).or_default().push(relation);
+    }
+    Ok(bases
+        .into_iter()
+        .map(|base| {
+            let mut item = base.item;
+            item.labels = labels.remove(&item.id).unwrap_or_default();
+            item.relations = relations.remove(&item.id).unwrap_or_default();
+            item
+        })
+        .collect())
 }
 
 fn row_relation(row: &Row<'_>) -> rusqlite::Result<crate::core::Relation> {

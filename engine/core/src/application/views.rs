@@ -429,6 +429,13 @@ fn gather<C: Clock, I: IdFactory>(
         let adopted = view.work_links_for_subjects(&keys)?;
         let overlays = view.work_overlays(&keys)?;
         let confirmed = ctx.observed.last_confirmed(&keys)?;
+        // Projects are loaded once, as Python's `views.py` does (`projects = {p.id: p ...}`).
+        // `project_by_id` per observed row was a full table lookup for every candidate.
+        let projects: std::collections::HashMap<String, crate::core::Project> = view
+            .list_projects(10_000, 0)?
+            .into_iter()
+            .map(|project| (project.id.clone(), project))
+            .collect();
         let filter_set = SuppressionFilter::build(&view.list_suppressions(false, 1000)?);
         // Every observed subject is present before any PR is dropped, so a PR
         // collapses under the issue it implements even when that issue is seen
@@ -467,9 +474,9 @@ fn gather<C: Clock, I: IdFactory>(
             let mut priority = crate::decisions::priority_of(observation).to_string();
             if observation.kind == "forge.issue" {
                 if let Some(project_id) = observation.project_id.as_deref() {
-                    if view
-                        .project_by_id(project_id)?
-                        .is_some_and(|project| crate::application::upstream::is_linked(&project))
+                    if projects
+                        .get(project_id)
+                        .is_some_and(crate::application::upstream::is_linked)
                     {
                         let workflow =
                             view.workflow_for(crate::decisions::work_kind_of(observation))?;
@@ -507,8 +514,8 @@ fn gather<C: Clock, I: IdFactory>(
             let project_slug = observation
                 .project_id
                 .as_ref()
-                .and_then(|id| view.project_by_id(id).ok().flatten())
-                .map(|project| project.slug);
+                .and_then(|id| projects.get(id))
+                .map(|project| project.slug.clone());
             observed_rows.push(ObservedScore {
                 observation,
                 kind,
