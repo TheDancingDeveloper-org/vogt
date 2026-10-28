@@ -8,6 +8,10 @@
   403
  ],
  [
+  "charter_version_conflict",
+  409
+ ],
+ [
   "collector_failed",
   500
  ],

@@ -2514,6 +2514,41 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         }
         Ok(())
     }
+    fn insert_charter(&mut self, charter: &Charter) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO charters (scope_kind, scope_id, version, body, author_actor_id, created_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                vocab_text(charter.scope_kind), charter.scope_id, charter.version, charter.body,
+                charter.author_actor_id, to_iso(charter.created_at), charter.reason,
+            ],
+        ).map(|_| ()).map_err(sql_err)
+    }
+    fn insert_watch(&mut self, watch: &Watch) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO watches (id, owner_actor_id, target_session, kind, trigger_json, note, state, created_at, expires_at, fired_at, outcome_json, attempts, last_error, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                watch.id, watch.owner_actor_id, watch.target_session, watch.kind,
+                crate::decisions::python_json_dumps(&watch.trigger, false), watch.note,
+                vocab_text(watch.state), to_iso(watch.created_at), to_iso(watch.expires_at),
+                watch.fired_at.map(to_iso),
+                watch.outcome.as_ref().map(|value| crate::decisions::python_json_dumps(value, false)),
+                watch.attempts, watch.last_error, watch.reason,
+            ],
+        ).map(|_| ()).map_err(sql_err)
+    }
+    fn update_watch(&mut self, watch: &Watch) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "UPDATE watches SET owner_actor_id = ?, target_session = ?, kind = ?, trigger_json = ?, note = ?, state = ?, created_at = ?, expires_at = ?, fired_at = ?, outcome_json = ?, attempts = ?, last_error = ?, reason = ? WHERE id = ?",
+            params![
+                watch.owner_actor_id, watch.target_session, watch.kind,
+                crate::decisions::python_json_dumps(&watch.trigger, false), watch.note,
+                vocab_text(watch.state), to_iso(watch.created_at), to_iso(watch.expires_at),
+                watch.fired_at.map(to_iso),
+                watch.outcome.as_ref().map(|value| crate::decisions::python_json_dumps(value, false)),
+                watch.attempts, watch.last_error, watch.reason, watch.id,
+            ],
+        ).map(|_| ()).map_err(sql_err)
+    }
     fn mark_drift_superseded(
         &mut self,
         proposal_id: &str,

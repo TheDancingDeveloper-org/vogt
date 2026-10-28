@@ -1,17 +1,17 @@
-//! Charters: standing instructions per scope (WI-2038). Ports the read half of
+//! Charters: standing instructions per scope (WI-2038). Ports
 //! `application/services/charters.py`.
 //!
 //! A charter is a short Markdown text attached to the workspace, a project or
 //! an initiative. Each set appends the next version; the current charter is
-//! the highest version and an empty body clears it. Writes stay unported:
-//! only `charter.get` is served here.
+//! the highest version and an empty body clears it. The workspace charter is
+//! a person's: an agent principal cannot rewrite it.
 
 use serde_json::{json, Value};
 
 use crate::application::context::{AppContext, Built};
 use crate::core::{Clock, IdFactory};
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ReadView};
+use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
 
 pub fn charter_get_op(built: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(built, |ctx| get(ctx, &params))
@@ -133,4 +133,90 @@ fn text_opt(params: &Value, name: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+use std::sync::Arc;
+
+use crate::application::context::write_of;
+use crate::application::services::now_of;
+use crate::application::writes::{audited_write, validate_reason, WriteOutcome};
+use crate::core::{ActorKind, Charter, CharterScopeKind};
+
+const CHARTER_SET_EVENT: &str = "charter.set";
+
+pub fn charter_set_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(built, |ctx| set(ctx, &params))
+}
+
+fn set<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: &Value,
+) -> Result<Value, VogtError> {
+    let reason = validate_reason(text(params, "reason").as_str())?;
+    let body_text = text(params, "body");
+    let scope = text(params, "scope");
+    let reference = text_opt(params, "ref");
+    let expected = params.get("expected_version").and_then(Value::as_i64);
+    if scope == "workspace" && ctx.principal.kind == ActorKind::Agent {
+        return Err(VogtError::PersonRequired(format!(
+            "the workspace charter reaches every session on every project, so only a person sets it, not an agent ({})",
+            ctx.principal.identity_ref
+        )));
+    }
+    let mut write = write_of(ctx);
+    let clock = Arc::clone(write.clock());
+    audited_write(&mut write, "charter.set", &reason, |txn, actor| {
+        let (scope_id, shown_ref) = resolve(&*txn, &scope, reference.as_deref())?;
+        let existing = txn.charter(&scope, &scope_id)?;
+        let current = existing.as_ref().map(|row| row.version).unwrap_or(0);
+        if let Some(expected) = expected {
+            if expected != current {
+                return Err(VogtError::CharterVersionConflict(format!(
+                    "the {scope} charter is at version {current}, not {expected}; re-read it and apply the change on top of the current text"
+                )));
+            }
+        }
+        let charter = Charter {
+            scope_kind: match scope.as_str() {
+                "workspace" => CharterScopeKind::Workspace,
+                "project" => CharterScopeKind::Project,
+                _ => CharterScopeKind::Initiative,
+            },
+            scope_id: scope_id.clone(),
+            version: current + 1,
+            body: body_text.clone(),
+            author_actor_id: actor.id.clone(),
+            created_at: now_of(&clock),
+            reason: reason.clone(),
+        };
+        let payload = charter_payload(&charter);
+        txn.insert_charter(&charter)?;
+        let summary = json!({
+            "scope": scope,
+            "ref": shown_ref,
+            "version": charter.version,
+            "cleared": charter.body.is_empty(),
+        });
+        Ok(WriteOutcome::new(
+            json!({"charter": view_of(&*txn, &scope, shown_ref.as_deref(), &charter)?}),
+            "charter",
+            &format!("{scope}:{scope_id}"),
+            payload,
+            CHARTER_SET_EVENT,
+            summary,
+        ))
+    })
+}
+
+/// `Charter.model_dump(mode="json")`, declaration order, moments with `Z`.
+fn charter_payload(charter: &Charter) -> Value {
+    json!({
+        "scope_kind": charter.scope_kind.to_string(),
+        "scope_id": charter.scope_id,
+        "version": charter.version,
+        "body": charter.body,
+        "author_actor_id": charter.author_actor_id,
+        "created_at": charter.created_at.to_json(),
+        "reason": charter.reason,
+    })
 }
