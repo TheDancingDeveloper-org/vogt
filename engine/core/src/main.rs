@@ -790,6 +790,10 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
             version: VERSION.to_string(),
             auth_enabled: !no_auth,
             writes_enabled,
+            connection: Some(adapters::http::health::ConnectionSettings {
+                fronted: config.fronted,
+                public_url: config.public_url.clone(),
+            }),
         },
     ));
     let router = health.merge(core_router(&built, &data_dir, no_auth, writes_enabled));

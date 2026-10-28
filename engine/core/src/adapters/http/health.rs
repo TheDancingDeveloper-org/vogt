@@ -27,6 +27,20 @@ pub struct HealthState {
     pub auth_enabled: bool,
     /// Whether writes are accepted. Reported by `/connection-info`.
     pub writes_enabled: bool,
+    /// Connection-info settings already loaded. `None` means read them from
+    /// the process config (`VOGT_CONFIG_FILE` and the environment), which is
+    /// what `serve` does. Tests pass the settings directly so they never
+    /// write that variable.
+    pub connection: Option<ConnectionSettings>,
+}
+
+/// The slice of configuration `/connection-info` reads. Held on the state so a
+/// test can name `fronted` and `public_url` without mutating the process
+/// environment, which other tests also read.
+#[derive(Clone, Default)]
+pub struct ConnectionSettings {
+    pub fronted: bool,
+    pub public_url: Option<String>,
 }
 
 pub fn router(state: HealthState) -> Router {
@@ -99,19 +113,29 @@ fn clean_path(value: Option<&str>) -> Option<String> {
     })
 }
 
+/// Settings from the process config. A missing or invalid file is the same as
+/// unfronted: connection-info still answers.
+fn connection_from_process() -> Option<ConnectionSettings> {
+    let config = crate::config::load_config(&serde_json::Map::new()).ok()?;
+    Some(ConnectionSettings {
+        fronted: config.fronted,
+        public_url: config.public_url.clone(),
+    })
+}
+
 async fn connection_info(
     State(state): State<Arc<HealthState>>,
     headers: axum::http::HeaderMap,
 ) -> Json<ConnectionInfo> {
-    let config = crate::config::load_config(&serde_json::Map::new()).ok();
-    let fronted = config.as_ref().is_some_and(|config| config.fronted);
+    let loaded = state.connection.clone().or_else(connection_from_process);
+    let fronted = loaded.as_ref().is_some_and(|config| config.fronted);
     let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
     // Unfronted, the headers are ignored entirely: anyone who can reach the
     // core must not be able to tell it that it lives somewhere else.
     let url = fronted
         .then(|| clean_url(header("x-vogt-public-url")))
         .flatten()
-        .or_else(|| clean_url(config.as_ref().and_then(|c| c.public_url.as_deref())));
+        .or_else(|| clean_url(loaded.as_ref().and_then(|c| c.public_url.as_deref())));
     let api_path = fronted
         .then(|| clean_path(header("x-vogt-api-path")))
         .flatten()
@@ -236,13 +260,8 @@ fn instance_id(data_dir: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV: Mutex<()> = Mutex::new(());
-
     #[test]
     fn a_ready_probe_carries_detail_null_and_the_instance_id() {
-        let _guard = ENV.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("vogt-health-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // The ids are passed in, not set through VOGT_TEST_IDS: an env write
@@ -264,12 +283,12 @@ mod tests {
 
     #[test]
     fn version_and_connection_info_match_python() {
-        let _guard = ENV.lock().unwrap();
         let state = HealthState {
             data_dir: PathBuf::from("/unused"),
             version: "0.7.7".to_string(),
             auth_enabled: false,
             writes_enabled: true,
+            connection: None,
         };
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -330,23 +349,15 @@ mod tests {
 
     #[test]
     fn a_fronted_instance_honours_the_door_headers() {
-        let _guard = ENV.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!("vogt-fronted-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("vogt.toml");
-        std::fs::write(
-            &file,
-            "fronted = true\npublic_url = \"https://config.example\"\n",
-        )
-        .unwrap();
-        // SAFETY: the test runs single-threaded and restores the variable.
-        unsafe { std::env::set_var("VOGT_CONFIG_FILE", &file) };
-
         let state = HealthState {
             data_dir: PathBuf::from("/unused"),
             version: "0.7.7".to_string(),
             auth_enabled: true,
             writes_enabled: true,
+            connection: Some(ConnectionSettings {
+                fronted: true,
+                public_url: Some("https://config.example".to_string()),
+            }),
         };
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -376,16 +387,12 @@ mod tests {
         assert_eq!(info["api_path"], "/api/vogt");
         assert_eq!(info["mcp_path"], "/mcp");
         assert_eq!(info["authentication"], "bearer token");
-
-        unsafe { std::env::remove_var("VOGT_CONFIG_FILE") };
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A red probe says what is wrong. On an empty data directory the readiness
     /// body names the declared schema as behind and points at the migrate step.
     #[test]
     fn a_probe_on_an_empty_store_says_why_it_is_not_ready() {
-        let _guard = ENV.lock().unwrap();
         let dir =
             std::env::temp_dir().join(format!("vogt-health-empty-{}", crate::core::fresh_id("t")));
         std::fs::create_dir_all(&dir).unwrap();
