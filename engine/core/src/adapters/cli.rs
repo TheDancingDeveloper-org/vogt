@@ -12,7 +12,6 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
 
 use serde_json::{Map, Value};
 
@@ -1682,13 +1681,6 @@ pub fn data_dir_of(invocation_argv: &[String]) -> Option<String> {
         break;
     }
     None
-}
-
-/// Refuse a path that escapes the process, used by tests that point
-/// `--password-file` at a fixture. Not a sandbox: the operator owns the box.
-#[allow(dead_code)]
-pub fn secret_path_is_file(path: &str) -> bool {
-    Path::new(path).is_file()
 }
 
 #[cfg(test)]

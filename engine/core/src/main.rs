@@ -11,18 +11,16 @@ mod application;
 mod auth;
 mod branches;
 mod collectors;
-#[allow(dead_code)]
 mod config;
 mod core;
 mod decisions;
 mod delivery;
 mod errors;
 mod git_story;
+mod glob;
 mod merge;
 mod observability;
-#[allow(dead_code)] // Consumed by the HTTP, CLI and MCP adapters (P2.3–P2.5).
 mod registry;
-#[allow(dead_code)]
 mod scripts;
 mod storage;
 

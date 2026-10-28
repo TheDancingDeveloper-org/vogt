@@ -4,7 +4,6 @@
 //! reference. Nothing here reads git or the store.
 
 #![allow(dead_code)]
-
 use std::sync::LazyLock;
 
 pub const DEFAULT_BRANCH_PATTERNS: [&str; 2] =

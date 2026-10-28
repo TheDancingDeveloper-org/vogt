@@ -6,7 +6,6 @@
 //! scrypt, in the same `scrypt$n$r$p$salt$hash` form.
 
 #![allow(dead_code)]
-
 use subtle::ConstantTimeEq;
 
 pub const ALL_SCOPES: [&str; 5] = ["read", "work.write", "project.write", "admin", "writeback"];

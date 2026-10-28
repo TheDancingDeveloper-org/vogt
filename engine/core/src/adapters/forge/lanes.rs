@@ -21,7 +21,6 @@ use super::kinds::{COLLECTOR_DEPLOY_LANES, KIND_DEPLOY_LANE};
 use super::sync::{finding, ForgeDirectory};
 use crate::config::{DeployLane, VogtConfig};
 use crate::core::Project;
-use crate::errors::VogtError;
 
 /// How many unpromoted commits a lane observation carries. The count is always
 /// exact (`ahead_by`); the list is for reading.
@@ -397,19 +396,9 @@ fn opt(value: Option<String>) -> Value {
     value.map_or(Value::Null, Value::String)
 }
 
-/// Kept so a caller can surface a provider error without this module reaching
-/// for transport detail.
-#[allow(dead_code)]
-fn provider_error(error: &VogtError) -> String {
-    error.message().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Moment;
-    use crate::errors::VogtError;
-
     struct MapVersions(Vec<(String, u16, Vec<u8>)>);
 
     impl VersionFetch for MapVersions {
@@ -504,10 +493,5 @@ mod tests {
         fn unsupported_reason(&self, _: Option<&str>) -> String {
             "no forge configured".into()
         }
-    }
-
-    #[allow(dead_code)]
-    fn _uses(error: VogtError, moment: Moment) -> (String, Moment) {
-        (provider_error(&error), moment)
     }
 }

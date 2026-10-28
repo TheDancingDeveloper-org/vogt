@@ -7,7 +7,6 @@
 //! while every other `InvalidRequest` is 400.
 
 #![allow(dead_code)]
-
 use std::fmt;
 
 /// One deliberate failure. The string is the message, `str(exc)` in Python.

@@ -4,7 +4,6 @@
 //! external. Unknown is reported as unknown, never guessed.
 
 #![allow(dead_code)]
-
 pub const DEFAULT_BOT_LOGINS: [&str; 4] =
     ["dependabot", "renovate", "renovate-bot", "github-actions"];
 
