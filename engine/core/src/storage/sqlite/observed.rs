@@ -4,9 +4,9 @@
 //! store, every method opens and closes its own connection, and a write
 //! begins with `BEGIN IMMEDIATE`.
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
@@ -40,7 +40,7 @@ pub struct SqliteObservedStore<C, I> {
     clock: Arc<std::sync::Mutex<C>>,
     ids: Arc<std::sync::Mutex<I>>,
     synchronous: String,
-    has_evidence_cached: Cell<bool>,
+    has_evidence_cached: AtomicBool,
 }
 
 impl<C, I> Clone for SqliteObservedStore<C, I> {
@@ -54,7 +54,7 @@ impl<C, I> Clone for SqliteObservedStore<C, I> {
             clock: Arc::clone(&self.clock),
             ids: Arc::clone(&self.ids),
             synchronous: self.synchronous.clone(),
-            has_evidence_cached: Cell::new(false),
+            has_evidence_cached: AtomicBool::new(false),
         }
     }
 }
@@ -86,7 +86,7 @@ where
             clock,
             ids,
             synchronous: synchronous.to_string(),
-            has_evidence_cached: Cell::new(false),
+            has_evidence_cached: AtomicBool::new(false),
         }
     }
 
@@ -227,13 +227,13 @@ where
         if !self.path.exists() {
             return Ok(false);
         }
-        if self.has_evidence_cached.get() {
+        if self.has_evidence_cached.load(Ordering::Relaxed) {
             return Ok(true);
         }
         let conn = self.open(false)?;
         let exists = table_exists(&conn, "observations").map_err(VogtError::from)?;
         if exists {
-            self.has_evidence_cached.set(true);
+            self.has_evidence_cached.store(true, Ordering::Relaxed);
         }
         Ok(exists)
     }

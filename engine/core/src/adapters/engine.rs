@@ -26,7 +26,8 @@ pub const HIBERNATE_TIMEOUT_MARGIN: Duration = Duration::from_secs(10);
 /// How the client actually talks, so tests never need an engine. The body and
 /// method are part of the call because a test of `create_session` has to assert
 /// the spec that was sent.
-pub type Transport = Arc<dyn Fn(&str, &BTreeMap<String, String>, &[u8], &str) -> (u16, Vec<u8>)>;
+pub type Transport =
+    Arc<dyn Fn(&str, &BTreeMap<String, String>, &[u8], &str) -> (u16, Vec<u8>) + Send + Sync>;
 
 /// Access to one session engine.
 pub struct EngineClient {

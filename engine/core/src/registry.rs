@@ -382,6 +382,15 @@ impl Operation {
         ctx: Option<&crate::application::context::Built>,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, VogtError> {
+        // Test-only: the HTTP dispatch test holds a request inside the blocking
+        // section to prove it does not pin a tokio worker. Production never
+        // sets the variable.
+        #[cfg(test)]
+        if let Ok(millis) = std::env::var("VOGT_TEST_BLOCK_MS") {
+            if let Ok(millis) = millis.parse::<u64>() {
+                std::thread::sleep(std::time::Duration::from_millis(millis));
+            }
+        }
         // Defaults and bounds come from the recorded pydantic schema, so every
         // transport applies them before a service sees the parameters. The CLI
         // validates first and reports a usage error; this catches HTTP and MCP,
@@ -578,6 +587,12 @@ impl OperationRegistry {
             .iter()
             .filter(|operation| self.transports_for(operation.name).contains(&transport))
             .collect()
+    }
+
+    /// The same lookup as `for_transport`, returning owned operations so a
+    /// caller can hand one to a blocking thread without borrowing the registry.
+    pub fn operations_for(&self, transport: Transport) -> Vec<Operation> {
+        self.for_transport(transport).into_iter().cloned().collect()
     }
 
     fn validate(&self) -> Result<(), RegistryError> {

@@ -24,7 +24,8 @@ pub const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 
 /// How the client talks, so tests never need a peer. Same shape as the engine
 /// client's transport.
-pub type Transport = Box<dyn Fn(&str, &BTreeMap<String, String>, &[u8], &str) -> (u16, Vec<u8>)>;
+pub type Transport =
+    Box<dyn Fn(&str, &BTreeMap<String, String>, &[u8], &str) -> (u16, Vec<u8>) + Send + Sync>;
 
 /// Access to one peer instance's REST surface.
 pub struct PeerClient {

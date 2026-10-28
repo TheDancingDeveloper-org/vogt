@@ -38,6 +38,16 @@ pub struct McpState<C, I> {
 }
 
 impl<C: Clock, I: IdFactory> McpState<C, I> {
+    /// Poison the store lock. Tests use it to prove a poisoned lock does not
+    /// make every later request fail; production never calls it.
+    #[cfg(test)]
+    fn poison_store(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.store.lock().unwrap();
+            panic!("poison the store lock");
+        }));
+    }
+
     pub fn new(
         data_dir: &std::path::Path,
         no_auth: bool,
@@ -158,108 +168,135 @@ mcp_route!(
     restart
 );
 
-async fn handle<C: Clock + Clone, I: IdFactory>(
+async fn handle<C: Clock + Clone + Send + 'static, I: IdFactory + Send + 'static>(
     State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
     let presented = bearer(request.headers().get("authorization"));
-    let body = axum::body::to_bytes(request.into_body(), usize::MAX)
-        .await
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
-    let registry = crate::registry::default_registry();
-    let Ok(Value::Object(message)) = serde_json::from_str::<Value>(&body) else {
-        // Not a message, so there is nothing to authorize and nothing to
-        // record. The client still has to be able to read why.
-        return json_response(
-            StatusCode::OK,
-            serde_json::json!({
-                "jsonrpc": "2.0", "id": null,
-                "error": {"code": -32602, "message": "body is not valid JSON"}
-            }),
-        );
-    };
-
-    let store = state.store.lock().expect("the store lock is not poisoned");
-    // The request's own store: the shared id factory, so the decision row and
-    // the service count from one sequence, and a clock restarted for this
-    // request, so both stamp from the same instant. The process store keeps its
-    // clock, which the CLI also ticks.
-    let request_store = SqliteDeclaredStore::shared(
-        store.path().to_path_buf(),
-        clock_for(store.clock()),
-        Arc::clone(store.id_factory()),
-        store.synchronous(),
-    );
-    // The operation context gets its own clock, restarted the same way the
-    // request store's was, and then read once before the service sees it.
-    // Python's per-call context reads its fresh step clock once while it is
-    // being built (`context.py`), so the service's first stamp is one tick
-    // past the hook's start rather than on it. A wall clock has nothing to
-    // restart, and keeps the shared one.
-    let operation_clock = clock_for(store.clock());
-    operation_clock
-        .lock()
-        .expect("the clock lock is not poisoned")
-        .now();
-    // One read of the request's clock. The gate's expiry check and the decision
-    // row below both use it; reading again for the row would land it a tick
-    // later than Python's.
-    let now = request_store
-        .clock()
-        .lock()
-        .expect("the clock lock is not poisoned")
-        .now();
-    // Authenticate through the shared gate. It records a refusal and nothing
-    // for a live credential, so a ping or a tools/list writes no row. The one
-    // row a tool call writes is recorded below.
-    let grant = match authenticate(&request_store, &state, presented.as_deref(), now) {
-        Ok(grant) => grant,
-        Err(denial) => return unauthenticated(denial),
-    };
-    let principal = match auth_gate::principal_for(&grant) {
-        Ok(principal) => principal,
-        // An authenticated grant whose actor has no identity must not run as
-        // the local operator. The caller already authenticated, so this is the
-        // plain 500 an unrecorded decision gets.
+    // The same cap `/api` applies, and it is applied before anything else reads
+    // the body: an unauthenticated caller must not be able to stream an
+    // unbounded body into memory.
+    let read = axum::body::to_bytes(request.into_body(), 1024 * 1024 + 1).await;
+    let bytes = match read {
+        Ok(bytes) if bytes.len() > 1024 * 1024 => {
+            return super::app::mcp_payload_too_large();
+        }
+        Ok(bytes) => bytes,
         Err(_) => {
-            return unauthenticated(Denial::Unrecorded {
-                failure: "the token's actor has no identity".to_string(),
-            });
+            return super::app::mcp_payload_too_large();
         }
     };
-    if let Some(operation) = called_operation(&message, &registry) {
-        if let Err(denial) = record_call(&request_store, &state, &grant, operation, now) {
-            return refusal(&message, operation, &grant, denial);
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let registry = crate::registry::default_registry();
+        let Ok(Value::Object(message)) = serde_json::from_str::<Value>(&body) else {
+            // Not a message, so there is nothing to authorize and nothing to
+            // record. The client still has to be able to read why.
+            return json_response(
+                StatusCode::OK,
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": null,
+                    "error": {"code": -32602, "message": "body is not valid JSON"}
+                }),
+            );
+        };
+
+        let store = state
+            .store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The request's own store: the shared id factory, so the decision row and
+        // the service count from one sequence, and a clock restarted for this
+        // request, so both stamp from the same instant. The process store keeps its
+        // clock, which the CLI also ticks.
+        let request_store = SqliteDeclaredStore::shared(
+            store.path().to_path_buf(),
+            clock_for(store.clock()),
+            Arc::clone(store.id_factory()),
+            store.synchronous(),
+        );
+        // The operation context gets its own clock, restarted the same way the
+        // request store's was, and then read once before the service sees it.
+        // Python's per-call context reads its fresh step clock once while it is
+        // being built (`context.py`), so the service's first stamp is one tick
+        // past the hook's start rather than on it. A wall clock has nothing to
+        // restart, and keeps the shared one.
+        let operation_clock = clock_for(store.clock());
+        operation_clock
+            .lock()
+            .expect("the clock lock is not poisoned")
+            .now();
+        // One read of the request's clock. The gate's expiry check and the decision
+        // row below both use it; reading again for the row would land it a tick
+        // later than Python's.
+        let now = request_store
+            .clock()
+            .lock()
+            .expect("the clock lock is not poisoned")
+            .now();
+        // Authenticate through the shared gate. It records a refusal and nothing
+        // for a live credential, so a ping or a tools/list writes no row. The one
+        // row a tool call writes is recorded below.
+        let grant = match authenticate(&request_store, &state, presented.as_deref(), now) {
+            Ok(grant) => grant,
+            Err(denial) => return unauthenticated(denial),
+        };
+        let principal = match auth_gate::principal_for(&grant) {
+            Ok(principal) => principal,
+            // An authenticated grant whose actor has no identity must not run as
+            // the local operator. The caller already authenticated, so this is the
+            // plain 500 an unrecorded decision gets.
+            Err(_) => {
+                return unauthenticated(Denial::Unrecorded {
+                    failure: "the token's actor has no identity".to_string(),
+                });
+            }
+        };
+        if let Some(operation) = called_operation(&message, &registry) {
+            if let Err(denial) = record_call(&request_store, &state, &grant, operation, now) {
+                return refusal(&message, operation, &grant, denial);
+            }
         }
-    }
-    drop(store);
-    // The console caller (`--no-auth`) writes even when the server is
-    // read-only, the same exception `record_call` records the row under. A
-    // presented token stays bound by the switch.
-    let permitted = Permitted {
-        scopes: grant.scopes.clone(),
-        writes_enabled: state.writes_enabled || state.no_auth,
-    };
-    let built = context_for(
-        &request_store,
-        &state,
-        &grant,
-        principal,
-        build,
-        operation_clock,
-    );
-    let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);
-    if let Some(context) = built.as_ref() {
-        dispatcher = dispatcher.with_context(context);
-    }
-    match dispatcher.handle(&message) {
-        None => Response::builder()
-            .status(StatusCode::ACCEPTED)
-            .header("content-type", "application/json")
-            .body(Body::from("null"))
+        drop(store);
+        // The console caller (`--no-auth`) writes even when the server is
+        // read-only, the same exception `record_call` records the row under. A
+        // presented token stays bound by the switch.
+        let permitted = Permitted {
+            scopes: grant.scopes.clone(),
+            writes_enabled: state.writes_enabled || state.no_auth,
+        };
+        let built = context_for(
+            &request_store,
+            &state,
+            &grant,
+            principal,
+            build,
+            operation_clock,
+        );
+        let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);
+        if let Some(context) = built.as_ref() {
+            dispatcher = dispatcher.with_context(context);
+        }
+        // `dispatcher.handle` runs the operation, which does blocking rusqlite and
+        // blocking engine HTTP. Python offloads that with `asyncio.to_thread`; here
+        // it leaves the tokio workers so one slow tool call cannot stall the rest.
+        match dispatcher.handle(&message) {
+            None => Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .header("content-type", "application/json")
+                .body(Body::from("null"))
+                .expect("a fixed response builds"),
+            Some(value) => json_response(StatusCode::OK, value),
+        }
+    })
+    .await;
+    match outcome {
+        Ok(response) => response,
+        Err(_) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(Body::from("Internal Server Error"))
             .expect("a fixed response builds"),
-        Some(value) => json_response(StatusCode::OK, value),
     }
 }
 
@@ -804,5 +841,50 @@ mod tests {
                 .is_some_and(|reference| reference.starts_with("WI-")),
             "{response}"
         );
+    }
+
+    /// The body cap is the same 1 MiB `/api` applies, and it is enforced before
+    /// the body is parsed or authenticated.
+    #[test]
+    fn an_oversized_body_is_413() {
+        let running = serve(true);
+        let body = "x".repeat(1024 * 1024 + 1);
+        let (status, response) = post(running.addr, &body);
+        assert_eq!(status, 413, "{response}");
+        let json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(json["error"]["code"], "payload_too_large");
+    }
+
+    /// A poisoned store lock must not turn every later request into a 500: the
+    /// route clears the poison and carries on.
+    #[test]
+    fn a_poisoned_store_lock_recovers() {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-mcp-poison-{}", crate::core::fresh_id("t")));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::application::instance::init(&dir, &mut None, &mut None).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let state = McpState::new(
+            &dir,
+            true,
+            true,
+            SystemClock,
+            SequentialIds::new(None).unwrap(),
+        );
+        state.poison_store();
+        assert!(state.store.lock().is_err(), "the lock stays poisoned");
+        runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            axum::serve(listener, router_system_sequential(state))
+                .await
+                .unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (status, response) = post(addr, r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
+        assert_eq!(status, 200, "{response}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
