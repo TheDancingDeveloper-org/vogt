@@ -498,10 +498,12 @@ jobs:
             git clone --quiet --depth 1 \
               https://github.com/RustSec/advisory-db.git "$advisory_db"
 
-          # RUSTSEC-2023-0071 has no fixed rsa release. rsa is compiled only
-          # through web-push -> jwt-simple -> superboring. Vogt's VAPID path
-          # signs ES256 (P-256 ECDSA), never RSA; see web-push's VapidKey and
-          # engine/server/src/push.rs.
+          # RUSTSEC-2023-0071 (Marvin Attack) has no fixed rsa release. The
+          # advisory is about RSA decryption timing. Vogt never decrypts with
+          # RSA: engine/core parses an unencrypted PKCS#1 or PKCS#8 private
+          # key to decide whether a GitHub App credential is configured, and
+          # the VAPID path (web-push -> jwt-simple -> superboring) signs
+          # ES256 (P-256 ECDSA) only. See engine/server/src/push.rs.
           # RUSTSEC-2025-0134: rustls-pemfile is unmaintained and has no
           # successor release. It arrives through rustls-native-certs and
           # axum-server, which still depend on it, so dropping our direct use
