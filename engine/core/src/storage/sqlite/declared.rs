@@ -38,17 +38,19 @@ const WORK_REF_PREFIX: &str = "WI-";
 
 fn sql_err(err: rusqlite::Error) -> VogtError {
     // A constraint, lock or I/O failure is the store breaking, not the caller
-    // sending a bad request. Python surfaces sqlite3.Error as a 500.
-    VogtError::MigrationError(err.to_string())
+    // sending a bad request. Python surfaces sqlite3.Error as a 500. The
+    // rusqlite sentence names SQL and paths, so it stays in the log.
+    tracing::error!(error = %err, "storage query failed");
+    VogtError::MigrationError("Internal Server Error".to_string())
 }
 
 /// A meta counter that cannot be read as an integer is corrupt, not zero.
 /// Defaulting it would silently restart the work-ref or revision sequence.
 fn meta_counter(conn: &Connection, key: &str) -> Result<i64, VogtError> {
     match meta_get(conn, key)? {
-        Some(text) => text.parse::<i64>().map_err(|_| {
-            VogtError::MigrationError(format!("meta {key} is not an integer: {text}"))
-        }),
+        Some(text) => text
+            .parse::<i64>()
+            .map_err(|_| VogtError::MigrationError(format!("meta {key} is not an integer"))),
         None => Err(VogtError::MigrationError(format!("meta {key} is missing"))),
     }
 }
@@ -4935,5 +4937,27 @@ mod more {
             "expired"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod storage_error_body {
+    use super::*;
+
+    #[test]
+    fn a_rusqlite_failure_body_does_not_carry_the_driver_sentence() {
+        let driver = "no such column: secret_path in /var/lib/vogt/declared.db";
+        let err = rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            driver.into(),
+        );
+        let mapped = sql_err(err);
+        let VogtError::MigrationError(message) = mapped else {
+            panic!("expected migration_error");
+        };
+        assert_eq!(message, "Internal Server Error");
+        assert!(!message.contains("declared.db"));
+        assert!(!message.contains("secret_path"));
     }
 }

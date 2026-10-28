@@ -554,7 +554,9 @@ impl<T: ForgeTransport> ForgeProvider for ForgejoProvider<T> {
             .transport
             .send(WriteMethod::Post, "/user/repos", Some(&payload))
         {
-            Err(error) if error.message().contains("409") || error.message().contains("422") => {
+            Err(VogtError::ForgeHttpStatus {
+                status: 409 | 422, ..
+            }) => {
                 return Err(VogtError::RemoteRepoExists(format!(
                     "{} already has a repository named {} reachable by this account; \
                      `forge.publish` never adopts or overwrites an existing remote — pick \
@@ -804,6 +806,20 @@ fn valid_name(name: &str) -> bool {
         && !name.contains('%')
 }
 
+fn forge_fail(message: &str) -> VogtError {
+    // A fixture names the status the way the real client does ("answered 422").
+    // The digits become a status, not something create_repo sniffs back out.
+    for status in [409_u16, 422, 500, 403, 401] {
+        if message.contains(&status.to_string()) {
+            return VogtError::ForgeHttpStatus {
+                status,
+                message: message.to_owned(),
+            };
+        }
+    }
+    VogtError::UpstreamWriteFailed(message.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,16 +875,14 @@ mod tests {
         ) -> Result<serde_json::Value, VogtError> {
             self.seen.borrow_mut().push(path.to_owned());
             if let Some(message) = &self.fail_with {
-                return Err(VogtError::UpstreamWriteFailed(message.clone()));
+                return Err(forge_fail(message));
             }
             if self
                 .fail_paths_containing
                 .as_deref()
                 .is_some_and(|part| path.contains(part))
             {
-                return Err(VogtError::UpstreamWriteFailed(
-                    "422 unknown label".to_owned(),
-                ));
+                return Err(VogtError::UpstreamWriteFailed("unknown label".to_owned()));
             }
             // A write answers with the created object, as the forge does: the
             // number and URL come back, the request body does not.

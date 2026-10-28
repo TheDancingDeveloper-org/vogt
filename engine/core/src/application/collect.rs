@@ -937,6 +937,8 @@ impl ErrorName for VogtError {
             Self::Unauthenticated(_) => "Unauthenticated",
             Self::Forbidden(_) => "Forbidden",
             Self::CollectorFailed(_) => "CollectorFailed",
+            Self::NotImplemented(_) => "NotImplemented",
+            Self::ForgeHttpStatus { .. } => "ForgeHttpStatus",
         }
     }
 }

@@ -568,7 +568,7 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
             .transport
             .send(WriteMethod::Post, "/user/repos", Some(&payload))
         {
-            Err(error) if error.message().contains("422") => {
+            Err(VogtError::ForgeHttpStatus { status: 422, .. }) => {
                 return Err(VogtError::RemoteRepoExists(format!(
                     "github.com already has a repository named {} reachable by this \
                      account; `forge.publish` never adopts or overwrites an existing remote — \
@@ -970,6 +970,20 @@ fn valid_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+fn forge_fail(message: &str) -> VogtError {
+    // A fixture names the status the way the real client does ("answered 422").
+    // The digits become a status, not something create_repo sniffs back out.
+    for status in [409_u16, 422, 500, 403, 401] {
+        if message.contains(&status.to_string()) {
+            return VogtError::ForgeHttpStatus {
+                status,
+                message: message.to_owned(),
+            };
+        }
+    }
+    VogtError::UpstreamWriteFailed(message.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1080,7 +1094,7 @@ mod tests {
         fn get(&self, path: &str, _query: &[(&str, String)]) -> Result<ForgeResponse, VogtError> {
             self.seen.borrow_mut().push(path.to_owned());
             if let Some(message) = &self.fail_with {
-                return Err(VogtError::UpstreamWriteFailed(message.clone()));
+                return Err(forge_fail(message));
             }
             Ok(self
                 .answers
@@ -1103,7 +1117,7 @@ mod tests {
                 self.sent.borrow_mut().push(body.clone());
             }
             if let Some(message) = &self.fail_with {
-                return Err(VogtError::UpstreamWriteFailed(message.clone()));
+                return Err(forge_fail(message));
             }
             Ok(self
                 .writes

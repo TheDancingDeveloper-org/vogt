@@ -85,6 +85,17 @@ pub enum VogtError {
     Forbidden(String),
     /// A collector raised rather than returning findings (`collectors/base.py`).
     CollectorFailed(String),
+    /// An operation the Rust build does not serve. Same code as
+    /// `InvalidRequest` (`invalid_request`); the status is 501, which the HTTP
+    /// adapter used to sniff out of the message text.
+    NotImplemented(String),
+    /// A forge write was refused with this HTTP status. The message stays the
+    /// sentence the client already reports, so callers that still read it see
+    /// the same text. `create_repo` matches the status, not the digits.
+    ForgeHttpStatus {
+        status: u16,
+        message: String,
+    },
 }
 
 impl VogtError {
@@ -125,6 +136,7 @@ impl VogtError {
             | Self::MissingReason(m)
             | Self::InvalidParams(m)
             | Self::MigrationError(m)
+            | Self::NotImplemented(m)
             | Self::MigrationLocked(m)
             | Self::EngineUnavailable(m)
             | Self::GitUnavailable(m)
@@ -133,6 +145,7 @@ impl VogtError {
             | Self::ForgejoUnavailable(m) => m,
             Self::PeerUnavailable { message, .. }
             | Self::TransitionRejected { message, .. }
+            | Self::ForgeHttpStatus { message, .. }
             | Self::Unauthenticated(message)
             | Self::Forbidden(message)
             | Self::CollectorFailed(message) => message,
@@ -187,6 +200,8 @@ impl VogtError {
             Self::Unauthenticated(_) => "unauthenticated",
             Self::Forbidden(_) => "forbidden",
             Self::CollectorFailed(_) => "collector_failed",
+            Self::NotImplemented(_) => "invalid_request",
+            Self::ForgeHttpStatus { .. } => "upstream_write_failed",
         }
     }
 
@@ -238,6 +253,8 @@ impl VogtError {
             Self::Unauthenticated(_) => 401,
             Self::Forbidden(_) => 403,
             Self::CollectorFailed(_) => 500,
+            Self::NotImplemented(_) => 501,
+            Self::ForgeHttpStatus { .. } => 502,
         }
     }
 
@@ -458,6 +475,43 @@ mod tests {
             "collector_failed" => VogtError::CollectorFailed(message),
             other => panic!("unmapped code {other}"),
         }
+    }
+
+    #[test]
+    fn an_unported_operation_is_501_without_a_new_code() {
+        let error = VogtError::NotImplemented(
+            "status.ping is not available in this build: its service has not been ported yet"
+                .to_string(),
+        );
+        assert_eq!(error.code(), "invalid_request");
+        assert_eq!(error.http_status(), 501);
+        assert!(!error.message().contains("501"));
+    }
+
+    #[test]
+    fn a_forge_status_is_matched_without_reading_the_message() {
+        // The message deliberately has no status digits. Classification uses
+        // the variant, so a 409 in some other sentence cannot become a refusal.
+        let refused = VogtError::ForgeHttpStatus {
+            status: 409,
+            message: "name already taken".to_string(),
+        };
+        assert!(matches!(
+            refused,
+            VogtError::ForgeHttpStatus {
+                status: 409 | 422,
+                ..
+            }
+        ));
+        let other = VogtError::UpstreamWriteFailed("room 409 is full".to_string());
+        assert!(!matches!(
+            other,
+            VogtError::ForgeHttpStatus {
+                status: 409 | 422,
+                ..
+            }
+        ));
+        assert_eq!(refused.code(), "upstream_write_failed");
     }
 
     #[test]

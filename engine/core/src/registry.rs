@@ -412,7 +412,7 @@ impl Operation {
                     "{} needs an instance context and none was given",
                     self.name
                 ))),
-                (None, _) => Err(VogtError::InvalidRequest(format!(
+                (None, _) => Err(VogtError::NotImplemented(format!(
                     "{} is not available in this build: its service has not been ported yet",
                     self.name
                 ))),

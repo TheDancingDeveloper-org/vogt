@@ -527,7 +527,6 @@ async fn dispatch<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     let body = match read {
         Ok(bytes) if bytes.len() > 1024 * 1024 => return payload_too_large(),
         Ok(bytes) => bytes,
-        Err(err) if err.to_string().contains("length limit") => return payload_too_large(),
         Err(_) => return payload_too_large(),
     };
     // Starlette reads the body as text and answers 400 when the bytes are not
@@ -727,14 +726,13 @@ async fn dispatch<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
             }
             response
         }
-        // Not ported is not the caller's fault, so it is not a 400. The shared
-        // error taxonomy has no 501, and adding one would change every adapter.
-        Err(VogtError::InvalidRequest(message)) if message.contains("has not been ported") => {
-            json_response(
-                StatusCode::NOT_IMPLEMENTED,
-                serde_json::json!({"error": {"code": "not_implemented", "message": message}}),
-            )
-        }
+        // Not ported is not the caller's fault, so it is not a 400. The code
+        // stays `invalid_request`, the code `InvalidRequest` carries; only the
+        // status is 501. Matching the variant, not the message text.
+        Err(VogtError::NotImplemented(message)) => json_response(
+            StatusCode::NOT_IMPLEMENTED,
+            serde_json::json!({"error": {"code": "invalid_request", "message": message}}),
+        ),
         Err(error) => error_response(&error),
     }
 }
@@ -2055,7 +2053,7 @@ mod tests {
         let (status, body) = request(running.addr, "GET", "/api/instance/diagnostics", None);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(status, 501, "{body}");
-        assert_eq!(json["error"]["code"], "not_implemented");
+        assert_eq!(json["error"]["code"], "invalid_request");
         assert!(json["error"]["message"]
             .as_str()
             .unwrap()

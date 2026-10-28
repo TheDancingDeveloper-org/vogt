@@ -140,9 +140,10 @@ impl GitHubClient {
             return Ok(Value::Null);
         }
         if status >= 400 {
-            return Err(VogtError::GitHubUnavailable(format!(
-                "GitHub returned {status} for {verb} {path}"
-            )));
+            return Err(VogtError::ForgeHttpStatus {
+                status,
+                message: format!("GitHub returned {status} for {verb} {path}"),
+            });
         }
         if response.iter().all(u8::is_ascii_whitespace) {
             return Ok(Value::Object(serde_json::Map::new()));
