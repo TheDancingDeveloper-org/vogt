@@ -29,6 +29,10 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "Zlib",
+    # webpki-roots (0.26 via ureq, 1.0 via reqwest/rustls) ships the Mozilla
+    # CA bundle under the Community Data License Agreement Permissive 2.0.
+    # That is the licence the crate publishes; there is no MIT/Apache build.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 

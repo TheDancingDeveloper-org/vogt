@@ -15,7 +15,7 @@ name = "vogt_engine_server"
 path = "src/lib.rs"
 
 [dependencies]
-vogt-engine-contract = { path = "../contract" }
+vogt-engine-contract = { path = "../contract", version = "0.1.0" }
 # The live call pipeline (WI-960), published as its own crate:
 # https://github.com/TheDancingDeveloper-org/voicepipe
 voicepipe = "0.1"
