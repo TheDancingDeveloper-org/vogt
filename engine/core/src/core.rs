@@ -1675,6 +1675,76 @@ fn decision_state_default() -> DecisionState {
     DecisionState::Pending
 }
 
+vocab!(CharterScopeKind {
+    Workspace,
+    Project,
+    Initiative
+});
+
+/// One version of a scope's standing instructions (WI-2038). Append-only:
+/// setting a charter writes the next version. An empty body clears it. The
+/// workspace charter has `scope_id` "", a project's is its id, an initiative's
+/// is its id.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Charter {
+    pub scope_kind: CharterScopeKind,
+    pub scope_id: String,
+    pub version: i64,
+    pub body: String,
+    pub author_actor_id: String,
+    pub created_at: Moment,
+    pub reason: String,
+}
+
+vocab!(WatchState {
+    Active,
+    Fired,
+    Failed,
+    Cancelled,
+    Expired
+});
+
+/// A session waiting on an event instead of polling (WI-2036). `expired` is
+/// stored once the loop sees an active watch past `expires_at`;
+/// `effective_state` also computes it on read.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Watch {
+    pub id: String,
+    pub owner_actor_id: String,
+    pub target_session: String,
+    pub kind: String,
+    pub trigger: serde_json::Value,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default = "watch_state_default")]
+    pub state: WatchState,
+    pub created_at: Moment,
+    pub expires_at: Moment,
+    pub fired_at: Option<Moment>,
+    #[serde(default)]
+    pub outcome: Option<serde_json::Value>,
+    #[serde(default)]
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub reason: String,
+}
+
+fn watch_state_default() -> WatchState {
+    WatchState::Active
+}
+
+impl Watch {
+    /// `expired` for an active watch past its expiry, else the stored state.
+    pub fn effective_state(&self, now: Moment) -> String {
+        if self.state == WatchState::Active && self.expires_at <= now {
+            return "expired".to_string();
+        }
+        self.state.to_string()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Label {

@@ -13,10 +13,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::{
-    Actor, ActorPreference, AuditRecord, AuthDecision, CodingSession, Comment, ContractExemption,
-    Decision, DepRef, DriftProposal, Event, ForgeAccount, InboxTriage, Initiative, Label, Moment,
-    Observation, PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression,
-    Sweep, SweepOutcome, Token, WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackRecord,
+    Actor, ActorPreference, AuditRecord, AuthDecision, Charter, CodingSession, Comment,
+    ContractExemption, Decision, DepRef, DriftProposal, Event, ForgeAccount, InboxTriage,
+    Initiative, Label, Moment, Observation, PasswordCredential, Principal, Project, RelationKind,
+    SessionGrant, Suppression, Sweep, SweepOutcome, Token, Watch, WorkItem, WorkLink, WorkOverlay,
+    Workflow, WriteBackRecord,
 };
 use crate::storage::observed_types::{
     ActivityBatch, ActivityEventRow, ActivityIndexStats, ActivityQuery, ActivitySessionRow,
@@ -444,6 +445,28 @@ pub trait ReadView {
         limit: i64,
     ) -> Result<Vec<SessionGrant>, crate::errors::VogtError>;
     fn decision(&self, decision_id: &str) -> Result<Option<Decision>, crate::errors::VogtError>;
+    /// The newest charter for a scope, or none when never set.
+    fn charter(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> Result<Option<Charter>, crate::errors::VogtError>;
+    /// Earlier versions of a charter, newest first, up to `limit`.
+    fn charter_history(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Charter>, crate::errors::VogtError>;
+    fn watch(&self, watch_id: &str) -> Result<Option<Watch>, crate::errors::VogtError>;
+    /// Newest first, by `created_at` then id, up to `limit`.
+    fn list_watches(
+        &self,
+        state: Option<&str>,
+        target_session: Option<&str>,
+        owner_actor_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Watch>, crate::errors::VogtError>;
     /// Newest first, by `created_at` then id, up to `limit`.
     fn list_decisions(
         &self,
