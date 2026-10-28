@@ -35,10 +35,14 @@ pub const PROFILES_KEY: &str = "dispatch.profiles";
 pub const MAX_WORKERS_KEY: &str = "dispatch.max_workers_per_overseer";
 pub const ESCALATE_KEY: &str = "dispatch.escalate_after_failed_reviews";
 pub const REVIEW_BY_OVERSIGHT_KEY: &str = "dispatch.review_by_oversight_only";
+/// How many times the core restarts an item's worker from its hand-off after
+/// a budget stop (WI-1833). `0` turns the restart off.
+pub const BUDGET_RESTARTS_KEY: &str = "dispatch.budget_restarts_per_item";
 
 pub const DEFAULT_MAX_WORKERS_PER_OVERSEER: i64 = 5;
 pub const DEFAULT_ESCALATE_AFTER_FAILED_REVIEWS: i64 = 2;
 pub const DEFAULT_REVIEW_BY_OVERSIGHT_ONLY: bool = true;
+pub const DEFAULT_BUDGET_RESTARTS_PER_ITEM: i64 = 1;
 
 /// The start defaults one purpose resolves to.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -88,6 +92,7 @@ pub struct DispatchSettings {
     pub max_workers_per_overseer: i64,
     pub escalate_after_failed_reviews: i64,
     pub review_by_oversight_only: bool,
+    pub budget_restarts_per_item: i64,
 }
 
 impl DispatchSettings {
@@ -99,11 +104,12 @@ impl DispatchSettings {
 
 /// The preference keys a write may name. Every other `dispatch.*` key is
 /// refused, so a typo is said rather than stored and silently ignored.
-pub const KEYS: [&str; 4] = [
+pub const KEYS: [&str; 5] = [
     PROFILES_KEY,
     MAX_WORKERS_KEY,
     ESCALATE_KEY,
     REVIEW_BY_OVERSIGHT_KEY,
+    BUDGET_RESTARTS_KEY,
 ];
 
 /// The prefix every dispatch preference key carries (Python `KEY_PREFIX`).
@@ -202,6 +208,9 @@ fn profile_field_problem(over: &ProfileOverride) -> Option<String> {
 
 fn validate_scalar(key: &str, value: &Value) -> Result<Value, String> {
     let object = value.as_object().expect("checked by the caller");
+    if key == BUDGET_RESTARTS_KEY {
+        return validate_count(key, object, value);
+    }
     let stored = object.get("value");
     let valid = object.len() == 1
         && match key {
@@ -218,6 +227,29 @@ fn validate_scalar(key: &str, value: &Value) -> Result<Value, String> {
         return Err(format!("invalid {key} value — expected {shape}"));
     }
     Ok(value.clone())
+}
+
+/// `budget_restarts_per_item` is pydantic's `_CountSetting`: one `value`
+/// field, an integer greater than or equal to zero. The messages are the
+/// ones Python's `DispatchError` carries.
+fn validate_count(key: &str, object: &Map<String, Value>, value: &Value) -> Result<Value, String> {
+    if let Some(extra) = object.keys().find(|name| name.as_str() != "value") {
+        return Err(format!(
+            "invalid {key} value — {extra}: Extra inputs are not permitted"
+        ));
+    }
+    match object.get("value") {
+        Some(Value::Number(number)) if number.as_i64().is_some_and(|n| n >= 0) => Ok(value.clone()),
+        Some(Value::Number(_)) => Err(format!(
+            "invalid {key} value — value: Input should be greater than or equal to 0"
+        )),
+        Some(Value::String(_)) => Err(format!(
+            "invalid {key} value — value: Input should be a valid integer, unable to parse string as an integer"
+        )),
+        _ => Err(format!(
+            "invalid {key} value — value: Input should be a valid integer"
+        )),
+    }
 }
 
 /// The code defaults (design C10).
@@ -314,6 +346,8 @@ pub fn resolve(stored: &BTreeMap<String, Value>) -> DispatchSettings {
             .unwrap_or(DEFAULT_ESCALATE_AFTER_FAILED_REVIEWS),
         review_by_oversight_only: scalar_bool(stored, REVIEW_BY_OVERSIGHT_KEY)
             .unwrap_or(DEFAULT_REVIEW_BY_OVERSIGHT_ONLY),
+        budget_restarts_per_item: scalar_count(stored, BUDGET_RESTARTS_KEY)
+            .unwrap_or(DEFAULT_BUDGET_RESTARTS_PER_ITEM),
     }
 }
 
@@ -355,6 +389,16 @@ fn scalar_int(stored: &BTreeMap<String, Value>, key: &str) -> Option<i64> {
         .get("value")?
         .as_i64()
         .filter(|value| *value > 0)
+}
+
+/// A count is stored as `{"value": n}` with `n` zero or more. Zero is a real
+/// setting (`budget_restarts_per_item` turns restarts off), not "unset".
+fn scalar_count(stored: &BTreeMap<String, Value>, key: &str) -> Option<i64> {
+    stored
+        .get(key)?
+        .get("value")?
+        .as_i64()
+        .filter(|value| *value >= 0)
 }
 
 /// A scalar setting is stored as `{"value": b}` with `b` a boolean.
@@ -469,5 +513,22 @@ mod tests {
         let mut stored = BTreeMap::new();
         stored.insert(REVIEW_BY_OVERSIGHT_KEY.to_string(), json!({"value": false}));
         assert!(!resolve(&stored).review_by_oversight_only);
+    }
+
+    #[test]
+    fn the_budget_restart_cap_defaults_to_one_and_can_be_off() {
+        assert_eq!(
+            resolve(&BTreeMap::new()).budget_restarts_per_item,
+            DEFAULT_BUDGET_RESTARTS_PER_ITEM
+        );
+        let mut stored = BTreeMap::new();
+        stored.insert(BUDGET_RESTARTS_KEY.to_string(), json!({"value": 0}));
+        assert_eq!(resolve(&stored).budget_restarts_per_item, 0);
+        assert_eq!(
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": 0})).unwrap(),
+            json!({"value": 0})
+        );
+        assert!(validate(BUDGET_RESTARTS_KEY, &json!({"value": -1})).is_err());
+        assert!(validate(BUDGET_RESTARTS_KEY, &json!({"value": 1, "extra": true})).is_err());
     }
 }
