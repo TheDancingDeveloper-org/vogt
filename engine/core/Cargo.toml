@@ -29,6 +29,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 tracing = "0.1"
 http-body = "1"
 tracing-subscriber = "0.3"
+# Exact pin, not a range. Later 0.4 releases changed the formats that
+# DateTime::parse_from_rfc3339 and friends accept, and the core's own parser
+# is pinned against CPython 3.12 datetime.fromisoformat (core.rs,
+# timestamps_round_trip_as_utc: the rows "the chrono formats got wrong").
+# A newer chrono is a behaviour change, so it is a deliberate bump with that
+# test green, not a Dependabot range. adebd6d75, 2026-10-08.
 chrono = { version = "=0.4.44", default-features = false, features = ["now", "std", "serde"] }
 scrypt = "0.12.0"
 # The OS entropy source for minted secrets. A hand-rolled read of /dev/urandom
