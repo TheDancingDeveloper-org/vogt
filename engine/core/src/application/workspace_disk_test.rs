@@ -195,6 +195,33 @@ fn engine_status_says_why_when_the_engine_cannot_be_asked() {
         none["engine"],
         json!("no session engine is configured (VOGT_ENGINE_URL is unset)")
     );
+    // No engine is still the model object, never a bare reason string.
+    let Value::Object(map) = &none else {
+        panic!("an unanswered engine status is an object, not {none}");
+    };
+    let keys: Vec<&String> = map.keys().collect();
+    assert_eq!(
+        keys,
+        [
+            "engine",
+            "version",
+            "source_ref",
+            "source_sha",
+            "release_url",
+            "session_count",
+            "push_subscription_count",
+            "gui_process_count",
+            "gui_stream_configured",
+            "fcm_enabled",
+            "auto_agent_auth",
+            "state_dir",
+            "workspace_root",
+            "history",
+            "agent_tasks",
+            "event_lag",
+            "disk",
+        ]
+    );
     for (id, answer) in [
         ("engine-unavailable", (503, "{}".to_string())),
         ("engine-garbage", (200, "[]".to_string())),
