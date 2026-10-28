@@ -56,11 +56,13 @@ LABEL org.opencontainers.image.title="vogt" \
       org.opencontainers.image.source="https://github.com/TheDancingDeveloper-org/vogt" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
-# python3 is not for the core. vogt-lifecycle's health mode shells out to it
-# (the same script the Python image uses), and a compose healthcheck that
-# exits 127 keeps the container unhealthy forever.
+# wget is the health probe. vogt-lifecycle health GETs
+# VOGT_LIFECYCLE_HEALTHCHECK_URL, and the Rust image has no Python (WI-1082,
+# WI-2679). A compose healthcheck that exits 127 stays unhealthy forever.
+# Same Dockerfile with python3 instead of wget: 240526609 bytes. With wget:
+# 205913320 bytes (about 33 MiB smaller).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates python3 \
+    && apt-get install -y --no-install-recommends git ca-certificates wget \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 vogt \
     && useradd --uid 1000 --gid 0 --no-create-home --shell /usr/sbin/nologin vogt \
