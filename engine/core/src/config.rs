@@ -365,6 +365,35 @@ pub struct VogtConfig {
     pub diagnostics_peer_token_file: Option<PathBuf>,
 }
 
+/// Config keys this build parses and stores but does not read. Each names the
+/// work item that still owes the behaviour Python implements for it. A key
+/// leaves this list the moment something outside this module reads it, and the
+/// test below fails if the list grows, so a newly ignored key cannot land
+/// quietly.
+///
+/// None of these features is ported: the in-process scheduler (WI-2021), the
+/// forge posture collector interval, the GitHub rate-limit floor, GitHub App
+/// installation auth, the usage board (WI-2666), cold-wake compaction
+/// (WI-2588), the session-scratch project, the autopilot result-report gate,
+/// and `image_digest` on `instance.diagnostics` (WI-2666).
+pub const UNREAD_KEYS: &[(&str, &str)] = &[
+    ("sweep_interval_seconds", "WI-2021"),
+    ("watch_interval_seconds", "WI-2021"),
+    ("forge_posture_interval_seconds", "WI-2021"),
+    ("github_rate_limit_floor", "WI-2021"),
+    ("github_app_installation_id", "WI-2021"),
+    ("usage_accounts", "WI-2666"),
+    ("usage_litellm_url", "WI-2666"),
+    ("usage_litellm_keys", "WI-2666"),
+    ("usage_daily_spend_alert_usd", "WI-2666"),
+    ("cold_wake_compaction", "WI-2588"),
+    ("cold_wake_threshold_tokens", "WI-2588"),
+    ("cold_wake_ttl_seconds", "WI-2588"),
+    ("session_scratch_project", "WI-2666"),
+    ("autopilot_done_requires_result_report", "WI-2666"),
+    ("image_digest", "WI-2666"),
+];
+
 /// Where an instance lives when the operator has not said otherwise.
 pub fn default_data_dir() -> PathBuf {
     match env::var("XDG_DATA_HOME") {
@@ -2332,5 +2361,26 @@ mod tests {
         );
         overrides.insert("session_ttl_days".to_string(), Value::from(30));
         assert!(load_config(&overrides).is_ok());
+    }
+
+    /// The unread-key allowlist is exactly the keys this build parses and never
+    /// reads. It may shrink as a feature is wired; it may not grow.
+    #[test]
+    fn unread_keys_are_the_known_set() {
+        assert_eq!(
+            UNREAD_KEYS.len(),
+            15,
+            "a config key was added to UNREAD_KEYS; wire it, or this list is wrong"
+        );
+        let documented: std::collections::HashSet<&str> =
+            describe_fields().iter().map(|field| field.name).collect();
+        for (name, work_item) in UNREAD_KEYS {
+            assert!(documented.contains(name), "{name} is not a config key");
+            assert!(
+                work_item.starts_with("WI-")
+                    && work_item[3..].chars().all(|ch| ch.is_ascii_digit()),
+                "{name} needs a WI ref, got {work_item}"
+            );
+        }
     }
 }
