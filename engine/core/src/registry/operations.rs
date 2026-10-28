@@ -938,9 +938,6 @@ pub fn build_operations() -> Vec<Operation> {
             HttpRoute::new(HttpMethod::Post, "/instance/restore"),
             CliBinding::new(&["restore"]),
         ),
-        // No REST route, matching Python (`route=None`, WI-1075): a clone
-        // replaces the live stores from a path on the server's filesystem, so
-        // it is an operator action at the machine (CLI only), not HTTP.
         Operation::local_only(
             "clone",
             "Restore another instance's backup here as a copy: keep this instance's id and credentials, revoke the source's tokens, disarm forge write-back, never copy push subscriptions.",
