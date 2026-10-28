@@ -17,6 +17,11 @@
 #                                /ui-legacy. Loopback → this script also *runs*
 #                                the core there. Unset → no core, and the
 #                                engine runs alone, as it shipped.
+#   VOGT_CORE_IMPL               which core that loopback process is:
+#                                `python` (default) or `rust`. Merging the
+#                                rust binary into this image is not the
+#                                cutover; flipping this and redeploying is.
+#                                Anything else refuses to boot.
 #   VOGT_DATA_DIR                the core's SQLite + backups (default from the
 #                                image: /var/lib/vogt)
 #
@@ -292,9 +297,43 @@ vogt_core_listen() {
     esac
 }
 
+# Which binary the supervisor runs. Default python so an image that already
+# contains vogt-core does not become the cutover the moment it is deployed.
+# `vogt` is the operator CLI name; on the python path it must be the Python
+# console script, never the rust binary the image also links as vogt-mcp-remote.
+vogt_core_bin() {
+    local impl="${VOGT_CORE_IMPL:-python}"
+    case "$impl" in
+        python)
+            if [[ -n "${VOGT_PYTHON_BIN:-}" ]]; then
+                printf '%s\n' "$VOGT_PYTHON_BIN"
+            elif [[ -x /opt/vogt/.venv/bin/vogt ]]; then
+                printf '%s\n' /opt/vogt/.venv/bin/vogt
+            else
+                echo "vogt-core: VOGT_CORE_IMPL=python but no Python vogt" \
+                     "console script (VOGT_PYTHON_BIN or /opt/vogt/.venv/bin/vogt)" >&2
+                return 78
+            fi
+            ;;
+        rust)
+            printf '%s\n' "${VOGT_RUST_CORE_BIN:-vogt-core}"
+            ;;
+        *)
+            echo "vogt-core: VOGT_CORE_IMPL=${impl} is not python or rust —" \
+                 "refusing to guess" >&2
+            return 78
+            ;;
+    esac
+}
+
 supervise_vogt_core() {
     local host="$1" port="$2"
-    local backoff=1 started=0 uptime=0
+    local bin backoff=1 started=0 uptime=0
+    if ! bin="$(vogt_core_bin)"; then
+        echo "vogt-core: not starting (see above)" >&2
+        return 78
+    fi
+    echo "vogt-core: implementation ${VOGT_CORE_IMPL:-python} (${bin})"
 
     # `init` before every `serve`, because nothing else migrates. `serve` does
     # not, and there is no `vogt migrate` verb, so an image carrying a new
@@ -312,12 +351,12 @@ supervise_vogt_core() {
     # somebody restarts the container.
     while :; do
         started=$SECONDS
-        if ! vogt-core init; then
+        if ! "$bin" init; then
             echo "vogt-core: init failed — refusing to serve a store this" \
                  "build does not understand" >&2
         else
             echo "vogt-core: serving on ${host}:${port}"
-            if vogt-core serve --host "$host" --port "$port"; then
+            if "$bin" serve --host "$host" --port "$port"; then
                 echo "vogt-core: exited cleanly" >&2
             else
                 echo "vogt-core: exited with status $?" >&2
