@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::params;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::application::context::{build_context, Built};
 use crate::application::services::{charters, watches};
@@ -157,9 +157,4 @@ fn watch_list_is_empty_and_an_active_watch_past_expiry_reads_expired() {
     assert!(matches!(missing, Err(VogtError::NotFound(_))));
     let raw = watches::watch_list_op(&built, json!({"session": "eng-1"})).unwrap();
     assert_eq!(raw["watches"].as_array().unwrap().len(), 1);
-}
-
-#[allow(dead_code)]
-fn _value(value: Value) -> Value {
-    value
 }

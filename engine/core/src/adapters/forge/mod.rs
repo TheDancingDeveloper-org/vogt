@@ -13,7 +13,6 @@ mod accounts;
 pub use accounts::{account_linking_enabled, load_cipher};
 mod actors;
 mod collectors;
-pub use collectors::glob_match;
 mod directory;
 mod edges;
 mod forgejo;

@@ -210,7 +210,7 @@ impl SuppressionFilter {
         }
         self.patterns.iter().any(|(pattern, scope)| {
             (scope.is_none() || scope.as_deref() == project_id)
-                && crate::adapters::forge::glob_match(pattern, subject_key)
+                && crate::glob::glob_match(pattern, subject_key)
         })
     }
 }

@@ -137,8 +137,6 @@ where
 
     /// The id factory this store counts with. The context holds the same one,
     /// because a second factory starts again at one and the two collide.
-    // Used by the write tests, which live outside this crate's binary target.
-    #[allow(dead_code)]
     pub fn id_factory(&self) -> &Arc<std::sync::Mutex<I>> {
         &self.ids
     }

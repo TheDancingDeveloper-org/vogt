@@ -5,7 +5,6 @@
 //! resolves a difference it cannot explain.
 
 #![allow(dead_code)]
-
 use crate::core::Moment;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

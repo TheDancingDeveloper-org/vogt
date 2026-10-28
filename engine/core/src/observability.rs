@@ -13,7 +13,6 @@
 //! for the HTTP adapter.
 
 #![allow(dead_code)]
-
 use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::{LazyLock, Mutex};
