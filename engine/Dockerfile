@@ -586,7 +586,20 @@ RUN set -eu; \
 COPY --from=server-build /usr/local/bin/vogt-engine /usr/local/bin/vogt-engine
 COPY --from=server-build /usr/local/bin/vogt-core /usr/local/bin/vogt-core
 COPY --from=python-core /opt/vogt /opt/vogt
-ENV PATH="/opt/vogt/.venv/bin:${PATH}"
+# The venv is appended, not prepended. Python installs its own `vogt-mcp`
+# console script into the venv, and putting the venv first made `command -v
+# vogt-mcp` resolve there instead of to the engine script copied into
+# /usr/local/bin below, which is the one a session runs. Appending changes
+# PATH order only, so it adds no layer content.
+#
+# Measured image size (`docker image inspect .Size`) of the local stack image
+# vogt-engine-e2e:local (id cb3998cfe1f9, built 2026-10-18 from this Dockerfile
+# before the PATH reorder): 7,555,153,795 B (7.56 GB). Appending the venv adds
+# no layer content, so the size does not move. The published comparison in
+# docs/rust-port/stack-image-numbers.md (2026-10-19, INSTALL_AI_CLIENTS=false)
+# is 7,536,275,581 B (7.54 GB) against the Python core image at 7,620,979,615 B
+# (7.62 GB).
+ENV PATH="${PATH}:/opt/vogt/.venv/bin"
 RUN chmod +x /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
 
 # The other half is the Rust core, built in `server-build` and copied above, so
@@ -647,6 +660,9 @@ COPY engine/deploy/git-forgejo.sh /usr/local/bin/git-forgejo
 COPY engine/deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
 COPY engine/deploy/cargo-cache.sh /usr/local/bin/vogt-cargo-cache
 COPY engine/deploy/policy-hook.sh /usr/local/bin/vogt-policy-hook
+# `vogt-mcp` must be the engine script, not the Python console script the venv
+# also installs. The venv is last on PATH (above), and this asserts the winner.
+RUN test "$(command -v vogt-mcp)" = /usr/local/bin/vogt-mcp
 RUN chmod +x \
     /usr/local/bin/vogt-lifecycle \
     /usr/local/bin/vogt-entrypoint \
