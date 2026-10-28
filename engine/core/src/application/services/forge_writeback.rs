@@ -200,3 +200,59 @@ fn optional_string(params: &Value, field: &str) -> Result<Option<String>, VogtEr
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{writeback_list_op, writeback_op};
+    use crate::application::services::forge_ops_test::insert_project;
+    use crate::application::services::services_test::opened;
+    use crate::errors::VogtError;
+    use serde_json::json;
+
+    /// A policy is stored on the project and the answer names the new value.
+    #[test]
+    fn writeback_sets_the_policy() {
+        let built = opened();
+        insert_project(&built, "widget", None, "/tmp", false);
+        let set = writeback_op(
+            &built,
+            json!({"project": "widget", "policy": "comment_only", "reason": "arm it"}),
+        )
+        .unwrap();
+        assert_eq!(set["project"]["write_back"], "comment_only");
+    }
+
+    /// An unknown policy and an unknown project are typed refusals, not a stored change.
+    #[test]
+    fn writeback_refuses_an_unknown_policy_and_an_unknown_project() {
+        let built = opened();
+        let policy = writeback_op(
+            &built,
+            json!({"project": "widget", "policy": "sometimes", "reason": "no"}),
+        );
+        assert!(
+            matches!(policy, Err(VogtError::InvalidRequest(_))),
+            "{policy:?}"
+        );
+        insert_project(&built, "widget", None, "/tmp", false);
+        let missing = writeback_op(
+            &built,
+            json!({"project": "nope", "policy": "none", "reason": "no"}),
+        );
+        assert!(
+            matches!(missing, Err(VogtError::NotFound(_))),
+            "{missing:?}"
+        );
+    }
+
+    /// The ledger is a read. An outcome outside the four recorded ones is refused,
+    /// and a page that is in range comes back empty when nothing has written.
+    #[test]
+    fn writeback_list_refuses_an_unknown_outcome_and_reads_an_empty_ledger() {
+        let built = opened();
+        let bad = writeback_list_op(&built, json!({"outcome": "maybe"}));
+        assert!(matches!(bad, Err(VogtError::InvalidRequest(_))), "{bad:?}");
+        let listed = writeback_list_op(&built, json!({})).unwrap();
+        assert_eq!(listed["actions"].as_array().unwrap().len(), 0);
+    }
+}

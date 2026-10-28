@@ -145,3 +145,59 @@ fn stamp_of(row: &Observation) -> String {
 fn text_of(payload: &Value, key: &str) -> Option<String> {
     payload.get(key).and_then(Value::as_str).map(str::to_string)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::notifications_op;
+    use crate::application::services::services_test::opened;
+    use crate::errors::VogtError;
+    use serde_json::json;
+
+    /// Before any sweep the list says the notifications were not collected,
+    /// which is not the same answer as an empty inbox.
+    #[test]
+    fn an_unswept_instance_says_nothing_was_collected() {
+        let built = opened();
+        let listed = notifications_op(&built, json!({})).unwrap();
+        assert_eq!(listed["notifications"].as_array().unwrap().len(), 0);
+        assert_eq!(listed["total"], 0);
+        assert_eq!(listed["freshness"]["status"], "never_swept");
+        assert!(listed["scope"]
+            .as_str()
+            .unwrap()
+            .contains("instance-scoped"));
+    }
+
+    /// A project filter for a slug that was never registered is a typed miss.
+    #[test]
+    fn filtering_to_an_unknown_project_is_a_miss() {
+        let built = opened();
+        // Seed evidence tables by recording one notification, then ask for a project.
+        crate::application::services::services_test::record_notification(
+            &built,
+            "note-1",
+            "hello",
+            "2026-01-01T00:00:00+00:00",
+        );
+        let missing = notifications_op(&built, json!({"project": "no-such-project"}));
+        assert!(
+            matches!(missing, Err(VogtError::NotFound(_))),
+            "{missing:?}"
+        );
+    }
+
+    /// `unread_only` keeps the unread rows and the scope stays the instance token.
+    #[test]
+    fn unread_only_keeps_the_unread_rows() {
+        let built = opened();
+        crate::application::services::services_test::record_notification(
+            &built,
+            "note-1",
+            "hello",
+            "2026-01-01T00:00:00+00:00",
+        );
+        let listed = notifications_op(&built, json!({"unread_only": true})).unwrap();
+        assert_eq!(listed["unread"], 1);
+        assert_eq!(listed["notifications"].as_array().unwrap().len(), 1);
+    }
+}

@@ -121,3 +121,70 @@ where
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::import_op;
+    use crate::application::services::services_test::opened;
+    use crate::errors::VogtError;
+
+    #[test]
+    fn importing_a_host_that_is_not_configured_is_refused() {
+        let built = opened();
+        match import_op(
+            &built,
+            json!({
+                "host": "no.such.host",
+                "owner": "acme",
+                "name": "widget",
+                "reason": "import it"
+            }),
+        ) {
+            Err(VogtError::InvalidRequest(message)) => {
+                assert!(message.contains("no.such.host"), "{message}");
+                assert!(message.contains("forge_token_files"), "{message}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn importing_without_a_credential_is_refused_before_cloning() {
+        let built = opened();
+        match import_op(
+            &built,
+            json!({
+                "host": "github.com",
+                "owner": "acme",
+                "name": "widget",
+                "reason": "import it"
+            }),
+        ) {
+            Err(VogtError::InvalidRequest(message)) => {
+                assert!(
+                    message.contains("credential") || message.contains("forge account"),
+                    "{message}"
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_import_call_without_a_reason_is_rejected() {
+        let built = opened();
+        let refused = import_op(
+            &built,
+            json!({"host": "github.com", "owner": "acme", "name": "widget"}),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(VogtError::InvalidRequest(_) | VogtError::MissingReason(_))
+            ),
+            "{refused:?}"
+        );
+    }
+}

@@ -41,7 +41,7 @@ fn with_token() -> Built {
 
 /// As [`with_token`], on a stand-in the test keeps, so it can read back what the
 /// forge was sent.
-fn with_token_on(standin: &StandInForge) -> Built {
+pub(super) fn with_token_on(standin: &StandInForge) -> Built {
     let dir = std::env::temp_dir().join(format!(
         "vogt-forge-ops-{}-{}",
         std::process::id(),
