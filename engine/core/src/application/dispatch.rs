@@ -238,14 +238,30 @@ fn validate_count(key: &str, object: &Map<String, Value>, value: &Value) -> Resu
             "invalid {key} value — {extra}: Extra inputs are not permitted"
         ));
     }
-    // Pydantic lax `int`: a trimmed digit string, a boolean and a whole float
-    // are integers. The stored value is the normalised integer, not the JSON
-    // that arrived. A fractional number is Python's exact message.
-    let number = match object.get("value") {
+    // Pydantic lax `int`. A value that fits in i64 is stored as that integer.
+    // One that does not (`2**63`) is kept as JSON sent it, which is how Python
+    // keeps an arbitrary-precision int. A float JSON cannot spell exactly
+    // (`1e20`) is Python's "exceeded maximum size" message.
+    let stored = match object.get("value") {
         Some(Value::Number(number)) => match number.as_i64() {
-            Some(number) => number,
+            Some(number) => Value::from(number),
+            None if number.as_u64().is_some() => {
+                // `2**63` and friends: Python keeps the integer. Store the
+                // JSON number as it arrived.
+                Value::Number(number.clone())
+            }
             None if number.as_f64().is_some_and(|f| f.fract() == 0.0) => {
-                number.as_f64().unwrap() as i64
+                let f = number.as_f64().unwrap();
+                let exact = f as i64;
+                if serde_json::Number::from(exact).as_f64() == Some(f) {
+                    Value::from(exact)
+                } else {
+                    // JSON wrote this as 1e+20. Python cannot parse that as an
+                    // integer.
+                    return Err(format!(
+                        "invalid {key} value — value: Unable to parse input string as an integer, exceeded maximum size"
+                    ));
+                }
             }
             None => {
                 return Err(format!(
@@ -253,10 +269,10 @@ fn validate_count(key: &str, object: &Map<String, Value>, value: &Value) -> Resu
                 ));
             }
         },
-        Some(Value::Bool(flag)) => i64::from(*flag),
-        Some(Value::String(text)) => match text.trim().parse::<i64>() {
-            Ok(number) => number,
-            Err(_) => {
+        Some(Value::Bool(flag)) => Value::from(i64::from(*flag)),
+        Some(Value::String(text)) => match lax_int(text) {
+            Some(number) => number,
+            None => {
                 return Err(format!(
                     "invalid {key} value — value: Input should be a valid integer, unable to parse string as an integer"
                 ));
@@ -268,13 +284,32 @@ fn validate_count(key: &str, object: &Map<String, Value>, value: &Value) -> Resu
             ));
         }
     };
-    if number < 0 {
+    if stored.as_i64().is_some_and(|number| number < 0) {
         return Err(format!(
             "invalid {key} value — value: Input should be greater than or equal to 0"
         ));
     }
     let _ = value;
-    Ok(serde_json::json!({"value": number}))
+    Ok(serde_json::json!({"value": stored}))
+}
+
+/// Pydantic's string-to-int: trim, allow `_` grouping and a trailing `.0`.
+/// `Some(Number)` is the normalised integer (i64, or the original digits when
+/// they do not fit). `None` is not an integer.
+fn lax_int(text: &str) -> Option<Value> {
+    let text = text.trim().replace('_', "");
+    if let Ok(number) = text.parse::<i64>() {
+        return Some(Value::from(number));
+    }
+    let body = text.strip_suffix(".0")?;
+    if body.is_empty() || !body.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if let Ok(number) = body.parse::<i64>() {
+        return Some(Value::from(number));
+    }
+    // Bigger than i64. Python keeps the integer; store the digits.
+    Some(Value::Number(text.parse().ok()?))
 }
 
 /// The code defaults (design C10).
@@ -572,22 +607,22 @@ mod tests {
             validate(BUDGET_RESTARTS_KEY, &json!({"value": 1.5})).unwrap_err(),
             "invalid dispatch.budget_restarts_per_item value — value: Input should be a valid integer, got a number with a fractional part"
         );
-        // Pydantic lax int: the stored value is the normalised integer.
         assert_eq!(
-            validate(BUDGET_RESTARTS_KEY, &json!({"value": "3"})).unwrap(),
-            json!({"value": 3})
-        );
-        assert_eq!(
-            validate(BUDGET_RESTARTS_KEY, &json!({"value": true})).unwrap(),
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": "1.0"})).unwrap(),
             json!({"value": 1})
         );
         assert_eq!(
-            validate(BUDGET_RESTARTS_KEY, &json!({"value": 1.0})).unwrap(),
-            json!({"value": 1})
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": "1_000"})).unwrap(),
+            json!({"value": 1000})
         );
         assert_eq!(
-            validate(BUDGET_RESTARTS_KEY, &json!({"value": 1.5})).unwrap_err(),
-            "invalid dispatch.budget_restarts_per_item value — value: Input should be a valid integer, got a number with a fractional part"
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": 1e20})).unwrap_err(),
+            "invalid dispatch.budget_restarts_per_item value — value: Unable to parse input string as an integer, exceeded maximum size"
+        );
+        let two_pow_63 = serde_json::json!({"value": 9223372036854775808u64});
+        assert_eq!(
+            validate(BUDGET_RESTARTS_KEY, &two_pow_63).unwrap(),
+            two_pow_63
         );
     }
 }
