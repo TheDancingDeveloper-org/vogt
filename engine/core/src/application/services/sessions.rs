@@ -187,6 +187,9 @@ where
         limit: optional_i64(&params, "limit", 50)?,
         offset: optional_i64(&params, "offset", 0)?,
         order: optional_string(&params, "order")?.unwrap_or_else(|| "started".to_string()),
+        mode: optional_string(&params, "mode")?.unwrap_or_else(|| "digest".to_string()),
+        states: optional_string_list(&params, "states")?,
+        stall_after_minutes: optional_i64(&params, "stall_after_minutes", 10)?,
     };
     Ok(serde_json::to_value(list_sessions(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -539,6 +542,13 @@ pub struct ListSessionsParams {
     pub limit: i64,
     pub offset: i64,
     pub order: String,
+    /// `digest` (default) or `full`. Digest mode pages after the live-state
+    /// filter and returns rows under `digests`.
+    pub mode: String,
+    /// Keep only these activities. `None` uses the digest live set; an empty
+    /// list keeps every state.
+    pub states: Option<Vec<String>>,
+    pub stall_after_minutes: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -734,15 +744,40 @@ pub struct SessionResult {
     pub session: SessionSummary,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// One digest row. Field order matches `views::SessionDigest` / Python
+/// `SessionDigest`. Local so the service does not name a private model module.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct SessionDigestRow {
+    id: String,
+    name: Option<String>,
+    work_item: Option<String>,
+    activity: Option<String>,
+    attention: Option<String>,
+    ready: Option<bool>,
+    blocked_reason: Option<String>,
+    blocked_detail: Option<String>,
+    turn_started_at: Option<String>,
+    done_at: Option<String>,
+    last_reply_excerpt: Option<String>,
+    report: Option<String>,
+    template: Option<String>,
+    brief_file: Option<String>,
+    question: Option<String>,
+    question_kind: Option<String>,
+    options: Option<Vec<String>>,
+    budget: Option<String>,
+    supervisor: Option<String>,
+    extra: Option<serde_json::Map<String, Value>>,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct SessionListResult {
     pub sessions: Vec<SessionSummary>,
     /// Digest rows (design C1). `mode` defaults to `digest`, so the ordinary
     /// list returns these and leaves `sessions` empty; `mode=full` does the
-    /// reverse. The Rust list does not build digests yet, so this is empty
-    /// either way.
+    /// reverse.
     #[serde(default)]
-    pub digests: Vec<serde_json::Value>,
+    pub digests: Vec<SessionDigestRow>,
     /// Why the engine could not be asked, or null when it answered.
     pub engine: Option<String>,
     /// How many sessions match the filters, before `limit`/`offset`.
@@ -1175,13 +1210,22 @@ where
     };
     // Python's session list reads the clock once here, after the engine
     // answers or does not, and before the rows are assembled. The value is
-    // the attention reference; the tick is spent in the same place.
-    let _now = super::now_of(&ctx.clock);
-    let mut sessions = rows_of(ctx, params, &live, detail.as_deref())?;
+    // the attention reference.
+    let now = super::now_of(&ctx.clock);
+    let (mut joined, declared_overflow) = rows_of(ctx, params, &live, detail.as_deref())?;
+    let full = params.mode == "full";
+    let stall_after = params.stall_after_minutes.saturating_mul(60);
+    let mut kept = Vec::new();
+    for summary in joined.drain(..) {
+        if full || digest_kept(&summary, attention_name(&summary, now, stall_after), params.states.as_deref())
+        {
+            kept.push(summary);
+        }
+    }
     if params.order == "rss" {
         // Stable: sessions with no sample keep their order, after the
         // measured ones. Sweep shares rows_of and must not inherit this.
-        sessions.sort_by(|left, right| {
+        kept.sort_by(|left, right| {
             let rss =
                 |row: &SessionSummary| row.resources.as_ref().map(|r| r.rss_bytes).unwrap_or(0);
             match (left.resources.is_none(), right.resources.is_none()) {
@@ -1191,26 +1235,161 @@ where
             }
         });
     }
+    let total = kept.len() as i64;
+    let offset = params.offset.max(0) as usize;
+    let limit = params.limit.max(0) as usize;
+    let page: Vec<SessionSummary> = kept.into_iter().skip(offset).take(limit).collect();
+    // When the declared fetch hits its ceiling, more links match than were
+    // joined, so `total` is a floor and the list stays truncated.
+    let mut reported = total;
+    let truncated = (offset as i64) + (page.len() as i64) < total || declared_overflow;
+    if declared_overflow {
+        reported += 1;
+    }
+    if full {
+        return Ok(SessionListResult {
+            sessions: page,
+            digests: Vec::new(),
+            engine: detail,
+            total: reported,
+            truncated,
+            hidden_count: 0,
+        });
+    }
+    let digests = page
+        .iter()
+        .map(|summary| digest_of(summary, attention_name(summary, now, stall_after)))
+        .collect();
     Ok(SessionListResult {
-        sessions,
-        // `mode` defaults to `digest` on the Python side, which returns its
-        // rows under `digests` and leaves `sessions` empty. The digest rows
-        // are not built here yet, so both are empty for the same empty list.
-        digests: Vec::new(),
+        sessions: Vec::new(),
+        digests,
         engine: detail,
-        total: 0,
-        truncated: false,
+        total: reported,
+        truncated,
         hidden_count: 0,
     })
 }
 
+/// One past the operation's own page ceiling, so a match beyond it is
+/// overflow rather than a silently complete list. Python `_DECLARED_FETCH`.
+const DECLARED_FETCH: i64 = 501;
+
+const DIGEST_LIVE: &[&str] = &[
+    "running", "idle", "waiting", "blocked", "approval", "stalled", "done", "unknown",
+];
+const EXCLUDED_STATES: &[&str] = &["hibernated", "stopped", "exited"];
+const DIGEST_CLIP: usize = 120;
+
+fn attention_name(summary: &SessionSummary, now: crate::core::Moment, stall_after_secs: i64) -> String {
+    decisions::classify(
+        summary.activity.as_deref(),
+        summary.alive,
+        Some(summary.activity.as_deref() == Some("waiting-for-input")),
+        summary.approval.as_ref().map(|approval| approval.question.as_str()),
+        summary.blocked.as_ref().map(|blocked| blocked.blocker.as_str()),
+        summary.approval.as_ref().map(|approval| approval.kind.as_str()),
+        summary
+            .last_output_at
+            .as_deref()
+            .and_then(|text| crate::core::from_iso(text).ok()),
+        now,
+        stall_after_secs,
+    )
+    .attention
+    .as_str()
+    .to_string()
+}
+
+fn state_of(summary: &SessionSummary, attention: &str) -> Option<String> {
+    if summary.activity.as_deref() == Some("stopped") || attention == "exited" {
+        return Some(if attention == "exited" {
+            "exited".to_string()
+        } else {
+            summary.activity.clone().unwrap_or_else(|| attention.to_string())
+        });
+    }
+    summary.activity.clone().or_else(|| {
+        if attention.is_empty() {
+            None
+        } else {
+            Some(attention.to_string())
+        }
+    })
+}
+
+/// Default listings drop hibernated, stopped and exited. An empty `states`
+/// list means the caller asked for every state.
+fn digest_kept(summary: &SessionSummary, attention: String, states: Option<&[String]>) -> bool {
+    if states.is_some_and(|wanted| wanted.is_empty()) {
+        return true;
+    }
+    let allowed: Vec<&str> = match states {
+        None => DIGEST_LIVE.to_vec(),
+        Some(wanted) => wanted.iter().map(String::as_str).collect(),
+    };
+    let state = state_of(summary, &attention);
+    let Some(state) = state else {
+        return allowed.iter().any(|name| *name == "unknown");
+    };
+    if allowed.iter().any(|name| *name == state) || allowed.iter().any(|name| *name == attention) {
+        return true;
+    }
+    !EXCLUDED_STATES.contains(&state.as_str()) && allowed.iter().any(|name| *name == state)
+}
+
+fn clip(text: &str) -> String {
+    text.chars().take(DIGEST_CLIP).collect()
+}
+
+fn digest_of(
+    summary: &SessionSummary,
+    attention: String,
+) -> SessionDigestRow {
+    let blocked = summary.blocked.as_ref().map(|blocked| blocked.blocker.clone());
+    let approval = summary.approval.as_ref();
+    SessionDigestRow {
+        id: summary.id.clone(),
+        name: summary.name.clone(),
+        work_item: summary.work_item.clone(),
+        activity: summary.activity.clone(),
+        attention: Some(attention),
+        ready: Some(summary.activity.as_deref() == Some("waiting-for-input")),
+        blocked_reason: blocked.as_ref().map(|text| clip(text)),
+        blocked_detail: blocked.filter(|text| text.chars().count() > DIGEST_CLIP),
+        turn_started_at: summary.turn_started_at.clone(),
+        done_at: None,
+        last_reply_excerpt: summary
+            .last_reply_excerpt
+            .as_ref()
+            .map(|text| clip(text)),
+        report: None,
+        template: summary.template.clone(),
+        brief_file: None,
+        question: approval.map(|approval| approval.question.clone()),
+        question_kind: approval.map(|approval| approval.kind.clone()),
+        options: approval.and_then(|approval| {
+            if approval.options.is_empty() {
+                None
+            } else {
+                Some(approval.options.iter().map(|option| option.label.clone()).collect())
+            }
+        }),
+        budget: None,
+        supervisor: None,
+        extra: None,
+    }
+}
+
 /// The rows `session.list` and `session.sweep` share.
+///
+/// The second value is true when more declared links match than
+/// `DECLARED_FETCH` read, so the caller's `total` is a floor.
 fn rows_of<C, I>(
     ctx: &AppContext<C, I>,
     params: &ListSessionsParams,
     live: &[EngineSession],
     detail: Option<&str>,
-) -> Result<Vec<SessionSummary>, VogtError>
+) -> Result<(Vec<SessionSummary>, bool), VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
@@ -1224,13 +1403,21 @@ where
         Some(reference) => Some(resolve::work_item(&view, reference)?.id),
         None => None,
     };
+    // The page is cut after the state filter, so the declared half is the
+    // joined set, not this caller's page. One past the operation ceiling.
     let recorded = view.list_sessions(
         project_id.as_deref(),
         work_item_id.as_deref(),
         params.include_stopped,
-        params.limit,
-        params.offset,
+        DECLARED_FETCH,
+        0,
     )?;
+    let declared_overflow = recorded.len() as i64 == DECLARED_FETCH;
+    let recorded: Vec<_> = if declared_overflow {
+        recorded.into_iter().take((DECLARED_FETCH - 1) as usize).collect()
+    } else {
+        recorded
+    };
     drop(view);
     let mut summaries = Vec::with_capacity(recorded.len());
     for session in &recorded {
@@ -1257,7 +1444,6 @@ where
                 summaries.push(unlinked_summary(&view, engine_session)?);
             }
         }
-        summaries.truncate(params.limit.max(0) as usize);
     }
     // Outside the read transaction: this is file I/O, and an excerpt that
     // cannot be had is a null, never an error. Only a session the engine
@@ -1295,7 +1481,7 @@ where
             }
         }
     }
-    Ok(summaries)
+    Ok((summaries, declared_overflow))
 }
 
 fn page_len(shown: usize, _unlinked: i64) -> i64 {
@@ -1345,7 +1531,7 @@ where
         Err(error) => return Err(error),
     };
     let live: Vec<EngineSession> = entries.iter().map(|entry| entry.session.clone()).collect();
-    let listed = rows_of(
+    let (listed, _declared_overflow) = rows_of(
         ctx,
         &ListSessionsParams {
             project: params.project.clone(),
@@ -1354,6 +1540,9 @@ where
             limit: 500,
             offset: 0,
             order: "started".to_string(),
+            mode: "full".to_string(),
+            states: None,
+            stall_after_minutes: params.stall_after_minutes,
         },
         &live,
         None,
