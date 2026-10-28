@@ -1942,7 +1942,8 @@ def build_operations() -> list[Operation[Any, Any]]:
             result_model=CloneResult,
             handler=services.clone,
             # No REST route: a clone replaces the live stores from a path on the
-            # server's filesystem, so it is an operator action at the machine.
+            # server's filesystem, so it is an operator action at the machine
+            # (WI-1075). The Rust registry stays local-only for the same reason.
             route=None,
             cli=CliBinding(("clone",)),
         ),

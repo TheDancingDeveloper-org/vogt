@@ -303,11 +303,36 @@ fn build(
     transport: Option<Transport>,
 ) -> Result<Option<ForgeClient>, VogtError> {
     match kind {
-        ForgeKind::GitHub => Ok(GitHubClient::from_token_file(
-            token_file_for(config, host),
-            transport,
-        )?
-        .map(|client| ForgeClient::GitHub(GitHubProvider::new(client)))),
+        ForgeKind::GitHub => {
+            // The App takes precedence over the token file, matching
+            // `github_client_for`: a usable App key is a credential even when
+            // no PAT file exists. The token is still what the client sends
+            // until installation-token minting is ported; the writability
+            // gate only asks whether a credential resolves.
+            if host == GITHUB_HOST {
+                if let Some(key) = config.github_app_private_key_file.as_deref() {
+                    if config
+                        .github_app_id
+                        .as_deref()
+                        .is_some_and(|id| !id.is_empty())
+                        && GitHubClient::usable_app_key(key)
+                    {
+                        let client = match GitHubClient::from_token_file(
+                            token_file_for(config, host),
+                            None,
+                        )? {
+                            Some(client) => client,
+                            None => GitHubClient::new(None, transport),
+                        };
+                        return Ok(Some(ForgeClient::GitHub(GitHubProvider::new(client))));
+                    }
+                }
+            }
+            Ok(
+                GitHubClient::from_token_file(token_file_for(config, host), transport)?
+                    .map(|client| ForgeClient::GitHub(GitHubProvider::new(client))),
+            )
+        }
         ForgeKind::Forgejo => {
             Ok(
                 ForgejoClient::from_token_file(host, token_file_for(config, host), transport)?

@@ -3009,8 +3009,8 @@ fn list_board<C: Clock, I: IdFactory>(
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_branch, comment_work, create_work, get_many_work, get_work, list_board, list_work,
-        relate_work, transition_work, unrelate_work, update_work, work_page,
+        bind_branch, comment_work, create_work, gaps_for, get_many_work, get_work, list_board,
+        list_work, policy_gap, relate_work, transition_work, unrelate_work, update_work, work_page,
     };
     use crate::application::context::{build_context, Built};
     use crate::core::{
@@ -3254,6 +3254,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(after["item"]["ref"], "WI-1");
+    }
+
+    #[test]
+    fn a_configured_github_app_is_a_credential_without_a_token_file() {
+        // Python's `github_client_for` returns the App client when the App id
+        // and a readable RSA key are set, even with no PAT. The writability
+        // reason then names only the policy, not a missing credential.
+        let dir =
+            std::env::temp_dir().join(format!("vogt-work-app-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("app.pem");
+        std::fs::write(
+            &key,
+            "-----BEGIN RSA PRIVATE KEY-----\nAQ==\n-----END RSA PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            github_app_id: Some("12345".to_string()),
+            github_app_private_key_file: Some(key),
+            ..crate::config::VogtConfig::default()
+        };
+        let built = build_context(
+            config,
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            panic!("expected a step clock");
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared
+            .bootstrap(&Principal::new("local:test-user", ActorKind::Human, "Test").unwrap())
+            .unwrap();
+        insert_project(&built, "beta", true, WriteBack::Disabled);
+        let view = ctx.declared.read().unwrap();
+        let project = view.project_by_slug("beta").unwrap().unwrap();
+        let actor = view.actor_by_identity(&ctx.principal.identity_ref).unwrap();
+        let gaps = gaps_for(
+            ctx,
+            &project,
+            actor.as_ref(),
+            policy_gap(&project, "create"),
+        )
+        .unwrap();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert!(gaps[0].contains("write-back policy is 'none'"), "{gaps:?}");
+        assert!(
+            !gaps.iter().any(|gap| gap.contains("no forge credential")),
+            "{gaps:?}"
+        );
     }
 
     #[test]
