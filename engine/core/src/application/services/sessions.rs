@@ -1329,12 +1329,12 @@ fn digest_kept(summary: &SessionSummary, attention: String, states: Option<&[Str
     };
     let state = state_of(summary, &attention);
     let Some(state) = state else {
-        return allowed.iter().any(|name| *name == "unknown");
+        return allowed.contains(&"unknown");
     };
-    if allowed.iter().any(|name| *name == state) || allowed.iter().any(|name| *name == attention) {
+    if allowed.contains(&state.as_str()) || allowed.contains(&attention.as_str()) {
         return true;
     }
-    !EXCLUDED_STATES.contains(&state.as_str()) && allowed.iter().any(|name| *name == state)
+    !EXCLUDED_STATES.contains(&state.as_str()) && allowed.contains(&state.as_str())
 }
 
 fn clip(text: &str) -> String {
