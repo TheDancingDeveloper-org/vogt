@@ -238,18 +238,43 @@ fn validate_count(key: &str, object: &Map<String, Value>, value: &Value) -> Resu
             "invalid {key} value — {extra}: Extra inputs are not permitted"
         ));
     }
-    match object.get("value") {
-        Some(Value::Number(number)) if number.as_i64().is_some_and(|n| n >= 0) => Ok(value.clone()),
-        Some(Value::Number(_)) => Err(format!(
+    // Pydantic lax `int`: a trimmed digit string, a boolean and a whole float
+    // are integers. The stored value is the normalised integer, not the JSON
+    // that arrived. A fractional number is Python's exact message.
+    let number = match object.get("value") {
+        Some(Value::Number(number)) => match number.as_i64() {
+            Some(number) => number,
+            None if number.as_f64().is_some_and(|f| f.fract() == 0.0) => {
+                number.as_f64().unwrap() as i64
+            }
+            None => {
+                return Err(format!(
+                    "invalid {key} value — value: Input should be a valid integer, got a number with a fractional part"
+                ));
+            }
+        },
+        Some(Value::Bool(flag)) => i64::from(*flag),
+        Some(Value::String(text)) => match text.trim().parse::<i64>() {
+            Ok(number) => number,
+            Err(_) => {
+                return Err(format!(
+                    "invalid {key} value — value: Input should be a valid integer, unable to parse string as an integer"
+                ));
+            }
+        },
+        _ => {
+            return Err(format!(
+                "invalid {key} value — value: Input should be a valid integer"
+            ));
+        }
+    };
+    if number < 0 {
+        return Err(format!(
             "invalid {key} value — value: Input should be greater than or equal to 0"
-        )),
-        Some(Value::String(_)) => Err(format!(
-            "invalid {key} value — value: Input should be a valid integer, unable to parse string as an integer"
-        )),
-        _ => Err(format!(
-            "invalid {key} value — value: Input should be a valid integer"
-        )),
+        ));
     }
+    let _ = value;
+    Ok(serde_json::json!({"value": number}))
 }
 
 /// The code defaults (design C10).
@@ -530,5 +555,39 @@ mod tests {
         );
         assert!(validate(BUDGET_RESTARTS_KEY, &json!({"value": -1})).is_err());
         assert!(validate(BUDGET_RESTARTS_KEY, &json!({"value": 1, "extra": true})).is_err());
+        // Pydantic lax int: the stored value is the normalised integer.
+        assert_eq!(
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": "3"})).unwrap(),
+            json!({"value": 3})
+        );
+        assert_eq!(
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": true})).unwrap(),
+            json!({"value": 1})
+        );
+        assert_eq!(
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": 1.0})).unwrap(),
+            json!({"value": 1})
+        );
+        assert_eq!(
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": 1.5})).unwrap_err(),
+            "invalid dispatch.budget_restarts_per_item value — value: Input should be a valid integer, got a number with a fractional part"
+        );
+        // Pydantic lax int: the stored value is the normalised integer.
+        assert_eq!(
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": "3"})).unwrap(),
+            json!({"value": 3})
+        );
+        assert_eq!(
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": true})).unwrap(),
+            json!({"value": 1})
+        );
+        assert_eq!(
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": 1.0})).unwrap(),
+            json!({"value": 1})
+        );
+        assert_eq!(
+            validate(BUDGET_RESTARTS_KEY, &json!({"value": 1.5})).unwrap_err(),
+            "invalid dispatch.budget_restarts_per_item value — value: Input should be a valid integer, got a number with a fractional part"
+        );
     }
 }
