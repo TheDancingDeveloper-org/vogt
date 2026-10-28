@@ -230,9 +230,12 @@ fn revoke_recorded<C: Clock + 'static, I: IdFactory + 'static>(
                     "token '{id}' is already revoked"
                 )));
             }
-            let updated = txn
-                .token_by_id(&id)?
-                .expect("the token was just written in this transaction");
+            let updated = txn.token_by_id(&id)?.ok_or_else(|| {
+                VogtError::MigrationError(
+                    "the token was written in this transaction but could not be read back"
+                        .to_string(),
+                )
+            })?;
             let payload = serde_json::to_value(&updated).expect("a token serialises");
             Ok(WriteOutcome::new(
                 payload.clone(),
@@ -357,7 +360,12 @@ fn create_user_recorded<C: Clock + 'static, I: IdFactory + 'static>(
             txn.upsert_password_credential(&holder.id, &username, &password_hash, &scopes, now)?;
             let user = txn
                 .password_credential_for_actor(&holder.id)?
-                .expect("the credential was just written in this transaction");
+                .ok_or_else(|| {
+                    VogtError::MigrationError(
+                        "the credential was written in this transaction but could not be read back"
+                            .to_string(),
+                    )
+                })?;
             let payload = serde_json::to_value(&user).expect("a credential serialises");
             Ok(WriteOutcome::new(
                 payload,
@@ -458,7 +466,12 @@ fn set_password_recorded<C: Clock + 'static, I: IdFactory + 'static>(
             };
             let user = txn
                 .password_credential_for_actor(&current.actor_id)?
-                .expect("the credential was just written in this transaction");
+                .ok_or_else(|| {
+                    VogtError::MigrationError(
+                        "the credential was written in this transaction but could not be read back"
+                            .to_string(),
+                    )
+                })?;
             Ok(WriteOutcome::new(
                 serde_json::to_value(&user).expect("a credential serialises"),
                 "user",

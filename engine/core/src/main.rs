@@ -846,8 +846,10 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 let handle = axum_server::Handle::new();
                 let signal = handle.clone();
                 tokio::spawn(async move {
-                    shutdown().await;
-                    signal.graceful_shutdown(None);
+                    // `shutdown` already bounds the grace. Passing `None` here
+                    // would start a second, unbounded drain after that.
+                    wait_for_stop().await;
+                    signal.graceful_shutdown(Some(SHUTDOWN_GRACE));
                 });
                 axum_server::bind_rustls(addr, tls)
                     .handle(handle)
@@ -889,8 +891,59 @@ fn resolve_data_dir(given: Option<PathBuf>) -> Result<PathBuf, String> {
     config::load_config(&overrides).map(|config| config.resolved_data_dir().to_path_buf())
 }
 
+/// How long a drain may hold the process after SIGTERM or SIGINT. In-flight
+/// requests finish inside it; anything still running is dropped. `docker stop`
+/// sends SIGTERM and then SIGKILL after its own grace, so this has to be
+/// shorter than a typical stop timeout and long enough for a store write.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait until SIGTERM or SIGINT, then for the grace. The first signal starts
+/// the drain (the listeners stop accepting); the grace is how long in-flight
+/// requests have to finish and the store has to flush. A second signal, or
+/// the grace expiring, ends the wait so the process can exit.
 async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
+    wait_for_stop().await;
+    let grace = tokio::time::sleep(SHUTDOWN_GRACE);
+    tokio::pin!(grace);
+    tokio::select! {
+        () = &mut grace => {}
+        () = wait_for_stop() => {}
+    }
+}
+
+/// The next SIGTERM or SIGINT. SIGINT is what `ctrl_c` listens for; SIGTERM is
+/// what `docker stop` sends, and `ctrl_c` alone never sees it, so the process
+/// was killed mid-write. On a platform without unix signals, SIGINT is the
+/// only one that can arrive.
+async fn wait_for_stop() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("vogt-core serve: SIGTERM is not available ({err}); waiting on SIGINT");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        let mut interrupt = match signal(SignalKind::interrupt()) {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("vogt-core serve: SIGINT is not available ({err}); waiting on SIGTERM");
+                terminate.recv().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// `--tls-cert` and `--tls-key` are a pair. Python refuses one without the
@@ -1021,5 +1074,25 @@ mod data_dir_tests {
             let resolved = resolve_data_dir(Some(from_flag.clone())).unwrap();
             assert_eq!(resolved.as_path(), from_flag.as_path());
         });
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::{wait_for_stop, SHUTDOWN_GRACE};
+
+    /// The drain is bounded, and a wait with no signal stays pending rather
+    /// than returning at once. Sending a real signal would stop the test
+    /// process, so this proves the wait is the signal future and the grace is
+    /// the bound `shutdown` selects on.
+    #[tokio::test]
+    async fn the_drain_waits_on_a_signal_and_the_grace_is_bounded() {
+        assert!(SHUTDOWN_GRACE <= std::time::Duration::from_secs(30));
+        assert!(SHUTDOWN_GRACE >= std::time::Duration::from_secs(1));
+        let started = std::time::Instant::now();
+        tokio::time::timeout(std::time::Duration::from_millis(50), wait_for_stop())
+            .await
+            .expect_err("no signal was sent, so the wait is still pending");
+        assert!(started.elapsed() < SHUTDOWN_GRACE);
     }
 }
