@@ -91,3 +91,61 @@ def test_merge_base_golden_wins_when_it_is_present(tmp_path: Path) -> None:
     )
     assert out.stdout.strip() == f"goldens/{base[:7]}"
     assert out.stderr == ""
+
+
+def test_fallback_dates_a_golden_by_the_commit_that_added_it(tmp_path: Path) -> None:
+    """A graft land squashes, so the commit a golden is named for is not in
+    the history CI checks out. The recording still qualifies, dated by the
+    commit that added its directory (WI-2662)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    base = _commit(repo, "2026-08-01T00:00:00Z", "main")
+    _git(repo, "checkout", "-b", "topic")
+    _commit(repo, "2026-09-01T00:00:00Z", "landed recording")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "main")
+    # Named for a commit that does not exist here, as a squashed recording is.
+    name = "b88583a"
+    assert name != base[:7]
+    recorded = repo / "goldens" / name
+    recorded.mkdir(parents=True)
+    (recorded / "cli.json").write_text("{}" + chr(10))
+    _git(repo, "add", "goldens")
+    added = _commit(repo, "2026-10-01T00:00:00Z", "add the recorded golden")
+
+    out = subprocess.run(
+        [str(SCRIPT), "goldens"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert out.stdout.strip() == f"goldens/{name}"
+    assert name in out.stderr
+    assert added
+
+
+def test_a_tied_commit_time_keeps_the_later_recording(tmp_path: Path) -> None:
+    """One graft batch stamps every land with the same committer time."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _commit(repo, "2026-08-01T00:00:00Z", "main")
+    _git(repo, "checkout", "-b", "topic")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "main")
+    when = "2026-10-01T00:00:00Z"
+    for name in ("aaaaaaa", "bbbbbbb"):
+        recorded = repo / "goldens" / name
+        recorded.mkdir(parents=True)
+        (recorded / "cli.json").write_text("{}" + chr(10))
+        _git(repo, "add", "goldens")
+        _commit(repo, when, f"add {name}")
+
+    out = subprocess.run(
+        [str(SCRIPT), "goldens"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert out.stdout.strip() == "goldens/bbbbbbb"
