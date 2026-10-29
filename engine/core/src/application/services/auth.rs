@@ -1002,6 +1002,16 @@ mod tests {
         assert_eq!(session["token"]["scopes"], serde_json::json!(["read"]));
         assert!(session["secret"].as_str().unwrap().starts_with("vogt_"));
 
+        let through_op = decisions_op(&built, serde_json::json!({})).unwrap();
+        let through_filter =
+            decisions_op(&built, serde_json::json!({"decision": "deny", "limit": 10})).unwrap();
+        assert_eq!(through_op["decisions"].as_array().unwrap().len(), 2);
+        assert_eq!(through_filter["decisions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            through_filter["decisions"][0]["reason_code"],
+            "bad_password"
+        );
+
         let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
         let decisions = view.list_auth_decisions(None, 10).unwrap();
         let kinds: Vec<&str> = decisions
