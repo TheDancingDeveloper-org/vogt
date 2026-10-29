@@ -20,10 +20,11 @@
 //! process.
 //!
 //! Each tick runs the collector sweep with reason [`SCHEDULED_REASON`] and then,
-//! whether or not the sweep succeeded, `settle_budget_stops` (WI-1833). The
-//! watch pass (`evaluate_watches`, WI-2036) is not ported: the schedule reads
-//! `watch_interval_seconds` so the key is no longer unread, and leaves the
-//! watch loop unstarted until the evaluator exists.
+//! whether or not the sweep succeeded, `settle_budget_stops` (WI-1833). A tick
+//! that panics is caught at the join and still counted as a failure; the
+//! settlement itself is inside the tick, in a `catch_unwind`, so a panicking
+//! sweep does not skip it. The watch pass (`evaluate_watches`, WI-2036) is not
+//! ported: `watch_interval_seconds` stays unread, and no watch loop is started.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -66,15 +67,24 @@ pub fn scheduler_principal() -> Principal {
 /// over the same config the listener loaded. The clock and ids are the hook
 /// pair `build_context` already resolves, not a second clock the routes share.
 /// The sweep, then the budget settlement, as Python's `try: sweep finally:
-/// settle_budget_stops`. The settlement runs whether or not the sweep failed;
-/// an error from the settlement replaces the sweep's, the way an exception
-/// raised in a `finally` block does.
+/// settle_budget_stops`. The settlement runs whether or not the sweep failed
+/// *or panicked*: a panic is caught and turned into the same failure a raised
+/// error is, and the settlement still runs. An error from the settlement
+/// replaces the sweep's, the way an exception raised in a `finally` block does.
 pub fn sweep_then_settle(
     sweep: impl FnOnce() -> Result<(), VogtError>,
     settle: impl FnOnce() -> Result<(), VogtError>,
 ) -> Result<(), VogtError> {
-    let swept = sweep();
-    settle()?;
+    // Closures that capture the engine transport are not UnwindSafe (the
+    // transport is interior-mutable). Assert it here: a sweep panic is caught
+    // and turned into an error, and the settlement still runs.
+    let swept = std::panic::catch_unwind(std::panic::AssertUnwindSafe(sweep));
+    let settled = settle();
+    let swept = match swept {
+        Ok(result) => result,
+        Err(_) => Err(VogtError::InvalidRequest("scheduled sweep panicked".into())),
+    };
+    settled?;
     swept
 }
 
@@ -127,24 +137,6 @@ impl CollectorSchedule {
             task: None,
             counts: Arc::new(Counts::default()),
         }
-    }
-
-    /// Python's `WatchSchedule` when the evaluator is not ported: the interval
-    /// is read (so the key is no longer unread) and nothing is started. Zero
-    /// is the disabled case either way.
-    pub fn watch_interval_seconds(interval_seconds: i64) -> i64 {
-        if interval_seconds > 0 {
-            tracing::info!(
-                target: TARGET,
-                "watch schedule not started (evaluate_watches is not ported; watch_interval_seconds={interval_seconds})"
-            );
-        } else {
-            tracing::info!(
-                target: TARGET,
-                "watch schedule disabled (watch_interval_seconds=0)"
-            );
-        }
-        interval_seconds
     }
 
     pub fn enabled(&self) -> bool {
@@ -456,8 +448,22 @@ mod tests {
     fn the_default_interval_is_fifteen_minutes() {
         let config = VogtConfig::default();
         assert_eq!(config.sweep_interval_seconds, 900);
-        assert_eq!(config.watch_interval_seconds, 60);
-        assert_eq!(CollectorSchedule::watch_interval_seconds(0), 0);
-        assert_eq!(CollectorSchedule::watch_interval_seconds(60), 60);
+    }
+
+    #[test]
+    fn a_panicking_sweep_still_settles() {
+        let order = std::sync::Mutex::new(Vec::new());
+        let swept = sweep_then_settle(
+            || {
+                order.lock().unwrap().push("sweep");
+                panic!("collector");
+            },
+            || {
+                order.lock().unwrap().push("settle");
+                Ok(())
+            },
+        );
+        assert!(swept.is_err());
+        assert_eq!(order.lock().unwrap().as_slice(), ["sweep", "settle"]);
     }
 }
