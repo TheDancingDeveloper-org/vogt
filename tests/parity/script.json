@@ -1617,7 +1617,7 @@
       "operation": "session.stop",
       "engine": true,
       "params": {
-        "id": "{seen:session.start#session.id}",
+        "id": "{seen:session.start#session.engine_session_id}",
         "reason": "parity"
       },
       "expect": {
