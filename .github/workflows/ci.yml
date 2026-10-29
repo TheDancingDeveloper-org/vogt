@@ -770,11 +770,23 @@ jobs:
           cargo nextest run --locked ${{ steps.scope.outputs.args }} --no-fail-fast
 
       # nextest does not run doctests, so they keep their own step.
+      # vogt-core is a bin with no library target, and `cargo test --doc -p
+      # vogt-core` errors ("no library targets found") rather than skipping.
       - name: cargo test (doctests)
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
         working-directory: engine
-        run: cargo test --locked ${{ steps.scope.outputs.args }} --doc
+        run: |
+          set -euo pipefail
+          args="${{ steps.scope.outputs.args }}"
+          # Drop `-p vogt-core`: it has no library, so `--doc` cannot run.
+          filtered="$(printf '%s\n' $args | awk 'BEGIN{skip=0} {if($0=="-p"){getline; if($0!="vogt-core") print "-p",$0} else print}')"
+          if [ -z "$filtered" ]; then
+            echo "no library targets in scope; skipping doctests"
+            exit 0
+          fi
+          # shellcheck disable=SC2086  # filtered is cargo's own -p list
+          cargo test --locked $filtered --doc
 
   voice:
     name: fmt, clippy, test (voice sidecar foundation)

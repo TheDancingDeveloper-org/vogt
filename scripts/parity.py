@@ -823,13 +823,20 @@ class _StandInHandler(BaseHTTPRequestHandler):
             and parts[:2] == ["api", "chats"]
             and parts[3] == "approvals"
         ):
+            # ChatApprovalView requires the full decision, not just the tool
+            # name. `status` follows the payload; timestamps are the pinned
+            # parity clock (VOGT_TEST_CLOCK_START), matching the chat body.
+            allow = bool(payload.get("allow"))
             return self._reply(
                 200,
                 {
                     "id": parts[4],
                     "tool_name": "parity",
                     "summary": "parity",
-                    "allow": payload.get("allow"),
+                    "source": "gate",
+                    "status": "allowed" if allow else "denied",
+                    "requested_at": "2026-01-01T00:00:00Z",
+                    "expires_at": "2026-01-01T00:10:00Z",
                 },
             )
         if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "model":
@@ -860,7 +867,7 @@ class _StandInHandler(BaseHTTPRequestHandler):
             session_id = _StandInState.fresh("eng")
             return self._reply(
                 200,
-                {"chat": chat, "session": self._remember(session_id, name="promoted")},
+                {"chat": found, "session": self._remember(session_id, name="promoted")},
             )
         self._reply(404, None)
 
