@@ -17,13 +17,11 @@ on:
   push:
     branches: [rust-core, wi-1076-engine-core, wi-1443-main-sync]
   pull_request:
-    # main is listed so the cutover PR (head rust-core, base main) starts
-    # this workflow at all. Fast jobs have no if:, so they run on that pull
-    # request too; Playwright is the only job gated to that one PR.
-    # Paths keep a docs-only or web-only PR into main from spending a rust
-    # job: the gate is the core, the parity suite, the Python it is ported
-    # from, and this workflow.
-    branches: [rust-core, wi-1443-main-sync, main]
+    # `main` is not a pull_request base: a PR into main (including the
+    # rust-core cutover) must not start this workflow. Fast jobs have no
+    # if:, so listing main spent a rust job on every core-touching PR.
+    # Paths stay narrow for the long-lived integration branches.
+    branches: [rust-core, wi-1443-main-sync]
     paths:
       - "engine/core/**"
       - "engine/server/**"
@@ -180,7 +178,7 @@ jobs:
     name: compose smoke against the Rust core
     # Image build and stack walk only. The live browser run moved to
     # `playwright`, and neither runs on every push (WI-2677).
-    if: github.event_name == 'merge_group' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, docker]
     timeout-minutes: 30
     steps:
@@ -197,7 +195,6 @@ jobs:
     # other pull request into main. The head-repo check refuses a fork
     # branch that happens to be named rust-core (self-hosted runners).
     if: >-
-      github.event_name == 'merge_group' ||
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
@@ -374,7 +371,7 @@ jobs:
   coverage:
     name: line coverage >= 80%
     # An instrumented rebuild, so not part of the per-push set (WI-2677).
-    if: github.event_name == 'merge_group' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     # The Python gate was pytest --cov-fail-under=80, and this floor matches
     # it. Measured line coverage of engine/core is 80.22% (the whole crate,
     # tests included, at rust-core a5ac4cba; WI-1080). It only moves up.
