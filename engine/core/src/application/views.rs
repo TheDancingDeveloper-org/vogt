@@ -933,7 +933,7 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{backlog, projected, trust_for};
+    use super::{backlog, projected, trust_for, RANKING_CANDIDATE_LIMIT};
     use crate::application::context::{build_context, Built};
     use crate::config::VogtConfig;
     use crate::core::{
@@ -1069,6 +1069,60 @@ mod tests {
             assert_eq!(result["declared"], 120);
             assert_eq!(result["total_considered"], 120);
             assert_eq!(result["items"].as_array().unwrap().len(), 20);
+        });
+    }
+
+    /// A ranked view loads at most `RANKING_CANDIDATE_LIMIT` declared rows.
+    /// Ports `test_the_backlog_is_capped_rather_than_unbounded`: seeding past
+    /// the window must not make `total_considered` grow without bound.
+    #[test]
+    fn the_backlog_is_capped_rather_than_unbounded() {
+        let now = Moment::from_unix(1_781_000_000, 0);
+        with_trust(now, |ctx| {
+            ctx.declared.migrate().unwrap();
+            ctx.declared
+                .bootstrap(&Principal::new("local:test-user", ActorKind::Human, "Test").unwrap())
+                .unwrap();
+            let seeded = RANKING_CANDIDATE_LIMIT + 25;
+            {
+                let mut txn = ctx.declared.write().unwrap();
+                let mut project = Project::new("prj_alpha", "alpha", "Alpha", "/tmp/alpha", now);
+                project.link_state = LinkState::Linked;
+                txn.insert_project(&project).unwrap();
+                for n in 1..=seeded {
+                    txn.insert_work_item(&WorkItem {
+                        id: format!("wrk_{n}"),
+                        reference: format!("WI-{n}"),
+                        kind: WorkKind::Feature,
+                        title: format!("Item {n}"),
+                        body: String::new(),
+                        state: "open".to_string(),
+                        priority: Priority::P2,
+                        effort: None,
+                        project_id: Some("prj_alpha".to_string()),
+                        project_slug: Some("alpha".to_string()),
+                        initiative_id: None,
+                        origin: Origin::Created,
+                        trust_state: TrustState::Unverified,
+                        assignee_actor_id: None,
+                        assignee_identity_ref: None,
+                        labels: Vec::new(),
+                        relations: Vec::new(),
+                        superseded_by: None,
+                        created_at: now,
+                        updated_at: now,
+                    })
+                    .unwrap();
+                }
+                txn.commit().unwrap();
+            }
+            let result = backlog(ctx, serde_json::json!({"limit": 1})).unwrap();
+            let considered = result["total_considered"].as_i64().unwrap();
+            assert!(
+                considered <= RANKING_CANDIDATE_LIMIT,
+                "total_considered {considered} exceeded the ranking window {RANKING_CANDIDATE_LIMIT}"
+            );
+            assert_eq!(considered, RANKING_CANDIDATE_LIMIT);
         });
     }
 

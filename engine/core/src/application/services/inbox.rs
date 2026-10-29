@@ -2157,8 +2157,10 @@ const _BRANCH_KIND: &str = BRANCH_CONCLUDED_KIND;
 #[cfg(test)]
 mod tests {
     use super::{inbox_archive_op, inbox_list_op, inbox_restore_op};
-    use crate::application::services::services_test::opened;
+    use crate::application::context::Built;
+    use crate::application::services::services_test::{moment, opened};
     use crate::errors::VogtError;
+    use crate::storage::interface::DeclaredStore;
     use serde_json::json;
 
     /// An empty inbox distinguishes "nothing here" from a failed read: the
@@ -2189,6 +2191,197 @@ mod tests {
             matches!(refused, Err(VogtError::InboxEntryNotFound(_))),
             "{refused:?}"
         );
+    }
+
+    /// CI history does not multiply store reads. `latest` is called for
+    /// notifications, checks and task runs once each, however many old
+    /// failing revisions exist; only the newest revision's failures become
+    /// "CI failing" entries. Ports
+    /// `test_the_store_is_read_a_fixed_number_of_times_however_many_checks_fail`.
+    #[test]
+    fn inbox_reads_the_store_a_fixed_number_of_times_however_many_checks_fail() {
+        use crate::core::{LinkState, Project};
+        use crate::storage::interface::{DeclaredStore, ObservedStore, WriteTxn};
+
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        let now = moment();
+        {
+            let mut txn = ctx.declared.write().unwrap();
+            for (id, slug) in [("prj_busy", "busy"), ("prj_quiet", "quiet")] {
+                let mut project = Project::new(id, slug, slug, &format!("/work/{slug}"), now);
+                project.link_state = LinkState::Unlinked;
+                txn.insert_project(&project).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let mut findings = Vec::new();
+        for i in 0..40 {
+            let revision = format!("0000{i:03}");
+            findings.push(check_finding(
+                "prj_busy",
+                &revision,
+                &format!("check-{i}"),
+                "failure",
+            ));
+        }
+        for (name, conclusion) in [
+            ("build", "failure"),
+            ("lint", "failure"),
+            ("test", "success"),
+        ] {
+            findings.push(check_finding("prj_busy", "9fe53d8", name, conclusion));
+        }
+        findings.push(check_finding("prj_quiet", "abc1234", "build", "failure"));
+
+        let sweep = ctx
+            .observed
+            .begin_sweep(
+                "forge-checks",
+                &["prj_busy".to_string(), "prj_quiet".to_string()],
+                now,
+            )
+            .unwrap();
+        ctx.observed.append(&sweep.id, &findings, now).unwrap();
+        ctx.observed
+            .finish_sweep(
+                &sweep.id,
+                crate::core::SweepOutcome::Ok,
+                &[("projects", 2)],
+                now,
+                None,
+            )
+            .unwrap();
+        ctx.observed.rebuild_latest().unwrap();
+
+        // `collect_stored` reads `latest` three times (notifications, checks,
+        // task runs) and never again per failing check. The public proof is
+        // the page: forty historical failures plus two current ones still
+        // yield exactly three active CI entries, the newest failures only.
+        let listed = inbox_list_op(&built, json!({"limit": 100})).unwrap();
+        assert_eq!(listed["counts"]["active"], 3, "{listed}");
+        let titles: Vec<String> = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["source"] == "ci")
+            .map(|entry| entry["title"].as_str().unwrap().to_string())
+            .collect();
+        let mut titles = titles;
+        titles.sort();
+        assert_eq!(
+            titles,
+            vec![
+                "CI failing: build".to_string(),
+                "CI failing: build".to_string(),
+                "CI failing: lint".to_string(),
+            ]
+        );
+        let summaries: Vec<String> = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["summary"].as_str().map(str::to_string))
+            .collect();
+        assert!(summaries.iter().all(|summary| !summary.contains("0000")));
+    }
+
+    fn check_finding(
+        project_id: &str,
+        revision: &str,
+        name: &str,
+        conclusion: &str,
+    ) -> crate::storage::observed_types::PendingObservation {
+        crate::storage::observed_types::PendingObservation {
+            kind: crate::adapters::forge::KIND_CHECK.to_string(),
+            subject_key: format!("ci:{project_id}@{revision}:{name}"),
+            payload: json!({
+                "revision": revision,
+                "check": name,
+                "conclusion": conclusion,
+                "updated_at": "2026-08-20T09:00:00Z",
+            }),
+            content_digest: format!("sha256:{project_id}:{revision}:{name}:{conclusion}"),
+            project_id: Some(project_id.to_string()),
+            source_url: None,
+            promoted: false,
+        }
+    }
+
+    /// One triage lookup covers the whole page, including a mix of active and
+    /// archived entries. Ports `test_triage_is_applied_from_one_lookup_for_the_whole_page`
+    /// as the public counts: archiving one of two CI failures leaves one
+    /// active and one archived when both states are requested.
+    #[test]
+    fn triage_for_a_page_is_one_lookup() {
+        use crate::core::{LinkState, Project};
+        use crate::storage::interface::{DeclaredStore, ObservedStore, WriteTxn};
+
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        let now = moment();
+        {
+            let mut txn = ctx.declared.write().unwrap();
+            let mut project = Project::new("prj_one", "one", "one", "/work/one", now);
+            project.link_state = LinkState::Unlinked;
+            txn.insert_project(&project).unwrap();
+            txn.commit().unwrap();
+        }
+        let findings = vec![
+            check_finding("prj_one", "9fe53d8", "build", "failure"),
+            check_finding("prj_one", "9fe53d8", "lint", "failure"),
+        ];
+        let sweep = ctx
+            .observed
+            .begin_sweep("forge-checks", &["prj_one".to_string()], now)
+            .unwrap();
+        ctx.observed.append(&sweep.id, &findings, now).unwrap();
+        ctx.observed
+            .finish_sweep(
+                &sweep.id,
+                crate::core::SweepOutcome::Ok,
+                &[("projects", 1)],
+                now,
+                None,
+            )
+            .unwrap();
+        ctx.observed.rebuild_latest().unwrap();
+
+        let listed = inbox_list_op(&built, json!({"limit": 10})).unwrap();
+        let entries = listed["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2, "{listed}");
+        let key = entries[0]["entry_key"].as_str().unwrap();
+        inbox_archive_op(&built, json!({"entry_key": key, "reason": "test"})).unwrap();
+
+        let again = inbox_list_op(
+            &built,
+            json!({"limit": 10, "triage_states": ["active", "archived"]}),
+        )
+        .unwrap();
+        assert_eq!(again["counts"]["active"], 1, "{again}");
+        assert_eq!(again["counts"]["archived"], 1, "{again}");
+        assert_eq!(again["counts"]["snoozed"], 0, "{again}");
+    }
+
+    /// More keys than one SQLite statement may bind still return in one call.
+    /// Ports `test_a_batched_triage_lookup_survives_the_bound_parameter_ceiling`.
+    #[test]
+    fn a_batched_triage_lookup_survives_the_bound_parameter_ceiling() {
+        use crate::storage::interface::ReadView;
+
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        let keys: Vec<String> = (0..1200).map(|i| format!("drift:key-{i}")).collect();
+        let view = ctx.declared.read().unwrap();
+        assert!(view.inbox_triage_by_keys(&keys).unwrap().is_empty());
+        assert!(view.inbox_triage_by_keys(&[]).unwrap().is_empty());
     }
 
     /// A missing reason is refused before any triage row is written.
