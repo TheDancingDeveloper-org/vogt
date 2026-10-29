@@ -12,9 +12,10 @@ entry="$root/entrypoint.sh"
 # Pull just the selector so the rest of the entrypoint (agent CLIs, exec) does
 # not run. The function is delimited by its name and the next top-level def.
 selector="$(awk '
+  /^link_vogt_names\(\)/ {p=1}
   /^vogt_core_bin\(\)/ {p=1}
   p {print}
-  p && /^}$/ {exit}
+  p && /^}$/ {p=0}
 ' "$entry")"
 # shellcheck disable=SC1090
 eval "$selector"
@@ -50,5 +51,23 @@ else
     fail "python without a console script should fail"
   fi
 fi
+
+# Operator names follow the same function. VOGT_BIN_DIR keeps the links out
+# of /usr/local/bin; unset it and the entrypoint writes there.
+bindir="$(mktemp -d)"
+trap 'rm -rf "$bindir"' EXIT
+export VOGT_BIN_DIR="$bindir"
+export VOGT_PYTHON_BIN="$bindir/python-vogt"
+export VOGT_PYTHON_MCP_BIN="$bindir/python-mcp"
+touch "$VOGT_PYTHON_BIN" "$VOGT_PYTHON_MCP_BIN"
+unset VOGT_CORE_IMPL || true
+link_vogt_names || fail "default link"
+[[ "$(readlink "$bindir/vogt")" == "$VOGT_PYTHON_BIN" ]] || fail "default link target"
+[[ "$(readlink "$bindir/vogt-mcp-remote")" == "$VOGT_PYTHON_MCP_BIN" ]] || fail "default mcp target"
+export VOGT_CORE_IMPL=rust
+export VOGT_RUST_CORE_BIN="$bindir/rust-core"
+link_vogt_names || fail "rust link"
+[[ "$(readlink "$bindir/vogt")" == "$bindir/rust-core" ]] || fail "rust link target"
+[[ "$(readlink "$bindir/vogt-mcp-remote")" == "$bindir/rust-core" ]] || fail "rust mcp target"
 
 echo "core-impl: ok"

@@ -767,6 +767,15 @@ jobs:
           if ! cargo nextest --version 2>/dev/null | grep -Fq 'cargo-nextest 0.9.103'; then
             cargo install --locked cargo-nextest --version 0.9.103 --force
           fi
+          # engine/server tests (rust_core.rs, front_door.rs) spawn the debug
+          # vogt-core binary and fail when it is absent. A server-only scope
+          # never builds that package, so build it before nextest whenever
+          # the server crate is in scope.
+          case " ${{ steps.scope.outputs.args }} " in
+            *" --workspace "*|*" -p vogt-engine-server "*)
+              cargo build --locked -p vogt-core
+              ;;
+          esac
           cargo nextest run --locked ${{ steps.scope.outputs.args }} --no-fail-fast
 
       # nextest does not run doctests, so they keep their own step.
@@ -787,6 +796,12 @@ jobs:
           fi
           # shellcheck disable=SC2086  # filtered is cargo's own -p list
           cargo test --locked $filtered --doc
+
+      # VOGT_CORE_IMPL selection (WI-2660). Sources the entrypoint's selector
+      # and checks python is the default and the operator names follow it.
+      - name: core implementation selector
+        if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
+        run: bash engine/deploy/tests/core-impl.sh
 
   voice:
     name: fmt, clippy, test (voice sidecar foundation)

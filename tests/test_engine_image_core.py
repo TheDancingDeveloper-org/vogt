@@ -1,9 +1,10 @@
-"""The engine image runs the Rust core it builds itself (WI-1078, I3).
+"""The engine image ships both cores and selects one at start (WI-2660).
 
 Static checks on `engine/Dockerfile` and `engine/deploy/entrypoint.sh`. The
-merged image no longer lifts a Python core from a published image or runs a uv
-venv; `vogt-core` is built in `server-build` and the entrypoint starts it where
-it used to start the Python `vogt`. The listen address and health URL are
+merged image builds `vogt-core` in `server-build` and also installs the Python
+core under `/opt/vogt/.venv`. `VOGT_CORE_IMPL` (default `python`) chooses which
+one the entrypoint supervises, and the same choice retargets the operator
+names `vogt` and `vogt-mcp-remote`. The listen address and health URL are
 unchanged, which is why the compose files do not change.
 """
 
@@ -42,27 +43,38 @@ def test_server_build_compiles_vogt_core_and_the_runtime_copies_it() -> None:
     )
 
 
-def test_the_engine_image_has_no_python_core_stage() -> None:
+def test_the_engine_image_does_not_lift_a_published_core() -> None:
     code = "\n".join(_code_lines(ENGINE_DOCKERFILE))
-    for retired in ("UV_IMAGE", "CORE_IMAGE", "AS core", "AS uv", "/opt/vogt/.venv"):
+    for retired in ("UV_IMAGE", "CORE_IMAGE", "AS core", "AS uv"):
         assert retired not in code, f"engine/Dockerfile still refers to {retired}"
     assert not re.search(r"COPY --from=core\b", code)
+    # The Python core is built in this image, not copied from a published one.
+    assert "AS python-core" in code
+    assert "COPY --from=python-core /opt/vogt /opt/vogt" in code
 
 
-def test_vogt_names_resolve_to_the_rust_binary() -> None:
-    text = ENGINE_DOCKERFILE.read_text(encoding="utf-8")
-    assert "ln -sfn /usr/local/bin/vogt-core /usr/local/bin/vogt;" in text
-    assert "ln -sfn /usr/local/bin/vogt-core /usr/local/bin/vogt-mcp-remote;" in text
+def test_operator_names_are_not_linked_to_rust_at_build_time() -> None:
+    """A build-time link would make `vogt` the rust binary in python mode."""
+    code = "\n".join(_code_lines(ENGINE_DOCKERFILE))
+    assert "ln -sfn /usr/local/bin/vogt-core /usr/local/bin/vogt" not in code
+    assert "ln -sfn /usr/local/bin/vogt-core /usr/local/bin/vogt-mcp-remote" not in code
+    assert "ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@" in code
 
 
-def test_the_entrypoint_runs_vogt_core_not_the_python_cli() -> None:
+def test_the_entrypoint_selects_the_core_and_retargets_the_names() -> None:
     lines = _code_lines(ENTRYPOINT)
     code = "\n".join(lines)
-    # A bare `vogt init` or `vogt serve` command would be the Python CLI; the
-    # `vogt-core` spelling has a hyphen, which the lookbehind rules out.
+    # A bare `vogt init` or `vogt serve` command would ignore the selection.
     assert not any(re.search(r"(?<![\w-])vogt (init|serve)\b", line) for line in lines)
-    assert "if ! vogt-core init; then" in code
-    assert 'vogt-core serve --host "$host" --port "$port"' in code
+    assert '"$bin" init' in code
+    assert '"$bin" serve --host "$host" --port "$port"' in code
+    assert 'local impl="${VOGT_CORE_IMPL:-python}"' in code
+    assert 'cli="${VOGT_PYTHON_BIN:-/opt/vogt/.venv/bin/vogt}"' in code
+    assert 'mcp="${VOGT_PYTHON_MCP_BIN:-/opt/vogt/.venv/bin/vogt-mcp-remote}"' in code
+    assert 'local dest="${VOGT_BIN_DIR:-/usr/local/bin}"' in code
+    assert 'ln -sfn "$cli" "$dest/vogt"' in code
+    assert 'ln -sfn "$mcp" "$dest/vogt-mcp-remote"' in code
+    assert "link_vogt_names" in code
 
 
 def test_no_workflow_passes_core_image_to_the_engine_dockerfile() -> None:

@@ -69,7 +69,7 @@
 # these build args back to their Docker Hub names still works and is the
 # escape hatch for a builder that cannot reach GHCR.
 ARG NODE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm
-ARG PYTHON_IMAGE=python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+ARG PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 # The static demo's *runtime* base, deliberately not `NODE_IMAGE`. Building the
 # PWA needs a toolchain; serving the built bytes does not — `demo-server.mjs`
 # imports only `node:` builtins. `node:22-bookworm` derives from
@@ -621,13 +621,18 @@ RUN chmod +x /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
 # shrink the layer by the unused binary (and, for python, the uv venv) but
 # would make rollback a rebuild — the wrong trade for the overlap window.
 #
+# The operator names `vogt` and `vogt-mcp-remote` are NOT linked here. Linking
+# them at build time always pointed them at the rust binary, so a container
+# running with the default `VOGT_CORE_IMPL=python` still answered `vogt` and
+# `vogt-mcp-remote` with rust. entrypoint.sh retargets both from the env at
+# container start: python -> /opt/vogt/.venv/bin/*, rust -> vogt-core.
 # `vogt-mcp` is not linked: the engine's own script of that name, copied below,
 # is what a session runs.
 RUN set -eu; \
-    ln -sfn /usr/local/bin/vogt-core /usr/local/bin/vogt; \
-    ln -sfn /usr/local/bin/vogt-core /usr/local/bin/vogt-mcp-remote; \
-    vogt-core --version; \
-    vogt --version
+    test -x /usr/local/bin/vogt-core; \
+    test -x /opt/vogt/.venv/bin/vogt; \
+    test -x /opt/vogt/.venv/bin/vogt-mcp-remote; \
+    vogt-core --version
 
 # The core's data directory (declared.sqlite3, observed.sqlite3, backups).
 # Owned by the pod's user rather than root:0 group-writable as in the
