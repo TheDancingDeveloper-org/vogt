@@ -2865,7 +2865,7 @@ where
 
 /// The `dispatch.*` values a person last wrote, by key. A key nobody wrote is
 /// absent, which the resolver reads as its default.
-fn dispatch_preferences<C, I>(
+pub(crate) fn dispatch_preferences<C, I>(
     ctx: &AppContext<C, I>,
 ) -> Result<std::collections::BTreeMap<String, Value>, VogtError>
 where
@@ -2879,6 +2879,7 @@ where
         dispatch_profiles::MAX_WORKERS_KEY,
         dispatch_profiles::ESCALATE_KEY,
         dispatch_profiles::REVIEW_BY_OVERSIGHT_KEY,
+        dispatch_profiles::BUDGET_RESTARTS_KEY,
     ] {
         if let Some(row) = view.latest_human_preference(key)? {
             if row

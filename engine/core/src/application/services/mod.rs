@@ -14,6 +14,7 @@ pub mod agent_activity;
 pub mod agent_clis;
 pub mod auth;
 pub mod bootstrap;
+pub mod budget_handoff;
 pub mod chats;
 pub mod connect;
 pub mod engine_status;
