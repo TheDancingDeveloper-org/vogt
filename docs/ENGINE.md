@@ -274,7 +274,9 @@ core's address and `VOGT_CORE_TOKEN` (or `VOGT_CORE_TOKEN_FILE`) to the
 `VOGT_BOOTSTRAP_CORE_TOKEN_FILE` and adopts at `init`. The engine recognises
 that value as the core's own identity when the core calls in to start a
 session, follows the core's event feed with it, and lends it to the
-break-glass token; it is never presented on behalf of anybody else. With
+break-glass token, and it is the credential the assistant uses when the
+request itself authenticated as the stack secret. It is never presented on
+behalf of any other caller. With
 neither `VOGT_CORE_URL` nor `ENGINE_TOKEN` set the engine refuses to start,
 because there would be no way to authenticate anybody. The assistant is
 configured in §6.
@@ -547,8 +549,10 @@ section that documents it.
   `gui-control` and `agent-clis-write`; `read` alone holds `push-write`, so a
   viewer can subscribe to notifications; `writeback` adds nothing. The
   break-glass token holds all eleven, and the stack secret holds `sessions`,
-  `history` and `agent-clis-write` — what the core needs to start sessions
-  here and to read the archive of the ones that ended. The
+  `history`, `agent-clis-write`, `git-write` and `assistant` — what the core
+  needs to start sessions here, read the archive of the ones that ended,
+  commit for a session, and drive the engine's own assistant turns when no
+  break-glass token is set. It does not hold `vogt-write`. The
   capability-to-route mapping lives in `required_capability` in
   `engine/server/src/auth.rs` and is keyed on method *and* path, so
   `GET /api/sessions` needs no capability while `POST /api/sessions` needs
@@ -595,7 +599,7 @@ section that documents it.
   capability, which <scope> grants`, and `vogt-core is unavailable, so this
   credential cannot be checked: <detail>`. The `403` names the identity the
   bearer resolved to and its scopes, or says it is the stack secret — which
-  holds `sessions` but never `vogt-write`, so a process holding it can type
+  holds `sessions` and `assistant` but never `vogt-write`, so a process holding it can type
   into sessions but cannot `POST /api/vogt/sessions`. A pod session's own
   `VOGT_HTTP_TOKEN` is a core token with `agent_session_scopes` (by default
   `work.write`, so `vogt-write`); a `403` on a Vogt write from inside a session
