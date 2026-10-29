@@ -56,3 +56,27 @@ def test_a_version_on_another_operation_is_untouched() -> None:
         {"version": "9.9.9"}, Path("/tmp/root"), Path("/tmp/data"), "work.get"
     )
     assert answer["version"] == "9.9.9"
+
+
+def test_a_structured_kind_is_not_a_set_membership_error() -> None:
+    # Some responses carry a structured `kind` (a dict) instead of a string.
+    # Testing that against a set of strings must not raise TypeError.
+    answer = parity._normalise(
+        {"kind": {"name": "not-a-string"}, "content_digest": "abc", "status": "ok"},
+        Path("/tmp/root"),
+        Path("/tmp/data"),
+        "observations.list",
+    )
+    assert answer["kind"] == {"name": "not-a-string"}
+    assert answer["content_digest"] == "abc"
+
+
+def test_a_structured_operation_name_is_not_a_set_membership_error() -> None:
+    answer = parity._normalise(
+        {"operation": {"name": "project.register"}, "payload_digest": "abc"},
+        Path("/tmp/root"),
+        Path("/tmp/data"),
+        "audit.list",
+    )
+    assert answer["operation"] == {"name": "project.register"}
+    assert answer["payload_digest"] == "abc"

@@ -1405,9 +1405,22 @@ def _walk(
             else:
                 walked[key] = _walk(item, rules, paths, operation, False, key)
 
-        if walked.get("operation") in path_bearing and "payload_digest" in walked:
+        # A response field can be a structured object (a dict) rather than a
+        # string. Membership in a set of strings requires a hashable value,
+        # so a non-string kind or operation is never a match, not an error.
+        operation_name = walked.get("operation")
+        if (
+            isinstance(operation_name, str)
+            and operation_name in path_bearing
+            and "payload_digest" in walked
+        ):
             walked["payload_digest"] = "<path-bearing>"
-        if walked.get("kind") in path_bearing_kinds and "content_digest" in walked:
+        kind = walked.get("kind")
+        if (
+            isinstance(kind, str)
+            and kind in path_bearing_kinds
+            and "content_digest" in walked
+        ):
             walked["content_digest"] = "<path-bearing>"
         if in_schema and schema["sort_any_of"]:
             any_of = walked.get("anyOf")
