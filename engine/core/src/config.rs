@@ -2371,7 +2371,7 @@ mod tests {
     fn unread_keys_are_the_known_set() {
         assert_eq!(
             UNREAD_KEYS.len(),
-            14,
+            13,
             "a config key was added to UNREAD_KEYS; wire it, or this list is wrong"
         );
         let documented: std::collections::HashSet<&str> =
