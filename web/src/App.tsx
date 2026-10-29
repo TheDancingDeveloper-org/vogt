@@ -55,6 +55,7 @@ import { clearStoredAuth, subscribeAuthRejected, subscribeAuthState } from "./ap
 import { signOutAndRevoke } from "./session";
 import { loginWithPassword } from "./authApi";
 import type { AuthRejection } from "./api";
+import { resolveAuthRejection } from "./authRecheck";
 import {
   createSession,
   deleteSession,
@@ -935,15 +936,30 @@ const App: Component = () => {
     setAuthState("unauthenticated");
   };
 
+  /**
+   * A published 401 is provisional. Confirm it with one shared
+   * `/api/auth/check` (3s) before wiping the token; a transport error or any
+   * other status keeps the session. The event stream never reaches here on
+   * its own — see `subscribeEvents`.
+   */
+  const onAuthRejected = (rejection: AuthRejection) => {
+    if (authState() === "unauthenticated") return;
+    void resolveAuthRejection(rejection, {
+      confirmed: rejection.confirmed === true,
+    }).then((confirmed) => {
+      if (confirmed) endSession(confirmed);
+    });
+  };
+
   onMount(() => {
     const unsubscribeAuthState = subscribeAuthState(() => {
       stopEventStream();
       window.location.reload();
     });
     onCleanup(unsubscribeAuthState);
-    // Every refused credential, wherever it was met — this tab's own reads,
-    // its event stream, or another tab's, which arrives over the same channel.
-    onCleanup(subscribeAuthRejected(endSession));
+    // Confirmed refusals only. A lone 401 from a read, the event stream, or
+    // another tab is re-checked once before this runs `endSession`.
+    onCleanup(subscribeAuthRejected(onAuthRejected));
     apiModule
       .publicConfig()
       .then((c) => setPublicCfg(c))
