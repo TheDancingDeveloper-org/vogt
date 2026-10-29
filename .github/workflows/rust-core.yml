@@ -20,7 +20,15 @@ on:
     # main is listed so the cutover PR (head rust-core, base main) starts
     # this workflow at all. Fast jobs have no if:, so they run on that pull
     # request too; Playwright is the only job gated to that one PR.
+    # Paths keep a docs-only or web-only PR into main from spending a rust
+    # job: the gate is the core, the parity suite, the Python it is ported
+    # from, and this workflow.
     branches: [rust-core, wi-1443-main-sync, main]
+    paths:
+      - "engine/core/**"
+      - "tests/parity/**"
+      - "src/vogt/**"
+      - ".github/workflows/rust-core.yml"
   # The live suite and coverage run here, not on every push (WI-2677).
   merge_group:
   schedule:
@@ -135,8 +143,14 @@ jobs:
 
       - name: install cargo-deny and cargo-audit
         run: |
-          cargo install --locked cargo-deny --version 0.18.9
-          cargo install --locked cargo-audit --version 0.22.2
+          # Same idempotent install as ci.yml: a runner that already has the
+          # pinned version skips the compile.
+          if ! cargo deny --version 2>/dev/null | grep -Fq 'cargo-deny 0.18.9'; then
+            cargo install --locked cargo-deny --version 0.18.9
+          fi
+          if ! cargo audit --version 2>/dev/null | grep -Fq 'cargo-audit 0.22.2'; then
+            cargo install --locked cargo-audit --version 0.22.2
+          fi
 
       - name: cargo deny
         run: cargo deny --all-features check

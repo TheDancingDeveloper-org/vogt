@@ -297,10 +297,37 @@ vogt_core_listen() {
     esac
 }
 
+# Point the operator names at the core VOGT_CORE_IMPL selected. The image
+# ships both binaries and links neither name: a build-time link to vogt-core
+# would make `vogt` rust even when the supervisor is running python. python
+# (the default) uses the venv console scripts; rust uses vogt-core for both
+# names, because that binary picks its mode from argv[0].
+link_vogt_names() {
+    local impl="${VOGT_CORE_IMPL:-python}"
+    local cli mcp
+    case "$impl" in
+        python)
+            cli="${VOGT_PYTHON_BIN:-/opt/vogt/.venv/bin/vogt}"
+            mcp="${VOGT_PYTHON_MCP_BIN:-/opt/vogt/.venv/bin/vogt-mcp-remote}"
+            ;;
+        rust)
+            cli="${VOGT_RUST_CORE_BIN:-/usr/local/bin/vogt-core}"
+            mcp="$cli"
+            ;;
+        *)
+            echo "vogt-core: VOGT_CORE_IMPL=${impl} is not python or rust —"                  "refusing to guess" >&2
+            return 78
+            ;;
+    esac
+    local dest="${VOGT_BIN_DIR:-/usr/local/bin}"
+    ln -sfn "$cli" "$dest/vogt"
+    ln -sfn "$mcp" "$dest/vogt-mcp-remote"
+}
+
 # Which binary the supervisor runs. Default python so an image that already
 # contains vogt-core does not become the cutover the moment it is deployed.
 # `vogt` is the operator CLI name; on the python path it must be the Python
-# console script, never the rust binary the image also links as vogt-mcp-remote.
+# console script, never the rust binary.
 vogt_core_bin() {
     local impl="${VOGT_CORE_IMPL:-python}"
     case "$impl" in
@@ -398,6 +425,13 @@ if [[ -n "${VOGT_CORE_URL:-}" ]]; then
                  "imported projects will be invisible to sessions (§6.3)" >&2
         fi
 
+        # Same selection the supervisor uses, applied to the names an
+        # operator types. A failure here is the same closed refusal as a bad
+        # impl: do not start a core the CLI names disagree with.
+        if ! link_vogt_names; then
+            echo "vogt-core: not linking operator names (see above)" >&2
+            exit 78
+        fi
         supervise_vogt_core "$core_host" "$core_port" &
         echo "vogt-core: supervisor started (PID $!)"
     fi

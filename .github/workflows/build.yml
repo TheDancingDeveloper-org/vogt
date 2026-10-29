@@ -150,7 +150,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
     # The merged image derives its core from this one by digest, so the
     # digest has to leave this job rather than being re-derived from a tag.
     outputs:

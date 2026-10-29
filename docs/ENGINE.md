@@ -106,8 +106,12 @@ docker build -f engine/Dockerfile -t vogt-engine .
 ```
 
 The Dockerfile's stages are the PWA bundle, the Rust binary with that bundle
-embedded, and `vogt-core` built beside it from the same source (there is no
-Python core in the image and no `CORE_IMAGE` argument), and the runtime. The
+embedded, `vogt-core` built beside it from the same source, and the Python
+core installed under `/opt/vogt/.venv` (there is no `CORE_IMAGE` argument; the
+Python stage builds from this checkout). `VOGT_CORE_IMPL` (`python` or
+`rust`, default `python`) chooses which core the entrypoint supervises and
+which binaries `/usr/local/bin/vogt` and `vogt-mcp-remote` point at. The
+runtime follows. The
 runtime stage starts `FROM` a
 **dev-pod base** (`engine/Dockerfile.pod`, published as
 `ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean-*`): an Ubuntu image
@@ -174,7 +178,7 @@ for.
 
 The image's entrypoint (`engine/deploy/entrypoint.sh`) supervises the
 container: it optionally starts a headless compositor for the GUI surface
-(`START_SWAY=1`), starts the Python core on loopback when `VOGT_CORE_URL`
+(`START_SWAY=1`), starts the core selected by `VOGT_CORE_IMPL` (default the Python core) on loopback when `VOGT_CORE_URL`
 names a loopback address, then execs the engine as PID 1's child. With
 `VOGT_CORE_URL` unset the container runs the engine alone. The published
 image runs with `deploy/stack.compose.yml`; `deploy/engine.overlay.yml`
