@@ -107,6 +107,14 @@ describe("session rail refetch identity (WI-2696)", () => {
     expect(rail.railSessions()[0]?.resources?.rss_bytes).toBe(9);
   });
 
+  it("keeps the bookmark-free order for the Sessions overview while the rail lifts bookmarks", async () => {
+    const marks = await import("../bookmarks");
+    marks.toggleBookmark("also");
+    await load();
+    expect(rail.railSessions().map((session) => session.id)).toEqual(["also", "keep"]);
+    expect(rail.oversightFirstSessions().map((session) => session.id)).toEqual(["keep", "also"]);
+  });
+
   it("drops a row that left the list and keeps the one that stayed", async () => {
     await load();
     const before = store.sessionsStore.sessions.keep;

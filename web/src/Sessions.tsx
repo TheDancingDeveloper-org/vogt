@@ -23,7 +23,7 @@ import {
 import SurfaceHeader from "./SurfaceHeader";
 import WaitingSessionCard from "./WaitingSession";
 import SessionList from "./SessionList";
-import { railSessions } from "./railSessions";
+import { oversightFirstSessions } from "./railSessions";
 import { createNarrow } from "./narrow";
 
 interface Props {
@@ -87,7 +87,7 @@ const Sessions: Component<Props> = (props) => {
     const pendingSession = currentPending?.kind === "send_input"
       ? currentPending.session_id
       : null;
-    return [...railSessions()].sort((left, right) =>
+    return [...oversightFirstSessions()].sort((left, right) =>
       Number(right.id === pendingSession) - Number(left.id === pendingSession),
     );
   });

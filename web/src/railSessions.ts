@@ -34,11 +34,27 @@ function sortInputs(): { id: string; role: SessionSummary["role"] }[] {
   return out;
 }
 
-/** Engine order, oversight first, bookmarks lifted between the two. */
-export const railSessions = createMemo<SessionSummary[]>((prev) => {
+const EMPTY_BOOKMARKS: ReadonlySet<string> = new Set();
+
+function memoisedOrder(
+  prev: SessionSummary[],
+  bookmarked: ReadonlySet<string>,
+): SessionSummary[] {
   const inputs = sortInputs();
-  const bookmarked = new Set(bookmarks());
   const key = railSortKey(inputs, bookmarked);
   if (prev.length > 0 && railSortKey(prev, bookmarked) === key) return prev;
   return sortSessionsForRail(listedSessions(), bookmarked);
+}
+
+/** Engine order, oversight first, bookmarks lifted between the two.
+ *  The Places rail is the only consumer that lifts bookmarks (WI-1289). */
+export const railSessions = createMemo<SessionSummary[]>((prev) => {
+  return memoisedOrder(prev, new Set(bookmarks()));
+}, []);
+
+/** Engine order, oversight first, no bookmark partition.
+ *  Sessions and SessionList used `sortSessionsOversightFirst` before the
+ *  shared memo; lifting bookmarks here would change their order (WI-2696). */
+export const oversightFirstSessions = createMemo<SessionSummary[]>((prev) => {
+  return memoisedOrder(prev, EMPTY_BOOKMARKS);
 }, []);

@@ -11,7 +11,6 @@ import { For, Show, createMemo, type Component } from "solid-js";
 import type { SessionSummary } from "./api";
 import { createNow } from "./viewAge";
 import { isConnected, sessionsStore } from "./store";
-import { railSessions } from "./railSessions";
 import {
   activityClass,
   activityLabel,
@@ -19,6 +18,7 @@ import {
   sessionStateWord,
   permissionPostureLabel,
   sessionRuntimeHint,
+  sortSessionsOversightFirst,
 } from "./sessionRowModel";
 
 interface Props {
@@ -34,13 +34,13 @@ export const SessionList: Component<Props> = (props) => {
   const now = createNow(30_000);
   const rows = createMemo(() => {
     const omit = new Set(props.omit ?? []);
-    // Same ordered array the Places rail uses. Filtering keeps that order;
-    // a second sort here used to rebuild it on every store tick (WI-2696).
-    const ordered = railSessions();
-    const allowed = new Set(
-      props.sessions.filter((session) => !omit.has(session.id)).map((session) => session.id),
+    // Sort the rows this caller handed us. A session absent from the store
+    // still has to appear; reconcile identity stays in the store (WI-2696).
+    // `sortSessionsOversightFirst` is the bookmark-free partition, shared
+    // with the Sessions overview — bookmarks are a Places-rail concern.
+    return sortSessionsOversightFirst(
+      props.sessions.filter((session) => !omit.has(session.id)),
     );
-    return ordered.filter((session) => allowed.has(session.id));
   });
 
   return (
