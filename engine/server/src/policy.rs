@@ -689,7 +689,8 @@ mod tests {
 
     #[test]
     fn commit_message_file_is_read() {
-        let dir = std::env::temp_dir().join("x").join("wt");
+        let dir = std::env::temp_dir().join(format!("vogt-policy-msg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("msg.txt"), "the sekret token").unwrap();
         let p = policy(&["sekret"], false, &[]);
