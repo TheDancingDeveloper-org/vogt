@@ -371,15 +371,15 @@ pub struct VogtConfig {
 /// test below fails if the list grows, so a newly ignored key cannot land
 /// quietly.
 ///
-/// None of these features is ported: the in-process scheduler (WI-2021), the
-/// forge posture collector interval, the GitHub rate-limit floor, GitHub App
-/// installation auth, the usage board (WI-2666), cold-wake compaction
-/// (WI-2588), the session-scratch project, the autopilot result-report gate,
-/// and `image_digest` on `instance.diagnostics` (WI-2666).
+/// None of these features is ported: the forge posture collector interval,
+/// the GitHub rate-limit floor, GitHub App installation auth, the usage board
+/// (WI-2666), cold-wake compaction (WI-2588), the session-scratch project, the
+/// autopilot result-report gate, and `image_digest` on `instance.diagnostics`
+/// (WI-2666). The collector schedule reads `sweep_interval_seconds` and
+/// `watch_interval_seconds` (WI-2021); the watch loop itself waits on
+/// `evaluate_watches`, which is not ported.
 #[allow(dead_code)] // Read by the unread-key regression in this module's tests.
 pub const UNREAD_KEYS: &[(&str, &str)] = &[
-    ("sweep_interval_seconds", "WI-2021"),
-    ("watch_interval_seconds", "WI-2021"),
     ("forge_posture_interval_seconds", "WI-2021"),
     ("github_rate_limit_floor", "WI-2021"),
     ("github_app_installation_id", "WI-2021"),
@@ -2370,7 +2370,7 @@ mod tests {
     fn unread_keys_are_the_known_set() {
         assert_eq!(
             UNREAD_KEYS.len(),
-            15,
+            13,
             "a config key was added to UNREAD_KEYS; wire it, or this list is wrong"
         );
         let documented: std::collections::HashSet<&str> =

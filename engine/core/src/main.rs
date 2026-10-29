@@ -81,8 +81,7 @@ enum Command {
         /// Refuse every write. The same switch as `VOGT_READ_ONLY`.
         #[arg(long)]
         read_only: bool,
-        /// Do not run the background sweep. There is no scheduler yet, so this
-        /// changes nothing.
+        /// Do not run the background collector sweep or budget settlement.
         #[arg(long)]
         no_schedule: bool,
         /// PEM file with the TLS certificate. Given with `--tls-key` or not at all.
@@ -255,7 +254,7 @@ fn main() -> ExitCode {
             port,
             no_auth,
             read_only,
-            no_schedule: _,
+            no_schedule,
             tls_cert,
             tls_key,
             no_read_only: _,
@@ -266,6 +265,7 @@ fn main() -> ExitCode {
             json: cli.json,
             no_auth,
             read_only,
+            no_schedule,
             tls_cert: tls_cert.as_deref(),
             tls_key: tls_key.as_deref(),
         }),
@@ -664,6 +664,7 @@ struct ServeArgs<'a> {
     json: bool,
     no_auth: bool,
     read_only: bool,
+    no_schedule: bool,
     tls_cert: Option<&'a Path>,
     tls_key: Option<&'a Path>,
 }
@@ -722,6 +723,7 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
         json,
         no_auth,
         read_only,
+        no_schedule,
         tls_cert,
         tls_key,
     } = args;
@@ -842,39 +844,67 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
         if let Some(addr) = metrics_addr {
             adapters::http::metrics::start(addr).await?;
         }
-        match tls_cert {
+        // One signal for the listener and the collector schedule. `wait_for_stop`
+        // can only be awaited once; both sides subscribe, so a SIGTERM ends the
+        // gap between sweeps at the same moment the listener stops accepting.
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            wait_for_stop().await;
+            let _ = stop_tx.send(true);
+        });
+        let mut schedule = adapters::http::scheduler::CollectorSchedule::new(
+            adapters::http::scheduler::serve_tick(config.clone()),
+            if no_schedule {
+                0
+            } else {
+                config.sweep_interval_seconds
+            },
+        );
+        // Read, not started: evaluate_watches is not ported. The read is what
+        // takes the key off the unread list.
+        let _watch_interval = adapters::http::scheduler::CollectorSchedule::watch_interval_seconds(
+            config.watch_interval_seconds,
+        );
+        schedule.start(stop_rx.clone());
+        let outcome = match tls_cert {
             Some(pem) => {
                 let tls = load_tls(pem, tls_key)?;
                 let handle = axum_server::Handle::new();
                 let signal = handle.clone();
+                let shutdown = stop_rx.clone();
                 tokio::spawn(async move {
                     // Stop accepting on the signal. The select below is what
                     // bounds the drain: axum-server's own grace is how long it
                     // tries to finish connections, and the select drops the
                     // serve future if one of them never ends.
-                    wait_for_stop().await;
+                    let _ = notified(shutdown).await;
                     signal.graceful_shutdown(Some(SHUTDOWN_GRACE));
                 });
                 let serve = axum_server::bind_rustls(addr, tls)
                     .handle(handle)
                     .serve(router.into_make_service_with_connect_info::<SocketAddr>());
-                bounded_serve(serve, wait_for_stop(), SHUTDOWN_GRACE).await
+                bounded_serve(serve, notified(stop_rx.clone()), SHUTDOWN_GRACE).await
             }
             None => {
                 let listener = tokio::net::TcpListener::bind(addr).await?;
-                // `wait_for_stop`, not `shutdown`: axum's graceful shutdown
-                // stops accepting and then drains with no bound of its own.
-                // Sleeping the grace inside that future would keep accepting
-                // for the whole grace, and an SSE or MCP stream would hold
-                // the process past it. The select below is the bound.
+                // `notified`, not `shutdown`: axum's graceful shutdown stops
+                // accepting and then drains with no bound of its own. Sleeping
+                // the grace inside that future would keep accepting for the
+                // whole grace, and an SSE or MCP stream would hold the process
+                // past it. The select below is the bound.
                 let serve = axum::serve(
                     listener,
                     router.into_make_service_with_connect_info::<SocketAddr>(),
                 )
-                .with_graceful_shutdown(wait_for_stop());
-                bounded_serve(serve, wait_for_stop(), SHUTDOWN_GRACE).await
+                .with_graceful_shutdown(notified(stop_rx.clone()));
+                bounded_serve(serve, notified(stop_rx.clone()), SHUTDOWN_GRACE).await
             }
-        }
+        };
+        // The listener has stopped. Wait for the sweep in flight; do not wait
+        // out the interval. `stop` returns as soon as the stop watch fires,
+        // which it already has if we got here via the signal.
+        schedule.stop().await;
+        outcome
     });
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -926,6 +956,14 @@ where
             tokio::time::sleep(grace).await;
         } => Ok(()),
     }
+}
+
+/// Resolves when `wait_for_stop` has published on `rx`.
+async fn notified(mut rx: tokio::sync::watch::Receiver<bool>) {
+    if *rx.borrow() {
+        return;
+    }
+    let _ = rx.changed().await;
 }
 
 /// The next SIGTERM or SIGINT. SIGINT is what `ctrl_c` listens for; SIGTERM is

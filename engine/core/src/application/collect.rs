@@ -46,6 +46,12 @@ pub fn sweep_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| sweep(ctx, &params))
 }
 
+/// The scheduled entry. Same sweep as [`sweep_op`]; the scheduler cannot match
+/// `Built` itself because the bin does not re-export `with_ctx` into adapters.
+pub(crate) fn sweep_built(ctx: &Built, params: &Value) -> Result<Value, VogtError> {
+    sweep_op(ctx, params.clone())
+}
+
 fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     params: &Value,
