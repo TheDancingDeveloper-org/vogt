@@ -1,0 +1,1293 @@
+//! The operation registry. Ports `src/vogt/registry/`.
+//!
+//! One definition per product operation: name, scope, mutation flag, route,
+//! CLI path and MCP tool name. Handlers are wired to services as those land
+//! (S1–S9); until then an operation carries a `not_ported` handler, so the
+//! manifest is complete before the behaviour is. `registry.dump` is the one
+//! operation this module implements itself.
+
+pub mod operations;
+mod strips;
+pub mod validate;
+
+use std::collections::{HashMap, HashSet};
+
+use crate::errors::VogtError;
+
+/// Authorization scopes. Every operation declares what it needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Read,
+    WorkWrite,
+    ProjectWrite,
+    Admin,
+    Writeback,
+}
+
+impl Scope {
+    /// The wire spelling, as the registry manifest and tokens use it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Read => "read",
+            Scope::WorkWrite => "work.write",
+            Scope::ProjectWrite => "project.write",
+            Scope::Admin => "admin",
+            Scope::Writeback => "writeback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpMethod {
+    Get,
+    Post,
+    #[allow(dead_code)] // Python's set uses GET and POST only; the type matches it.
+    Patch,
+    #[allow(dead_code)]
+    Delete,
+}
+
+impl HttpMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+            HttpMethod::Patch => "PATCH",
+            HttpMethod::Delete => "DELETE",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpRoute {
+    pub method: HttpMethod,
+    pub path: &'static str,
+}
+
+impl HttpRoute {
+    pub fn new(method: HttpMethod, path: &'static str) -> Self {
+        assert!(
+            path.starts_with('/'),
+            "route path must start with '/': {path}"
+        );
+        Self { method, path }
+    }
+}
+
+/// The CLI command path, e.g. `["project", "register"]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliBinding {
+    pub path: &'static [&'static str],
+}
+
+impl CliBinding {
+    pub fn new(path: &'static [&'static str]) -> Self {
+        assert!(
+            !path.is_empty(),
+            "CLI binding needs at least one path segment"
+        );
+        Self { path }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Cli,
+    Http,
+    Mcp,
+}
+
+impl Transport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Transport::Cli => "cli",
+            Transport::Http => "http",
+            Transport::Mcp => "mcp",
+        }
+    }
+}
+
+/// The service behind an operation, once it is ported.
+///
+/// One signature for every operation: the context the hooks built, and the
+/// parameters the transport already parsed. The result is the JSON the
+/// transport sends back. An operation that is not in the table has not been
+/// ported, which is a failure and never an empty success.
+pub type ServiceFn = fn(
+    &crate::application::context::Built,
+    serde_json::Value,
+) -> Result<serde_json::Value, VogtError>;
+
+/// The service for an operation, or `None` while it is still `not_ported`.
+///
+/// The table lives here, not in the generated operation list, so a service
+/// landing adds one arm and touches none of the four transports that call it.
+pub fn service_for(name: &str) -> Option<ServiceFn> {
+    match name {
+        "migrate" => Some(crate::application::instance::migrate_op),
+        "mcp.stdio" => Some(crate::application::instance::mcp_stdio_op),
+        "status" => Some(crate::application::instance::status_op),
+        "contract.evaluate" => Some(crate::application::contracts::contract_evaluate_op),
+        "token.issue" => Some(crate::application::services::auth::issue_token_op),
+        "token.list" => Some(crate::application::services::auth::list_tokens_op),
+        "token.revoke" => Some(crate::application::services::auth::revoke_token_op),
+        "user.create" => Some(crate::application::services::auth::create_user_op),
+        "user.list" => Some(crate::application::services::auth::list_users_op),
+        "user.set_password" => Some(crate::application::services::auth::set_password_op),
+        "user.remove" => Some(crate::application::services::auth::remove_user_op),
+        "auth.logout" => Some(crate::application::services::auth::logout_op),
+        "auth.whoami" => Some(crate::application::services::auth::whoami_op),
+        "auth.decisions" => Some(crate::application::services::auth::decisions_op),
+        "install.status" => Some(crate::application::services::install::install_status_op),
+        "install.bootstrap" => Some(crate::application::services::install::install_bootstrap_op),
+        "contract.check" => Some(crate::application::contracts::contract_check_op),
+        "contract.adopt" => Some(crate::application::contracts::contract_adopt_op),
+        "contract.decline" => Some(crate::application::contracts::contract_decline_op),
+        "contract.inapplicable" => Some(crate::application::contracts::contract_inapplicable_op),
+        "contract.applicable" => Some(crate::application::contracts::contract_applicable_op),
+        "compliance" => Some(crate::application::contracts::compliance_op),
+        "coverage" => Some(crate::application::coverage::coverage_op),
+        "sweep" => Some(crate::application::collect::sweep_op),
+        "drift.detect" => Some(crate::application::drift::drift_detect_op),
+        "drift.list" => Some(crate::application::drift::drift_list_op),
+        "drift.resolve" => Some(crate::application::drift::drift_resolve_op),
+        "session.bind_work" => Some(crate::application::session_work::bind_work_op),
+        "session.report_blocked" => Some(crate::application::session_blocked::report_blocked_op),
+        "session.report" => Some(crate::application::session_report::report_op),
+        "usage.board" => Some(crate::application::usage::usage_board_op),
+        "instance.diagnostics" => Some(crate::application::instance::diagnostics_op),
+        "session.report_unblocked" => {
+            Some(crate::application::session_blocked::report_unblocked_op)
+        }
+        "session.changes" => Some(crate::application::session_changes::session_changes_op),
+        "session.wait_any" => Some(crate::application::session_changes::session_wait_any_op),
+        "session.commit_for" => Some(crate::application::session_commit::commit_for_op),
+        "session.last_reply" => Some(crate::application::session_reads::last_reply),
+        "session.economics" => Some(crate::application::session_economics::economics_op),
+        "session.digest" => Some(crate::application::session_digest::digest_op),
+        "session.history_list" => Some(crate::application::session_reads::history_list),
+        "session.search_output" => Some(crate::application::session_reads::search_output),
+        "session.grant_request" => Some(crate::application::grants::grant_request_op),
+        "session.grant_decide" => Some(crate::application::grants::grant_decide_op),
+        "session.grant_revoke" => Some(crate::application::grants::grant_revoke_op),
+        "session.grant_list" => Some(crate::application::grants::grant_list_op),
+        "session.start" => Some(crate::application::services::sessions::start_session_op),
+        "session.stop" => Some(crate::application::services::sessions::stop_session_op),
+        "session.list" => Some(crate::application::services::sessions::list_sessions_op),
+        "session.sweep" => Some(crate::application::services::sessions::sweep_sessions_op),
+        "session.log_tail" => Some(crate::application::services::sessions::log_tail_op),
+        "session.input" => Some(crate::application::services::sessions::input_op),
+        "session.screen" => Some(crate::application::services::sessions::screen_op),
+        "session.wait" => Some(crate::application::services::sessions::wait_op),
+        "session.wake" => Some(crate::application::services::sessions::wake_op),
+        "session.keep_awake" => Some(crate::application::services::sessions::keep_awake_op),
+        "session.set_role" => Some(crate::application::services::sessions::set_role_op),
+        "session.rename" => Some(crate::application::services::sessions::rename_session_op),
+        "session.remove" => Some(crate::application::services::sessions::remove_session_op),
+        "session.token" => Some(crate::application::services::sessions::session_token_op),
+        "connect" => Some(crate::application::services::connect::connect_op),
+        "agent_cli.list" => Some(crate::application::services::agent_clis::list_agent_clis_op),
+        "agent_cli.update" => Some(crate::application::services::agent_clis::update_agent_cli_op),
+        "agent_activity.search" => {
+            Some(crate::application::services::agent_activity::search_agent_activity_op)
+        }
+        "agent_activity.summary" => {
+            Some(crate::application::services::agent_activity::summarize_agent_activity_op)
+        }
+        "session.answer" => Some(crate::application::services::sessions::answer_op),
+        "session.hibernate" => Some(crate::application::services::sessions::hibernate_op),
+        "chat.list" => Some(crate::application::services::chats::list_op),
+        "chat.get" => Some(crate::application::services::chats::get_op),
+        "chat.create" => Some(crate::application::services::chats::create_op),
+        "chat.send" => Some(crate::application::services::chats::send_op),
+        "chat.decide" => Some(crate::application::services::chats::decide_op),
+        "chat.set_model" => Some(crate::application::services::chats::set_model_op),
+        "chat.interrupt" => Some(crate::application::services::chats::interrupt_op),
+        "chat.archive" => Some(crate::application::services::chats::archive_op),
+        "chat.promote" => Some(crate::application::services::chats::promote_op),
+        "suppress" => Some(crate::application::suppressions::suppress_op),
+        "suppression.list" => Some(crate::application::suppressions::suppression_list_op),
+        "suppression.revoke" => Some(crate::application::suppressions::suppression_revoke_op),
+        "observations.list" => Some(crate::application::observations::observations_list_op),
+        "deps" => Some(crate::application::observations::deps_op),
+        "observations.prune" => Some(crate::application::observations::observations_prune_op),
+        "why" => Some(crate::application::views::why_op),
+        "backlog" => Some(crate::application::views::backlog_op),
+        "bugs" => Some(crate::application::views::bugs_op),
+        "work.list" => Some(crate::application::services::work::list_op),
+        "work.get" => Some(crate::application::services::work::get_op),
+        "work.get_many" => Some(crate::application::services::work::get_many_op),
+        "work.create" => Some(crate::application::services::work::create_op),
+        "work.update" => Some(crate::application::services::work::update_op),
+        "work.comment" => Some(crate::application::services::work::comment_op),
+        "work.transition" => Some(crate::application::services::work::transition_op),
+        "work.relate" => Some(crate::application::services::work::relate_op),
+        "work.unrelate" => Some(crate::application::services::work::unrelate_op),
+        "work.bind_branch" => Some(crate::application::services::work::bind_branch_op),
+        "work.adopt" => Some(crate::application::services::work::adopt_op),
+        "board.list" => Some(crate::application::services::work::board_list_op),
+        "project.register" => Some(crate::application::projects::register_op),
+        "project.create" => Some(crate::application::projects::create_op),
+        "project.scaffold" => Some(crate::application::projects::scaffold_op),
+        "project.import" => Some(crate::application::projects::import_op),
+        "project.get" => Some(crate::application::projects::get_op),
+        "project.list" => Some(crate::application::projects::list_op),
+        "project.update" => Some(crate::application::projects::update_op),
+        "project.transition" => Some(crate::application::projects::transition_op),
+        "project.brief" => Some(crate::application::projects::brief_op),
+        "place.metrics" => Some(crate::application::place::place_metrics_op),
+        "engine.status" => Some(crate::application::services::engine_status::engine_status_op),
+        "label.create" => Some(crate::application::taxonomy::create_label_op),
+        "label.list" => Some(crate::application::taxonomy::list_labels_op),
+        "actor.create" => Some(crate::application::taxonomy::create_actor_op),
+        "actor.list" => Some(crate::application::taxonomy::list_actors_op),
+        "workflow.list" => Some(crate::application::taxonomy::list_workflows_op),
+        "deployed.versions" => Some(crate::application::deployed::deployed_versions_op),
+        "preference.get" => Some(crate::application::services::preferences::preference_get_op),
+        "preference.set" => Some(crate::application::services::preferences::preference_set_op),
+        "notifications" => Some(crate::application::services::notifications::notifications_op),
+        "initiative.create" => {
+            Some(crate::application::services::initiatives::initiative_create_op)
+        }
+        "initiative.list" => Some(crate::application::services::initiatives::initiative_list_op),
+        "initiative.update" => {
+            Some(crate::application::services::initiatives::initiative_update_op)
+        }
+        "initiative.publish" => {
+            Some(crate::application::services::initiatives::initiative_publish_op)
+        }
+        "decision.ask" => Some(crate::application::services::decisions::ask_decision_op),
+        "decision.answer" => Some(crate::application::services::decisions::answer_decision_op),
+        "decision.list" => Some(crate::application::services::decisions::list_decisions_op),
+        "charter.get" => Some(crate::application::services::charters::charter_get_op),
+        "charter.set" => Some(crate::application::services::charters::charter_set_op),
+        "watch.list" => Some(crate::application::services::watches::watch_list_op),
+        "watch.create" => Some(crate::application::services::watches::watch_create_op),
+        "watch.cancel" => Some(crate::application::services::watches::watch_cancel_op),
+        "decision.withdraw" => Some(crate::application::services::decisions::withdraw_decision_op),
+        "inbox.list" => Some(crate::application::services::inbox::inbox_list_op),
+        "inbox.archive" => Some(crate::application::services::inbox::inbox_archive_op),
+        "inbox.snooze" => Some(crate::application::services::inbox::inbox_snooze_op),
+        "inbox.restore" => Some(crate::application::services::inbox::inbox_restore_op),
+        "backup" => Some(crate::application::services::lifecycle::backup_op),
+        "restore" => Some(crate::application::services::lifecycle::restore_op),
+        "clone" => Some(crate::application::services::lifecycle::clone_op),
+        "export" => Some(crate::application::services::lifecycle::export_op),
+        "import" => Some(crate::application::services::import_merge::import_op),
+        "events.list" => Some(crate::application::services::history::events_list_op),
+        "audit.list" => Some(crate::application::services::history::audit_list_op),
+        "forge.account_status" => {
+            Some(crate::application::services::forge_accounts::account_status_op)
+        }
+        "forge.account_unlink" => {
+            Some(crate::application::services::forge_accounts::account_unlink_op)
+        }
+        "forge.account_link" => Some(crate::application::services::forge_accounts::account_link_op),
+        "forge.onboard" => Some(crate::application::services::forge_onboard::onboard_op),
+        "forge.repos" => Some(crate::application::services::forge_repos::repos_op),
+        "forge.writeback" => Some(crate::application::services::forge_writeback::writeback_op),
+        // The public name is `forge.actions`. `forge.writeback_list` is not a
+        // Python operation, so it is not an alias here.
+        "forge.actions" => Some(crate::application::services::forge_writeback::writeback_list_op),
+        "forge.link" => Some(crate::application::services::forge_link::link_op),
+        "forge.publish" => Some(crate::application::services::forge_publish::publish_op),
+        "forge.import" => Some(crate::application::services::forge_import::import_op),
+        _ => None,
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handler {
+    /// The service for this operation is not ported. Running it returns the
+    /// honest-unavailable error rather than an empty success.
+    NotPorted,
+    /// Implemented by this module: the registry describes itself.
+    RegistryDump,
+}
+
+/// One capability of the product, in one place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Operation {
+    pub name: &'static str,
+    pub summary: &'static str,
+    pub scope: Scope,
+    pub mutating: bool,
+    /// The parameter model carries a required `reason`. True for every
+    /// mutating operation (enforced at construction) and for the few reads
+    /// that also audit a reason.
+    pub reason_required: bool,
+    /// `None` for an operation with no REST route. The registry requires a
+    /// route for every operation on the HTTP transport.
+    pub route: Option<HttpRoute>,
+    pub cli: CliBinding,
+    pub handler: Handler,
+}
+
+impl Operation {
+    /// Build an operation. `reason_required` follows `mutating`: the registry
+    /// refuses a write without one, and no read in the Python set is built
+    /// that way here — the reads that audit a reason set it afterwards.
+    fn new(
+        name: &'static str,
+        summary: &'static str,
+        scope: Scope,
+        mutating: bool,
+        route: HttpRoute,
+        cli: CliBinding,
+    ) -> Self {
+        Self {
+            name,
+            summary,
+            scope,
+            mutating,
+            reason_required: mutating,
+            route: Some(route),
+            cli,
+            handler: Handler::NotPorted,
+        }
+    }
+
+    /// Build an operation with no REST route, for one that must not be
+    /// mounted over HTTP at all.
+    fn local_only(
+        name: &'static str,
+        summary: &'static str,
+        scope: Scope,
+        mutating: bool,
+        cli: CliBinding,
+    ) -> Self {
+        Self {
+            name,
+            summary,
+            scope,
+            mutating,
+            reason_required: mutating,
+            route: None,
+            cli,
+            handler: Handler::NotPorted,
+        }
+    }
+
+    /// The REST route. Only an HTTP-transport operation has one, and the
+    /// registry checks that when it is built, so an HTTP adapter may rely on it.
+    pub fn http_route(&self) -> &HttpRoute {
+        self.route
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} has no HTTP route", self.name))
+    }
+
+    /// MCP tool names use underscores; everything else is identical.
+    pub fn mcp_tool_name(&self) -> String {
+        self.name.replace('.', "_")
+    }
+
+    /// Run the operation. An operation with no service yet is a failure, never a
+    /// success, and the message names the operation so the caller can see which
+    /// one is missing.
+    pub fn run(
+        &self,
+        ctx: Option<&crate::application::context::Built>,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, VogtError> {
+        // Test-only: the HTTP dispatch test holds a request inside the blocking
+        // section to prove it does not pin a tokio worker. Production never
+        // sets the variable.
+        #[cfg(test)]
+        if let Ok(millis) = std::env::var("VOGT_TEST_BLOCK_MS") {
+            if let Ok(millis) = millis.parse::<u64>() {
+                std::thread::sleep(std::time::Duration::from_millis(millis));
+            }
+        }
+        // Defaults and bounds come from the recorded pydantic schema, so every
+        // transport applies them before a service sees the parameters. The CLI
+        // validates first and reports a usage error; this catches HTTP and MCP,
+        // which have no earlier check. An operation whose service is not ported
+        // still reports that, rather than a schema error about parameters it
+        // never reads.
+        let params = match (service_for(self.name), self.handler) {
+            (None, Handler::NotPorted) => params,
+            _ => validate::prepare(self.name, params)?,
+        };
+        match self.handler {
+            Handler::RegistryDump => Ok(dump()),
+            Handler::NotPorted => match (service_for(self.name), ctx) {
+                (Some(service), Some(ctx)) => service(ctx, params),
+                (Some(_), None) => Err(VogtError::InvalidRequest(format!(
+                    "{} needs an instance context and none was given",
+                    self.name
+                ))),
+                (None, _) => Err(VogtError::NotImplemented(format!(
+                    "{} is not available in this build: its service has not been ported yet",
+                    self.name
+                ))),
+            },
+        }
+    }
+}
+
+/// What a missing `reason` is told. Every write is audited and the registry
+/// refuses to build a write whose reason is optional, so the reason cannot be
+/// defaulted.
+#[allow(dead_code)] // The reason hint is part of the validation message P2.2 emits.
+pub const REASON_HINT: &str = "every write is audited and must say why it is being made — pass \
+     `reason` as a short sentence, e.g. reason=\"tests pass, ready for review\"";
+
+/// Operations that exist only where the data directory is. Each entry carries
+/// its justification, so "why is this excluded" is answerable without
+/// archaeology.
+pub const LOCAL_ONLY: &[(&str, &str)] = &[
+    (
+        "init",
+        "Creates the instance in a local data directory. A running server \
+         already has one, so there is no meaningful remote semantics.",
+    ),
+    (
+        "migrate",
+        "Brings the schema of the local data directory forward. Over HTTP it \
+         would be a request asking the server to change the ground it is \
+         standing on mid-flight; the server already migrates at startup \
+         , so the remote case is served by restarting it.",
+    ),
+    (
+        "serve",
+        "Takes over this process to listen on a port. A running server being \
+         asked over its own API to start another one is not a meaningful \
+         request; restarting a service is the supervisor's job.",
+    ),
+    (
+        "backup",
+        "Writes to a path on the machine holding the data directory. Over \
+         HTTP the path would name a filesystem the caller cannot see.",
+    ),
+    (
+        "restore",
+        "Replaces the live stores from a path on the server's filesystem, \
+         and every client's view of the instance changes underneath them. \
+         That is an operator action taken at the machine, not a request.",
+    ),
+    (
+        "clone",
+        "Replaces the live stores from a path on the server's filesystem, \
+         exactly as restore does, so it is an operator action at the machine \
+         for the same reason.",
+    ),
+    (
+        "import",
+        "Reads a file from the machine holding the data directory, for the \
+         same reason as backup.",
+    ),
+    (
+        "mcp.stdio",
+        "Takes over this process's stdin and stdout to speak MCP. That is \
+         meaningful only where the data directory is; a remote client uses \
+         the streamable-HTTP transport at /mcp. \
+         Offering it as a REST route would mean a server hijacking its own \
+         stdout.",
+    ),
+];
+
+/// Operations that exist only over HTTP.
+pub const HTTP_ONLY: &[(&str, &str)] = &[(
+    "session.token",
+    "The session engine's own call, made over HTTP with its credential, \
+     to mint or revoke the agent credential of a session it started \
+     (WI-926). No person or agent has a reason to call it, and an MCP \
+     tool or CLI command for it would only put a refusal on every \
+     agent's tool list.",
+)];
+
+/// The registry is internally inconsistent — always a programming error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryError(pub String);
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// An ordered collection of operations, validated on build.
+#[derive(Debug, Clone)]
+pub struct OperationRegistry {
+    operations: Vec<Operation>,
+}
+
+impl OperationRegistry {
+    pub fn new(mut operations: Vec<Operation>) -> Result<Self, RegistryError> {
+        // The reads that audit a reason. Every mutating operation already has
+        // `reason_required`; these three do not mutate but still require one.
+        for operation in &mut operations {
+            if matches!(operation.name, "backup" | "restore" | "export") {
+                operation.reason_required = true;
+            }
+            if operation.name == "registry.dump" {
+                operation.handler = Handler::RegistryDump;
+            }
+        }
+        let mut seen = HashSet::new();
+        for operation in &operations {
+            if !seen.insert(operation.name) {
+                return Err(RegistryError(format!(
+                    "duplicate operation name: {}",
+                    operation.name
+                )));
+            }
+        }
+        let registry = Self { operations };
+        registry.validate()?;
+        registry.validate_schemas()?;
+        Ok(registry)
+    }
+
+    #[allow(dead_code)] // Registry coverage tests assert the operation count.
+    pub fn len(&self) -> usize {
+        self.operations.len()
+    }
+
+    #[allow(dead_code)] // Used by the transports that land in P2.3–P2.5.
+    pub fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Operation> {
+        self.operations.iter()
+    }
+
+    #[allow(dead_code)]
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.operations.iter().map(|operation| operation.name)
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.operations
+            .iter()
+            .any(|operation| operation.name == name)
+    }
+
+    pub fn get(&self, name: &str) -> Result<&Operation, RegistryError> {
+        self.operations
+            .iter()
+            .find(|operation| operation.name == name)
+            .ok_or_else(|| RegistryError(format!("unknown operation: {name}")))
+    }
+
+    pub fn by_mcp_tool(&self, tool_name: &str) -> Result<&Operation, RegistryError> {
+        self.operations
+            .iter()
+            .find(|operation| operation.mcp_tool_name() == tool_name)
+            .ok_or_else(|| RegistryError(format!("unknown MCP tool: {tool_name}")))
+    }
+
+    /// Which surfaces this operation is expected to appear on.
+    pub fn transports_for(&self, name: &str) -> Vec<Transport> {
+        if LOCAL_ONLY.iter().any(|(excluded, _)| *excluded == name) {
+            return vec![Transport::Cli];
+        }
+        if HTTP_ONLY.iter().any(|(excluded, _)| *excluded == name) {
+            return vec![Transport::Http];
+        }
+        vec![Transport::Cli, Transport::Http, Transport::Mcp]
+    }
+
+    #[allow(dead_code)]
+    pub fn for_transport(&self, transport: Transport) -> Vec<&Operation> {
+        self.operations
+            .iter()
+            .filter(|operation| self.transports_for(operation.name).contains(&transport))
+            .collect()
+    }
+
+    /// The same lookup as `for_transport`, returning owned operations so a
+    /// caller can hand one to a blocking thread without borrowing the registry.
+    pub fn operations_for(&self, transport: Transport) -> Vec<Operation> {
+        self.for_transport(transport).into_iter().cloned().collect()
+    }
+
+    fn validate(&self) -> Result<(), RegistryError> {
+        self.validate_unique_bindings()?;
+        self.validate_http_routes()?;
+        self.validate_reasons()?;
+        self.validate_exclusions()
+    }
+
+    fn validate_unique_bindings(&self) -> Result<(), RegistryError> {
+        let mut routes: HashMap<(&str, &str), &str> = HashMap::new();
+        let mut cli_paths: HashMap<&[&str], &str> = HashMap::new();
+        let mut tools: HashMap<String, &str> = HashMap::new();
+        for operation in &self.operations {
+            if let Some(route) = &operation.route {
+                let route_key = (route.method.as_str(), route.path);
+                if let Some(owner) = routes.insert(route_key, operation.name) {
+                    return Err(RegistryError(format!(
+                        "route {} {} is claimed by both {owner} and {}",
+                        route_key.0, route_key.1, operation.name
+                    )));
+                }
+            }
+            if let Some(owner) = cli_paths.insert(operation.cli.path, operation.name) {
+                return Err(RegistryError(format!(
+                    "CLI path {} is claimed by both {owner} and {}",
+                    operation.cli.path.join(" "),
+                    operation.name
+                )));
+            }
+            if let Some(owner) = tools.insert(operation.mcp_tool_name(), operation.name) {
+                return Err(RegistryError(format!(
+                    "MCP tool {} is claimed by both {owner} and {}",
+                    operation.mcp_tool_name(),
+                    operation.name
+                )));
+            }
+        }
+        self.validate_cli_tree(&cli_paths)
+    }
+
+    /// A CLI command cannot be both a leaf and a group.
+    fn validate_cli_tree(&self, cli_paths: &HashMap<&[&str], &str>) -> Result<(), RegistryError> {
+        let mut paths: Vec<(&[&str], &str)> = cli_paths
+            .iter()
+            .map(|(path, owner)| (*path, *owner))
+            .collect();
+        paths.sort();
+        for (path, owner) in &paths {
+            for (other, other_owner) in &paths {
+                if other != path && other.starts_with(path) {
+                    return Err(RegistryError(format!(
+                        "CLI path '{}' ({owner}) is a prefix of '{}' ({other_owner}); a command \
+                         cannot be both a leaf and a group",
+                        path.join(" "),
+                        other.join(" ")
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An operation on the HTTP transport must have a REST route. The reverse
+    /// is allowed: a local-only operation carries none.
+    fn validate_http_routes(&self) -> Result<(), RegistryError> {
+        for operation in &self.operations {
+            if self
+                .transports_for(operation.name)
+                .contains(&Transport::Http)
+                && operation.route.is_none()
+            {
+                return Err(RegistryError(format!(
+                    "{} is on the HTTP transport but declares no route",
+                    operation.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every mutating operation must take a required reason.
+    ///
+    /// Python also refuses a *defaulted* reason, because a default explains
+    /// nothing. That case cannot be expressed with `reason_required` alone —
+    /// a missing field and an optional one look the same — so it is read
+    /// from the recorded schema: a mutating operation whose `reason` property
+    /// is absent from `required` is the optional-reason shape.
+    fn validate_reasons(&self) -> Result<(), RegistryError> {
+        let schemas = parsed_schemas();
+        for operation in &self.operations {
+            if !operation.mutating {
+                continue;
+            }
+            if !operation.reason_required {
+                return Err(RegistryError(format!(
+                    "{} is mutating but its parameters have no reason field",
+                    operation.name
+                )));
+            }
+            let Some((params, _)) = schemas.get(operation.name) else {
+                continue;
+            };
+            #[cfg(test)]
+            let overridden = tests::reason_schema_override(operation.name);
+            #[cfg(test)]
+            let params = overridden.as_ref().unwrap_or(params);
+            if !reason_is_required(params) {
+                return Err(RegistryError(format!(
+                    "{} has an optional reason; a defaulted reason explains nothing",
+                    operation.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every operation has a derived schema, and no schema names an operation
+    /// that does not exist. Checked against the parsed map, which is also what
+    /// the dump and the MCP tool list read, so a mismatch fails here rather
+    /// than at the first call.
+    fn validate_schemas(&self) -> Result<(), RegistryError> {
+        let schemas = parsed_schemas();
+        for operation in &self.operations {
+            if !schemas.contains_key(operation.name) {
+                return Err(RegistryError(format!(
+                    "{} has no derived schema; list it in application::models::DERIVED",
+                    operation.name
+                )));
+            }
+        }
+        for name in schemas.keys() {
+            if !self.contains(name) {
+                return Err(RegistryError(format!(
+                    "schema derived for '{name}', which is not a registered operation"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_exclusions(&self) -> Result<(), RegistryError> {
+        for (name, _) in LOCAL_ONLY.iter().chain(HTTP_ONLY) {
+            if !self.contains(name) {
+                return Err(RegistryError(format!(
+                    "parity exclusion names '{name}', which is not a registered operation — the \
+                     list is stale"
+                )));
+            }
+        }
+        for (local, _) in LOCAL_ONLY {
+            if HTTP_ONLY.iter().any(|(name, _)| name == local) {
+                return Err(RegistryError(format!(
+                    "operations excluded twice: [{local}]"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Build the registry every adapter uses.
+pub fn default_registry() -> OperationRegistry {
+    OperationRegistry::new(operations::build_operations()).expect("the default registry is valid")
+}
+
+/// One operation as every transport sees it. The field order is the manifest's.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OperationManifest {
+    pub name: &'static str,
+    pub summary: &'static str,
+    pub scope: &'static str,
+    pub mutating: bool,
+    pub reason_required: bool,
+    pub http_method: Option<&'static str>,
+    pub http_path: Option<&'static str>,
+    pub mcp_tool: String,
+    pub cli_path: Vec<&'static str>,
+    /// Derived from the operation's Rust models in `application::models`.
+    pub params_schema: serde_json::Value,
+    pub result_schema: serde_json::Value,
+    pub transports: Vec<&'static str>,
+    /// `None` serialises as `null`, matching pydantic's `model_dump`, which
+    /// emits the field for every operation rather than omitting it.
+    pub exclusion: Option<&'static str>,
+    pub exclusion_reason: Option<&'static str>,
+}
+
+/// A schema requires `reason` when the property is listed in `required`.
+/// Absent `required`, or a `reason` that only has a default, is optional —
+/// the shape a defaulted reason takes, which explains nothing.
+fn reason_is_required(params: &serde_json::Value) -> bool {
+    params
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("reason")))
+}
+
+fn exclusion_of(name: &str) -> Option<(&'static str, &'static str)> {
+    if let Some((_, reason)) = LOCAL_ONLY.iter().find(|(excluded, _)| *excluded == name) {
+        return Some(("local_only", *reason));
+    }
+    HTTP_ONLY
+        .iter()
+        .find(|(excluded, _)| *excluded == name)
+        .map(|(_, reason)| ("http_only", *reason))
+}
+
+/// Parameter and result schemas, derived once from the Rust models.
+/// `validate_schemas` refuses a registry whose derived set does not match the
+/// operation set, so a lookup that misses here is a bug in that check, not a
+/// state to paper over.
+fn parsed_schemas() -> &'static HashMap<&'static str, (serde_json::Value, serde_json::Value)> {
+    use std::sync::LazyLock;
+    static PARSED: LazyLock<HashMap<&str, (serde_json::Value, serde_json::Value)>> =
+        LazyLock::new(|| {
+            crate::application::models::derived_schemas()
+                .into_iter()
+                .map(|(name, params, result)| (name, (params, result)))
+                .collect()
+        });
+    &PARSED
+}
+
+/// The parameter schema an operation's MCP tool advertises as `inputSchema`.
+pub fn params_schema_for(name: &str) -> Option<&'static serde_json::Value> {
+    parsed_schemas().get(name).map(|(params, _)| params)
+}
+
+/// The result schema an operation returns, as pydantic emits it.
+pub fn result_schema_for(name: &str) -> Option<&'static serde_json::Value> {
+    parsed_schemas().get(name).map(|(_, result)| result)
+}
+
+/// The `registry.dump` result: every operation, in registration order.
+pub fn dump() -> serde_json::Value {
+    let registry = default_registry();
+    let operations: Vec<OperationManifest> = registry
+        .iter()
+        .map(|operation| {
+            let (exclusion, exclusion_reason) = match exclusion_of(operation.name) {
+                Some((kind, reason)) => (Some(kind), Some(reason)),
+                None => (None, None),
+            };
+            let (params_schema, result_schema) = parsed_schemas()
+                .get(operation.name)
+                .map(|(params, result)| (params.clone(), result.clone()))
+                .expect("validate_schemas guarantees a schema for every operation");
+            OperationManifest {
+                name: operation.name,
+                summary: operation.summary,
+                scope: operation.scope.as_str(),
+                mutating: operation.mutating,
+                reason_required: operation.reason_required,
+                http_method: operation.route.as_ref().map(|route| route.method.as_str()),
+                http_path: operation.route.as_ref().map(|route| route.path),
+                mcp_tool: operation.mcp_tool_name(),
+                cli_path: operation.cli.path.to_vec(),
+                params_schema,
+                result_schema,
+                transports: registry
+                    .transports_for(operation.name)
+                    .iter()
+                    .map(|transport| transport.as_str())
+                    .collect(),
+                exclusion,
+                exclusion_reason,
+            }
+        })
+        .collect();
+    serde_json::json!({ "operations": operations })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry() -> OperationRegistry {
+        default_registry()
+    }
+
+    #[test]
+    fn the_default_registry_builds_and_covers_every_exclusion() {
+        let registry = registry();
+        assert!(registry.len() > 100, "got {}", registry.len());
+        for (name, _) in LOCAL_ONLY.iter().chain(HTTP_ONLY) {
+            assert!(
+                registry.contains(name),
+                "{name} is excluded but not registered"
+            );
+        }
+    }
+
+    #[test]
+    fn transports_follow_the_exclusion_lists() {
+        let registry = registry();
+        for (name, _) in LOCAL_ONLY {
+            assert_eq!(registry.transports_for(name), vec![Transport::Cli]);
+        }
+        for (name, _) in HTTP_ONLY {
+            assert_eq!(registry.transports_for(name), vec![Transport::Http]);
+        }
+        assert_eq!(
+            registry.transports_for("work.get"),
+            vec![Transport::Cli, Transport::Http, Transport::Mcp]
+        );
+    }
+
+    #[test]
+    fn a_mutating_operation_requires_a_reason() {
+        let mut operations = operations::build_operations();
+        let work_create = operations
+            .iter_mut()
+            .find(|operation| operation.name == "work.create")
+            .unwrap();
+        work_create.reason_required = false;
+        let error = OperationRegistry::new(operations).unwrap_err();
+        assert!(error.0.contains("no reason field"), "{}", error.0);
+        assert!(error.0.contains("work.create"), "{}", error.0);
+    }
+
+    #[test]
+    fn a_defaulted_reason_is_rejected() {
+        // An operation that claims a reason, but whose recorded schema leaves
+        // `reason` off `required`, is the optional-reason shape Python refuses.
+        // The schema table is a process-wide static, so the probe uses an
+        // operation name that is not in it and is checked through the same
+        // predicate by substituting a schema that omits `reason` from
+        // `required`.
+        let optional = serde_json::json!({
+            "type": "object",
+            "properties": {"reason": {"type": "string", "default": "because"}},
+            "required": []
+        });
+        assert!(
+            !reason_is_required(&optional),
+            "a defaulted reason is not required"
+        );
+        assert!(reason_is_required(
+            &serde_json::json!({"required": ["reason"]})
+        ));
+        // And the shipped set has no such operation: every mutating schema
+        // lists `reason` in `required`.
+        let schemas = parsed_schemas();
+        for operation in registry().iter() {
+            if !operation.mutating {
+                continue;
+            }
+            let shipped = reason_is_required(&schemas[operation.name].0);
+            assert!(
+                shipped,
+                "{} is mutating but its schema does not require reason",
+                operation.name
+            );
+        }
+    }
+
+    thread_local! {
+        /// A schema `validate_reasons` reads in place of the derived one, for
+        /// this test thread only. The derived table is a process-wide static.
+        static REASON_SCHEMA: std::cell::RefCell<Option<(&'static str, serde_json::Value)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn reason_schema_override(name: &str) -> Option<serde_json::Value> {
+        REASON_SCHEMA.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|(overridden, _)| *overridden == name)
+                .map(|(_, schema)| schema.clone())
+        })
+    }
+
+    #[test]
+    fn construction_refuses_a_defaulted_reason() {
+        // `work.create` with its reason given a default and dropped from
+        // `required`: the registry must refuse to build, as Python does.
+        let mut schema = parsed_schemas()["work.create"].0.clone();
+        schema["properties"]["reason"]["default"] = serde_json::json!("because");
+        let required: Vec<serde_json::Value> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item.as_str() != Some("reason"))
+            .cloned()
+            .collect();
+        schema["required"] = serde_json::Value::Array(required);
+        REASON_SCHEMA.with(|slot| *slot.borrow_mut() = Some(("work.create", schema)));
+        let error = OperationRegistry::new(operations::build_operations()).unwrap_err();
+        REASON_SCHEMA.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(
+            error.0,
+            "work.create has an optional reason; a defaulted reason explains nothing"
+        );
+        // Without the override the same operations build.
+        assert!(OperationRegistry::new(operations::build_operations()).is_ok());
+    }
+
+    #[test]
+    fn a_stale_exclusion_is_rejected() {
+        let error = OperationRegistry::new(vec![]).unwrap_err();
+        assert!(error.0.contains("parity exclusion"), "{}", error.0);
+    }
+
+    #[test]
+    fn a_leaf_and_group_cli_path_is_rejected() {
+        let mut operations = operations::build_operations();
+        operations.push(Operation::new(
+            "status.child",
+            "a child of a leaf",
+            Scope::Read,
+            false,
+            HttpRoute::new(HttpMethod::Get, "/status/child"),
+            CliBinding::new(&["status", "x"]),
+        ));
+        let error = OperationRegistry::new(operations).unwrap_err();
+        assert!(
+            error.0.contains("cannot be both a leaf and a group"),
+            "{}",
+            error.0
+        );
+    }
+
+    #[test]
+    fn clone_is_local_only_and_declares_no_route() {
+        let registry = registry();
+        assert!(registry.get("clone").unwrap().route.is_none());
+        assert_eq!(registry.transports_for("clone"), vec![Transport::Cli]);
+    }
+
+    #[test]
+    fn an_http_operation_must_declare_a_route() {
+        let mut operations = operations::build_operations();
+        let work_get = operations
+            .iter_mut()
+            .find(|operation| operation.name == "work.get")
+            .unwrap();
+        work_get.route = None;
+        let error = OperationRegistry::new(operations).unwrap_err();
+        assert!(error.0.contains("declares no route"), "{}", error.0);
+    }
+
+    #[test]
+    fn bindings_are_unique() {
+        let mut operations = operations::build_operations();
+        let work_get = operations
+            .iter()
+            .find(|operation| operation.name == "work.get")
+            .unwrap()
+            .clone();
+        operations.push(Operation::new(
+            "work.get.again",
+            "a duplicate route",
+            Scope::Read,
+            false,
+            HttpRoute::new(work_get.http_route().method, work_get.http_route().path),
+            work_get.cli.clone(),
+        ));
+        let error = OperationRegistry::new(operations).unwrap_err();
+        assert!(error.0.contains("claimed by both"), "{}", error.0);
+    }
+
+    #[test]
+    fn not_ported_is_a_failure() {
+        let registry = registry();
+        // instance.diagnostics is ported: with no context it asks for one.
+        let diagnostics = registry.get("instance.diagnostics").unwrap();
+        let needs = diagnostics.run(None, serde_json::json!({})).unwrap_err();
+        assert!(
+            needs.message().contains("needs an instance context"),
+            "{}",
+            needs.message()
+        );
+        // An operation whose service has not landed still fails, and names itself.
+        let missing = registry
+            .iter()
+            .find(|operation| {
+                matches!(operation.handler, Handler::NotPorted)
+                    && service_for(operation.name).is_none()
+            })
+            .expect("an unported operation");
+        let error = missing.run(None, serde_json::json!({})).unwrap_err();
+        assert!(
+            error.message().contains("not been ported"),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn the_project_brief_and_place_metrics_handlers_are_wired() {
+        assert!(service_for("project.brief").is_some());
+        assert!(service_for("place.metrics").is_some());
+    }
+
+    #[test]
+    fn dump_names_every_operation_and_its_exclusion() {
+        let manifest = dump();
+        let operations = manifest["operations"].as_array().unwrap();
+        let names: Vec<&str> = operations
+            .iter()
+            .map(|operation| operation["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.len(), registry().len());
+        assert!(names.contains(&"registry.dump"));
+        let init = operations
+            .iter()
+            .find(|operation| operation["name"] == "init")
+            .unwrap();
+        assert_eq!(init["exclusion"], "local_only");
+        assert_eq!(init["transports"], serde_json::json!(["cli"]));
+        assert!(init["exclusion_reason"]
+            .as_str()
+            .unwrap()
+            .contains("local data directory"));
+        let shared = operations
+            .iter()
+            .find(|operation| operation["name"] == "work.get")
+            .unwrap();
+        assert!(shared.get("exclusion").unwrap().is_null());
+        assert_eq!(shared["mcp_tool"], "work_get");
+        assert_eq!(shared["cli_path"], serde_json::json!(["work", "get"]));
+    }
+
+    #[test]
+    fn the_dump_matches_the_python_golden() {
+        // Recorded by `scripts/gen_registry.py` from Python's own registry
+        // dump. Compared with no normaliser, so a drift in any field fails.
+        // The golden is unkeyed (tests/parity/golden/registry.json, not under
+        // golden/<sha>/) on purpose: it describes the registry, which changes
+        // with the operation set rather than with the parity script.
+        // `gen_registry.py --check` diffs it against a fresh recording from the
+        // live Python.
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/golden/registry.json");
+        let golden: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
+        let dump = dump();
+        assert_eq!(dump, golden, "registry dump drifted from the Python golden");
+        // Value equality ignores key order, and the manifest's field order is
+        // part of the contract, so compare the text too.
+        assert_eq!(
+            serde_json::to_string_pretty(&dump).unwrap(),
+            serde_json::to_string_pretty(&golden).unwrap(),
+            "registry field order drifted"
+        );
+    }
+
+    /// The schema normaliser of `tests/parity/normalise.toml` `[schema]`: sort
+    /// `anyOf`, applied only inside a schema object (one that carries
+    /// `$schema` or `properties`). Pydantic's union order is a generator
+    /// accident, not contract. Titles are compared (operator ruling, WI-1046).
+    fn normalise_schema(value: &serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        match value {
+            Value::Object(object) => {
+                let is_schema = object.contains_key("$schema") || object.contains_key("properties");
+                let mut out = serde_json::Map::new();
+                for (key, child) in object {
+                    let child = if is_schema && key == "anyOf" {
+                        let mut options: Vec<Value> = child
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(normalise_schema)
+                            .collect();
+                        options.sort_by_key(|option| option.to_string());
+                        Value::Array(options)
+                    } else {
+                        normalise_schema(child)
+                    };
+                    out.insert(key.clone(), child);
+                }
+                Value::Object(out)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(normalise_schema).collect()),
+            other => other.clone(),
+        }
+    }
+
+    #[test]
+    fn every_operation_schema_matches_the_python_golden_under_the_normaliser() {
+        // One comparison per operation, so a drift names the operation that
+        // moved. The whole-dump golden test above is stricter; this one is the
+        // contract-level check the normaliser is written for.
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/golden/registry.json");
+        let golden: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
+        let golden_ops = golden["operations"].as_array().unwrap();
+        let rust = dump();
+        let rust_ops = rust["operations"].as_array().unwrap();
+        assert_eq!(rust_ops.len(), golden_ops.len(), "operation count drifted");
+
+        let mut drifted = Vec::new();
+        for expected in golden_ops {
+            let name = expected["name"].as_str().unwrap();
+            let Some(actual) = rust_ops.iter().find(|op| op["name"] == name) else {
+                drifted.push(format!("{name}: missing from the Rust dump"));
+                continue;
+            };
+            for field in ["params_schema", "result_schema"] {
+                if normalise_schema(&actual[field]) != normalise_schema(&expected[field]) {
+                    drifted.push(format!("{name}.{field}"));
+                }
+            }
+        }
+        assert!(
+            drifted.is_empty(),
+            "schemas drifted from Python: {drifted:?}"
+        );
+    }
+
+    #[test]
+    fn lookup_misses_are_errors() {
+        let registry = registry();
+        assert!(registry.get("nope").is_err());
+        assert!(registry.by_mcp_tool("nope").is_err());
+        assert_eq!(registry.by_mcp_tool("work_get").unwrap().name, "work.get");
+    }
+
+    /// Operations registered without a service. `run` turns each of these into
+    /// the "has not been ported" error, which HTTP reports as 501. An entry
+    /// here is a known gap, named with the work item that still owes the
+    /// service. A newly registered operation with no service and no entry fails
+    /// this test, so a stub cannot land quietly.
+    ///
+    /// `registry.dump` is implemented by the registry itself. `init` and `serve`
+    /// are process commands in `main` (`fn init`, `fn serve`), not registry
+    /// services, so a service arm is not how they are implemented.
+    const PROCESS_COMMANDS: &[&str] = &["init", "serve"];
+
+    const PENDING_SERVICES: &[(&str, &str)] = &[] as &[(&str, &str)];
+
+    #[test]
+    fn every_registered_operation_has_a_handler_or_a_named_gap() {
+        let registry = registry();
+        let pending: std::collections::HashMap<&str, &str> =
+            PENDING_SERVICES.iter().copied().collect();
+        assert_eq!(
+            pending.len(),
+            PENDING_SERVICES.len(),
+            "the pending-service allowlist names an operation twice"
+        );
+        let mut missing = Vec::new();
+        for operation in registry.iter() {
+            let implemented = PROCESS_COMMANDS.contains(&operation.name)
+                || match operation.handler {
+                    Handler::RegistryDump => true,
+                    Handler::NotPorted => service_for(operation.name).is_some(),
+                };
+            if implemented {
+                assert!(
+                    !pending.contains_key(operation.name),
+                    "{} has a handler, so it must leave the pending-service allowlist",
+                    operation.name
+                );
+                continue;
+            }
+            if !pending.contains_key(operation.name) {
+                missing.push(operation.name);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "registered without a service and not on the pending-service allowlist              (each entry needs the work item that still owes the service): {missing:?}"
+        );
+        for (name, work_item) in PENDING_SERVICES {
+            assert!(
+                registry.contains(name),
+                "{name} is allowlisted ({work_item}) but is not registered"
+            );
+            assert!(
+                work_item.starts_with("WI-") && work_item.len() > 3,
+                "{name}'s allowlist entry {work_item} is not a work-item ref"
+            );
+            let error = registry
+                .get(name)
+                .unwrap()
+                .run(None, serde_json::json!({}))
+                .unwrap_err();
+            let VogtError::NotImplemented(message) = error else {
+                panic!("{name} did not fail as not-ported: {error:?}");
+            };
+            assert!(
+                message.contains("has not been ported"),
+                "{name} would not be reported as 501: {message}"
+            );
+        }
+    }
+}

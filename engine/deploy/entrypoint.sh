@@ -17,6 +17,11 @@
 #                                /ui-legacy. Loopback → this script also *runs*
 #                                the core there. Unset → no core, and the
 #                                engine runs alone, as it shipped.
+#   VOGT_CORE_IMPL               which core that loopback process is:
+#                                `python` (default) or `rust`. Merging the
+#                                rust binary into this image is not the
+#                                cutover; flipping this and redeploying is.
+#                                Anything else refuses to boot.
 #   VOGT_DATA_DIR                the core's SQLite + backups (default from the
 #                                image: /var/lib/vogt)
 #
@@ -275,7 +280,7 @@ vogt_core_listen() {
 
     case "$host" in
         127.0.0.1|localhost|'[::1]')
-            # `vogt serve --host` wants a bare address; the brackets are URL
+            # `vogt-core serve --host` wants a bare address; the brackets are URL
             # syntax, not part of the address.
             printf '%s %s\n' "${host//[\[\]]/}" "$port"
             ;;
@@ -292,9 +297,84 @@ vogt_core_listen() {
     esac
 }
 
+# Point the operator names at the core VOGT_CORE_IMPL selected. The image
+# ships both binaries and links neither name at build time: a build-time link
+# to vogt-core would make `vogt` rust even when the supervisor is running
+# python. python (the default) uses the venv console scripts; rust uses
+# vogt-core for both names, because that binary picks its mode from argv[0].
+#
+# The links live in /opt/vogt/bin, created at build time and owned by the
+# image user. /usr/local/bin is root-owned 755, and this function runs as
+# that user, so writing there exits the container at boot. The image puts
+# /opt/vogt/bin first on PATH (ahead of /usr/local/bin and the venv), so the
+# supervisor, a `docker exec` shell, and vogt-mcp-auth.sh (which calls
+# `vogt-mcp-remote` by name) all see the selected core. Nothing is written
+# under /usr/local/bin at runtime.
+link_vogt_names() {
+    local impl="${VOGT_CORE_IMPL:-python}"
+    local cli mcp
+    case "$impl" in
+        python)
+            cli="${VOGT_PYTHON_BIN:-/opt/vogt/.venv/bin/vogt}"
+            mcp="${VOGT_PYTHON_MCP_BIN:-/opt/vogt/.venv/bin/vogt-mcp-remote}"
+            ;;
+        rust)
+            cli="${VOGT_RUST_CORE_BIN:-/usr/local/bin/vogt-core}"
+            mcp="$cli"
+            ;;
+        *)
+            echo "vogt-core: VOGT_CORE_IMPL=${impl} is not python or rust —" \
+                 "refusing to guess" >&2
+            return 78
+            ;;
+    esac
+    local dest="${VOGT_BIN_DIR:-/opt/vogt/bin}"
+    if [[ ! -d "$dest" || ! -w "$dest" ]]; then
+        echo "vogt-core: ${dest} is missing or not writable —" \
+             "the image creates /opt/vogt/bin for the runtime user" >&2
+        return 78
+    fi
+    ln -sfn "$cli" "$dest/vogt"
+    ln -sfn "$mcp" "$dest/vogt-mcp-remote"
+}
+
+# Which binary the supervisor runs. Default python so an image that already
+# contains vogt-core does not become the cutover the moment it is deployed.
+# `vogt` is the operator CLI name; on the python path it must be the Python
+# console script, never the rust binary.
+vogt_core_bin() {
+    local impl="${VOGT_CORE_IMPL:-python}"
+    case "$impl" in
+        python)
+            if [[ -n "${VOGT_PYTHON_BIN:-}" ]]; then
+                printf '%s\n' "$VOGT_PYTHON_BIN"
+            elif [[ -x /opt/vogt/.venv/bin/vogt ]]; then
+                printf '%s\n' /opt/vogt/.venv/bin/vogt
+            else
+                echo "vogt-core: VOGT_CORE_IMPL=python but no Python vogt" \
+                     "console script (VOGT_PYTHON_BIN or /opt/vogt/.venv/bin/vogt)" >&2
+                return 78
+            fi
+            ;;
+        rust)
+            printf '%s\n' "${VOGT_RUST_CORE_BIN:-vogt-core}"
+            ;;
+        *)
+            echo "vogt-core: VOGT_CORE_IMPL=${impl} is not python or rust —" \
+                 "refusing to guess" >&2
+            return 78
+            ;;
+    esac
+}
+
 supervise_vogt_core() {
     local host="$1" port="$2"
-    local backoff=1 started=0 uptime=0
+    local bin backoff=1 started=0 uptime=0
+    if ! bin="$(vogt_core_bin)"; then
+        echo "vogt-core: not starting (see above)" >&2
+        return 78
+    fi
+    echo "vogt-core: implementation ${VOGT_CORE_IMPL:-python} (${bin})"
 
     # `init` before every `serve`, because nothing else migrates. `serve` does
     # not, and there is no `vogt migrate` verb, so an image carrying a new
@@ -312,12 +392,12 @@ supervise_vogt_core() {
     # somebody restarts the container.
     while :; do
         started=$SECONDS
-        if ! vogt init; then
+        if ! "$bin" init; then
             echo "vogt-core: init failed — refusing to serve a store this" \
                  "build does not understand" >&2
         else
             echo "vogt-core: serving on ${host}:${port}"
-            if vogt serve --host "$host" --port "$port"; then
+            if "$bin" serve --host "$host" --port "$port"; then
                 echo "vogt-core: exited cleanly" >&2
             else
                 echo "vogt-core: exited with status $?" >&2
@@ -364,6 +444,17 @@ if [[ -n "${VOGT_CORE_URL:-}" ]]; then
     fi
 else
     echo "vogt-core: VOGT_CORE_URL unset; running the engine alone"
+fi
+
+# The operator names follow VOGT_CORE_IMPL whether or not a core is
+# supervised here. A loopback VOGT_CORE_URL is what starts the supervisor;
+# a docker exec shell and vogt-mcp-auth.sh still call `vogt` and
+# `vogt-mcp-remote` by name when the engine runs alone, and those names
+# have to be the selected core. A failure is the same closed refusal as a
+# bad impl: do not leave names that disagree with the flag.
+if ! link_vogt_names; then
+    echo "vogt-core: not linking operator names (see above)" >&2
+    exit 78
 fi
 
 # `exec` so the server becomes the container's foreground process from here;

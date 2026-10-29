@@ -31,8 +31,8 @@ estate that needs its own tools inside sessions ends at the third, and
 
 Every setting lives in one schema, `src/vogt/config.py`.
 [`CONFIG.md`](CONFIG.md) and `config.example.toml` are *generated* from it —
-never hand-edit them; run `uv run python scripts/gen_config_docs.py` and
-commit the result.
+never hand-edit them; run `vogt-core gen-config-docs` (the Rust port of
+`scripts/gen_config_docs.py`, as CI runs it) and commit the result.
 
 Precedence, highest first:
 
@@ -365,17 +365,22 @@ whatever its image declares — frequently an empty anonymous volume that
 Docker creates fresh on each deploy.
 
 So **administrative commands go to the core**: `project import`,
-`project register`, `token issue`, `status`. Anything you would run to
-change what the instance knows belongs where the instance's state is. The
-tempting `vogt init` that the error message suggests is exactly the wrong
-response — it would initialise a second, empty instance in the container
-that should not have one.
+`project register`, `token issue`, `user create`, `status`, `backup`,
+`restore`. In the stack image the core is the Rust `vogt-core`, and its `vogt`
+carries all of these (see [DEPLOYMENT.md](DEPLOYMENT.md), "The stack image's
+CLI"); only `diagnostics`, `engine status` and `connect` are not yet ported.
+Anything you would run to change what the instance knows belongs where the
+instance's state is. The tempting `vogt init` that the error message suggests
+is exactly the wrong response — it would initialise a second, empty instance
+in the container that should not have one.
 
-One wrinkle if you go looking: the core's CLI may be inside a virtualenv
-(`/opt/vogt/.venv/bin`) that is on `PATH` for a plain `docker exec` but not
-for a *login* shell. `docker exec core vogt status` finds it;
-`docker exec core sh -lc 'vogt status'` may not, and reports
-`vogt: not found` — a missing binary that is not missing.
+One wrinkle if you go looking, in the Python core image (the root
+`Dockerfile`, published until the swap): its CLI is inside a virtualenv
+(`/opt/vogt/.venv/bin`) that is on `PATH` for a plain `docker exec` but not for
+a *login* shell, so `docker exec core sh -lc 'vogt status'` may report
+`vogt: not found` — a missing binary that is not missing. The stack image has
+no virtualenv; its `vogt` is the Rust binary, linked into `/usr/local/bin`,
+and is found either way.
 
 ## Layer 3 — extending the image
 

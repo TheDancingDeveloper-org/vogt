@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Regenerate the Rust operation registry from the Python one.
+
+The Rust registry in `engine/core/src/registry/operations.rs` is derived, not
+authored: it carries every operation's name, summary, scope, mutation flag,
+route and CLI path exactly as `src/vogt/registry/operations.py` defines them.
+Hand-editing it is how the Rust side fell behind (it shipped 122 operations
+against a Python tree that had grown to 134). Run this after changing the
+Python operation set; the committed golden at
+`tests/parity/golden/registry.json` is what the Rust dump is checked against.
+
+The golden is recorded from Python's own `registry.dump`, schemas included.
+`--check` diffs it, so a model change that alters a schema fails here rather
+than at the next review. The Rust side derives every schema from its own
+types in `application::models`; `tests/test_rust_schemas.py` checks those
+against the live Python registry.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import re
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+OPERATIONS_RS = REPO_ROOT / "engine" / "core" / "src" / "registry" / "operations.rs"
+STRIPS_RS = REPO_ROOT / "engine" / "core" / "src" / "registry" / "strips.rs"
+GOLDEN = REPO_ROOT / "tests" / "parity" / "golden" / "registry.json"
+MODELS_RS = REPO_ROOT / "engine" / "core" / "src" / "application" / "models.rs"
+
+SCOPES = {
+    "read": "Read",
+    "work.write": "WorkWrite",
+    "project.write": "ProjectWrite",
+    "admin": "Admin",
+    "writeback": "Writeback",
+}
+METHODS = {"GET": "Get", "POST": "Post", "PATCH": "Patch", "DELETE": "Delete"}
+
+HEADER = """\
+//! The operation set, generated from `src/vogt/registry/operations.py`.
+//!
+//! Produced by `scripts/gen_registry.py`. Do not edit by hand: the generator
+//! is what stops the Rust registry drifting behind the Python one, and a test
+//! checks the dump against a golden recorded from Python. Every handler is
+//! `not_ported` until its service lands, except `registry.dump`, which the
+//! registry implements itself.
+
+use super::{CliBinding, HttpMethod, HttpRoute, Operation, Scope};
+
+"""
+
+
+def _validates_line() -> str:
+    # Kept as one Rust comment. Building it avoids a source line ruff format
+    # rewrites into single quotes, which would change the generated file.
+    sample = "`" + '"  xy  "' + "`"
+    result = "`" + '"xy"' + "`"
+    return f"//! validating {sample} against its annotation returns {result}:\n"
+
+
+def _rust_array(decl: str, rows: list[str]) -> str:
+    """One Rust static: the declaration, then the rows, then the closer."""
+    return decl + " = &[\n" + "".join(rows) + "];\n"
+
+
+def _arg(node: ast.expr, index: int) -> ast.expr:
+    if not isinstance(node, ast.Call):
+        raise SystemExit(f"expected a call, got {type(node).__name__}")
+    return node.args[index]
+
+
+def _operations() -> list[dict[str, object]]:
+    """Read the operation set from source, so this runs without importing it."""
+    source = REPO_ROOT / "src" / "vogt" / "registry" / "operations.py"
+    tree = ast.parse(source.read_text())
+    found: list[dict[str, object]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Name) or func.id != "Operation":
+            continue
+        kw = {keyword.arg: keyword.value for keyword in node.keywords}
+        # `route=None` is an operation with no REST route, not a call to parse.
+        routeless = isinstance(kw["route"], ast.Constant) and kw["route"].value is None
+        found.append(
+            {
+                "name": ast.literal_eval(kw["name"]),
+                "summary": ast.literal_eval(kw["summary"]),
+                "scope": ast.literal_eval(kw["scope"]),
+                "mutating": ast.literal_eval(kw["mutating"]),
+                "method": None if routeless else ast.literal_eval(_arg(kw["route"], 0)),
+                "path": None if routeless else ast.literal_eval(_arg(kw["route"], 1)),
+                "cli": list(ast.literal_eval(_arg(kw["cli"], 0))),
+            }
+        )
+    return found
+
+
+def render_operations_rs(operations: list[dict[str, object]]) -> str:
+    lines = [HEADER, "pub fn build_operations() -> Vec<Operation> {\n    vec![\n"]
+    for operation in operations:
+        parts = operation["cli"]
+        assert isinstance(parts, list)
+        cli = ", ".join(json.dumps(part) for part in parts)
+        if operation["method"] is None:
+            # No REST route: the constructor takes none, so the operation cannot
+            # be mounted by accident.
+            constructor = "Operation::local_only("
+            route = ""
+        else:
+            constructor = "Operation::new("
+            route = (
+                "            HttpRoute::new("
+                f"HttpMethod::{METHODS[operation['method']]}, "  # type: ignore[index]
+                f"{json.dumps(operation['path'])}),\n"
+            )
+        lines.append(
+            f"        {constructor}\n"
+            f"            {json.dumps(operation['name'])},\n"
+            f"            {json.dumps(operation['summary'])},\n"
+            f"            Scope::{SCOPES[operation['scope']]},\n"  # type: ignore[index]
+            f"            {str(operation['mutating']).lower()},\n"
+            f"{route}"
+            f"            CliBinding::new(&[{cli}]),\n"
+            "        ),\n"
+        )
+    lines.append("    ]\n}\n")
+    # JSON writes non-ASCII as \uXXXX, which is not a Rust escape. Rust wants
+    # \u{XXXX}, and a character is unambiguous where a decoded code point is not.
+    return re.sub(r"\\u([0-9a-fA-F]{4})", r"\\u{\1}", "".join(lines))
+
+
+def record_golden() -> str:
+    """Python's own registry dump, the golden `registry::dump()` is compared with.
+
+    Every schema comes straight from pydantic: the Rust side derives its own
+    schemas in `application::models`, and `tests/test_rust_schemas.py` checks
+    them against the live registry, so this file records Python's answer and
+    nothing else.
+    """
+    from vogt.application.models import RegistryDumpParams
+    from vogt.application.services.instance import registry_dump
+
+    # registry_dump reads no store. The signature still asks for a context
+    # because every service does; this call has nothing to give it.
+    dump = registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
+    return json.dumps(dump, indent=2, ensure_ascii=False) + "\n"
+
+
+def record_strips() -> str:
+    """Which parameter fields strip whitespace, per operation.
+
+    `Name` and `Reason` strip; a plain `str` does not, even when it shares the
+    field's name. Pydantic erases the alias, so this is decided by behaviour
+    rather than by reading the source: a field strips exactly when validating
+    ``"  xy  "`` against its own annotation returns ``"xy"``. Inheritance,
+    ``Name | None`` and a constraint written out by hand all come out the same
+    way, and a regex over the file would miss each of them.
+    """
+    import pydantic
+
+    from vogt.registry.operations import build_operations
+
+    rows = []
+    for operation in build_operations():
+        for name, field in operation.params_model.model_fields.items():
+            try:
+                out = pydantic.TypeAdapter(field.rebuild_annotation()).validate_python(
+                    "  xy  "
+                )
+            except (pydantic.ValidationError, TypeError):
+                continue
+            if out == "xy":
+                rows.append(f'    ("{operation.name}", "{name}"),\n')
+    return (
+        "//! Parameter fields that strip whitespace, recorded from the models.\n"
+        "//!\n"
+        "//! Produced by `scripts/gen_registry.py`. A field is here exactly when\n"
+        + _validates_line()
+        + "//! `Name` and `Reason` do, a plain `str` does not. A field of the same\n"
+        "//! name typed `str` is absent, and must stay absent: stripping it would\n"
+        "//! change stored text, and with it the audit digest.\n"
+        "\n"
+        "/// `(operation, field)`, in registry order.\n"
+        + _rust_array("pub static STRIPS: &[(&str, &str)]", rows)
+    )
+
+
+def main() -> int:
+    check = "--check" in sys.argv[1:]
+    operations = _operations()
+    rendered = render_operations_rs(operations)
+    strips = record_strips()
+    outputs = {OPERATIONS_RS: rendered, STRIPS_RS: strips}
+    # The registry golden is Python's own dump, schemas included. It is
+    # checked on --check as well as written, so a model change that alters a
+    # schema cannot pass CI while the Rust side still derives the old one.
+    # `record_golden` imports the registry, so it needs the package
+    # importable; the metadata check above does not.
+    outputs[GOLDEN] = record_golden()
+    if check:
+        # Drift fails here, at the Python source, rather than waiting for
+        # someone to remember to regenerate. The Rust test checks the same
+        # golden from the other side, including field order.
+        drifted = [
+            str(path.relative_to(REPO_ROOT))
+            for path, content in outputs.items()
+            if not path.exists() or path.read_text() != content
+        ]
+        if drifted:
+            print(
+                "registry drift: "
+                + ", ".join(drifted)
+                + " differ from src/vogt/registry/operations.py. "
+                "Run `python scripts/gen_registry.py` and commit the result.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"registry matches the Python source ({len(operations)} operations)")
+        return 0
+    for path, content in outputs.items():
+        path.write_text(content)
+    print(f"wrote {len(operations)} operations")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

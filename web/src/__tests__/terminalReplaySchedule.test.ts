@@ -4,6 +4,8 @@ import {
   REPLAY_SLICE_BYTES,
   REPLAY_TAIL_MAX_BYTES,
   prepareReplayTail,
+  recordReplayMeasure,
+  replayClock,
   replaySlices,
   scheduleReplay,
 } from "../terminalReplay";
@@ -62,5 +64,25 @@ describe("terminal replay scheduling", () => {
     await Promise.all(handles.map((handle) => handle.done));
     expect(turns.slice(0, 8)).toEqual(Array.from({ length: 8 }, (_, i) => String(i)));
     vi.useRealTimers();
+  });
+});
+
+describe("replay measures", () => {
+  it("a serialized-cache restore records the same measure a queued replay does", () => {
+    // The F5 restore writes the screen in one go, outside the queue; a reload
+    // that takes it must still report a vogt-terminal-replay measure, or the
+    // H3 budget harness sees no replay at all (terminalReplay.spec.ts:274).
+    performance.clearMeasures();
+    const startedAt = replayClock();
+    recordReplayMeasure("cache", startedAt);
+    const measures = performance
+      .getEntriesByType("measure")
+      .filter((entry) => entry.name === "vogt-terminal-replay.cache");
+    expect(measures).toHaveLength(1);
+    expect(measures[0]?.duration ?? -1).toBeGreaterThanOrEqual(0);
+    // Marks are cleared once measured, so repeated restores do not accumulate.
+    expect(
+      performance.getEntriesByType("mark").filter((mark) => mark.name.startsWith("vogt-terminal-replay-")),
+    ).toHaveLength(0);
   });
 });

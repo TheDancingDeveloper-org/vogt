@@ -29,7 +29,7 @@ sidecar, released as a pair and run by one Compose file,
     ├── /mcp            proxied to the core
     ├── /api/auth/login, /api/install/...   proxied untouched; the core self-gates
     └── /healthz, /readyz
-  vogt serve   (:8000, loopback inside the container, never published)
+  vogt-core serve   (:8000, loopback inside the container, never published)
     ├── /api/...        REST (OpenAPI at /openapi.json)
     ├── /mcp            MCP streamable HTTP transport
     └── /health/live, /health/ready, /version
@@ -530,12 +530,35 @@ instance id), otherwise every difference is a conflict.
    fresh prod backup: the clone baseline is now behind both sides, so a
    second carry would report every item touched by the first as a conflict.
 
-**Migrations run at boot.** The entrypoint runs `vogt init` before every
-`vogt serve`. `init` is idempotent: it creates the instance on a new volume,
+**Migrations run at boot.** The entrypoint runs the selected core's `init`
+before every `serve` — `vogt-core init` when `VOGT_CORE_IMPL=rust`, the Python
+`vogt init` otherwise. `init` is idempotent: it creates the instance on a new volume,
 brings an existing one forward to this build's schema, and leaves the audit
 history alone after that. Until the schemas match, `/health/ready` answers
 503 naming the store and both schema numbers. Migrations are forward-only and
 run under a lock. Read [`SCHEMA.md`](SCHEMA.md) before a major version.
+
+**The stack image ships both cores.** `VOGT_CORE_IMPL` selects which one the
+entrypoint supervises and which binaries the operator names point at
+(`python` or `rust`, default `python`, WI-2660). `python` runs
+`/opt/vogt/.venv/bin/vogt` and links `vogt` and `vogt-mcp-remote` in
+`/opt/vogt/bin` (created at build time, owned by the image user, first on
+`PATH`) to the Python console scripts. `rust` runs `vogt-core`,
+built from `engine/core` in the same image (WI-1078), and links both names to
+that binary. The links are not written into `/usr/local/bin`: that directory
+is root-owned, and the entrypoint runs as the image user. The choice is read at container start, so changing it and
+redeploying is the cutover and the rollback; neither needs a rebuild.
+`vogt-core` itself stays on PATH either way, for a direct call. Besides
+`init` (with `--check`) and `serve`, `vogt` carries the registry's CLI: the admin verbs `status`,
+`token issue`, `user create`, `backup`, `restore`, `migrate`, `project import`
+and `project register`, and the rest of the commands the Python CLI had
+(`work`, `session`, `forge`, `export`, `import`, `clone`, ...), with the same
+global `--json` and `--data-dir`. Run them in the container that holds the
+store, for example `docker exec <stack> vogt token issue ...`. Three commands
+are bound but not yet ported, and answer with a "not available" error rather
+than an empty success: `diagnostics`, `engine status` and `connect`. Use the
+API and MCP endpoints for those. `vogt-mcp` is the engine's own stdio script,
+not the `mcp` command.
 
 **Upgrade.**
 
@@ -717,7 +740,7 @@ existed:
    smoke test against them.
 4. **Tag** `vX.Y.Z` on that same commit. `release.yml` then:
    - checks the tag is reachable from `main` and matches the package, PWA,
-     mobile and workflow versions (`scripts/check_product_version.py`, which
+     mobile and workflow versions (`vogt-core check-product-version`, which
      also proves `build.yml` baked that version);
    - finds a `build.yml` run for the exact commit on `main` whose three
      image jobs succeeded (the demo image's job is not required), resolves

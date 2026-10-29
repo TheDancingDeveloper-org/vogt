@@ -1,0 +1,71 @@
+# cargo-deny policy for the Rust core. Checked by rust-core.yml on every push
+# (WI-2674). The advisory ignores match the reasoned ones in ci.yml (WI-2373).
+
+[advisories]
+unmaintained = "workspace"
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2023-0071 (Marvin Attack): no fixed rsa release. Vogt never
+    # decrypts with RSA; it parses an unencrypted PKCS#1 or PKCS#8 key.
+    "RUSTSEC-2023-0071",
+    # RUSTSEC-2025-0134: rustls-pemfile is unmaintained, with no successor, and
+    # arrives through rustls-native-certs and axum-server.
+    "RUSTSEC-2025-0134",
+    # RUSTSEC-2026-0387: crypto-bigint 0.5.5 timing variability. jsonwebtoken
+    # and web-push pin elliptic-curve 0.13, which pins crypto-bigint 0.5.
+    # Accepted by the operator 2026-10-24; WI-2373 drops it at 0.14.
+    "RUSTSEC-2026-0387",
+]
+
+[licenses]
+allow = [
+    "AGPL-3.0-only",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+    # webpki-roots (0.26 via ureq, 1.0 via reqwest/rustls) ships the Mozilla
+    # CA bundle under the Community Data License Agreement Permissive 2.0.
+    # That is the licence the crate publishes; there is no MIT/Apache build.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "simplest-path"
+# Duplicate versions are a warning, not a deny. `cargo tree -d` under-counts:
+# parsing engine/Cargo.lock finds the set below (WI-2674). Collapsed already:
+# the direct pins moved to the newer line (sha2 0.11, hmac 0.13,
+# openssl-probe 0.2), and a lock refresh dropped base64 0.21, hashbrown 0.15
+# and foldhash. What remains, and why it cannot move yet:
+#   RustCrypto 0.10 vs 0.11 line (aes, block-buffer, cipher, crypto-common,
+#     digest, hkdf, hmac, inout, sha1, sha2, cpufeatures): rsa 0.9, aes 0.8,
+#     cbc 0.1, scrypt 0.12, jsonwebtoken 11 and web-push pin the old line.
+#     Bump them together when those crates publish against digest 0.11.
+#   base64 0.13 / 0.22 / 0.23: 0.22 is ureq 2 only; 0.13 is transitive.
+#   hashbrown 0.14 / 0.16 / 0.17 and hashlink 0.9 / 0.11: rusqlite 0.32 pins
+#     hashlink 0.9, which pins hashbrown 0.14.
+#   openssl-probe 0.1.6 / 0.2: the direct pin is 0.2; curl 0.4 (via isahc,
+#     via web-push) still needs 0.1.
+#   syn 1 / 2 / 3, thiserror 1 / 2: proc-macro crates we do not choose.
+#   webpki-roots 0.26 / 1: ureq 2 pins 0.26.
+#   windows-sys 0.52 / 0.61, and the rand / der / const-oid / pkcs8 splits:
+#     transitive through the crates above.
+# ureq stays on 2. ureq 3 removed AgentBuilder, tls_config(),
+# Error::Status(code, response) and Response::into_reader(), and every call
+# site uses them (adapters/engine.rs, adapters/mcp/bridge.rs,
+# adapters/forge/lanes.rs, scripts/fixture_reset.rs, scripts/load/driver.rs).
+# It also replaces the hand-assembled rustls trust store. That is a behaviour
+# change, not a dependency bump.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

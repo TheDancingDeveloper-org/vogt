@@ -102,16 +102,17 @@ the git routes.
 The merged image is built from the **repository root**, not from `engine/`:
 
 ```bash
-docker build -f engine/Dockerfile \
-  --build-arg CORE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt:latest \
-  -t vogt-engine .
+docker build -f engine/Dockerfile -t vogt-engine .
 ```
 
 The Dockerfile's stages are the PWA bundle, the Rust binary with that bundle
-embedded, the published core image (lifted whole, so the merged image runs
-*the* public core rather than a second build of it — `CORE_IMAGE` defaults to
-the public `:latest` tag as a placeholder for a local build, and CI overrides
-it with a digest), and the runtime. The runtime stage starts `FROM` a
+embedded, `vogt-core` built beside it from the same source, and the Python
+core installed under `/opt/vogt/.venv` (there is no `CORE_IMAGE` argument; the
+Python stage builds from this checkout). `VOGT_CORE_IMPL` (`python` or
+`rust`, default `python`) chooses which core the entrypoint supervises and
+which binaries `/opt/vogt/bin/vogt` and `vogt-mcp-remote` point at (that directory is first on `PATH`; `/usr/local/bin` is not written at runtime). The
+runtime follows. The
+runtime stage starts `FROM` a
 **dev-pod base** (`engine/Dockerfile.pod`, published as
 `ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean-*`): an Ubuntu image
 carrying the toolchains an agent working *inside* a session is likely to want
@@ -124,9 +125,9 @@ built on it as `vogt-stack-workbench`; nothing in this repository deploys
 that image. It is a
 development pod rather than a hardened service image — it runs as a named
 user with `sudo`, with a writable home — which is why the core image at the
-repository root is a separate build rather than a stage of this one: it is
-the hardened input this image lifts its core from, not something to deploy on
-its own (`DEPLOYMENT.md`).
+repository root is a separate build rather than a stage of this one: it is the
+hardened core-only image, not something to deploy on its own (`DEPLOYMENT.md`).
+The merged image no longer takes its core from it; that image is retired at I7.
 
 Build arguments worth knowing: `INSTALL_AI_CLIENTS=true` bakes in the `claude`
 and `opencode` CLIs at the Renovate-pinned versions in
@@ -177,7 +178,7 @@ for.
 
 The image's entrypoint (`engine/deploy/entrypoint.sh`) supervises the
 container: it optionally starts a headless compositor for the GUI surface
-(`START_SWAY=1`), starts the Python core on loopback when `VOGT_CORE_URL`
+(`START_SWAY=1`), starts the core selected by `VOGT_CORE_IMPL` (default the Python core) on loopback when `VOGT_CORE_URL`
 names a loopback address, then execs the engine as PID 1's child. With
 `VOGT_CORE_URL` unset the container runs the engine alone. The published
 image runs with `deploy/stack.compose.yml`; `deploy/engine.overlay.yml`
@@ -727,7 +728,7 @@ than these routes.
   those rows as well. A session is hidden only when all of these hold: it is
   not oversight and not pinned with `keep_awake`; it is not running a turn,
   awaiting approval, blocked, or waiting for input; its state is exited,
-  stopped, hibernated, or idle-and-not-alive; `now - last_event_at` is at
+  stopped, hibernated, or idle (alive or not); `now - last_event_at` is at
   least `ENGINE_SESSION_LIST_RETAIN_AFTER` (default `6h`; `off` or `0`
   disables hiding); and no person typed in that window. Agent input does not
   count as a person typing. Hiding is a list filter: `GET /api/sessions/:id`

@@ -1,0 +1,801 @@
+//! MCP over JSON-RPC 2.0. Ports `adapters/mcp/stdio.py` and the dispatch half
+//! of `adapters/mcp/http.py`.
+//!
+//! One dispatcher, two transports. The stdio server and the streamable-HTTP
+//! route both hand a parsed message here and write back whatever comes out, so
+//! the protocol lives in exactly one place. What differs between them — where
+//! the bytes come from, and that HTTP filters the tool list by the caller's
+//! grant — stays in the transport.
+//!
+//! Three rules, kept from the Python:
+//!
+//! - **A notification gets no response.** A message with no id is acknowledged
+//!   by silence; over HTTP that silence is a 202.
+//! - **A failed tool call is a result, not a protocol error.** The model is
+//!   meant to see it and try something else, so it comes back with `isError`.
+//! - **Identity is never a message field.** Nothing in `initialize` or a tool
+//!   argument can name who is calling; the principal arrives from the
+//!   transport's own authentication.
+
+use serde_json::{json, Map, Value};
+
+use crate::registry::{Operation, OperationRegistry, Transport};
+
+/// Newest first. The head is what the server offers when it gets to choose.
+pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+const SERVER_NAME: &str = "vogt";
+
+const PARSE_ERROR: i64 = -32700;
+const INVALID_REQUEST: i64 = -32600;
+const METHOD_NOT_FOUND: i64 = -32601;
+const INVALID_PARAMS: i64 = -32602;
+
+/// Answer with a version both sides can speak.
+///
+/// The handshake is a negotiation, not a gate: a server that does not recognise
+/// the requested version answers with one it does support and lets the client
+/// decide whether to continue. Refusing instead makes the server unusable by
+/// every client newer than itself, which is the normal direction of drift.
+pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some(version) if SUPPORTED_PROTOCOL_VERSIONS.contains(&version) => {
+            SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .position(|supported| *supported == version)
+                .expect("the contains check just matched")]
+        }
+        _ => SUPPORTED_PROTOCOL_VERSIONS[0],
+    }
+}
+
+/// What one session did.
+#[derive(Debug, Default)]
+pub struct ServeReport {
+    pub messages_handled: u64,
+    pub protocol_version: Option<String>,
+}
+
+/// The operations a caller may see and run.
+///
+/// The stdio transport grants everything the registry exposes over MCP. The
+/// HTTP transport narrows it to the caller's grant, so an ungranted tool is
+/// absent rather than present and refusing.
+pub trait ToolGrant {
+    fn allows(&self, registry: &OperationRegistry, operation: &Operation) -> bool;
+
+    /// Why a call was refused, in the words the caller sees.
+    ///
+    /// The default is the stdio path, which never reaches this: it grants
+    /// everything. The HTTP grant names the cause, because "forbidden" tells a
+    /// model nothing it can act on.
+    fn denial(&self, operation: &Operation) -> String {
+        let _ = operation;
+        "forbidden".to_owned()
+    }
+
+    /// Whether writes are switched on for this caller. The stdio grant has no
+    /// such switch; the HTTP grant does, and the recorded reason depends on it.
+    fn writes_enabled(&self) -> bool {
+        true
+    }
+}
+
+/// Every MCP-exposed operation, which is what a local stdio session may do.
+pub struct FullGrant;
+
+impl ToolGrant for FullGrant {
+    fn allows(&self, _registry: &OperationRegistry, _operation: &Operation) -> bool {
+        true
+    }
+}
+
+/// Whether the MCP transport carries this operation at all.
+///
+/// `LOCAL_ONLY` and `HTTP_ONLY` operations are absent from the tool list and
+/// undispatchable through it — the same invisible-tool rule on both paths.
+/// The registry decides which those are, so this asks it rather than repeating
+/// one of the two lists.
+pub(super) fn exposed_over_mcp(registry: &OperationRegistry, operation: &Operation) -> bool {
+    registry
+        .transports_for(operation.name)
+        .contains(&Transport::Mcp)
+}
+
+/// Which transport is asking. The two disagree on a handful of error shapes,
+/// and the disagreement is what the differential test pins down, so it is
+/// named here rather than papered over with one behaviour.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum McpTransport {
+    /// `stdio.py`: a missing method is `-32600`, a notification is any id that
+    /// is not a string or an integer, and an unknown tool falls into the
+    /// internal-error result because the surface raises before it can say
+    /// "unknown".
+    Stdio,
+    /// `http.py`: a missing method and a non-object body are `-32602`, only an
+    /// absent id is a notification, and an unknown tool is `-32601`.
+    Http,
+}
+pub struct Dispatcher<'a, G: ToolGrant> {
+    registry: &'a OperationRegistry,
+    grant: &'a G,
+    transport: McpTransport,
+    report: ServeReport,
+    /// The caller's context. Both transports have one: the HTTP route builds it
+    /// from the authenticated grant, and `mcp.stdio` passes the context the
+    /// command was invoked with. Absent, a ported service says so rather than
+    /// running against a guessed one.
+    context: Option<&'a crate::application::context::Built>,
+}
+
+impl<'a, G: ToolGrant> Dispatcher<'a, G> {
+    pub fn new(registry: &'a OperationRegistry, grant: &'a G, transport: McpTransport) -> Self {
+        Self {
+            registry,
+            grant,
+            transport,
+            report: ServeReport::default(),
+            context: None,
+        }
+    }
+
+    /// The context a tool call runs against. Both transports set it.
+    pub fn with_context(mut self, context: &'a crate::application::context::Built) -> Self {
+        self.context = Some(context);
+        self
+    }
+
+    pub fn report(&self) -> &ServeReport {
+        &self.report
+    }
+
+    /// Handle one line of stdio framing. Blank lines are skipped, and a line
+    /// that is not JSON is a parse error rather than a dropped message.
+    pub fn handle_line(&mut self, line: &str) -> Option<Value> {
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+        self.report.messages_handled += 1;
+        match serde_json::from_str::<Value>(line) {
+            Ok(Value::Object(message)) => self.handle(&message),
+            Ok(_) => Some(error(
+                None,
+                INVALID_REQUEST,
+                "message must be a JSON object",
+            )),
+            Err(failure) => Some(error(None, PARSE_ERROR, format!("invalid JSON: {failure}"))),
+        }
+    }
+
+    /// Handle one parsed message.
+    ///
+    /// Validation runs before the id is read, because a message that is not a
+    /// request still has to be answered: `{"params": []}` is an invalid
+    /// request with a null id, not silence. The id itself is a string or an
+    /// integer. A boolean counts — Python's `bool` is an `int` — and a float
+    /// does not, so `1.5` and `1.0` are notifications over stdio.
+    pub fn handle(&mut self, message: &Map<String, Value>) -> Option<Value> {
+        let method = message.get("method").and_then(Value::as_str);
+        let params = message.get("params").filter(|params| !json_falsy(params));
+        if method.is_none() {
+            let code = match self.transport {
+                McpTransport::Stdio => INVALID_REQUEST,
+                McpTransport::Http => INVALID_PARAMS,
+            };
+            return Some(error(self.message_id(message), code, "missing method"));
+        }
+        if let Some(params) = params {
+            if !params.is_object() {
+                return Some(error(
+                    self.message_id(message),
+                    INVALID_PARAMS,
+                    "params must be an object",
+                ));
+            }
+        }
+        let params = params
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let message_id = self.message_id(message)?;
+
+        let response = match method.expect("checked above") {
+            "initialize" => self.initialize(&params),
+            "ping" => json!({}),
+            "tools/list" => json!({"tools": self.tools()}),
+            "tools/call" => return Some(self.call(message_id, &params)),
+            other => {
+                return Some(error(
+                    Some(message_id),
+                    METHOD_NOT_FOUND,
+                    format!("unknown method {}", python_repr(other)),
+                ));
+            }
+        };
+        Some(result(Some(message_id), response))
+    }
+
+    /// The id a response should echo, or `None` when the message is a
+    /// notification.
+    ///
+    /// Over stdio anything that is not a string or an integer — a float, a
+    /// boolean-shaped number aside, an object — is a notification. Over HTTP
+    /// only an absent id is: `http.py` returns the raw id whenever the key is
+    /// present, and answers it.
+    fn message_id(&self, message: &Map<String, Value>) -> Option<Value> {
+        let raw = message.get("id")?;
+        // A JSON null is an absent id on both transports: Python's
+        // `message.get("id") is None` is true for it, so the message is a
+        // notification and gets no answer.
+        if raw.is_null() {
+            return None;
+        }
+        let acceptable = match raw {
+            Value::String(_) => true,
+            Value::Number(number) => number.as_i64().is_some() || number.as_u64().is_some(),
+            // Python's `bool` is a subclass of `int`, so `id: true` is a
+            // request there. JSON has no integer/boolean overlap, so this is
+            // the one place the two languages read the same byte differently.
+            Value::Bool(_) => true,
+            _ => false,
+        };
+        if acceptable {
+            Some(raw.clone())
+        } else if self.transport == McpTransport::Http {
+            // http.py echoes the raw id only when it is a str or an int, and
+            // answers with a null id otherwise. A float, an object or an array
+            // is still a request — only an absent id is a notification.
+            Some(Value::Null)
+        } else {
+            None
+        }
+    }
+
+    fn initialize(&mut self, params: &Map<String, Value>) -> Value {
+        let version =
+            negotiate_protocol_version(params.get("protocolVersion").and_then(Value::as_str))
+                .to_owned();
+        self.report.protocol_version = Some(version.clone());
+        json!({
+            "protocolVersion": version,
+            "capabilities": {"tools": {"listChanged": false}},
+            "serverInfo": {"name": SERVER_NAME, "version": crate::VERSION},
+        })
+    }
+
+    /// The tools this grant allows, in registry order, and only the ones the
+    /// MCP transport carries. `session.token` is HTTP-only and must not appear.
+    fn tools(&self) -> Vec<Value> {
+        self.registry
+            .iter()
+            .filter(|operation| exposed_over_mcp(self.registry, operation))
+            .filter(|operation| self.grant.allows(self.registry, operation))
+            .map(tool_wire)
+            .collect()
+    }
+
+    /// A tool call. A missing name or a non-object `arguments` is a protocol
+    /// error (`-32602`), not a failed tool result: the call never reached a
+    /// tool. An unknown tool differs by transport — HTTP names it with
+    /// `-32601`, stdio's surface raises and the catch-all reports an internal
+    /// error.
+    fn call(&self, message_id: Value, params: &Map<String, Value>) -> Value {
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return error(
+                Some(message_id),
+                INVALID_PARAMS,
+                "tools/call needs a tool name",
+            );
+        };
+        if let Some(arguments) = params.get("arguments").filter(|value| !json_falsy(value)) {
+            if !arguments.is_object() {
+                return error(
+                    Some(message_id),
+                    INVALID_PARAMS,
+                    "arguments must be an object",
+                );
+            }
+        }
+        // Python's stdio server dispatches every registry operation by its tool
+        // name, including the local-only ones it does not list. Only the remote
+        // HTTP transport refuses them, so the exposure gate is for that path.
+        let operation = match self.registry.by_mcp_tool(name) {
+            Ok(operation)
+                if self.transport == McpTransport::Stdio
+                    || exposed_over_mcp(self.registry, operation) =>
+            {
+                operation
+            }
+            Ok(_) | Err(_) => {
+                return match self.transport {
+                    McpTransport::Http => error(
+                        Some(message_id),
+                        METHOD_NOT_FOUND,
+                        format!("unknown tool {}", python_repr(name)),
+                    ),
+                    McpTransport::Stdio => {
+                        result(Some(message_id), tool_error("error", "internal error"))
+                    }
+                };
+            }
+        };
+        if !self.grant.allows(self.registry, operation) {
+            return result(
+                Some(message_id),
+                tool_error("forbidden", &self.grant.denial(operation)),
+            );
+        }
+        // The arguments the caller sent, or nothing. `run` validates them
+        // against the recorded schema and fills the defaults, so a bad
+        // argument comes back as a tool error the model can correct rather
+        // than a protocol error. A service that is not ported says so the
+        // same way, and never as an empty success.
+        let arguments = params
+            .get("arguments")
+            .filter(|value| !json_falsy(value))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let body = match operation.run(self.context, arguments) {
+            Ok(value) => json!({
+                "content": [{"type": "text", "text": compact_text(&value)}],
+                "structuredContent": value,
+                "isError": false,
+            }),
+            Err(error) => tool_error(tool_code(&error), &describe(operation, &error)),
+        };
+        result(Some(message_id), body)
+    }
+}
+
+/// The MCP `Tool` shape.
+fn tool_wire(operation: &Operation) -> Value {
+    json!({
+        "name": operation.mcp_tool_name(),
+        "description": operation.summary,
+        "inputSchema": crate::registry::params_schema_for(operation.name)
+            .expect("validate_schemas guarantees a schema for every operation"),
+    })
+}
+
+fn result(id: Option<Value>, result: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+fn error(id: Option<Value>, code: i64, message: impl Into<String>) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message.into()}})
+}
+
+/// A failed tool call: a result the model is meant to read and recover from.
+fn tool_error(code: &str, message: &str) -> Value {
+    json!({
+        "content": [{"type": "text", "text": format!("{code}: {message}")}],
+        "isError": true,
+    })
+}
+
+/// The code a tool error carries. A validation failure is `invalid_params`, the
+/// way `run_raw` raises `InvalidParams`; every other error keeps its own code.
+fn tool_code(error: &crate::errors::VogtError) -> &str {
+    match error {
+        crate::errors::VogtError::InvalidRequest(message)
+            if message.starts_with("invalid arguments for ") =>
+        {
+            "invalid_params"
+        }
+        other => other.code(),
+    }
+}
+
+/// A validation failure as an instruction, the way `describe_invalid` writes it:
+/// what is wrong, then what the tool accepts. The validator's report names each
+/// field and why; anything else keeps its own message.
+fn describe(operation: &Operation, error: &crate::errors::VogtError) -> String {
+    let Some(report) = crate::errors::take_validation(error) else {
+        return error.message().to_string();
+    };
+    let problems = report
+        .errors
+        .iter()
+        .map(|error| {
+            let location = error
+                .loc
+                .iter()
+                .map(crate::errors::Loc::as_text)
+                .collect::<Vec<_>>()
+                .join(".");
+            if error.error_type == "missing" && location == "reason" {
+                format!("missing required parameter 'reason': {REASON_HINT}")
+            } else if error.error_type == "missing" {
+                format!("missing required parameter '{location}'")
+            } else if error.error_type == "extra_forbidden" {
+                format!("unknown parameter '{location}'")
+            } else if !location.is_empty() {
+                format!("{location}: {}", error.msg)
+            } else {
+                error.msg.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let schema = crate::registry::params_schema_for(operation.name);
+    let (required, optional) = schema
+        .map(accepted)
+        .unwrap_or_else(|| (Vec::new(), Vec::new()));
+    let mut accepted = format!(
+        "required: {}",
+        if required.is_empty() {
+            "none".to_string()
+        } else {
+            required.join(", ")
+        }
+    );
+    if !optional.is_empty() {
+        accepted.push_str(&format!("; optional: {}", optional.join(", ")));
+    }
+    format!("{problems}. {} takes {accepted}", operation.mcp_tool_name())
+}
+
+/// What a missing `reason` is told. `describe_invalid` in `registry/operation.py`.
+const REASON_HINT: &str = "every write is audited and must say why it is being made — pass \
+    `reason` as a short sentence, e.g. reason=\"tests pass, ready for review\"";
+
+/// The parameter names a schema requires and the ones it leaves optional.
+fn accepted(schema: &Value) -> (Vec<String>, Vec<String>) {
+    let properties = schema.get("properties").and_then(Value::as_object);
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let optional = properties
+        .map(|fields| {
+            fields
+                .keys()
+                .filter(|name| !required.iter().any(|item| item == *name))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    (required, optional)
+}
+/// The text a successful tool call carries. Ports `tool_success`: the whole
+/// result, compact (`separators=(",", ":")`), with null-valued keys dropped at
+/// every depth and list items kept. `structuredContent` beside it is the full
+/// result, nulls included. Klaudia reads this text and only falls back to the
+/// structured body when the text is empty, so a summary here would hide it.
+fn compact_text(value: &Value) -> String {
+    // `separators=(",", ":")`. The second argument of `python_json_dumps` is
+    // sort_keys, and that helper always writes the spaced separators the stores
+    // use, so the compact form is its own function.
+    crate::decisions::python_json_dumps_compact(&without_nulls(value))
+}
+
+/// Drop null-valued keys at every depth. A null list item stays, as Python's
+/// `_without_nulls` keeps it.
+fn without_nulls(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .filter(|(_, item)| !item.is_null())
+                .map(|(key, item)| (key.clone(), without_nulls(item)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_nulls).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Python's truthiness for a JSON value: `None`, `[]`, `0`, `""` and `false`
+/// are all falsy, and both handlers write `params or {}`.
+pub(super) fn json_falsy(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(value) => !value,
+        Value::Number(number) => number.as_i64() == Some(0) || number.as_f64() == Some(0.0),
+        Value::String(text) => text.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(_) => false,
+    }
+}
+
+/// Python's `repr` for a string: single quotes, with the usual escapes.
+pub(super) fn python_repr(text: &str) -> String {
+    crate::core::py_repr(text)
+}
+
+/// Read newline-delimited JSON-RPC from `input`, writing each response to
+/// `output`. Diagnostics would go to stderr; this layer has none of its own.
+///
+/// Returns the session report. A caller that wants the bytes — a test, the
+/// HTTP transport — passes its own buffers.
+pub fn serve_stdio<G: ToolGrant>(
+    input: &str,
+    output: &mut String,
+    registry: &OperationRegistry,
+    grant: &G,
+) -> ServeReport {
+    serve_stdio_with(input, output, registry, grant, None)
+}
+
+/// [`serve_stdio`] against a context. `None` is the unauthenticated path the
+/// framing tests use; `mcp.stdio` passes the context it was called with, which
+/// is the principal and the data directory the tools then run against.
+pub fn serve_stdio_with<G: ToolGrant>(
+    input: &str,
+    output: &mut String,
+    registry: &OperationRegistry,
+    grant: &G,
+    context: Option<&crate::application::context::Built>,
+) -> ServeReport {
+    let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Stdio);
+    if let Some(context) = context {
+        dispatcher = dispatcher.with_context(context);
+    }
+    feed_lines(input.lines(), &mut dispatcher, output);
+    report_of(&dispatcher)
+}
+
+/// Serve MCP on the process's own stdin and stdout until stdin closes.
+///
+/// One line in, at most one line out, flushed before the next read, so a
+/// client that stays open is answered before it sends EOF. Ports
+/// `StdioServer.serve`.
+pub fn serve_stdio_streams<G: ToolGrant>(
+    registry: &OperationRegistry,
+    grant: &G,
+) -> Result<ServeReport, std::io::Error> {
+    serve_stdio_streams_with(registry, grant, None)
+}
+
+/// [`serve_stdio_streams`] against a context. `mcp.stdio` passes the context
+/// the command was invoked with, so a tool runs as that caller.
+pub fn serve_stdio_streams_with<G: ToolGrant>(
+    registry: &OperationRegistry,
+    grant: &G,
+    context: Option<&crate::application::context::Built>,
+) -> Result<ServeReport, std::io::Error> {
+    use std::io::{BufRead, Write};
+    let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Stdio);
+    if let Some(context) = context {
+        dispatcher = dispatcher.with_context(context);
+    }
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    while let Some(line) = lines.next().transpose()? {
+        let mut output = String::new();
+        feed_lines(std::iter::once(line.as_str()), &mut dispatcher, &mut output);
+        if !output.is_empty() {
+            stdout.write_all(output.as_bytes())?;
+            stdout.flush()?;
+        }
+    }
+    Ok(report_of(&dispatcher))
+}
+
+fn feed_lines<'a, G: ToolGrant>(
+    lines: impl Iterator<Item = &'a str>,
+    dispatcher: &mut Dispatcher<'_, G>,
+    output: &mut String,
+) {
+    for line in lines {
+        if let Some(response) = dispatcher.handle_line(line) {
+            output.push_str(&crate::decisions::python_json_dumps_compact(&response));
+            output.push('\n');
+        }
+    }
+}
+
+fn report_of<G: ToolGrant>(dispatcher: &Dispatcher<'_, G>) -> ServeReport {
+    ServeReport {
+        messages_handled: dispatcher.report.messages_handled,
+        protocol_version: dispatcher.report.protocol_version.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry() -> OperationRegistry {
+        OperationRegistry::new(crate::registry::operations::build_operations()).unwrap()
+    }
+
+    fn line(message: Value) -> String {
+        format!("{message}\n")
+    }
+
+    fn responses(input: &str) -> Vec<Value> {
+        let mut output = String::new();
+        serve_stdio(input, &mut output, &registry(), &FullGrant);
+        output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn an_unknown_version_negotiates_down_instead_of_refusing() {
+        assert_eq!(negotiate_protocol_version(Some("2025-03-26")), "2025-03-26");
+        assert_eq!(negotiate_protocol_version(Some("2099-01-01")), "2025-06-18");
+        assert_eq!(negotiate_protocol_version(None), "2025-06-18");
+    }
+
+    #[test]
+    fn initialize_answers_with_the_negotiated_version() {
+        let response = &responses(&line(json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05"}
+        })))[0];
+        assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(response["result"]["serverInfo"]["name"], "vogt");
+        assert_eq!(
+            response["result"]["capabilities"]["tools"]["listChanged"],
+            false
+        );
+    }
+
+    #[test]
+    fn a_notification_gets_silence_and_a_blank_line_is_skipped() {
+        let mut output = String::new();
+        let report = serve_stdio(
+            "\n\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            &mut output,
+            &registry(),
+            &FullGrant,
+        );
+        assert!(output.is_empty(), "{output}");
+        assert_eq!(report.messages_handled, 1);
+    }
+
+    #[test]
+    fn tools_list_comes_from_the_registry_and_hides_local_only() {
+        let response = &responses(&line(
+            json!({"jsonrpc": "2.0", "id": "a", "method": "tools/list"}),
+        ))[0];
+        let tools = response["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"work_list"), "{names:?}");
+        assert!(
+            !names.contains(&"mcp_stdio"),
+            "a local-only operation is absent, not present and refusing"
+        );
+        assert!(
+            !names.contains(&"session_token"),
+            "an http-only operation is absent too"
+        );
+        assert!(tools
+            .iter()
+            .all(|tool| tool["inputSchema"]["type"] == "object"));
+    }
+
+    #[test]
+    fn a_tool_call_against_an_unported_service_is_a_failed_result() {
+        let response = &responses(&line(json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": "instance_diagnostics", "arguments": {}}
+        })))[0];
+        assert!(
+            response.get("error").is_none(),
+            "a tool failure is a result"
+        );
+        assert_eq!(response["result"]["isError"], true);
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("needs an instance context"), "{text}");
+    }
+
+    #[test]
+    fn a_local_only_tool_is_callable_on_stdio_as_python_is() {
+        // Python's stdio server dispatches every registry operation by tool name,
+        // local-only ones included, and only the HTTP transport refuses them. The
+        // call is to `mcp_stdio`, which has no side effect, so the test does not
+        // touch a data directory.
+        let response = &responses(&line(json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "mcp_stdio", "arguments": {}}
+        })))[0];
+        // The harness has no instance context, so the operation answers its own
+        // refusal. The point is that it ran: a gate would answer "internal error".
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("internal error"), "{text}");
+        assert!(text.contains("mcp.stdio"), "{text}");
+    }
+
+    #[test]
+    fn a_success_carries_the_whole_result_as_compact_text() {
+        // Design C1: the text is the full result with null keys dropped and no
+        // indentation. structuredContent keeps the nulls.
+        let payload = json!({
+            "rows": [{"id": "ses_1", "note": null, "tail": ["x".repeat(300)]}],
+            "engine": null,
+            "counts": {"total": 1},
+        });
+        let text = compact_text(&payload);
+        // The separators are (",", ":"), not the spaced (", ", ": ") the stores
+        // write. Re-parsing cannot tell the two apart, so the bytes are checked.
+        let tail = "x".repeat(300);
+        let expected = format!(
+            "{{\"rows\":[{{\"id\":\"ses_1\",\"tail\":[\"{tail}\"]}}],\"counts\":{{\"total\":1}}}}"
+        );
+        assert_eq!(text, expected);
+        assert!(!text.contains('\n'));
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({
+                "rows": [{"id": "ses_1", "tail": ["x".repeat(300)]}],
+                "counts": {"total": 1},
+            })
+        );
+        // A null list item is data, not an absent key.
+        assert_eq!(
+            serde_json::from_str::<Value>(&compact_text(&json!([1, null]))).unwrap(),
+            json!([1, null])
+        );
+    }
+
+    #[test]
+    fn malformed_input_is_a_protocol_error_naming_the_cause() {
+        let parsed = &responses("not json\n{\"id\": 1, \"params\": []}\n")[0];
+        assert_eq!(parsed["error"]["code"], PARSE_ERROR);
+        let missing = &responses("{\"id\": 1, \"params\": []}\n")[0];
+        assert_eq!(missing["error"]["code"], INVALID_REQUEST);
+        let params =
+            &responses("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":[1]}\n")[0];
+        assert_eq!(params["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[test]
+    fn an_unknown_method_names_itself() {
+        let response = &responses(&line(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}),
+        ))[0];
+        assert_eq!(response["error"]["code"], METHOD_NOT_FOUND);
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("'resources/list'"));
+    }
+
+    #[test]
+    fn tools_list_matches_the_python_golden() {
+        // Recorded from Python's `McpSurface.list_tools` as `tools/list` wire
+        // objects, by the capture in tests/parity/golden/mcp-tools.json. Names
+        // and order are compared first so a reordered list says so plainly.
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/golden/mcp-tools.json");
+        let golden: Value =
+            serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
+        let response = &responses(&line(json!({
+            "jsonrpc": "2.0", "id": "a", "method": "tools/list"
+        })))[0];
+        let names = |list: &Value| -> Vec<String> {
+            list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(&response["result"]),
+            names(&golden),
+            "tool names or order drifted"
+        );
+        assert_eq!(
+            response["result"], golden,
+            "tools/list drifted from the Python golden"
+        );
+    }
+}

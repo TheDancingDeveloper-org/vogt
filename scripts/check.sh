@@ -18,6 +18,29 @@
 # This script is the local floor for what CI runs, not a mirror of it: a CI
 # job may legitimately do more, so keep the commands below in step with
 # `ci.yml` by hand.
+# Product scripts ported to Rust (WI-1079), run from the checkout as:
+#   vogt-core check-product-version [EXPECTED]
+#   vogt-core check-docs
+#   vogt-core gen-config-docs
+#   vogt-core sanitise-transcript [--check] INPUT [OUTPUT]
+#   vogt-core capture-transcript OUTPUT [--max-bytes N] -- CMD [ARG ...]
+# The engine half below runs the Rust copies. ci.yml, docs.yml and release.yml
+# call them too, each with the pinned Rust toolchain the engine job uses. The
+# Python originals stay as the reference the ports were checked against.
+#
+# Also ported (WI-1079), each a vogt-core subcommand:
+#   vogt-core load [--scale N] [--mode load|soak|deployed] [--check-baseline FILE]
+#   vogt-core fake-agent [SCENARIO]
+#   vogt-core fixture-reset [--dry-run] [--repo OWNER/NAME]
+# The Python originals stay as the reference the ports were checked against.
+# CI-only scripts stay Python (WI-1079 decision): each imports the standard
+# library only, so none needs the project environment.
+#   python3 on the runner: play_preflight (release-mobile*.yml),
+#     check_workflow_policy (runner-policy.yml)
+#   uv run --no-project python (no project deps): check_bundle,
+#     check_rust_version, check_demo_assets (ci.yml)
+#   not wired into any workflow, run by hand: check_engine_spec, call_latency
+
 set -uo pipefail
 
 # `|| exit` because this script sets `-uo pipefail` and deliberately not
@@ -49,7 +72,7 @@ for half in "${halves[@]}"; do
         run "ruff check" uv run ruff check .
         run "ruff format" uv run ruff format --check .
         run "mypy" uv run mypy
-        run "check_docs" uv run python scripts/check_docs.py
+        run "check_docs" cargo run --quiet --manifest-path engine/core/Cargo.toml --bin vogt-core -- check-docs
         run "pytest" uv run pytest
         ;;
     engine)
@@ -61,6 +84,8 @@ for half in "${halves[@]}"; do
         run "cargo clippy" cargo clippy --manifest-path engine/Cargo.toml \
             --workspace --all-targets -- -D warnings
         run "cargo test" cargo test --manifest-path engine/Cargo.toml --workspace
+        # The product scripts ported in WI-1079, from the checkout itself.
+        run "check-product-version" cargo run --quiet --manifest-path engine/core/Cargo.toml --bin vogt-core -- check-product-version
         ;;
     web)
         if [ ! -d web ]; then
@@ -68,6 +93,7 @@ for half in "${halves[@]}"; do
             continue
         fi
         run "pnpm typecheck" pnpm --dir web typecheck
+        run "pwa route map" node web/scripts/check-route-map.mjs
         run "pnpm test" pnpm --dir web test
         ;;
     *)

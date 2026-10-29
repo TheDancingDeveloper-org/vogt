@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 import uuid
@@ -47,6 +48,8 @@ from collections import deque
 from contextvars import ContextVar, Token
 from datetime import UTC, datetime
 from typing import Any, Literal, TextIO
+
+from vogt.core.clock import from_iso
 
 #: The header this core reads a correlation id from and echoes back. Lower
 #: case because that is how ASGI presents it and how the engine sends it.
@@ -64,10 +67,31 @@ _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _request_id: ContextVar[str | None] = ContextVar("vogt_request_id", default=None)
 _actor: ContextVar[str | None] = ContextVar("vogt_request_actor", default=None)
 
+
 #: When this process started, for `instance.diagnostics`' uptime. Captured at
 #: import, which for every entry point is process start to within the import
 #: time of the package.
-PROCESS_STARTED_AT = datetime.now(UTC)
+#:
+#: A golden recording sets `VOGT_TEST_CLOCK_START`, and that hook fixes every
+#: other timestamp a run writes. This one is read at import, before the step
+#: clock exists, so two recordings of the same script disagreed on
+#: `instance.diagnostics`' `started_at` and the byte-exact recording check
+#: failed. When the hook is set, process start is that instant instead: the
+#: recording is reproducible, and the uptime a step clock measures against it
+#: is deterministic. Anything else stays wall-clock.
+def _process_started_at() -> datetime:
+    raw = os.environ.get("VOGT_TEST_CLOCK_START", "").strip()
+    if raw:
+        try:
+            return from_iso(raw)
+        except ValueError:
+            # clock_from_env refuses a malformed value when the context is
+            # built; here a bad value must not stop the package importing.
+            pass
+    return datetime.now(UTC)
+
+
+PROCESS_STARTED_AT = _process_started_at()
 
 #: How many recent warning-or-worse lines the process keeps in memory for
 #: `instance.diagnostics`. Bounded, so a crash loop cannot grow it.
