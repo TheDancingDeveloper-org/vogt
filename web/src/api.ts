@@ -260,6 +260,11 @@ interface AuthStateMessage {
 export interface AuthRejection {
   status: number;
   detail: string;
+  /**
+   * Set when this fact already survived `/api/auth/check`. The shell must
+   * not probe again. Absent on a raw 401 from a read.
+   */
+  confirmed?: boolean;
 }
 
 interface AuthRejectedMessage extends AuthRejection {
@@ -309,9 +314,9 @@ function publishAuthRejection(rejection: AuthRejection) {
  * Anything that is not a 401 returns without a word — see `AuthRejection` for
  * why that silence is deliberate rather than an omission.
  */
-export function reportAuthResponse(status: number, detail = ""): void {
+export function reportAuthResponse(status: number, detail = "", confirmed = false): void {
   if (status !== 401) return;
-  publishAuthRejection({ status, detail });
+  publishAuthRejection({ status, detail, ...(confirmed ? { confirmed: true } : {}) });
 }
 
 /**
@@ -450,7 +455,11 @@ export function subscribeAuthRejected(
         const data = event.data;
         if (data?.type === "auth-rejected" && data.source !== AUTH_SOURCE_ID) {
           invalidate();
-          onRejected({ status: data.status, detail: data.detail });
+          onRejected({
+            status: data.status,
+            detail: data.detail,
+            ...(data.confirmed ? { confirmed: true } : {}),
+          });
         }
       });
     }
@@ -1627,13 +1636,24 @@ export function subscribeEvents(
         // connect down and started another (WI-2324).
         cache: "no-store",
       });
-      // The stream is an authenticated read like any other, and the one
-      // most likely to meet a rotated token first — it outlives every panel.
-      // Reported through the same path rather than a second one, so a stream
-      // that dies on 401 signs the reader out instead of reconnecting on a
-      // dead credential until the backoff gives up.
+      // A 401 on the stream alone must not sign the reader out (WI-2708).
+      // It joins the shared `/api/auth/check` re-check; only that check's
+      // own 401 ends the session. Any other answer, including a dead
+      // socket, leaves the credential and lets the stream reconnect.
       if (!res.ok || !res.body) {
-        if (!res.ok) reportAuthResponse(res.status, "the event stream was refused");
+        if (res.status === 401) {
+          // Re-check, and publish only if that check also returns 401.
+          // Publishing the stream's own status would sign out immediately.
+          void import("./authRecheck").then(async ({ resolveAuthRejection }) => {
+            const confirmed = await resolveAuthRejection(
+              { status: 401, detail: "the event stream was refused" },
+              { fromStream: true },
+            );
+            if (confirmed) reportAuthResponse(confirmed.status, confirmed.detail, true);
+          });
+        } else if (!res.ok) {
+          reportAuthResponse(res.status, "the event stream was refused");
+        }
         throw new Error(`SSE failed: ${res.status}`);
       }
       if (cancelled) return;
