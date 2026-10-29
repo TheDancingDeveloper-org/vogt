@@ -434,9 +434,19 @@ path = os.environ["CODEX_CONFIG"]
 # inside LiteLLM (408 / hang, WI-1147 cmt_01M4YZWG8B7E9YE5Y8FNJ7H2GH).
 # Re-adding them is WI-1631.
 # theclawbay Responses models (gpt-5.5, gpt-5.6, gpt-5.6-sol, gpt-5.6-luna,
-# gpt-5.6-terra, gpt-6-astra) are listed before premium so they stay visible;
-# premium stays last and hidden. They need the router to serve them over the
-# Responses wire (ops config), which this catalog does not configure.
+# gpt-5.6-terra, gpt-6-astra) are listed before premium so they stay visible
+# for an explicit `-m` and get apply_patch metadata. premium stays last and
+# hidden. The litellm provider is still wire_api = "chat", so a slug in
+# CHAT_UNAVAILABLE is not a default the router can serve. Flip that set to
+# empty once the router serves those slugs over the Responses wire.
+CHAT_UNAVAILABLE = {
+    "gpt-5.5",
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-6-astra",
+}
 ROUTER_GROUPS = (
     "grok",
     "code",
@@ -631,7 +641,9 @@ _set_root("model_provider", "litellm", {None, "litellm", "theclawbay"})
 # default moves to grok unless it already names a catalog group.
 if _root_value("model_provider") == "litellm":
     _model = _root_value("model")
-    if _model not in ROUTER_GROUPS:
+    # A catalog slug that the chat wire cannot serve is not a keepable
+    # default: a leftover gpt-6-astra still fails every model-less exec.
+    if _model not in ROUTER_GROUPS or _model in CHAT_UNAVAILABLE:
         _set_root("model", "grok", {_model})
 # Point at the catalog this writer owns. A path an operator chose stays.
 _set_root("model_catalog_json", catalog_path, {None, catalog_path})
