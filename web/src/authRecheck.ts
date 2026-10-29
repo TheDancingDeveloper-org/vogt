@@ -53,27 +53,44 @@ async function defaultProbe(signal: AbortSignal): Promise<Response> {
  * the event stream, or two tabs' listeners in one process — await the same
  * probe. A 401 is `confirmed`; everything else, including a thrown transport
  * error and a missing token (nothing left to confirm), is `kept`.
+ *
+ * The token check lives inside the try so the `.finally` always clears the
+ * shared promise. An early return before that assignment used to pin a
+ * stale `kept` until reload, and a later real 401 then never signed out.
  */
 export function recheckAuth(deps: AuthRecheckDeps = {}): Promise<RecheckOutcome> {
   if (inflight) return inflight;
   const probe = deps.probe ?? defaultProbe;
-  const run = (async (): Promise<RecheckOutcome> => {
-    if (!getToken()) return "kept";
-    const controller = new AbortController();
-    const timer = setTimeout(
-      () => controller.abort(new DOMException("auth re-check deadline", "TimeoutError")),
-      AUTH_RECHECK_DEADLINE_MS,
-    );
-    try {
-      const res = await probe(controller.signal);
-      return res.status === 401 ? "confirmed" : "kept";
-    } catch {
-      return "kept";
-    } finally {
-      clearTimeout(timer);
-      inflight = null;
-    }
-  })();
+  // The body must not run until `inflight` points at this promise. An async
+  // function starts immediately, and a synchronous return (no token) runs
+  // its `finally` before the caller can assign the promise — which left a
+  // finished `kept` in place until reload, so a later real 401 never signed
+  // out. The deferred start is what makes the clear see the right promise.
+  let run!: Promise<RecheckOutcome>;
+  run = new Promise<RecheckOutcome>((resolve) => {
+    queueMicrotask(() => {
+      void (async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(
+          () => controller.abort(new DOMException("auth re-check deadline", "TimeoutError")),
+          AUTH_RECHECK_DEADLINE_MS,
+        );
+        try {
+          if (!getToken()) {
+            resolve("kept");
+            return;
+          }
+          const res = await probe(controller.signal);
+          resolve(res.status === 401 ? "confirmed" : "kept");
+        } catch {
+          resolve("kept");
+        } finally {
+          clearTimeout(timer);
+          if (inflight === run) inflight = null;
+        }
+      })();
+    });
+  });
   inflight = run;
   return run;
 }

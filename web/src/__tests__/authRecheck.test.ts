@@ -117,6 +117,22 @@ describe("auth re-check", () => {
     expect(calls).toBe(1);
   });
 
+  it("does not pin a kept result when the first call has no token", async () => {
+    // No credential: the probe is not the question, and the shared promise
+    // must still be released. Signing in afterwards with a token the check
+    // rejects has to sign out — a stale "kept" would leave the dead session.
+    const first = await recheckAuth({
+      probe: async () => {
+        throw new Error("must not probe without a token");
+      },
+    });
+    expect(first).toBe("kept");
+
+    setToken("revoked-token");
+    const second = await recheckAuth({ probe: probe(401) });
+    expect(second).toBe("confirmed");
+  });
+
   it("passes a rejection that is already confirmed without probing again", async () => {
     setToken("stale-token");
     let calls = 0;

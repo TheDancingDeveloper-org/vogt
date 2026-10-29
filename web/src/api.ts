@@ -301,7 +301,12 @@ function publishAuthRejection(rejection: AuthRejection) {
   // filtered by `source` precisely so a tab never hears its own — so this
   // tab's listeners are called here, in-process, and the channel carries the
   // same fact to the others.
-  invalidate();
+  //
+  // A raw 401 is still provisional (WI-2708). Dropping the whole read cache
+  // on every blip makes every panel refetch, in every tab, for a refusal
+  // that the re-check may then reject. Only a confirmed refusal, or a
+  // deliberate sign-out, throws the cache away.
+  if (rejection.status !== 401 || rejection.confirmed === true) invalidate();
   for (const listener of [...authRejectedListeners]) listener(rejection);
   postAuthMessage({ type: "auth-rejected", source: AUTH_SOURCE_ID, ...rejection });
 }
@@ -454,7 +459,9 @@ export function subscribeAuthRejected(
       channel.addEventListener("message", (event: MessageEvent<AuthMessage>) => {
         const data = event.data;
         if (data?.type === "auth-rejected" && data.source !== AUTH_SOURCE_ID) {
-          invalidate();
+          // Same rule as the local publish: an unconfirmed 401 is not yet
+          // a sign-out, so it must not empty this tab's read cache either.
+          if (data.status !== 401 || data.confirmed === true) invalidate();
           onRejected({
             status: data.status,
             detail: data.detail,
