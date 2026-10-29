@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { createStore, produce } from "solid-js/store";
+import { createStore, produce, reconcile as reconcileStore } from "solid-js/store";
 import type {
   ActivityState,
   CreateSessionRequest,
@@ -135,18 +135,20 @@ async function loadSessions(signal?: AbortSignal): Promise<void> {
     // stall timer armed so *some* list still has to land.
     if (signal?.aborted) return;
     disarmStallTimer();
-    setStore(
-      produce((s) => {
-        s.sessions = {};
-        s.order = [];
-        for (const sess of list.sessions) {
-          s.sessions[sess.id] = sess;
-          s.order.push(sess.id);
-        }
-        s.hiddenCount = list.hidden_count;
-        s.ready = true;
-      }),
-    );
+    const next: Record<string, SessionSummary> = {};
+    const order: string[] = [];
+    for (const sess of list.sessions) {
+      next[sess.id] = sess;
+      order.push(sess.id);
+    }
+    // Keyed by session id so a refetch merges into the rows already held.
+    // Unchanged rows keep their object identity (and so their DOM); a row
+    // that left the list is dropped. Replacing the map wholesale remounted
+    // every rail row on every poll (WI-2696).
+    setStore("sessions", reconcileStore(next, { key: "id", merge: true }));
+    setStore("order", order);
+    setStore("hiddenCount", list.hidden_count);
+    setStore("ready", true);
     setError(null);
     setConnected(true);
     setStore("lastAnswerAt", new Date().toISOString());

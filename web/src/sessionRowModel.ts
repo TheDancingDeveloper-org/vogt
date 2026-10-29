@@ -180,6 +180,23 @@ export function sortSessionsOversightFirst(sessions: SessionSummary[]): SessionS
 }
 
 /**
+ * Fields the rail partition reads: oversight role and bookmark membership.
+ * Resource samples, scrollback and activity ticks do not change this key, so
+ * a memo keyed on it does not re-sort when those tick (WI-2696).
+ */
+export function railSortKey(
+  sessions: readonly Pick<SessionSummary, "id" | "role">[],
+  bookmarked: ReadonlySet<string>,
+): string {
+  let key = "";
+  for (const session of sessions) {
+    const partition = session.role === "oversight" ? "0" : bookmarked.has(session.id) ? "1" : "2";
+    key += session.id + ":" + partition + ";";
+  }
+  return key;
+}
+
+/**
  * Keep `previous`'s row ORDER while adopting `current`'s membership and data.
  *
  * The rail re-sorts by attention/recency on every activity change (see

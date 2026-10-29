@@ -43,7 +43,7 @@ import {
   sortTemplatesForContext,
   type TemplateContext,
 } from "./customTemplates";
-import { isBookmarked, toggleBookmark, bookmarks } from "./bookmarks";
+import { isBookmarked, toggleBookmark } from "./bookmarks";
 import { api as apiModule, ApiError, getBase, validateCredentials } from "./api";
 import type { PublicConfig, SessionTemplate } from "./api";
 import { clearStoredAuth, subscribeAuthRejected, subscribeAuthState } from "./api";
@@ -135,8 +135,8 @@ import {
   sessionActivityAge,
   sessionStateWord,
   sessionRuntimeHint,
-  sortSessionsForRail,
 } from "./sessionRowModel";
+import { railSessions as sortedRailSessions } from "./railSessions";
 import { railSections, setRailSection } from "./railSections";
 import { setExpanded } from "./fileTreeState";
 import { demoManifest, resetDemoData } from "./runtimeTransport";
@@ -538,10 +538,7 @@ const App: Component = () => {
   // took its place (#686). The order itself is the engine's (oversight, then
   // last event) with bookmarks lifted between the two (WI-1289).
   const railSessions = createMemo<SessionSummary[]>((prev) => {
-    const sessions = sessionsStore.order
-      .map((id) => sessionsStore.sessions[id])
-      .filter((s): s is SessionSummary => Boolean(s));
-    const sorted = sortSessionsForRail(sessions, new Set(bookmarks()));
+    const sorted = sortedRailSessions();
     if (openMenuId() !== null && prev.length > 0) {
       return holdRailOrder(prev, sorted);
     }
