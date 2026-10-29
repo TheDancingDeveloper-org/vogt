@@ -80,3 +80,32 @@ def test_a_structured_operation_name_is_not_a_set_membership_error() -> None:
     )
     assert answer["operation"] == {"name": "project.register"}
     assert answer["payload_digest"] == "abc"
+
+
+def test_a_missing_golden_file_is_an_error_before_the_run(
+    tmp_path: Path, capsys: object
+) -> None:
+    # A golden that recorded only the CLI transport must not traceback on
+    # http.json, and must not start the script to find that out.
+    empty = tmp_path / "golden"
+    empty.mkdir()
+    assert parity._missing_golden(empty, "http", "") == (
+        f"no http golden at {empty / 'http.json'} "
+        "(record with: parity.py record --impl python --transport http)"
+    )
+    (empty / "http.json").write_text("[]\n")
+    assert parity._missing_golden(empty, "http", "") == (
+        f"no http audit golden at {empty / 'audit.http.json'} "
+        "(a full record writes audit.http.json)"
+    )
+    # A filtered run compares no audit trail.
+    assert parity._missing_golden(empty, "http", "actor") is None
+    (empty / "audit.http.json").write_text("[]\n")
+    assert parity._missing_golden(empty, "http", "") is None
+    code = parity.main(
+        ["check", "--impl", "python", "--transport", "mcp", "--golden", str(empty)]
+    )
+    assert code == 1
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert "no mcp golden" in captured.err
+    assert "Traceback" not in captured.err

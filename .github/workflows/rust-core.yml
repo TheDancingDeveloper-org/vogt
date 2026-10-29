@@ -450,7 +450,17 @@ jobs:
           short=$(git rev-parse --short=7 HEAD)
           out="tests/parity/golden/${short}"
           mkdir -p "$out"
+          # Every file the parity job reads: cli, http, mcp, their audits
+          # (written with a full record), and schema.json. Recording only
+          # the default CLI transport is how a golden left the job missing
+          # http.json, mcp.json and schema.json (WI-2662).
           uv run python scripts/parity.py record --impl python --out "$out"
+          uv run python scripts/parity.py record --impl python --transport http --out "$out"
+          uv run python scripts/parity.py record --impl python --transport mcp --out "$out"
+          uv run python scripts/parity.py record --impl python --only schema --out "$out"
+          for f in cli.json http.json mcp.json schema.json audit.cli.json audit.http.json audit.mcp.json meta.json; do
+            test -f "$out/$f" || { echo "record-golden did not write $f" >&2; exit 1; }
+          done
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Only this golden's directory. Adding the whole tree is how the
