@@ -14,6 +14,14 @@ use crate::config::VogtConfig;
 use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
 use crate::errors::VogtError;
 use crate::storage::interface::DeclaredStore;
+
+fn person() -> Principal {
+    Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()
+}
+
+fn agent(identity: &str) -> Principal {
+    Principal::new(identity, ActorKind::Agent, identity).unwrap()
+}
 use crate::storage::sqlite::connection::connect_with;
 
 fn start() -> Moment {
@@ -30,15 +38,14 @@ fn unique_dir() -> PathBuf {
     dir
 }
 
-fn open(dir: &Path) -> Built {
+fn open_as(dir: &Path, principal: Principal) -> Built {
     let config = VogtConfig {
         data_dir: dir.to_path_buf(),
         ..VogtConfig::default()
     };
-    let principal = Principal::new("local:test-user", ActorKind::Human, "Test").unwrap();
     let built = build_context(
         config,
-        Some(principal.clone()),
+        Some(principal),
         Some(StepClock::new(start())),
         Some(SequentialIds::new(Some(dir.join("ids.json"))).unwrap()),
         None,
@@ -50,16 +57,25 @@ fn open(dir: &Path) -> Built {
     match &built {
         Built::StepSequential(ctx) => {
             ctx.declared.migrate().unwrap();
-            ctx.declared.bootstrap(&principal).unwrap();
         }
         _other => panic!("expected a step clock"),
     }
     built
 }
 
+fn open(dir: &Path) -> Built {
+    open_as(dir, person())
+}
+
 fn store() -> (PathBuf, Built) {
     let dir = unique_dir();
     let built = open(&dir);
+    match &built {
+        Built::StepSequential(ctx) => {
+            let _ = ctx.declared.bootstrap(&person()).unwrap();
+        }
+        _other => panic!("expected a step clock"),
+    }
     (dir, built)
 }
 
@@ -157,4 +173,96 @@ fn watch_list_is_empty_and_an_active_watch_past_expiry_reads_expired() {
     assert!(matches!(missing, Err(VogtError::NotFound(_))));
     let raw = watches::watch_list_op(&built, json!({"session": "eng-1"})).unwrap();
     assert_eq!(raw["watches"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn charter_set_by_a_person_increments_and_a_stale_version_conflicts() {
+    let (dir, built) = store();
+    let first = charters::charter_set_op(
+        &built,
+        json!({"scope": "workspace", "body": "Stop at push.", "expected_version": 0, "reason": "first"}),
+    )
+    .unwrap();
+    assert_eq!(first["charter"]["version"], 1);
+    assert_eq!(first["charter"]["body"], "Stop at push.");
+
+    let stale = charters::charter_set_op(
+        &built,
+        json!({"scope": "workspace", "body": "Other.", "expected_version": 0, "reason": "stale"}),
+    );
+    assert!(
+        matches!(stale, Err(VogtError::CharterVersionConflict(message))
+            if message.contains("version 1, not 0"))
+    );
+
+    let second = charters::charter_set_op(
+        &built,
+        json!({"scope": "workspace", "body": "Other.", "expected_version": 1, "reason": "second"}),
+    )
+    .unwrap();
+    assert_eq!(second["charter"]["version"], 2);
+
+    let current = charters::charter_get_op(&built, json!({"scope": "workspace"})).unwrap();
+    assert_eq!(current["current"]["body"], "Other.");
+    assert_eq!(current["current"]["version"], 2);
+    let _ = dir;
+}
+
+#[test]
+fn only_a_person_sets_the_workspace_charter() {
+    let (dir, _person_built) = store();
+    let built = open_as(&dir, agent("agent:engine:eng-worker"));
+    let refused = charters::charter_set_op(
+        &built,
+        json!({"scope": "workspace", "body": "from an agent", "reason": "agent"}),
+    );
+    assert!(matches!(refused, Err(VogtError::PersonRequired(message))
+            if message.contains("only a person")));
+    let still = charters::charter_get_op(&built, json!({"scope": "workspace"})).unwrap();
+    assert!(still["current"].is_null());
+}
+
+#[test]
+fn watch_create_and_cancel_round_trip_and_a_stranger_cannot_cancel() {
+    let (dir, built) = store();
+    let created = watches::watch_create_op(
+        &built,
+        json!({
+            "session": "eng-target",
+            "trigger": {"kind": "session", "session": "other-session", "until": "ended"},
+            "reason": "wait",
+        }),
+    )
+    .unwrap();
+    let id = created["watch"]["id"].as_str().unwrap().to_string();
+    assert_eq!(created["watch"]["state"], "active");
+    assert_eq!(created["watch"]["kind"], "session");
+
+    let listed = watches::watch_list_op(&built, json!({})).unwrap();
+    assert_eq!(listed["watches"].as_array().unwrap().len(), 1);
+
+    let stranger = open_as(&dir, agent("agent:engine:somebody-else"));
+    let refused = watches::watch_cancel_op(&stranger, json!({"id": id, "reason": "not mine"}));
+    assert!(matches!(refused, Err(VogtError::GrantRefused(_))));
+
+    let cancelled = watches::watch_cancel_op(&built, json!({"id": id, "reason": "done"})).unwrap();
+    assert_eq!(cancelled["watch"]["state"], "cancelled");
+
+    let again = watches::watch_cancel_op(&built, json!({"id": id, "reason": "again"}));
+    assert!(matches!(again, Err(VogtError::Conflict(message)) if message.contains("not active")));
+}
+
+#[test]
+fn a_session_cannot_wait_for_itself() {
+    let (_dir, built) = store();
+    let refused = watches::watch_create_op(
+        &built,
+        json!({
+            "session": "eng-target",
+            "trigger": {"kind": "session", "session": "eng-target", "until": "ended"},
+            "reason": "self",
+        }),
+    );
+    assert!(matches!(refused, Err(VogtError::InvalidRequest(message))
+            if message.contains("cannot wait for itself")));
 }
