@@ -110,7 +110,7 @@ embedded, `vogt-core` built beside it from the same source, and the Python
 core installed under `/opt/vogt/.venv` (there is no `CORE_IMAGE` argument; the
 Python stage builds from this checkout). `VOGT_CORE_IMPL` (`python` or
 `rust`, default `python`) chooses which core the entrypoint supervises and
-which binaries `/usr/local/bin/vogt` and `vogt-mcp-remote` point at. The
+which binaries `/opt/vogt/bin/vogt` and `vogt-mcp-remote` point at (that directory is first on `PATH`; `/usr/local/bin` is not written at runtime). The
 runtime follows. The
 runtime stage starts `FROM` a
 **dev-pod base** (`engine/Dockerfile.pod`, published as

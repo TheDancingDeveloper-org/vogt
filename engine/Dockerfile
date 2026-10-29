@@ -602,7 +602,12 @@ COPY --from=python-core /opt/vogt /opt/vogt
 # docs/rust-port/stack-image-numbers.md (2026-10-19, INSTALL_AI_CLIENTS=false)
 # is 7,536,275,581 B (7.54 GB) against the Python core image at 7,620,979,615 B
 # (7.62 GB).
-ENV PATH="${PATH}:/opt/vogt/.venv/bin"
+# /opt/vogt/bin is first so the core the entrypoint selected (the `vogt` and
+# `vogt-mcp-remote` symlinks it writes there) wins for the supervisor, for
+# `docker exec` shells, and for vogt-mcp-auth.sh, which calls `vogt-mcp-remote`
+# by name. The venv stays last so `vogt-mcp` remains the engine script in
+# /usr/local/bin rather than the Python console script.
+ENV PATH="/opt/vogt/bin:${PATH}:/opt/vogt/.venv/bin"
 RUN chmod +x /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
 
 # The other half is the Rust core, built in `server-build` and copied above, so
@@ -626,8 +631,10 @@ RUN chmod +x /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
 # running with the default `VOGT_CORE_IMPL=python` still answered `vogt` and
 # `vogt-mcp-remote` with rust. entrypoint.sh retargets both from the env at
 # container start: python -> /opt/vogt/.venv/bin/*, rust -> vogt-core.
-# `vogt-mcp` is not linked: the engine's own script of that name, copied below,
-# is what a session runs.
+# The links are written into /opt/vogt/bin (created below, owned by the image
+# user), which this image puts first on PATH. /usr/local/bin stays root-owned
+# and is not written at runtime. `vogt-mcp` is not linked: the engine's own
+# script of that name, copied below, is what a session runs.
 RUN set -eu; \
     test -x /usr/local/bin/vogt-core; \
     test -x /opt/vogt/.venv/bin/vogt; \
@@ -647,8 +654,12 @@ RUN set -eu; \
 # base defaults them to the same 1000/1000.
 ARG SPROOTY_UID=1000
 ARG SPROOTY_GID=1000
+# /opt/vogt/bin is where entrypoint.sh writes the `vogt` and `vogt-mcp-remote`
+# symlinks at start (VOGT_CORE_IMPL). It has to exist and be writable by the
+# image user. /usr/local/bin is root-owned and is not written at runtime.
 RUN install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0750 /var/lib/vogt \
-    && install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0755 /opt/vogt/agent-clis
+    && install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0755 /opt/vogt/agent-clis \
+    && install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0755 /opt/vogt/bin
 
 # Runtime scripts. Agent-specific CLIs are optional; these helpers only broker
 # credentials on demand for neutral tools already present in the image.

@@ -61,6 +61,25 @@ def test_operator_names_are_not_linked_to_rust_at_build_time() -> None:
     assert "ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@" in code
 
 
+def test_the_image_puts_the_link_dir_first_on_path() -> None:
+    """Every entry (supervisor, exec shell, vogt-mcp-auth) must see the links.
+
+    /opt/vogt/bin is created for the image user. It has to precede
+    /usr/local/bin, or `vogt` and `vogt-mcp-remote` resolve nowhere (or to a
+    stale root-owned link) and the container cannot boot.
+    """
+    text = ENGINE_DOCKERFILE.read_text(encoding="utf-8")
+    assert (
+        "install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0755 /opt/vogt/bin" in text
+    )
+    path_lines = [line for line in text.splitlines() if line.startswith("ENV PATH=")]
+    assert path_lines, "engine/Dockerfile sets no PATH"
+    last = path_lines[-1]
+    assert last.startswith('ENV PATH="/opt/vogt/bin:')
+    # Nothing before /opt/vogt/bin in the final PATH assignment.
+    assert last.split(":", 1)[0] == 'ENV PATH="/opt/vogt/bin'
+
+
 def test_the_entrypoint_selects_the_core_and_retargets_the_names() -> None:
     lines = _code_lines(ENTRYPOINT)
     code = "\n".join(lines)
@@ -71,7 +90,8 @@ def test_the_entrypoint_selects_the_core_and_retargets_the_names() -> None:
     assert 'local impl="${VOGT_CORE_IMPL:-python}"' in code
     assert 'cli="${VOGT_PYTHON_BIN:-/opt/vogt/.venv/bin/vogt}"' in code
     assert 'mcp="${VOGT_PYTHON_MCP_BIN:-/opt/vogt/.venv/bin/vogt-mcp-remote}"' in code
-    assert 'local dest="${VOGT_BIN_DIR:-/usr/local/bin}"' in code
+    assert 'local dest="${VOGT_BIN_DIR:-/opt/vogt/bin}"' in code
+    assert 'local dest="${VOGT_BIN_DIR:-/usr/local/bin}"' not in code
     assert 'ln -sfn "$cli" "$dest/vogt"' in code
     assert 'ln -sfn "$mcp" "$dest/vogt-mcp-remote"' in code
     assert "link_vogt_names" in code
