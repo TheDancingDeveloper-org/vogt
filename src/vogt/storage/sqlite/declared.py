@@ -1405,6 +1405,25 @@ class SqliteReadView:
         ).fetchone()
         return None if row is None else _row_to_session(row)
 
+    def sessions_by_engine_ids(
+        self, engine_session_ids: list[str]
+    ) -> dict[str, CodingSession]:
+        wanted = sorted(set(engine_session_ids))
+        found: dict[str, CodingSession] = {}
+        # Under SQLite's host-parameter limit, same chunking as reports.
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start : start + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                "SELECT * FROM coding_sessions "
+                f"WHERE engine_session_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                session = _row_to_session(row)
+                found[session.engine_session_id] = session
+        return found
+
     def list_sessions(
         self,
         *,

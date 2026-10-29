@@ -606,6 +606,16 @@ class ReadView(Protocol):
         """
         ...
 
+    def sessions_by_engine_ids(
+        self, engine_session_ids: list[str]
+    ) -> dict[str, CodingSession]:
+        """The links for many engine session ids, in one query.
+
+        An id with no declared link is absent. `session.list` uses this for
+        the unlinked half so it does not query once per live engine session.
+        """
+        ...
+
     def list_sessions(
         self,
         *,

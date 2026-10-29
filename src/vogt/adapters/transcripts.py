@@ -54,6 +54,12 @@ EXCERPT_CHARS = 300
 MAX_ENTRIES = 20_000
 #: How long a conversation-id index is reused without re-checking the root.
 #: A root whose mtime moved is rebuilt on the next lookup regardless.
+#:
+#: WI-2693 (local, not a prod session.list): 200 ids under a root of 400
+#: directories cost one scan (10.2 ms) then dict reads (0.1 ms for the same
+#: 200). Before the shared index, each row scanned up to 20_000 entries.
+#: 400 unlinked-id lookups: 3.6 ms one query each, 0.6 ms in one IN (...).
+#: A path whose file has vanished is dropped on the next lookup.
 INDEX_TTL_SECONDS = 5.0
 #: How long a conversation id that was not on disk stays a miss, so a list of
 #: sessions with no transcript does not rescan the root once per row.
@@ -265,7 +271,19 @@ class _Index:
     def lookup(self, conversation_id: str) -> Path | None:
         path = self.by_id.get(conversation_id)
         if path is not None:
-            return path
+            # A cached path must not outlive the file. Drop it so the next
+            # lookup (after the index is rebuilt) does not hand back a path
+            # that is gone. The rebuild itself waits for the TTL or a stamp
+            # change; until then this id is a miss.
+            try:
+                if path.is_file():
+                    return path
+            except OSError:
+                pass
+            with _index_guard:
+                self.by_id.pop(conversation_id, None)
+                self.negative[conversation_id] = _clock()
+            return None
         now = _clock()
         with _index_guard:
             seen = self.negative.get(conversation_id)
