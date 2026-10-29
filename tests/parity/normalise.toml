@@ -51,12 +51,13 @@ why = "collector evidence names the machine; everything the hooks make determini
 # Path-scoped entries are `parent.key`: the key is blanked only inside an
 # object reached under that parent name (or inside a list of those objects).
 # A bare key is blanked wherever it appears. `suppression` and
-# `evidence_snapshot` used to be bare, which hid every field inside those
-# objects, including ones the two cores must agree on.
+# `evidence_snapshot` stay bare: the golden at 84ec105 blanked the whole
+# object, and scoping the rule to `.id` makes that recording differ from
+# itself (WI-2662).
 keys = [
   "last_swept_at",
-  "suppression.id",
-  "evidence_snapshot.id",
+  "suppression",
+  "evidence_snapshot",
   "evidence_observation_id",
   "secret",
   "data_dir",
