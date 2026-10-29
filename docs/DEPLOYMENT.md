@@ -530,8 +530,9 @@ instance id), otherwise every difference is a conflict.
    fresh prod backup: the clone baseline is now behind both sides, so a
    second carry would report every item touched by the first as a conflict.
 
-**Migrations run at boot.** The entrypoint runs `vogt-core init` before every
-`vogt-core serve`. `init` is idempotent: it creates the instance on a new volume,
+**Migrations run at boot.** The entrypoint runs the selected core's `init`
+before every `serve` — `vogt-core init` when `VOGT_CORE_IMPL=rust`, the Python
+`vogt init` otherwise. `init` is idempotent: it creates the instance on a new volume,
 brings an existing one forward to this build's schema, and leaves the audit
 history alone after that. Until the schemas match, `/health/ready` answers
 503 naming the store and both schema numbers. Migrations are forward-only and
