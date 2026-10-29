@@ -25,9 +25,17 @@ import {
 import {
   loadTerminalCache,
   MAX_TERMINAL_CACHE_BYTES,
-  saveTerminalCache,
   type TerminalCacheEntry,
 } from "./terminalCache";
+import { postTerminalCacheWrite } from "./terminalCacheOffthread";
+import {
+  CACHE_PERSIST_IDLE_TIMEOUT_MS,
+  CACHE_PERSIST_INTERVAL_MS,
+  cacheNeedsPersist,
+  scheduleOnIdle,
+  shouldScheduleCachePersist,
+  type IdleHandle,
+} from "./terminalCacheSchedule";
 import {
   createReplayQueue,
   prepareReplayTail,
@@ -210,9 +218,12 @@ const TerminalView: Component<Props> = (props) => {
   // time-slice the shared replay parser with the active pane.
   let deferredCache: TerminalCacheEntry | null = null;
   let cacheTimer: ReturnType<typeof setTimeout> | null = null;
-  // The outputPosition at the last successful persist, so an unchanged ring is
+  let cacheIdle: IdleHandle | null = null;
+  // The outputPosition at the last scheduled persist, so an unchanged ring is
   // not re-copied and re-written to IndexedDB.
   let lastPersistedPosition: number | undefined;
+  // Set on dormancy entry so a hidden pane persists once, then stops.
+  let persistOnDormancy = false;
   let replay: ReplayHandle | null = null;
   const [readyToConnect, setReadyToConnect] = createSignal(false);
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -450,28 +461,40 @@ const TerminalView: Component<Props> = (props) => {
   };
 
   const persistCache = () => {
-    if (outputPosition === undefined) return;
-    // Skip the write when nothing new has arrived since the last persist
-    // OutputPosition is the monotonic byte cursor, so an unchanged
-    // value means the ring is identical and copying+writing it is wasted work.
-    if (outputPosition === lastPersistedPosition) return;
-    lastPersistedPosition = outputPosition;
+    if (!cacheNeedsPersist(outputPosition, lastPersistedPosition)) return;
+    const position = outputPosition;
+    lastPersistedPosition = position;
+    persistOnDormancy = false;
     const serialized = trySerialize();
-    void saveTerminalCache(
-      props.sessionId,
-      outputPosition,
-      serialized !== null ? { serialized } : { data: cachedBytes() },
-    );
+    const payload = serialized !== null ? { serialized } : { data: cachedBytes() };
+    // Serialize needs the live xterm, so it stays on this thread. The IndexedDB
+    // put (up to 4 MiB) runs in a worker.
+    postTerminalCacheWrite(props.sessionId, position, payload);
+  };
+
+  const flushCacheSoon = () => {
+    if (cacheIdle) return;
+    cacheIdle = scheduleOnIdle(() => {
+      cacheIdle = null;
+      persistCache();
+    }, window, CACHE_PERSIST_IDLE_TIMEOUT_MS);
   };
 
   const scheduleCachePersist = () => {
-    if (cacheTimer !== null) return;
-    // 5s, not 1s: a reconnect cache does not need per-second freshness,
-    // and each persist copies up to 4 MiB and does a 4 MiB IndexedDB put.
+    const hidden = socketDormant || document.visibilityState === "hidden";
+    if (!shouldScheduleCachePersist({
+      outputPosition,
+      lastPersistedPosition,
+      hidden: hidden && !persistOnDormancy,
+      alreadyScheduled: cacheTimer !== null || cacheIdle !== null,
+    })) return;
+    // Visible panes wait the 5 s cadence, then idle. A pane that just went
+    // dormant persists once on the next idle slice, not on every later chunk.
+    const delay = persistOnDormancy ? 0 : CACHE_PERSIST_INTERVAL_MS;
     cacheTimer = setTimeout(() => {
       cacheTimer = null;
-      persistCache();
-    }, 5_000);
+      flushCacheSoon();
+    }, delay);
   };
 
   const dispatchInput = (data: string | ArrayBuffer) => {
@@ -1414,7 +1437,8 @@ const TerminalView: Component<Props> = (props) => {
       // Resume writes this delta, or a bounded tail if it outgrows the budget.
       if (socketDormant) {
         dormantBytes += buf.byteLength;
-        scheduleCachePersist();
+        // Dormancy entry already scheduled the one persist. Later chunks stay
+        // in the ring until the pane is visible again.
         return;
       }
       if (heldForResize) {
@@ -1494,7 +1518,9 @@ const TerminalView: Component<Props> = (props) => {
     }
     socketDormant = true;
     dormantBytes = 0;
+    persistOnDormancy = true;
     setStatusText(null);
+    scheduleCachePersist();
   }
 
   // Back to visible. A small buffer is written as-is; past the budget the
@@ -1618,6 +1644,8 @@ const TerminalView: Component<Props> = (props) => {
     stopWatchdog();
     if (hiddenTimer !== null) clearTimeout(hiddenTimer);
     if (cacheTimer !== null) { clearTimeout(cacheTimer); cacheTimer = null; }
+    cacheIdle?.cancel();
+    cacheIdle = null;
     persistCache();
     dropDormantSlot();
     if (fitFrame !== null) {
