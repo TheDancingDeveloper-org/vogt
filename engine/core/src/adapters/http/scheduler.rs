@@ -20,11 +20,11 @@
 //! process.
 //!
 //! Each tick runs the collector sweep with reason [`SCHEDULED_REASON`] and then,
-//! whether or not the sweep succeeded, `settle_budget_stops` (WI-1833). A tick
-//! that panics is caught at the join and still counted as a failure; the
-//! settlement itself is inside the tick, in a `catch_unwind`, so a panicking
-//! sweep does not skip it. The watch pass (`evaluate_watches`, WI-2036) is not
-//! ported: `watch_interval_seconds` stays unread, and no watch loop is started.
+//! whether or not the sweep succeeded, `settle_budget_stops` (WI-1833).
+//! [`sweep_then_settle`] catches a panicking sweep and still settles, so one
+//! bad collector does not skip the hand-off. The loop counts that failure and
+//! carries on. The watch pass (`evaluate_watches`, WI-2036) is not ported:
+//! `watch_interval_seconds` stays unread, and no watch loop is started.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -63,14 +63,10 @@ pub fn scheduler_principal() -> Principal {
     .expect("a fixed, non-empty identity")
 }
 
-/// The tick `serve` runs: a fresh context per tick, as the service principal,
-/// over the same config the listener loaded. The clock and ids are the hook
-/// pair `build_context` already resolves, not a second clock the routes share.
-/// The sweep, then the budget settlement, as Python's `try: sweep finally:
-/// settle_budget_stops`. The settlement runs whether or not the sweep failed
-/// *or panicked*: a panic is caught and turned into the same failure a raised
-/// error is, and the settlement still runs. An error from the settlement
-/// replaces the sweep's, the way an exception raised in a `finally` block does.
+/// Sweep, then settle budget stops. A panicking sweep is caught here and
+/// turned into the same failure a raised error is, and the settlement still
+/// runs. An error from the settlement replaces the sweep's, the way an
+/// exception raised in a `finally` block does.
 pub fn sweep_then_settle(
     sweep: impl FnOnce() -> Result<(), VogtError>,
     settle: impl FnOnce() -> Result<(), VogtError>,
@@ -88,6 +84,11 @@ pub fn sweep_then_settle(
     swept
 }
 
+/// The tick `serve` runs: a fresh context per tick, as the service principal,
+/// over the same config the listener loaded. The clock and ids are the hook
+/// pair `build_context` already resolves, not a second clock the routes share.
+/// The sweep, then the budget settlement, as Python's `try: sweep finally:
+/// settle_budget_stops`, via [`sweep_then_settle`].
 pub fn serve_tick(config: VogtConfig) -> Tick {
     Arc::new(move || {
         let built = build_context(
@@ -173,12 +174,16 @@ impl CollectorSchedule {
         let counts = Arc::clone(&self.counts);
         self.stop = Some(sender.clone());
         self.task = Some(tokio::spawn(async move {
-            // Either the listener's signal or `stop()` ends the wait.
-            tokio::spawn(async move {
+            // Either the listener's signal or `stop()` ends the wait. The
+            // forwarder is joined (or aborted if the loop ends first) so stop
+            // does not leave a detached task.
+            let forward = tokio::spawn(async move {
                 let _ = notify.changed().await;
                 let _ = sender.send(true);
             });
             run_loop(tick, counts, interval, receiver).await;
+            forward.abort();
+            let _ = forward.await;
         }));
         tracing::info!(
             target: TARGET,
