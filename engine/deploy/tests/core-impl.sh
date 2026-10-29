@@ -52,8 +52,9 @@ else
   fi
 fi
 
-# Operator names follow the same function. VOGT_BIN_DIR keeps the links out
-# of /usr/local/bin; unset it and the entrypoint writes there.
+# Operator names follow the same function. The default destination is
+# /opt/vogt/bin (writable by the image user). VOGT_BIN_DIR overrides it so
+# this test does not need that directory, and so it never writes /usr/local/bin.
 bindir="$(mktemp -d)"
 trap 'rm -rf "$bindir"' EXIT
 export VOGT_BIN_DIR="$bindir"
@@ -70,4 +71,9 @@ link_vogt_names || fail "rust link"
 [[ "$(readlink "$bindir/vogt")" == "$bindir/rust-core" ]] || fail "rust link target"
 [[ "$(readlink "$bindir/vogt-mcp-remote")" == "$bindir/rust-core" ]] || fail "rust mcp target"
 
+# The shipped default must be the writable directory, not /usr/local/bin.
+grep -q 'VOGT_BIN_DIR:-/opt/vogt/bin' "$entry" || fail "default dest is not /opt/vogt/bin"
+grep -q 'VOGT_BIN_DIR:-/usr/local/bin' "$entry" && fail "still defaults to /usr/local/bin"
+
 echo "core-impl: ok"
+

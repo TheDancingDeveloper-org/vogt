@@ -540,10 +540,12 @@ run under a lock. Read [`SCHEMA.md`](SCHEMA.md) before a major version.
 **The stack image ships both cores.** `VOGT_CORE_IMPL` selects which one the
 entrypoint supervises and which binaries the operator names point at
 (`python` or `rust`, default `python`, WI-2660). `python` runs
-`/opt/vogt/.venv/bin/vogt` and links `vogt` and `vogt-mcp-remote` at
-`/usr/local/bin` to the Python console scripts. `rust` runs `vogt-core`,
+`/opt/vogt/.venv/bin/vogt` and links `vogt` and `vogt-mcp-remote` in
+`/opt/vogt/bin` (created at build time, owned by the image user, first on
+`PATH`) to the Python console scripts. `rust` runs `vogt-core`,
 built from `engine/core` in the same image (WI-1078), and links both names to
-that binary. The choice is read at container start, so changing it and
+that binary. The links are not written into `/usr/local/bin`: that directory
+is root-owned, and the entrypoint runs as the image user. The choice is read at container start, so changing it and
 redeploying is the cutover and the rollback; neither needs a rebuild.
 `vogt-core` itself stays on PATH either way, for a direct call. Besides
 `init` (with `--check`) and `serve`, `vogt` carries the registry's CLI: the admin verbs `status`,

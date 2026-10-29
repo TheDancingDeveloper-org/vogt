@@ -298,10 +298,18 @@ vogt_core_listen() {
 }
 
 # Point the operator names at the core VOGT_CORE_IMPL selected. The image
-# ships both binaries and links neither name: a build-time link to vogt-core
-# would make `vogt` rust even when the supervisor is running python. python
-# (the default) uses the venv console scripts; rust uses vogt-core for both
-# names, because that binary picks its mode from argv[0].
+# ships both binaries and links neither name at build time: a build-time link
+# to vogt-core would make `vogt` rust even when the supervisor is running
+# python. python (the default) uses the venv console scripts; rust uses
+# vogt-core for both names, because that binary picks its mode from argv[0].
+#
+# The links live in /opt/vogt/bin, created at build time and owned by the
+# image user. /usr/local/bin is root-owned 755, and this function runs as
+# that user, so writing there exits the container at boot. The image puts
+# /opt/vogt/bin first on PATH (ahead of /usr/local/bin and the venv), so the
+# supervisor, a `docker exec` shell, and vogt-mcp-auth.sh (which calls
+# `vogt-mcp-remote` by name) all see the selected core. Nothing is written
+# under /usr/local/bin at runtime.
 link_vogt_names() {
     local impl="${VOGT_CORE_IMPL:-python}"
     local cli mcp
@@ -319,7 +327,12 @@ link_vogt_names() {
             return 78
             ;;
     esac
-    local dest="${VOGT_BIN_DIR:-/usr/local/bin}"
+    local dest="${VOGT_BIN_DIR:-/opt/vogt/bin}"
+    if [[ ! -d "$dest" || ! -w "$dest" ]]; then
+        echo "vogt-core: ${dest} is missing or not writable —" \
+             "the image creates /opt/vogt/bin for the runtime user" >&2
+        return 78
+    fi
     ln -sfn "$cli" "$dest/vogt"
     ln -sfn "$mcp" "$dest/vogt-mcp-remote"
 }
