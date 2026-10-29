@@ -746,12 +746,24 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
         "dlab-glm-5-3-flash",
         "dlab-glm-5-3-flashx",
         "dlab-kimi-k3",
+        "gpt-5.5",
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-6-astra",
         "premium",
     ]
     assert by_priority[0]["slug"] == "grok"
     assert by_priority[0]["visibility"] == "list"
     assert by_priority[-1]["slug"] == "premium"
     assert by_priority[-1]["visibility"] == "hide"
+    # Explicit `-m gpt-6-astra` still resolves: the slug stays in the catalog
+    # with apply_patch metadata even though a stale default migrates to grok.
+    astra = next(row for row in catalog["models"] if row["slug"] == "gpt-6-astra")
+    assert astra["visibility"] == "list"
+    assert astra["apply_patch_tool_type"] == "freeform"
+    assert astra["supported_in_api"] is True
     model = by_priority[0]
     assert all(
         row["apply_patch_tool_type"] == "freeform" and "tool_mode" not in row
@@ -789,8 +801,9 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     )
     assert text.count("[model_providers.theclawbay]") == 1
 
-    # A model the router does not serve, left over from theclawbay, moves to
-    # grok; a catalog group stays (WI-1640).
+    # A model the chat wire does not serve, left over from theclawbay, moves
+    # to grok even when the catalog lists it for an explicit `-m` (WI-1640).
+    # A chat-served catalog group stays.
     config.write_text(
         'model = "gpt-6-astra"\nmodel_provider = "litellm"\n', encoding="utf-8"
     )
