@@ -31,7 +31,18 @@ export interface TerminalWriteCoalescer {
 export interface CoalesceClock {
   requestFrame(callback: () => void): number;
   cancelFrame(handle: number): void;
+  /**
+   * Hidden tabs pause `requestAnimationFrame`. A timer fallback still
+   * flushes queued live bytes so they cannot sit until the tab is shown.
+   */
+  setTimer(callback: () => void, delayMs: number): number;
+  clearTimer(handle: number): void;
+  /** True when the document is hidden (or the host has no document). */
+  hidden(): boolean;
 }
+
+/** Timer fallback when the tab is hidden and rAF will not fire. */
+export const TERMINAL_WRITE_COALESCE_HIDDEN_MS = 50;
 
 function defaultClock(): CoalesceClock {
   const request =
@@ -41,7 +52,14 @@ function defaultClock(): CoalesceClock {
   const cancel =
     globalThis.cancelAnimationFrame?.bind(globalThis) ??
     ((handle: number) => clearTimeout(handle as unknown as ReturnType<typeof setTimeout>));
-  return { requestFrame: request, cancelFrame: cancel };
+  return {
+    requestFrame: request,
+    cancelFrame: cancel,
+    setTimer: (callback, delayMs) => setTimeout(callback, delayMs) as unknown as number,
+    clearTimer: (handle) => clearTimeout(handle as unknown as ReturnType<typeof setTimeout>),
+    hidden: () =>
+      typeof document !== "undefined" && document.visibilityState === "hidden",
+  };
 }
 
 export function createTerminalWriteCoalescer(
@@ -53,12 +71,24 @@ export function createTerminalWriteCoalescer(
   const pending: Uint8Array[] = [];
   let pendingBytes = 0;
   let frame: number | null = null;
+  let timer: number | null = null;
+  // Bumped by cancel() so a frame already handed to rAF or a timer is a no-op.
+  let generation = 0;
 
-  function flush(): void {
+  function clearSchedule(): void {
     if (frame !== null) {
       clock.cancelFrame(frame);
       frame = null;
     }
+    if (timer !== null) {
+      clock.clearTimer(timer);
+      timer = null;
+    }
+  }
+
+  function flush(): void {
+    generation += 1;
+    clearSchedule();
     if (pending.length === 0) return;
     const chunks = pending.splice(0, pending.length);
     pendingBytes = 0;
@@ -74,11 +104,20 @@ export function createTerminalWriteCoalescer(
   }
 
   function schedule(): void {
-    if (frame !== null) return;
-    frame = clock.requestFrame(() => {
+    if (frame !== null || timer !== null) return;
+    const scheduled = generation;
+    const run = () => {
       frame = null;
+      timer = null;
+      if (scheduled !== generation) return;
       flush();
-    });
+    };
+    frame = clock.requestFrame(run);
+    // rAF does not fire while the document is hidden. Race a short timer so
+    // queued live bytes still flush; whichever runs first wins via generation.
+    if (clock.hidden()) {
+      timer = clock.setTimer(run, TERMINAL_WRITE_COALESCE_HIDDEN_MS);
+    }
   }
 
   return {
@@ -94,10 +133,8 @@ export function createTerminalWriteCoalescer(
     },
     flush,
     cancel(): void {
-      if (frame !== null) {
-        clock.cancelFrame(frame);
-        frame = null;
-      }
+      generation += 1;
+      clearSchedule();
       pending.length = 0;
       pendingBytes = 0;
     },
