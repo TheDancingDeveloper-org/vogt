@@ -82,3 +82,19 @@ checks and `dependencies.detail`, `place.metrics` `work_total`, the
 deploy-lanes collector when a lane is configured, `initiative.list`
 `mode=summary`, `preference.set` `dispatch.budget_restarts_per_item`, and
 `clone` with no HTTP route (Python declares none either).
+
+## A7 — process-fatal expects (WI-2670)
+
+`loaded_config` in `engine/core/src/adapters/http/app.rs` panics when the
+process config cannot be read. `serve` has already exited on that same
+failure; serving the defaults would silently turn
+`install_bootstrap_enabled` back on. The MCP route reads the same function,
+so both surfaces share one config.
+
+`engine/core/src/application/services/auth.rs` still panics when a clock or
+id mutex is poisoned and when `serde_json::to_value` refuses one of our own
+types. A poisoned mutex means a thread already panicked while holding it;
+continuing would stamp or mint from a lock that did not release cleanly.
+Serialising our own types cannot fail for a value those types can hold.
+Neither path copies an internal store or io error into a response.
+Read-after-write misses in that file are `MigrationError`, not panics.
