@@ -9,6 +9,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use parking_lot::Mutex as StoreMutex;
+
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
@@ -27,7 +29,7 @@ use crate::storage::sqlite::declared::SqliteDeclaredStore;
 /// What the route needs. The store is behind a mutex because its clock and id
 /// factory are not shareable across tasks.
 pub struct McpState<C, I> {
-    store: Mutex<SqliteDeclaredStore<C, I>>,
+    store: StoreMutex<SqliteDeclaredStore<C, I>>,
     data_dir: std::path::PathBuf,
     /// Loaded once, at startup, the same way `/api` loads it. A request must not
     /// call `load_config` itself, and `VogtConfig::default()` is where
@@ -38,16 +40,6 @@ pub struct McpState<C, I> {
 }
 
 impl<C: Clock, I: IdFactory> McpState<C, I> {
-    /// Poison the store lock. Tests use it to prove a poisoned lock does not
-    /// make every later request fail; production never calls it.
-    #[cfg(test)]
-    fn poison_store(&self) {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = self.store.lock().unwrap();
-            panic!("poison the store lock");
-        }));
-    }
-
     pub fn new(
         data_dir: &std::path::Path,
         no_auth: bool,
@@ -56,7 +48,7 @@ impl<C: Clock, I: IdFactory> McpState<C, I> {
         ids: I,
     ) -> Self {
         Self {
-            store: Mutex::new(SqliteDeclaredStore::new(
+            store: StoreMutex::new(SqliteDeclaredStore::new(
                 crate::storage::sqlite::declared_path(data_dir),
                 clock,
                 ids,
@@ -76,7 +68,7 @@ impl<C: Clock, I: IdFactory> McpState<C, I> {
         source: &SqliteDeclaredStore<C, I>,
     ) -> Self {
         Self {
-            store: Mutex::new(source.joined(crate::storage::sqlite::declared_path(data_dir))),
+            store: StoreMutex::new(source.joined(crate::storage::sqlite::declared_path(data_dir))),
             data_dir: data_dir.to_path_buf(),
             config: super::app::loaded_config(data_dir),
             no_auth,
@@ -201,10 +193,9 @@ async fn handle<C: Clock + Clone + Send + 'static, I: IdFactory + Send + 'static
             );
         };
 
-        let store = state
-            .store
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // parking_lot's mutex does not poison: a panic under the lock releases
+        // it, so one failed request cannot turn every later request into a 500.
+        let store = state.store.lock();
         // The request's own store: the shared id factory, so the decision row and
         // the service count from one sequence, and a clock restarted for this
         // request, so both stamp from the same instant. The process store keeps its
@@ -855,12 +846,12 @@ mod tests {
         assert_eq!(json["error"]["code"], "payload_too_large");
     }
 
-    /// A poisoned store lock must not turn every later request into a 500: the
-    /// route clears the poison and carries on.
+    /// A panic while the store lock is held must not turn every later request
+    /// into a 500. The lock does not poison, so the next request takes it.
     #[test]
-    fn a_poisoned_store_lock_recovers() {
+    fn a_panic_under_the_store_lock_does_not_stick() {
         let dir =
-            std::env::temp_dir().join(format!("vogt-mcp-poison-{}", crate::core::fresh_id("t")));
+            std::env::temp_dir().join(format!("vogt-mcp-lock-{}", crate::core::fresh_id("t")));
         std::fs::create_dir_all(&dir).unwrap();
         crate::application::instance::init(&dir, &mut None, &mut None).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -874,8 +865,10 @@ mod tests {
             SystemClock,
             SequentialIds::new(None).unwrap(),
         );
-        state.poison_store();
-        assert!(state.store.lock().is_err(), "the lock stays poisoned");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.store.lock();
+            panic!("panic under the store lock");
+        }));
         runtime.spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
             axum::serve(listener, router_system_sequential(state))

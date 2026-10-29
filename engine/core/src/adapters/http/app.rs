@@ -10,6 +10,8 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use parking_lot::Mutex as StoreMutex;
+
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderValue, Method, Request, StatusCode};
@@ -35,7 +37,7 @@ pub const API_PREFIX: &str = "/api";
 /// because its clock and id factory are not shareable across tasks.
 pub struct AppState<C, I> {
     pub registry: Arc<OperationRegistry>,
-    store: Mutex<SqliteDeclaredStore<C, I>>,
+    store: StoreMutex<SqliteDeclaredStore<C, I>>,
     data_dir: std::path::PathBuf,
     /// Loaded once, at startup. A request must not call `load_config` itself:
     /// the file and the environment are process-wide, and reading them per
@@ -56,7 +58,7 @@ impl<C: Clock, I: IdFactory> AppState<C, I> {
     ) -> Self {
         Self {
             registry: Arc::new(default_registry()),
-            store: Mutex::new(SqliteDeclaredStore::new(
+            store: StoreMutex::new(SqliteDeclaredStore::new(
                 crate::storage::sqlite::declared_path(data_dir),
                 clock,
                 ids,
@@ -77,7 +79,7 @@ impl<C: Clock, I: IdFactory> AppState<C, I> {
     ) -> Self {
         Self {
             registry: Arc::new(default_registry()),
-            store: Mutex::new(source.joined(crate::storage::sqlite::declared_path(data_dir))),
+            store: StoreMutex::new(source.joined(crate::storage::sqlite::declared_path(data_dir))),
             data_dir: data_dir.to_path_buf(),
             config: loaded_config(data_dir),
             no_auth,
@@ -684,44 +686,55 @@ async fn dispatch<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     let built = context_for(&request_store, &state, &grant, principal, build);
     // Conditional reads answer after authentication and authorization: an old
     // validator must never turn a refused request into a 304.
-    let etag = if etag::is_conditional_read(operation.name) {
-        match request_store
-            .read()
-            .and_then(|view| view.current_revision())
-        {
-            Ok(revision) => Some(etag::etag_for_revision(revision)),
-            Err(error) => return error_response(&error),
-        }
-    } else {
-        None
-    };
-    if let Some(etag) = &etag {
-        if etag::if_none_match_matches(if_none_match.as_deref(), etag) {
-            return Response::builder()
-                .status(StatusCode::NOT_MODIFIED)
-                .header("etag", etag.as_str())
-                .body(Body::empty())
-                .expect("a fixed response builds");
-        }
-    }
+    // The revision read is rusqlite, the same blocking work `operation.run` is.
+    // Reading it here, on the async worker, is what a handful of conditional
+    // reads would still stall. It runs on the blocking pool, with the handler.
+    let conditional = etag::is_conditional_read(operation.name);
+    let if_none_match_owned = if_none_match.clone();
     // `operation.run` does blocking rusqlite and blocking engine HTTP (a
     // session wait is up to 120 s). Python runs the same work with
     // `asyncio.to_thread`; on the tokio runtime it has to leave the worker
     // threads, or a handful of waits starves `/health/live` and every other
     // request. The store is Send: its per-connection cache is a Mutex.
-    let outcome =
-        match tokio::task::spawn_blocking(move || operation.run(built.as_ref(), params)).await {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                return Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .header("content-type", "text/plain; charset=utf-8")
-                    .body(Body::from("Internal Server Error"))
-                    .expect("a fixed response builds");
+    let outcome = match tokio::task::spawn_blocking(move || {
+        let etag = if conditional {
+            match request_store
+                .read()
+                .and_then(|view| view.current_revision())
+            {
+                Ok(revision) => Some(etag::etag_for_revision(revision)),
+                Err(error) => return Err(error),
             }
+        } else {
+            None
         };
+        if let Some(etag) = &etag {
+            if etag::if_none_match_matches(if_none_match_owned.as_deref(), etag) {
+                return Ok(Dispatch::NotModified(etag.clone()));
+            }
+        }
+        operation
+            .run(built.as_ref(), params)
+            .map(|value| Dispatch::Ran { value, etag })
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("content-type", "text/plain; charset=utf-8")
+                .body(Body::from("Internal Server Error"))
+                .expect("a fixed response builds");
+        }
+    };
     match outcome {
-        Ok(value) => {
+        Ok(Dispatch::NotModified(etag)) => Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header("etag", etag)
+            .body(Body::empty())
+            .expect("a fixed response builds"),
+        Ok(Dispatch::Ran { value, etag }) => {
             let mut response = json_response(StatusCode::OK, value);
             if let Some(etag) = etag
                 .as_deref()
@@ -940,14 +953,26 @@ fn percent_decode(text: &str) -> String {
 /// gate stamps its decision row from the store it is given, so the decision and
 /// the service only share an instant when they share this store. The process
 /// store keeps its own clock, which the CLI also ticks.
+/// What the blocking dispatch did. The 304 has to be decided where the
+/// revision was read, which is off the async worker, so the worker returns
+/// the decision rather than the response.
+enum Dispatch {
+    NotModified(String),
+    Ran {
+        value: serde_json::Value,
+        etag: Option<String>,
+    },
+}
+
 fn request_store<C: Clock, I: IdFactory>(
     state: &AppState<C, I>,
     clock_for: ClockFor<C>,
 ) -> SqliteDeclaredStore<C, I> {
-    let store = state
-        .store
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // parking_lot's mutex does not poison: a panic under the lock releases it
+    // and the next request takes it. A std Mutex recovered with `into_inner`
+    // still left one panic able to fail every later lock() that forgot to
+    // recover.
+    let store = state.store.lock();
     SqliteDeclaredStore::shared(
         store.path().to_path_buf(),
         clock_for(store.clock()),
@@ -2569,5 +2594,96 @@ mod tests {
             elapsed < std::time::Duration::from_millis(2000),
             "a blocked operation stalled another request for {elapsed:?}"
         );
+    }
+
+    /// Eight concurrent blocking operations (the shape of `session.wait` against
+    /// a slow engine) must not pin the runtime's worker threads. `/health/live`
+    /// is the Rust liveness route (Python's `/healthz`) and it stays on the
+    /// async worker, so it answers while those waits are still blocked.
+    #[test]
+    fn eight_blocking_waits_leave_liveness_under_50ms() {
+        struct ClearBlock;
+        impl Drop for ClearBlock {
+            fn drop(&mut self) {
+                std::env::remove_var("VOGT_TEST_BLOCK_MS");
+            }
+        }
+        let _clear = ClearBlock;
+        std::env::set_var("VOGT_TEST_BLOCK_MS", "2000");
+        let running = serve_with_health();
+        let addr = running.addr;
+        // Warm the listener before measuring, so accept/setup is not the probe.
+        let (status, _) = request(addr, "GET", "/health/live", None);
+        assert_eq!(status, 200);
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            waits.push(std::thread::spawn(move || {
+                request(addr, "GET", "/api/status", None)
+            }));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let started = std::time::Instant::now();
+        let (status, body) = request(addr, "GET", "/health/live", None);
+        let elapsed = started.elapsed();
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains("\"status\":\"ok\""),
+            "liveness body was {body}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "liveness took {elapsed:?} while 8 waits were blocked"
+        );
+        for wait in waits {
+            let (status, _) = wait.join().unwrap();
+            assert_eq!(status, 200);
+        }
+    }
+
+    /// `serve` merges the health router onto the API router. The in-module
+    /// `serve_with` does not, and the load test has to hit `/health/live`.
+    fn serve_with_health() -> Running {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("vogt-http-health-{n}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::application::instance::init(&dir, &mut None, &mut None).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let state = AppState::new(
+            &dir,
+            true,
+            true,
+            crate::application::context::SystemClock,
+            crate::core::SequentialIds::new(None).unwrap(),
+        );
+        let health_dir = dir.clone();
+        runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            let router = router_system_sequential(state).merge(
+                crate::adapters::http::health::router(crate::adapters::http::health::HealthState {
+                    data_dir: health_dir,
+                    version: "test".to_string(),
+                    auth_enabled: false,
+                    writes_enabled: true,
+                    connection: None,
+                }),
+            );
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        Running {
+            addr,
+            _runtime: runtime,
+            dir,
+        }
     }
 }
