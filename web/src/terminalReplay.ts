@@ -194,20 +194,34 @@ function requestPump(): void {
   }, 0);
 }
 
-function report(task: ReplayTask): void {
-  task.metrics.durationMs = Math.max(0, now() - task.startedAt);
+/**
+ * Record one completed replay as a `vogt-terminal-replay.<kind>` performance
+ * measure, the mark the H3 budget harness reads. Every path that paints a
+ * session's history into a pane records one, the queued replays below and the
+ * serialized-cache restore (F5) that writes the screen in one go.
+ */
+export function recordReplayMeasure(kind: ReplayOptions["kind"], startedAt: number): void {
   const id = measurementId++;
   const startMark = `vogt-terminal-replay-${id}-start`;
   const endMark = `vogt-terminal-replay-${id}-end`;
-  const measureName = `vogt-terminal-replay.${task.options.kind}`;
   const perf = globalThis.performance;
   if (perf?.mark && perf.measure) {
-    perf.mark(startMark, { startTime: task.startedAt });
+    perf.mark(startMark, { startTime: startedAt });
     perf.mark(endMark);
-    perf.measure(measureName, startMark, endMark);
+    perf.measure(`vogt-terminal-replay.${kind}`, startMark, endMark);
     perf.clearMarks(startMark);
     perf.clearMarks(endMark);
   }
+}
+
+/** Now, on the clock replay measures are taken against. */
+export function replayClock(): number {
+  return now();
+}
+
+function report(task: ReplayTask): void {
+  task.metrics.durationMs = Math.max(0, now() - task.startedAt);
+  recordReplayMeasure(task.options.kind, task.startedAt);
   // Debug-level, structured enough for the performance harness to collect but
   // quiet enough not to become normal terminal UI output.
   console.debug("[vogt] terminal replay", {

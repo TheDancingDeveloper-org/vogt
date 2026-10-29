@@ -1,0 +1,70 @@
+[package]
+name = "vogt-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Drop-in Rust replacement for the Vogt Python core process"
+
+[[bin]]
+name = "vogt-core"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+futures-util = "0.3"
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+clap = { version = "4.5", features = ["derive"] }
+regex = "1"
+fancy-regex = "0.14"
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "arbitrary_precision"] }
+# Derives every operation schema from the models in `application/models`.
+schemars = "1.2.3"
+toml = "0.8"
+sha2 = "0.11"
+rsa = { version = "0.9.10", default-features = false, features = ["std", "pem"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+parking_lot = "0.12"
+tracing = "0.1"
+http-body = "1"
+tracing-subscriber = "0.3"
+# Exact pin, not a range. Later 0.4 releases changed the formats that
+# DateTime::parse_from_rfc3339 and friends accept, and the core's own parser
+# is pinned against CPython 3.12 datetime.fromisoformat (core.rs,
+# timestamps_round_trip_as_utc: the rows "the chrono formats got wrong").
+# A newer chrono is a behaviour change, so it is a deliberate bump with that
+# test green, not a Dependabot range. adebd6d75, 2026-10-08.
+chrono = { version = "=0.4.44", default-features = false, features = ["now", "std", "serde"] }
+scrypt = "0.12.0"
+# The OS entropy source for minted secrets. A hand-rolled read of /dev/urandom
+# that swallowed its error minted a token from a buffer of zeroes.
+getrandom = "0.2"
+subtle = "2.6.1"
+hex = "0.4.3"
+base64 = "0.23.1"
+unicode-general-category = "1.1.0"
+# The adapter HTTP client. `http1` below handles plain http with the standard
+# library; https (GitHub, an https peer) needs a TLS stack. native-certs trusts
+# the platform store, so a private CA that Python trusts is trusted here too.
+# No OpenSSL.
+ureq = { version = "2", features = ["tls"], default-features = false }
+# The same rustls ureq speaks, so the client can hand it a trust store built
+# from the platform certificates instead of only the bundled Mozilla roots.
+# ureq's own native-certs feature is not used. rustls-native-certs returns
+# only the SSL_CERT_FILE bundle when that variable is set, so the store is
+# assembled by hand: the env bundle, parsed with rustls-pki-types' PemObject,
+# plus the platform bundle openssl-probe finds. rustls-pemfile did this before
+# and is unmaintained (RUSTSEC-2025-0134).
+rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+openssl-probe = "0.2"
+portable-pty = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+hmac = "0.13"
+aes = "0.8"
+cbc = "0.1"

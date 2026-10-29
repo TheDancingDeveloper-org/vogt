@@ -1,7 +1,7 @@
 # Recorded numbers
 
-`scripts/load.py` drives the real operation registry and records numbers — it
-is not a pass/fail suite. This directory holds the **committed baselines**
+`vogt-core load` (the Rust port of `scripts/load.py`) drives the real
+operation registry and records numbers — it is not a pass/fail suite. This directory holds the **committed baselines**
 those runs are compared against. Every number here is a dev-box measurement,
 not a production SLA, and a number is only comparable to another taken the
 same way: each report carries a `produced_by` label saying how it was
@@ -23,7 +23,8 @@ collector schedule). Over the steady phase it records:
 The run builds one `AppContext` over a temporary SQLite database and drives
 the same handlers the CLI, REST and MCP surfaces reach — every mutating call
 through `audited_write` with a principal and a reason. No server, no HTTP, no
-Rust engine. Produced by:
+Rust engine. The committed baseline was recorded by the Python generator,
+before the port:
 
 ```bash
 uv run python scripts/load.py --mode soak --scale 1 \
@@ -45,13 +46,25 @@ mints a bearer token, and drives the hot read surfaces (`work.list`,
 `backlog`, `board.list`, `inbox.list`, `bugs`) and the write path
 (`work.create`, `work.update`) with a pool of concurrent HTTP clients. It
 records the same throughput / p50 / p95 / p99 / RSS shape as the soak, and
-the same `compare_to_baseline` gate reads it the same way. Produced by:
+the same `compare_to_baseline` gate reads it the same way. The committed
+baseline was recorded by the Python generator, before the port:
 
 ```bash
 uv run python scripts/load.py --mode deployed --scale 5 \
   --requests 2000 --concurrency 16 --seed 0 \
   --produced-by "dev box (uvicorn, require_auth)" \
   --out bench/deployed_baseline.json
+```
+
+`vogt-core load` takes the same flags and writes the same report shape, with
+the same seeded relation edges and the same rounding, so a new recording uses
+the same arguments:
+
+```bash
+vogt-core load --mode soak --scale 1 \
+  --iterations 200 --sweep-every 25 --seed 0 \
+  --produced-by "in-process (dev box, vogt-core load --mode soak)" \
+  --out bench/soak_baseline.json
 ```
 
 To re-record either baseline on a different machine, run the same command
@@ -64,7 +77,7 @@ A later run compares itself to a baseline and fails on regression past the
 fell past ½× baseline:
 
 ```bash
-uv run python scripts/load.py --mode soak --scale 1 \
+vogt-core load --mode soak --scale 1 \
   --iterations 200 --sweep-every 25 \
   --check-baseline bench/soak_baseline.json
 ```

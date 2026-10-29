@@ -1,0 +1,2608 @@
+//! CLI adapter. Ports `src/vogt/adapters/cli/`.
+//!
+//! Commands, flags and help text are generated from the operation registry, so
+//! the CLI cannot drift from the other surfaces without the parity tests
+//! noticing. Flags come from the recorded parameter schemas (the same table
+//! MCP advertises as `inputSchema`), not from a second hand-written list.
+//!
+//! Exit codes match the Python adapter: `0` success, `1` a domain error,
+//! `2` usage. A field that holds a secret (`password`, or a name ending in
+//! `_password`) never becomes a plain flag: it takes `--<name>-file` and
+//! `--<name>-stdin` instead.
+
+use std::collections::BTreeMap;
+use std::io::{self, IsTerminal, Write};
+
+use serde_json::{Map, Value};
+
+use crate::errors::VogtError;
+use crate::registry::{self, Operation, OperationRegistry};
+
+pub const EXIT_OK: i32 = 0;
+pub const EXIT_ERROR: i32 = 1;
+pub const EXIT_USAGE: i32 = 2;
+
+const DESCRIPTION: &str = "Vogt — per-repo and estate-wide product development state, \
+with provenance and freshness on every answer.";
+
+/// The outcome of one CLI invocation, so tests need not capture streams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// One parsed invocation: which operation, and the parameter object built from
+/// the flags the caller actually set. A flag left off is omitted, so the
+/// operation's own default applies rather than `null`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Invocation {
+    pub operation: &'static str,
+    pub params: Value,
+    pub json: bool,
+    pub data_dir: Option<String>,
+}
+
+/// Execute one invocation.
+///
+/// `dispatch` runs the operation. The adapter does not know which handlers
+/// exist: a `not_ported` handler comes back as a domain error (exit 1), the
+/// same way any other `VogtError` does. `version` is the string `--version`
+/// prints; the Python adapter prints `vogt <version>`.
+pub fn run(
+    argv: &[String],
+    registry: &OperationRegistry,
+    version: &str,
+    dispatch: &mut dyn FnMut(&Operation, Value) -> Result<Value, VogtError>,
+) -> CliResult {
+    match parse(argv, registry, version) {
+        ParseOutcome::Result(result) => result,
+        ParseOutcome::Ready(invocation) => {
+            let operation = match registry.get(invocation.operation) {
+                Ok(operation) => operation,
+                Err(_) => {
+                    return usage(format!(
+                        "error: unknown operation {}\n",
+                        invocation.operation
+                    ));
+                }
+            };
+            // Validated here, before the service, so a bad argument is a usage
+            // error (exit 2) as argparse-then-pydantic makes it, rather than the
+            // domain error `Operation::run` would report. The service validates
+            // again for HTTP and MCP, which never pass through here.
+            let params = match registry::validate::prepare(operation.name, invocation.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return CliResult {
+                        exit_code: EXIT_USAGE,
+                        stdout: String::new(),
+                        stderr: format!("error: {}\n", error.message()),
+                    };
+                }
+            };
+            match dispatch(operation, params) {
+                Ok(result) => {
+                    let rendered = if invocation.json {
+                        to_json(&result)
+                    } else {
+                        to_text(&result)
+                    };
+                    CliResult {
+                        exit_code: EXIT_OK,
+                        stdout: format!("{rendered}\n"),
+                        stderr: String::new(),
+                    }
+                }
+                Err(error) => CliResult {
+                    exit_code: EXIT_ERROR,
+                    stdout: String::new(),
+                    stderr: format!("error: {}: {error}\n", error.code()),
+                },
+            }
+        }
+    }
+}
+
+enum ParseOutcome {
+    Result(CliResult),
+    Ready(Invocation),
+}
+
+fn ok_out(text: String) -> CliResult {
+    CliResult {
+        exit_code: EXIT_OK,
+        stdout: text,
+        stderr: String::new(),
+    }
+}
+
+/// A usage error. argparse prints the help and the error on stdout, so a bare
+/// invocation and a bare group do too. stderr stays empty.
+fn usage(text: String) -> CliResult {
+    CliResult {
+        exit_code: EXIT_USAGE,
+        stdout: text,
+        stderr: String::new(),
+    }
+}
+
+/// An unrecognized-argument error. argparse writes the root usage synopsis
+/// (not the whole help page) and the `vogt: error:` line to stderr, and exits 2.
+fn unrecognized(arguments: &str) -> CliResult {
+    CliResult {
+        exit_code: EXIT_USAGE,
+        stdout: String::new(),
+        stderr: format!(
+            "{}\nvogt: error: unrecognized arguments: {arguments}\n",
+            usage_synopsis().trim_end()
+        ),
+    }
+}
+
+/// Parse `argv` (without the program name) against the registry.
+fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseOutcome {
+    let argv_rest = argv;
+    let mut json = false;
+    let mut data_dir: Option<String> = None;
+    let mut positional: Vec<String> = Vec::new();
+    let mut flags: Vec<String> = Vec::new();
+
+    // Global flags are accepted before the command and after it. Once the
+    // command's own flags start, every remaining token belongs to them,
+    // including a value that happens to look like a command word.
+    let mut index = 0usize;
+    let mut command_complete = false;
+    while index < argv_rest.len() {
+        let flag = &argv_rest[index];
+        // argparse abbreviates the globals too: `--js` is `--json`, `--vers`
+        // is `--version`, `--data` is `--data-dir`, and `--he`/`--h` are
+        // `--help`. An exact match still wins, so `--json` is never `--json`
+        // plus something else. Only before the command word: after `work`,
+        // `--json` is that command's flag and a usage error.
+        let global = if positional.is_empty() && flag.starts_with("--") {
+            match_global(flag)
+        } else {
+            None
+        };
+        if !command_complete && global == Some("--help") && positional.is_empty() {
+            return ParseOutcome::Result(ok_out(format_top(registry)));
+        }
+        if !command_complete && global == Some("--version") && positional.is_empty() {
+            return ParseOutcome::Result(ok_out(format!("vogt {version}\n")));
+        }
+        if global == Some("--json") && positional.is_empty() {
+            if let Some((_, value)) = flag.split_once('=') {
+                return ParseOutcome::Result(global_arg_error(&format!(
+                    "argument --json: ignored explicit argument '{value}'"
+                )));
+            }
+            json = true;
+            index += 1;
+            continue;
+        }
+        if global == Some("--data-dir") && positional.is_empty() {
+            let inline = flag.split_once('=').map(|(_, value)| value.to_string());
+            let Some(value) = inline.clone().or_else(|| argv_rest.get(index + 1).cloned()) else {
+                return ParseOutcome::Result(global_arg_error(
+                    "argument --data-dir: expected one argument",
+                ));
+            };
+            if inline.is_none() && value.starts_with('-') && value != "-" {
+                return ParseOutcome::Result(global_arg_error(
+                    "argument --data-dir: expected one argument",
+                ));
+            }
+            data_dir = Some(value);
+            index += if inline.is_some() { 1 } else { 2 };
+            continue;
+        }
+        if flag == "--help" || flag == "-h" || global == Some("--help") {
+            flags.push(flag.clone());
+            index += 1;
+            continue;
+        }
+        if positional.is_empty() && flag.starts_with('-') {
+            // An unknown flag before the command is unrecognized, but argparse
+            // keeps parsing: `--jsonx work list` reports `--jsonx` and still
+            // sees `work list` as the command. The run stops at the next token
+            // that is a real command word or a global it does know.
+            let rest = unrecognized_globals(&argv_rest[index..], registry).join(" ");
+            return ParseOutcome::Result(unrecognized(&rest));
+        }
+        if !command_complete && !flag.starts_with('-') {
+            positional.push(flag.clone());
+            command_complete = command_is_complete(&positional, registry);
+            index += 1;
+            continue;
+        }
+        if !command_complete && flag.starts_with('-') && !is_help_flag(flag) {
+            // A flag between the group word and the subcommand is a root
+            // usage error, matching argparse: `work --json get` reports
+            // "unrecognized arguments" against the top-level usage.
+            let rest = argv_rest[index..].join(" ");
+            return ParseOutcome::Result(unrecognized(&rest));
+        }
+        flags.push(flag.clone());
+        index += 1;
+    }
+
+    if positional.is_empty() {
+        // A bare invocation prints the root help and exits 2, on stdout, as
+        // argparse does.
+        return ParseOutcome::Result(usage(format_top(registry)));
+    }
+    let operations = cli_operations(registry);
+    let (operation, consumed) = match resolve_command(&positional, &operations) {
+        CommandMatch::Operation { name, depth } => {
+            let Some(operation) = registry.iter().find(|operation| operation.name == name) else {
+                return ParseOutcome::Result(usage(format!("error: unknown operation {name}\n")));
+            };
+            (operation, depth)
+        }
+        CommandMatch::None => {
+            return ParseOutcome::Result(usage(format!(
+                "error: unknown command '{}'\n{}",
+                positional[0],
+                format_top(registry)
+            )));
+        }
+        CommandMatch::Group { path } => {
+            // `--help` on a group prints the group page and exits 0. argparse
+            // writes `usage: vogt work [-h] <subcommand> ...` with the
+            // subcommands and the options section.
+            if flags.iter().any(|flag| is_help_flag(flag)) {
+                return ParseOutcome::Result(ok_out(format_group(registry, &path)));
+            }
+            let show = positional.len() == path.len();
+            if show && flags.is_empty() {
+                // A bare group is a usage error (exit 2) and prints the root
+                // help, which is what argparse does for an incomplete command.
+                return ParseOutcome::Result(usage(format_top(registry)));
+            }
+            // A flag right after the group word is a root-level usage error,
+            // not the operation's help: argparse reports "unrecognized
+            // arguments" against the top-level usage.
+            if flags.first().is_some_and(|flag| flag.starts_with('-')) {
+                return ParseOutcome::Result(unrecognized(&flags.join(" ")));
+            }
+            let unknown = positional
+                .get(path.len())
+                .map(String::as_str)
+                .unwrap_or(flags.first().map(String::as_str).unwrap_or(""));
+            return ParseOutcome::Result(usage(format!(
+                "error: unknown command '{unknown}'\n{}",
+                format_group(registry, &path)
+            )));
+        }
+    };
+
+    if consumed < positional.len() {
+        return ParseOutcome::Result(usage(format!(
+            "error: unexpected argument {}\n{}",
+            positional[consumed],
+            format_operation(operation)
+        )));
+    }
+    let flags = flags.as_slice();
+    if flags.iter().any(|flag| is_help_flag(flag)) {
+        return ParseOutcome::Result(ok_out(format_operation(operation)));
+    }
+
+    let schema = registry::params_schema_for(operation.name).cloned().unwrap_or_else(|| {
+        serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false})
+    });
+    match collect_params(flags, &schema) {
+        Ok(params) => ParseOutcome::Ready(Invocation {
+            operation: operation.name,
+            params,
+            json,
+            data_dir,
+        }),
+        Err(message) if message.starts_with("root: ") => {
+            let detail = message.trim_start_matches("root: ");
+            if let Some(arguments) = detail.strip_prefix("unrecognized arguments: ") {
+                ParseOutcome::Result(unrecognized(arguments))
+            } else {
+                ParseOutcome::Result(usage(format!(
+                    "{}\nvogt: error: {detail}\n",
+                    format_top(registry).trim_end(),
+                )))
+            }
+        }
+        Err(message) if message.starts_with("domain: ") => ParseOutcome::Result(CliResult {
+            exit_code: EXIT_ERROR,
+            stdout: String::new(),
+            stderr: format!("{}\n", message.trim_start_matches("domain: ")),
+        }),
+        Err(message) if message.starts_with("usage: ") => {
+            let missing = message.trim_start_matches("usage: ");
+            let path = operation.cli.path.join(" ");
+            let page = format_operation(operation);
+            let synopsis = page.split("\n\n").next().unwrap_or(&page);
+            ParseOutcome::Result(CliResult {
+                exit_code: EXIT_USAGE,
+                stdout: String::new(),
+                stderr: format!(
+                    "{synopsis}\nvogt {path}: error: the following arguments are required: {missing}\n"
+                ),
+            })
+        }
+        Err(message) if message.starts_with("arg: ") => {
+            let detail = message.trim_start_matches("arg: ");
+            let path = operation.cli.path.join(" ");
+            let page = format_operation(operation);
+            let synopsis = page.split("\n\n").next().unwrap_or(&page);
+            ParseOutcome::Result(CliResult {
+                exit_code: EXIT_USAGE,
+                stdout: String::new(),
+                stderr: format!("{synopsis}\nvogt {path}: error: {detail}\n"),
+            })
+        }
+        Err(message) => ParseOutcome::Result(usage(format!(
+            "error: {message}\n{}",
+            format_operation(operation)
+        ))),
+    }
+}
+
+/// True once `words` is itself an operation. A group word (`work`) is not
+/// finished: the subcommand still follows, and a flag after it is a usage
+/// error only once the whole command has been seen.
+fn command_is_complete(words: &[String], registry: &OperationRegistry) -> bool {
+    cli_operations(registry).iter().any(|op| op.path == words)
+}
+
+struct CliOp {
+    path: Vec<String>,
+    name: &'static str,
+    summary: &'static str,
+}
+
+fn cli_operations(registry: &OperationRegistry) -> Vec<CliOp> {
+    registry
+        .for_transport(registry::Transport::Cli)
+        .into_iter()
+        .map(|operation| CliOp {
+            path: operation
+                .cli
+                .path
+                .iter()
+                .map(|part| (*part).to_string())
+                .collect(),
+            name: operation.name,
+            summary: operation.summary,
+        })
+        .collect()
+}
+
+enum CommandMatch {
+    None,
+    Group { path: Vec<String> },
+    Operation { name: &'static str, depth: usize },
+}
+
+/// Longest command path that is a prefix of `argv`. A path that is a strict
+/// prefix of some operation and not itself an operation is a group.
+fn resolve_command(argv: &[String], operations: &[CliOp]) -> CommandMatch {
+    if argv.is_empty() {
+        return CommandMatch::None;
+    }
+    let mut best: Option<&CliOp> = None;
+    let mut best_depth = 0usize;
+    let mut group: Option<Vec<String>> = None;
+    for op in operations {
+        if argv.len() < op.path.len()
+            && argv
+                .iter()
+                .zip(op.path.iter())
+                .all(|(got, want)| got == want)
+            && group.is_none()
+        {
+            group = Some(argv.to_vec());
+        }
+        if argv.len() >= op.path.len()
+            && argv[..op.path.len()] == op.path[..]
+            && op.path.len() > best_depth
+        {
+            best = Some(op);
+            best_depth = op.path.len();
+        }
+    }
+    if let Some(op) = best {
+        return CommandMatch::Operation {
+            name: op.name,
+            depth: best_depth,
+        };
+    }
+    // A prefix of a longer command, with nothing left that matches, is still a
+    // group when every token matched some operation's leading path.
+    if let Some(path) = group {
+        return CommandMatch::Group { path };
+    }
+    // The first token matches no command at all.
+    let head = &argv[0];
+    if operations
+        .iter()
+        .any(|op| op.path.first().is_some_and(|part| part == head))
+    {
+        return CommandMatch::Group {
+            path: vec![head.clone()],
+        };
+    }
+    CommandMatch::None
+}
+
+/// Read flags into the parameter object. Unknown flags and missing required
+/// fields are usage errors. A secret field is read from `--<name>-file` or
+/// `--<name>-stdin`, never from a plain flag.
+fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let required: Vec<String> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut values: Map<String, Value> = Map::new();
+    let mut secret_files: BTreeMap<String, String> = BTreeMap::new();
+    let mut secret_sources: BTreeMap<String, String> = BTreeMap::new();
+    // stdin is read only after the required arguments are checked, so a usage
+    // error never consumes or waits on standard input.
+    let mut stdin_secrets: Vec<String> = Vec::new();
+    let mut index = 0usize;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            // Everything after the separator is an operand, so it is all
+            // unrecognized, separator included.
+            let rest = argv[index..].join(" ");
+            return Err(format!("root: unrecognized arguments: {rest}"));
+        }
+        if !token.starts_with("--") {
+            // A bare word is an unrecognized argument only when the command could
+            // still be valid without it: every required flag is present, or a
+            // later known flag supplies one that is missing. Otherwise argparse
+            // reports the missing argument and says nothing about the word. The
+            // report runs up to the next known flag.
+            if extras_are_unrecognized(&argv[index..], &properties, &required, &values) {
+                let rest = unrecognized_run(&argv[index..], &properties).join(" ");
+                return Err(format!("root: unrecognized arguments: {rest}"));
+            }
+            index += 1;
+            continue;
+        }
+        let token_text = token.clone();
+        let (name, inline) = match token.split_once('=') {
+            Some((flag, value)) => (flag.trim_start_matches("--"), Some(value.to_string())),
+            None => (token.trim_start_matches("--"), None),
+        };
+        // argparse abbreviates a long option to any unique prefix, and an
+        // exact match wins before the prefix search. `--lim` is `--limit`;
+        // `--re` matches several and is an error.
+        let (name, inline) = match resolve_abbrev(name, inline, &properties) {
+            Ok(resolved) => resolved,
+            Err(candidates) => {
+                let shown = token_text;
+                return Err(format!(
+                    "arg: ambiguous option: {shown} could match {candidates}"
+                ));
+            }
+        };
+        let field = name.replace('-', "_");
+
+        if is_secret(&field) && properties.contains_key(&field) {
+            return Err(format!(
+                "refusing --{name}: pass --{name}-file or --{name}-stdin, never the value in argv"
+            ));
+        }
+        if let Some(secret) = secret_name(&field) {
+            if !properties.contains_key(secret) {
+                return Err(format!("root: unrecognized arguments: --{name}"));
+            }
+            let source = if field.ends_with("_stdin") {
+                "stdin"
+            } else {
+                "file"
+            };
+            if let Some(previous) = secret_sources.get(secret) {
+                if previous != source {
+                    let (first, second) = if source == "stdin" {
+                        (format!("--{secret}-stdin"), format!("--{secret}-file"))
+                    } else {
+                        (format!("--{secret}-file"), format!("--{secret}-stdin"))
+                    };
+                    return Err(format!(
+                        "root: argument {first}: not allowed with argument {second}"
+                    ));
+                }
+            }
+            secret_sources.insert(secret.to_string(), source.to_string());
+            if field.ends_with("_stdin") {
+                if inline.is_some() {
+                    return Err(format!("--{name} takes no value"));
+                }
+                index += 1;
+                stdin_secrets.push(secret.to_string());
+                continue;
+            }
+            let value = take_value(argv, &mut index, inline, &name)?;
+            // Only the last file is read. An earlier missing file is ignored,
+            // matching argparse, which keeps the final value.
+            secret_files.insert(secret.to_string(), value);
+            continue;
+        }
+
+        // `--no-<flag>` is the off switch for a boolean that is not already
+        // phrased as a negative, matching argparse's BooleanOptionalAction.
+        let (property_name, forced_bool) = if let Some(base) = field.strip_prefix("no_") {
+            if !properties.contains_key(&field)
+                && properties.contains_key(base)
+                && is_bool(&properties[base])
+            {
+                (base.to_string(), Some(false))
+            } else {
+                (field.clone(), None)
+            }
+        } else {
+            (field.clone(), None)
+        };
+        let Some(property) = properties.get(&property_name) else {
+            // An unknown flag on a finished command is a root usage error.
+            // argparse reports the unknown flag, its value, and any bare words
+            // after it, and stops at the next flag it does recognise.
+            let rest = unrecognized_run(&argv[index..], &properties).join(" ");
+            return Err(format!("root: unrecognized arguments: {rest}"));
+        };
+        if is_bool(property) {
+            let value = match (forced_bool, inline) {
+                (Some(value), None) => value,
+                (Some(_), Some(_)) => {
+                    return Err(format!("--{name} takes no value"));
+                }
+                (None, Some(text)) => parse_bool_text(&text)?,
+                (None, None) => true,
+            };
+            values.insert(property_name, Value::Bool(value));
+            index += 1;
+            continue;
+        }
+        let raw = take_value(argv, &mut index, inline, &name)?;
+        // argparse rejects a value it cannot convert as an argument error:
+        // the usage synopsis, then `vogt <cmd>: error:`. Not the full help page.
+        let parsed = coerce(&raw, property)
+            .map_err(|message| format!("arg: argument --{name}: {message}"))?;
+        if is_list(property) {
+            let entry = values
+                .entry(field)
+                .or_insert_with(|| Value::Array(Vec::new()));
+            entry.as_array_mut().expect("list value").push(parsed);
+        } else {
+            values.insert(field, parsed);
+        }
+    }
+    // Required arguments that are not secrets are a usage error, and that check
+    // runs before any secret is read, as argparse does before pydantic does.
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|name| {
+            !is_secret(name) && !is_nullable(properties.get(*name)) && !values.contains_key(*name)
+        })
+        .map(|name| format!("--{}", name.replace('_', "-")))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!("usage: {}", missing.join(", ")));
+    }
+    for secret in &stdin_secrets {
+        // A repeated secret flag is the last one, matching argparse.
+        let text = read_secret_stdin().map_err(|message| format!("domain: {message}"))?;
+        values.insert(secret.clone(), Value::String(text));
+    }
+    for (secret, path) in &secret_files {
+        // An unreadable file is a domain error (exit 1, on stderr), as the
+        // secret-not-on-a-terminal case is. Python's uncaught OSError exits 1 too.
+        let text = read_secret_file(path).map_err(|message| format!("domain: {message}"))?;
+        values.insert(secret.clone(), Value::String(text));
+    }
+
+    for name in required.iter().filter(|name| is_secret(name)) {
+        if !values.contains_key(name) {
+            let dashed = name.replace('_', "-");
+            // Off a terminal there is no prompt, so a missing secret is a
+            // domain error (exit 1), not a usage error.
+            if !io::stdin().is_terminal() {
+                return Err(format!(
+                    "domain: --{dashed}-file or --{dashed}-stdin is required when not on a terminal"
+                ));
+            }
+            return Err(format!("--{dashed}-file or --{dashed}-stdin is required"));
+        }
+    }
+    Ok(Value::Object(values))
+}
+
+/// Whether the bare words at the front of `tail` are unrecognized arguments.
+/// They are when every required flag is already present, or when a known flag
+/// later in the tail supplies one that is still missing: argparse only reports
+/// the words once the command would otherwise be complete.
+/// A usage error on a global option, before any command. argparse writes the
+/// root synopsis and `vogt: error:` to stderr and exits 2.
+fn global_arg_error(detail: &str) -> CliResult {
+    CliResult {
+        exit_code: EXIT_USAGE,
+        stdout: String::new(),
+        stderr: format!("{}\nvogt: error: {detail}\n", usage_synopsis().trim_end()),
+    }
+}
+
+/// The global long options, in the order argparse lists them on the root parser.
+const GLOBAL_OPTIONS: [&str; 4] = ["help", "version", "data-dir", "json"];
+
+/// Resolve a `--flag` or `--flag=value` against the globals. `None` when it is
+/// not a unique prefix of any of them, so the caller treats it as unrecognized.
+fn match_global(flag: &str) -> Option<&'static str> {
+    let name = flag.split_once('=').map(|(head, _)| head).unwrap_or(flag);
+    let name = name.trim_start_matches("--");
+    if GLOBAL_OPTIONS.contains(&name) {
+        return Some(global_spelling(name));
+    }
+    let matches: Vec<&&str> = GLOBAL_OPTIONS
+        .iter()
+        .filter(|option| option.starts_with(name) && !name.is_empty())
+        .collect();
+    match matches.as_slice() {
+        [one] => Some(global_spelling(one)),
+        _ => None,
+    }
+}
+
+/// An unknown flag before the command, up to the next token argparse still
+/// parses: a real command word, or a global option it recognises. `--jsonx work
+/// list` reports `--jsonx`; `--jsonx --zz work list` reports `--jsonx --zz`.
+fn unrecognized_globals<'a>(tail: &'a [String], registry: &OperationRegistry) -> &'a [String] {
+    let operations = cli_operations(registry);
+    let heads: std::collections::BTreeSet<&str> =
+        operations.iter().map(|op| op.path[0].as_str()).collect();
+    for (offset, token) in tail.iter().enumerate().skip(1) {
+        if heads.contains(token.as_str()) || match_global(token).is_some() {
+            return &tail[..offset];
+        }
+    }
+    tail
+}
+
+fn global_spelling(name: &str) -> &'static str {
+    match name {
+        "help" => "--help",
+        "version" => "--version",
+        "data-dir" => "--data-dir",
+        "json" => "--json",
+        _ => "--help",
+    }
+}
+
+/// `--help`, `-h`, or a unique prefix of `--help`. argparse accepts all three
+/// on a subcommand.
+fn is_help_flag(flag: &str) -> bool {
+    flag == "-h" || flag == "--help" || {
+        let name = flag.trim_start_matches("--");
+        !name.is_empty() && "help".starts_with(name) && flag.starts_with("--")
+    }
+}
+
+/// Resolve an option abbreviation the way argparse does. An exact match wins
+/// before any prefix is considered. Otherwise every long option the text is a
+/// prefix of is a candidate: one candidate resolves, several are ambiguous.
+fn resolve_abbrev(
+    name: &str,
+    inline: Option<String>,
+    properties: &Map<String, Value>,
+) -> Result<(String, Option<String>), String> {
+    let options = option_names(properties);
+    if options.iter().any(|option| option == name) {
+        return Ok((name.to_string(), inline));
+    }
+    let matches: Vec<&String> = options
+        .iter()
+        .filter(|option| option.starts_with(name))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(((*one).clone(), inline)),
+        [] => Ok((name.to_string(), inline)),
+        many => Err(many
+            .iter()
+            .map(|option| format!("--{option}"))
+            .collect::<Vec<_>>()
+            .join(", ")),
+    }
+}
+
+/// Every long option a command accepts, dashed, in the order argparse lists
+/// them: the schema's order, a boolean's `--no-` form straight after it, then a
+/// secret's `--file` and `--stdin` forms.
+fn option_names(properties: &Map<String, Value>) -> Vec<String> {
+    let mut names = Vec::new();
+    for (field, property) in properties {
+        let dashed = field.replace('_', "-");
+        names.push(dashed.clone());
+        if is_bool(property) && !dashed.starts_with("no-") {
+            names.push(format!("no-{dashed}"));
+        }
+        if is_secret(field) {
+            names.push(format!("{dashed}-file"));
+            names.push(format!("{dashed}-stdin"));
+        }
+    }
+    names
+}
+
+fn known_flag(token: &str, properties: &Map<String, Value>) -> bool {
+    let name = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
+    let field = name.trim_start_matches("--").replace('-', "_");
+    properties.contains_key(&field)
+        || field
+            .strip_prefix("no_")
+            .is_some_and(|base| properties.contains_key(base))
+        || secret_name(&field).is_some_and(|secret| properties.contains_key(secret))
+}
+
+/// The unrecognized run: every token up to the first known flag that follows an
+/// unknown one. A bare word before that flag stays in the run, so
+/// `extra1 --zz 3 --reason r` reports `extra1 --zz 3`.
+fn unrecognized_run<'a>(tail: &'a [String], properties: &Map<String, Value>) -> &'a [String] {
+    let mut seen_unknown = false;
+    for (offset, token) in tail.iter().enumerate() {
+        let known = token.starts_with("--") && token != "--" && known_flag(token, properties);
+        if known && seen_unknown {
+            return &tail[..offset];
+        }
+        if !known {
+            seen_unknown = true;
+        }
+    }
+    tail
+}
+
+fn extras_are_unrecognized(
+    tail: &[String],
+    properties: &Map<String, Value>,
+    required: &[String],
+    values: &Map<String, Value>,
+) -> bool {
+    let mut satisfied: Vec<String> = values.keys().cloned().collect();
+    let mut index = 0usize;
+    while index < tail.len() {
+        let token = &tail[index];
+        if token == "--" || !token.starts_with("--") {
+            index += 1;
+            continue;
+        }
+        let name = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
+        let field = name.trim_start_matches("--").replace('-', "_");
+        let known = properties.contains_key(&field)
+            || field
+                .strip_prefix("no_")
+                .is_some_and(|base| properties.contains_key(base));
+        if !known {
+            index += 1;
+            continue;
+        }
+        if required.iter().any(|item| item == &field) {
+            satisfied.push(field);
+        }
+        index += 1;
+    }
+    required
+        .iter()
+        .all(|name| satisfied.iter().any(|have| have == name))
+}
+
+fn take_value(
+    argv: &[String],
+    index: &mut usize,
+    inline: Option<String>,
+    option: &str,
+) -> Result<String, String> {
+    if let Some(value) = inline {
+        *index += 1;
+        return Ok(value);
+    }
+    let next = argv
+        .get(*index + 1)
+        .ok_or_else(|| format!("arg: argument --{option}: expected one argument"))?;
+    // A negative number is a value, not a flag. argparse's
+    // `_negative_number_matcher` does the same when no option looks like a
+    // negative number, which none of ours do. `-5` and `-5.5` are values;
+    // `--foo` and `-h` are not.
+    if next.starts_with('-') && next != "-" && !is_negative_number(next) {
+        return Err(format!("arg: argument --{option}: expected one argument"));
+    }
+    *index += 2;
+    Ok(next.clone())
+}
+
+fn is_negative_number(token: &str) -> bool {
+    let rest = token.strip_prefix('-').unwrap_or("");
+    let mut seen_dot = false;
+    let mut digits = 0usize;
+    for ch in rest.chars() {
+        match ch {
+            '0'..='9' => digits += 1,
+            '.' if !seen_dot => seen_dot = true,
+            _ => return false,
+        }
+    }
+    digits > 0
+}
+
+fn secret_name(field: &str) -> Option<&str> {
+    for suffix in ["_file", "_stdin"] {
+        if let Some(base) = field.strip_suffix(suffix) {
+            if is_secret(base) {
+                return Some(base);
+            }
+        }
+    }
+    None
+}
+
+fn is_secret(name: &str) -> bool {
+    name == "password" || name.ends_with("_password")
+}
+
+fn read_secret_file(path: &str) -> Result<String, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|_| format!("cannot read secret file {path}"))?;
+    Ok(text.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn read_secret_stdin() -> Result<String, String> {
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|_| "cannot read secret from stdin".to_string())?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn is_bool(property: &Value) -> bool {
+    schema_types(property).iter().any(|kind| kind == "boolean")
+        && !schema_types(property).iter().any(|kind| kind == "array")
+}
+
+fn is_list(property: &Value) -> bool {
+    schema_types(property).iter().any(|kind| kind == "array")
+}
+
+fn schema_types(property: &Value) -> Vec<String> {
+    match property.get("type") {
+        Some(Value::String(kind)) => vec![kind.clone()],
+        Some(Value::Array(kinds)) => kinds
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => {
+            // anyOf: string | null, and friends.
+            property
+                .get("anyOf")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|option| option.get("type").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+}
+
+fn parse_bool_text(text: &str) -> Result<bool, String> {
+    match text {
+        "true" | "True" | "1" | "yes" => Ok(true),
+        "false" | "False" | "0" | "no" => Ok(false),
+        _ => Err(format!("expected a boolean, got {text}")),
+    }
+}
+
+fn coerce(raw: &str, property: &Value) -> Result<Value, String> {
+    if let Some(allowed) = enum_choices(property) {
+        if !allowed.iter().any(|choice| choice == raw) {
+            return Err(format!(
+                "invalid choice {raw}; choose from {}",
+                allowed.join(", ")
+            ));
+        }
+        return Ok(Value::String(raw.to_string()));
+    }
+    let types = schema_types(property);
+    if types.iter().any(|kind| kind == "integer") {
+        let number: i64 = raw
+            .parse()
+            .map_err(|_| format!("invalid int value: '{raw}'"))?;
+        return Ok(Value::from(number));
+    }
+    if types.iter().any(|kind| kind == "number") {
+        let number: f64 = raw
+            .parse()
+            .map_err(|_| format!("expected a number, got {raw}"))?;
+        return Ok(Value::from(number));
+    }
+    if types.iter().any(|kind| kind == "array") {
+        // A list of objects is one JSON value per repeat, matching the Python
+        // CLI. A list of scalars is one element per repeat.
+        let items = property.get("items").cloned().unwrap_or(Value::Null);
+        if is_json_value(&items) || items.get("$ref").is_some() {
+            return serde_json::from_str(raw).map_err(|_| format!("expected JSON, got {raw}"));
+        }
+        return coerce(raw, &items);
+    }
+    // Only an object-typed field is JSON. A string that happens to start with
+    // `{` (`--title '{wip} fix'`) stays a string.
+    if is_json_value(property) {
+        return serde_json::from_str(raw).map_err(|_| format!("expected JSON, got {raw}"));
+    }
+    Ok(Value::String(raw.to_string()))
+}
+
+/// Choices declared as `enum` or, for `Optional[Literal]`, inside `anyOf`.
+fn enum_choices(property: &Value) -> Option<Vec<String>> {
+    if let Some(choices) = property.get("enum").and_then(Value::as_array) {
+        let allowed: Vec<String> = choices
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        if !allowed.is_empty() {
+            return Some(allowed);
+        }
+    }
+    let options = property.get("anyOf").and_then(Value::as_array)?;
+    for option in options {
+        if let Some(choices) = option.get("enum").and_then(Value::as_array) {
+            let allowed: Vec<String> = choices
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            if !allowed.is_empty() {
+                return Some(allowed);
+            }
+        }
+    }
+    None
+}
+
+fn is_json_value(property: &Value) -> bool {
+    let types = schema_types(property);
+    // A nested model is a `$ref` (pydantic and schemars both), with no
+    // `type`. The flag is still one JSON object, matching the Python CLI
+    // once it `json.loads` a `BaseModel` field (`watch.create --trigger`).
+    if property.get("$ref").is_some() {
+        return true;
+    }
+    if let Some(branches) = property.get("anyOf").and_then(Value::as_array) {
+        if branches.iter().any(|branch| branch.get("$ref").is_some()) {
+            return true;
+        }
+    }
+    types.iter().any(|kind| kind == "object" || kind == "array")
+}
+
+/// The column width argparse wraps at: `$COLUMNS` minus 2, or 78 when the
+/// variable is unset or not a usable number. The override is per thread, so a
+/// test can pin its width without racing the others; argparse reads the
+/// terminal size when it formats, not at startup.
+fn wrap_width() -> usize {
+    WIDTH_OVERRIDE.with(|override_width| {
+        override_width.get().unwrap_or_else(|| {
+            std::env::var("COLUMNS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|columns| *columns > 2)
+                .unwrap_or(80)
+                - 2
+        })
+    })
+}
+
+thread_local! {
+    static WIDTH_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn usage_synopsis() -> String {
+    // The root command: optionals first, then the `<command> ...` positional as
+    // its own group, so it starts a new line once the synopsis wraps.
+    command_usage(
+        "vogt",
+        &[
+            "[-h]".to_string(),
+            "[--version]".to_string(),
+            "[--data-dir DATA_DIR]".to_string(),
+            "[--json]".to_string(),
+        ],
+        &["<command>".to_string(), "...".to_string()],
+    )
+}
+
+/// One wrapped group, measured the way argparse's `get_lines` measures it. The
+/// running length starts one short of the lead, a part breaks the line only
+/// when adding it would pass the width, and `prefix` replaces the indent on the
+/// first line. `None` means there is no prefix, so the first line keeps the
+/// indent — which is how the positional group stays aligned.
+fn wrap_parts(
+    prefix: Option<&str>,
+    head: &[&str],
+    parts: &[&str],
+    indent: &str,
+    width: usize,
+) -> Vec<String> {
+    let lead = prefix.unwrap_or(indent);
+    let mut lines: Vec<Vec<&str>> = Vec::new();
+    let mut line: Vec<&str> = Vec::new();
+    let mut length = lead.len().saturating_sub(1);
+    for part in head.iter().copied().chain(parts.iter().copied()) {
+        if !line.is_empty() && length + 1 + part.len() > width {
+            lines.push(line);
+            line = Vec::new();
+            length = indent.len().saturating_sub(1);
+        }
+        line.push(part);
+        length += part.len() + 1;
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, parts)| {
+            let lead = if index == 0 { lead } else { indent };
+            format!("{lead}{}", parts.join(" "))
+        })
+        .collect()
+}
+
+fn format_top(registry: &OperationRegistry) -> String {
+    let mut out = String::new();
+    out.push_str(&usage_synopsis());
+    out.push('\n');
+    // argparse wraps the description at the terminal width minus 2, which is
+    // what `wrap_width` already is.
+    for line in wrap_text(DESCRIPTION, wrap_width()) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str("\npositional arguments:\n  <command>\n");
+    let rows = top_commands(registry);
+    let width = wrap_width() + 2;
+    let cap = 24.min(width.saturating_sub(20).max(4));
+    let option_longest = ["-h, --help", "--version", "--data-dir DATA_DIR", "--json"]
+        .iter()
+        .map(|flag| flag.chars().count())
+        .max()
+        .unwrap_or(0);
+    let option_column = cap.min(option_longest + 2 + 2);
+    let sub_column = option_column;
+    for (name, summary) in &rows {
+        out.push_str(&option_row(name, summary, sub_column, 4));
+    }
+    out.push_str("\noptions:\n");
+    for (flag, help) in [
+        ("-h, --help", "show this help message and exit"),
+        ("--version", "show program's version number and exit"),
+        (
+            "--data-dir DATA_DIR",
+            "Instance data directory (overrides VOGT_DATA_DIR).",
+        ),
+        (
+            "--json",
+            "Emit the raw result as JSON instead of formatted text.",
+        ),
+    ] {
+        out.push_str(&option_row(flag, help, option_column, 2));
+    }
+    out
+}
+
+fn top_commands(registry: &OperationRegistry) -> Vec<(String, String)> {
+    let mut seen = BTreeMap::<String, String>::new();
+    let mut order: Vec<String> = Vec::new();
+    for op in cli_operations(registry) {
+        let head = op.path[0].clone();
+        if seen.contains_key(&head) {
+            continue;
+        }
+        let summary = if op.path.len() == 1 {
+            op.summary.to_string()
+        } else {
+            format!("{head} operations")
+        };
+        seen.insert(head.clone(), summary);
+        order.push(head);
+    }
+    order
+        .into_iter()
+        .map(|name| {
+            let summary = seen.remove(&name).unwrap_or_default();
+            (name, summary)
+        })
+        .collect()
+}
+
+fn format_group(registry: &OperationRegistry, path: &[String]) -> String {
+    let mut out = String::new();
+    let joined = path.join(" ");
+    out.push_str(&command_usage(
+        &format!("vogt {joined}"),
+        &["[-h]".to_string()],
+        &["<subcommand> ...".to_string()],
+    ));
+    out.push_str("\npositional arguments:\n  <subcommand>\n");
+    let rows = group_rows(registry, path);
+    // The help position argparse prints at: the longest choice plus two spaces,
+    // but never past min(24, width - 20) and never short of where `-h, --help`
+    // sits. `option_row` subtracts the indent itself, so this is the column the
+    // help text starts at, not the invocation width. `bind-branch` (11) starts
+    // the help at 15; `label`'s choices are shorter, and so is its help.
+    let width = wrap_width() + 2;
+    let cap = 24.min(width.saturating_sub(20).max(4));
+    let longest = rows
+        .iter()
+        .map(|(name, _)| name.chars().count())
+        .max()
+        .unwrap_or(0);
+    // Wide enough for the longest subcommand row and for the options row. A
+    // column narrower than the indent plus the flag wraps the flag onto its own
+    // line, which argparse only does past the cap.
+    let option_column = cap.min("-h, --help".chars().count() + 2 + 2);
+    let sub_column = (longest + 4 + 2).max(option_column + 2);
+    for (name, summary) in &rows {
+        out.push_str(&option_row(name, summary, sub_column, 4));
+    }
+    out.push_str("\noptions:\n");
+    out.push_str(&option_row(
+        "-h, --help",
+        "show this help message and exit",
+        sub_column.max(option_column),
+        2,
+    ));
+    out
+}
+
+fn group_rows(registry: &OperationRegistry, path: &[String]) -> Vec<(String, String)> {
+    let mut shown = BTreeMap::<String, String>::new();
+    let mut order = Vec::new();
+    for op in cli_operations(registry) {
+        if op.path.len() <= path.len() || op.path[..path.len()] != *path {
+            continue;
+        }
+        let name = op.path[path.len()].clone();
+        if shown.contains_key(&name) {
+            continue;
+        }
+        let summary = if op.path.len() == path.len() + 1 {
+            op.summary.to_string()
+        } else {
+            format!("{name} operations")
+        };
+        shown.insert(name.clone(), summary);
+        order.push(name);
+    }
+    order
+        .into_iter()
+        .map(|name| {
+            let summary = shown.remove(&name).unwrap_or_default();
+            (name, summary)
+        })
+        .collect()
+}
+
+fn format_operation(operation: &Operation) -> String {
+    let path = operation.cli.path.join(" ");
+    let schema = registry::params_schema_for(operation.name);
+    let mut out = String::new();
+    // argparse's usage for a subcommand: the program is `vogt <path>`, `[-h]`
+    // leads the optionals, and the positionals (there are none here) would
+    // follow as their own group. The summary is the command's help, not its
+    // description, so it does not appear on this page.
+    let prog = format!("vogt {path}");
+    let mut opt_parts = vec!["[-h]".to_string()];
+    if let Some(schema) = schema {
+        opt_parts.extend(usage_flags(schema));
+    }
+    let opt_parts = usage_parts(&opt_parts);
+    out.push_str(&command_usage(&prog, &opt_parts, &[]));
+    out.push('\n');
+    out.push_str("options:\n");
+    let rows = schema.map(flag_help).unwrap_or_default();
+    // argparse's help column. The longest invocation is measured with its
+    // indent, then capped at 24, and the indent comes back off.
+    let indent = 2usize;
+    let width = wrap_width();
+    // argparse caps the help column at 24, and on a narrow terminal at
+    // `max(width - 20, 4)`. Every invocation counts toward the longest,
+    // however long, so a metavar or choices list past the cap still pushes
+    // the column out to it: `work relate`'s `--kind {…}` is 68 wide and the
+    // help starts at 23.
+    let max_help_position = 24.min((width.saturating_sub(20)).max(indent * 2));
+    let action_max = rows
+        .iter()
+        .map(|(flag, _)| flag.chars().count() + indent)
+        .chain(["-h, --help".chars().count() + indent])
+        .max()
+        .unwrap_or(0);
+    let help_column = (action_max + 2).min(max_help_position);
+    out.push_str(&option_row(
+        "-h, --help",
+        "show this help message and exit",
+        help_column,
+        indent,
+    ));
+    for (flag, help) in &rows {
+        out.push_str(&option_row(flag, help, help_column, indent));
+    }
+    out
+}
+
+/// `usage: <prog> <options> <positionals>`, wrapped like argparse. Optionals and
+/// positionals are separate groups, so a positional starts its own line once the
+/// synopsis breaks. The width is `$COLUMNS` minus 2, and a program longer than
+/// three quarters of the width takes the first line alone.
+fn command_usage(prog: &str, opt_parts: &[String], pos_parts: &[String]) -> String {
+    let width = wrap_width();
+    let opt_refs: Vec<&str> = opt_parts.iter().map(String::as_str).collect();
+    let pos_refs: Vec<&str> = pos_parts.iter().map(String::as_str).collect();
+    let one_line = ["usage:", prog]
+        .into_iter()
+        .chain(opt_refs.iter().copied())
+        .chain(pos_refs.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body = if one_line.len() <= width {
+        one_line
+    } else {
+        let prefix = "usage: ";
+        let short = prefix.len() + prog.len() <= width * 3 / 4;
+        let indent = " ".repeat(if short {
+            prefix.len() + prog.len() + 1
+        } else {
+            prefix.len()
+        });
+        let mut lines = if short {
+            wrap_parts(Some(prefix), &[prog], &opt_refs, &indent, width)
+        } else {
+            let mut lines = vec![format!("{prefix}{prog}")];
+            lines.extend(wrap_parts(None, &[], &opt_refs, &indent, width));
+            lines
+        };
+        if !pos_refs.is_empty() {
+            lines.extend(wrap_parts(None, &[], &pos_refs, &indent, width));
+        }
+        lines.join("\n")
+    };
+    format!("{body}\n")
+}
+
+/// One option row. `column` is where the help text starts, indent included, and
+/// `indent` is the section indent. A flag no wider than `column - indent - 2`
+/// is padded and the help follows on the same line; a longer flag takes the
+/// line and the help starts on the next. Help wider than the remaining columns
+/// wraps.
+fn option_row(flag: &str, help: &str, column: usize, indent: usize) -> String {
+    let width = wrap_width();
+    let help_width = width.saturating_sub(column).max(11);
+    let action_width = column - indent - 2;
+    let lines = wrap_text(help, help_width);
+    let mut out = String::new();
+    let flag_width = flag.chars().count();
+    let gap = " ".repeat(indent);
+    if help.is_empty() {
+        out.push_str(&format!("{gap}{flag}\n"));
+    } else if flag_width <= action_width {
+        let pad = " ".repeat(action_width - flag_width);
+        out.push_str(&gap);
+        out.push_str(flag);
+        out.push_str(&pad);
+        out.push_str("  ");
+        out.push_str(&lines[0]);
+        out.push('\n');
+        for line in lines.iter().skip(1) {
+            out.push_str(&format!("{:>column$}{line}\n", ""));
+        }
+    } else {
+        out.push_str(&format!("{:indent$}{flag}\n", ""));
+        for line in &lines {
+            out.push_str(&format!("{:>column$}{line}\n", ""));
+        }
+    }
+    out
+}
+
+/// textwrap.wrap, measured in characters: break on whitespace, and after a
+/// hyphen whose word has letters on both sides. A chunk longer than the width
+/// breaks wherever it has to.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current: Vec<char> = Vec::new();
+    let width = width.max(1);
+    for chunk in hyphen_chunks(&text) {
+        let mut chars: Vec<char> = chunk.chars().collect();
+        // A chunk longer than the line breaks mid-word. What fits stays on
+        // the current line; the rest starts the next, matching textwrap.
+        if chars.len() > width && !chars.iter().all(|ch| ch.is_whitespace()) {
+            let room = width - current.len();
+            if room > 0 && !current.is_empty() {
+                current.extend(chars.drain(..room));
+            }
+            while chars.len() > width {
+                lines.push(current.iter().collect());
+                current = chars.drain(..width).collect();
+            }
+        }
+        if chars.is_empty() {
+            continue;
+        }
+        let whitespace = chars.iter().all(|ch| ch.is_whitespace());
+        // A space that would end the line is dropped, matching textwrap, so
+        // the next word still gets the full width.
+        if whitespace && (current.is_empty() || current.len() + chars.len() > width) {
+            continue;
+        }
+        if current.is_empty() {
+            current = chars;
+        } else if current.len() + chars.len() <= width {
+            current.extend(chars);
+        } else {
+            lines.push(current.iter().collect());
+            current = chars
+                .into_iter()
+                .skip_while(|ch| ch.is_whitespace())
+                .collect();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current.iter().collect());
+    }
+    lines.iter_mut().for_each(|line| {
+        *line = line.trim_end().to_string();
+    });
+    lines
+}
+
+/// Break `text` the way textwrap's `wordsep_re` does: at whitespace, and after
+/// a hyphen that has a letter before it and a letter after it.
+fn hyphen_chunks(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index].is_whitespace() {
+            if start < index {
+                chunks.push(chars[start..index].iter().collect());
+            }
+            let end = (index + 1..chars.len()).find(|at| !chars[*at].is_whitespace());
+            let end = end.unwrap_or(chars.len());
+            chunks.push(chars[index..end].iter().collect());
+            start = end;
+            index = end;
+            continue;
+        }
+        if chars[index] == '-'
+            && index > start
+            && chars[index - 1].is_alphabetic()
+            && index + 1 < chars.len()
+            && chars[index + 1].is_alphabetic()
+        {
+            chunks.push(chars[start..=index].iter().collect());
+            start = index + 1;
+        }
+        index += 1;
+    }
+    if start < chars.len() {
+        chunks.push(chars[start..].iter().collect());
+    }
+    chunks
+}
+
+fn usage_flags(schema: &Value) -> Vec<String> {
+    let required = required_fields(schema);
+    let flags = flag_help(schema);
+    let mut parts = Vec::new();
+    let mut index = 0;
+    while index < flags.len() {
+        let (flag, _) = &flags[index];
+        let name = flag.split_whitespace().next().unwrap_or("");
+        let field = name.trim_start_matches("--").replace('-', "_");
+        let base = field
+            .strip_suffix("_file")
+            .or_else(|| field.strip_suffix("_stdin"))
+            .unwrap_or(&field);
+        if flag.contains("-file ")
+            && flags
+                .get(index + 1)
+                .is_some_and(|(next, _)| next.ends_with("-stdin"))
+        {
+            // A secret's two flags are a mutually exclusive group, so the
+            // usage line offers one or the other. The file dest is
+            // `<name>__file`, which is what argparse uppercases for the metavar.
+            let file_flag = flag.replace(" PATH", " PASSWORD__FILE");
+            let stdin_flag = flags[index + 1].0.clone();
+            parts.push(format!("[{file_flag} | {stdin_flag}]"));
+            index += 2;
+            continue;
+        }
+        if required.iter().any(|item| item == base) {
+            parts.push(flag.clone());
+        } else if let Some((on, off)) = flag.split_once(", ") {
+            // BooleanOptionalAction: the options list joins the pair with a
+            // comma, the usage line joins it with " | ".
+            parts.push(format!("[{on} | {off}]"));
+        } else {
+            parts.push(format!("[{flag}]"));
+        }
+        index += 1;
+    }
+    parts
+}
+
+/// argparse 3.13's usage parts: one part per action, however many words it
+/// holds, so a required `--reason REASON` never breaks across lines. (3.12 split
+/// unbracketed actions on whitespace; the image runs 3.13.)
+fn usage_parts(flags: &[String]) -> Vec<String> {
+    flags.to_vec()
+}
+
+/// Fields argparse treats as required flags: listed in `required`, and not
+/// nullable. A field that is `T | None` with no default is required by pydantic
+/// but optional on the CLI, because the generator asks `is_required() and not
+/// optional`. `session bind`'s `work_item` is the one such field.
+fn required_fields(schema: &Value) -> Vec<String> {
+    let properties = schema.get("properties");
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|name| !is_nullable(properties.and_then(|props| props.get(*name))))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A property whose schema allows null: `anyOf` with a `{"type": "null"}` arm,
+/// or a `type` array that names `null`.
+fn is_nullable(property: Option<&Value>) -> bool {
+    property.is_some_and(|property| schema_types(property).iter().any(|kind| kind == "null"))
+}
+
+fn flag_help(schema: &Value) -> Vec<(String, String)> {
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut lines = Vec::new();
+    for (name, property) in &properties {
+        let dashed = name.replace('_', "-");
+        if is_secret(name) {
+            lines.push((
+                format!("--{dashed}-file PASSWORD__FILE"),
+                format!("Read the {dashed} from this file (never pass it in argv)."),
+            ));
+            lines.push((
+                format!("--{dashed}-stdin"),
+                format!("Read the {dashed} from standard input."),
+            ));
+            continue;
+        }
+        let help = property
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if is_bool(property) {
+            if dashed.starts_with("no-") {
+                lines.push((format!("--{dashed}"), help));
+            } else {
+                lines.push((format!("--{dashed}, --no-{dashed}"), help));
+            }
+            continue;
+        }
+        let metavar = flag_metavar(name, property);
+        lines.push((format!("--{dashed} {metavar}"), help));
+    }
+    lines
+}
+
+/// The metavar argparse prints: `{a,b}` for a choice, the uppercased field
+/// name otherwise. A choice is what pushes `--order {started,rss}` past the
+/// help column.
+fn flag_metavar(name: &str, property: &Value) -> String {
+    if let Some(choices) = enum_choices(property) {
+        return format!("{{{}}}", choices.join(","));
+    }
+    name.to_uppercase()
+}
+/// Human rendering, porting `render.py`: a mapping is `key: value` lines, an
+/// empty list is `(none)`, a boolean is `yes`/`no`, and `null` is `-`.
+fn to_text(value: &Value) -> String {
+    let mut lines = Vec::new();
+    render_value(value, &mut lines, 0);
+    lines.join("\n")
+}
+
+fn render_value(value: &Value, lines: &mut Vec<String>, indent: usize) {
+    let pad = "  ".repeat(indent);
+    match value {
+        Value::Object(map) => {
+            for (key, item) in map {
+                match item {
+                    Value::Object(_) => {
+                        lines.push(format!("{pad}{key}:"));
+                        render_value(item, lines, indent + 1);
+                    }
+                    Value::Array(items) if items.is_empty() => {
+                        lines.push(format!("{pad}{key}: (none)"));
+                    }
+                    Value::Array(_) => {
+                        lines.push(format!("{pad}{key}:"));
+                        render_value(item, lines, indent + 1);
+                    }
+                    other => lines.push(format!("{pad}{key}: {}", scalar(other))),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                if item.is_object() {
+                    lines.push(format!("{pad}-"));
+                    render_value(item, lines, indent + 1);
+                } else {
+                    lines.push(format!("{pad}- {}", scalar(item)));
+                }
+            }
+        }
+        other => lines.push(format!("{pad}{}", scalar(other))),
+    }
+}
+
+fn scalar(value: &Value) -> String {
+    match value {
+        Value::Null => "-".to_string(),
+        Value::Bool(true) => "yes".to_string(),
+        Value::Bool(false) => "no".to_string(),
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn to_json(value: &Value) -> String {
+    // Python `json.dumps(..., indent=2)`: two-space indent, `": "` and
+    // `ensure_ascii`. Kept here rather than in `decisions` so the digest
+    // renderer and this layout can change independently.
+    python_json_indent(value)
+}
+
+fn python_json_indent(value: &Value) -> String {
+    let mut out = String::new();
+    write_indent(&mut out, value, 0);
+    out
+}
+
+fn write_indent(out: &mut String, value: &Value, indent: usize) {
+    let pad = "  ".repeat(indent);
+    let inner = "  ".repeat(indent + 1);
+    match value {
+        Value::Array(items) if !items.is_empty() => {
+            out.push_str("[\n");
+            for (index, item) in items.iter().enumerate() {
+                out.push_str(&inner);
+                write_indent(out, item, indent + 1);
+                if index + 1 != items.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push(']');
+        }
+        Value::Object(map) if !map.is_empty() => {
+            out.push_str("{\n");
+            for (index, (key, item)) in map.iter().enumerate() {
+                out.push_str(&inner);
+                out.push_str(&crate::decisions::python_json_dumps(
+                    &Value::String(key.clone()),
+                    false,
+                ));
+                out.push_str(": ");
+                write_indent(out, item, indent + 1);
+                if index + 1 != map.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push('}');
+        }
+        other => out.push_str(&crate::decisions::python_json_dumps(other, false)),
+    }
+}
+
+/// Console entry used by `main`. Writes the result and returns the exit code.
+pub fn main_cli(
+    argv: &[String],
+    registry: &OperationRegistry,
+    version: &str,
+    dispatch: &mut dyn FnMut(&Operation, Value) -> Result<Value, VogtError>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let result = run(argv, registry, version, dispatch);
+    let _ = stdout.write_all(result.stdout.as_bytes());
+    let _ = stderr.write_all(result.stderr.as_bytes());
+    result.exit_code
+}
+
+/// `--data-dir` from a parsed invocation, for the binary to thread into config.
+/// A unique prefix counts (`--data DIR`, `--data=DIR`), because argparse
+/// resolves it before the command word and `main` routes `init` from the same
+/// argv. A missing value is left for the parser, which reports it.
+pub fn data_dir_of(invocation_argv: &[String]) -> Option<String> {
+    let mut rest = invocation_argv;
+    while let [flag, tail @ ..] = rest {
+        if flag == "--json" || flag == "--help" || flag == "-h" || flag == "--version" {
+            rest = tail;
+            continue;
+        }
+        if let Some("--data-dir") = match_global(flag) {
+            if let Some((_, value)) = flag.split_once('=') {
+                return Some(value.to_string());
+            }
+            return tail.first().cloned();
+        }
+        if flag.starts_with('-') {
+            rest = match tail {
+                [value, after @ ..] if !value.starts_with('-') => after,
+                _ => tail,
+            };
+            continue;
+        }
+        break;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run one invocation as if the terminal were 80 columns, which is the
+    /// width the help layout is compared against.
+    fn at_eighty(
+        argv: &[String],
+        registry: &OperationRegistry,
+        version: &str,
+        dispatch: &mut impl FnMut(&Operation, Value) -> Result<Value, VogtError>,
+    ) -> CliResult {
+        WIDTH_OVERRIDE.with(|override_width| override_width.set(Some(78)));
+        let result = super::run(argv, registry, version, dispatch);
+        WIDTH_OVERRIDE.with(|override_width| override_width.set(None));
+        result
+    }
+    use crate::registry::default_registry;
+
+    fn no_dispatch(operation: &Operation, _params: Value) -> Result<Value, VogtError> {
+        // The registry's own answer for a service that has not landed.
+        operation.run(None, Value::Null)?;
+        Ok(Value::Null)
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    #[test]
+    fn help_lists_every_cli_command_group() {
+        let registry = default_registry();
+        let result = at_eighty(&argv(&["--help"]), &registry, "test", &mut no_dispatch);
+        assert_eq!(result.exit_code, EXIT_OK);
+        assert!(result.stdout.contains("usage: vogt"));
+        assert!(result.stdout.contains("positional arguments"));
+        assert!(result.stdout.contains("--json"));
+        assert!(result.stdout.contains("--data-dir"));
+    }
+
+    #[test]
+    fn version_exits_zero() {
+        let registry = default_registry();
+        let result = at_eighty(&argv(&["--version"]), &registry, "9.9.9", &mut no_dispatch);
+        assert_eq!(result.exit_code, EXIT_OK);
+        assert_eq!(result.stdout, "vogt 9.9.9\n");
+    }
+
+    #[test]
+    fn unknown_command_is_usage() {
+        let registry = default_registry();
+        let result = at_eighty(&argv(&["nope"]), &registry, "test", &mut no_dispatch);
+        assert_eq!(result.exit_code, EXIT_USAGE);
+        assert!(result.stdout.contains("unknown command"));
+    }
+
+    #[test]
+    fn operation_help_shows_schema_flags() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&["work", "get", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert!(result.stdout.contains("--ref"), "{}", result.stdout);
+    }
+
+    #[test]
+    fn missing_required_flag_is_usage() {
+        let registry = default_registry();
+        let result = at_eighty(&argv(&["work", "get"]), &registry, "test", &mut no_dispatch);
+        assert_eq!(
+            result.exit_code, EXIT_USAGE,
+            "STDERR={:?} STDOUT={}",
+            result.stderr, result.stdout
+        );
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result
+                .stderr
+                .contains("the following arguments are required: --ref"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn parsed_params_omit_unset_flags_and_coerce_types() {
+        let registry = default_registry();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(serde_json::json!({"ok": true}))
+        };
+        let result = at_eighty(
+            &argv(&[
+                "--json",
+                "work",
+                "get",
+                "--ref",
+                "WI-7",
+                "--comment-limit",
+                "3",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert!(result.stdout.contains("\"ok\": true"), "{}", result.stdout);
+        assert!(
+            result.stdout.contains('\n'),
+            "indent=2, got {}",
+            result.stdout
+        );
+        let params = seen.expect("dispatched");
+        assert_eq!(params["ref"], "WI-7");
+        assert_eq!(params["comment_limit"], 3);
+        assert!(params.get("comment_offset").is_none());
+    }
+
+    #[test]
+    fn a_domain_error_exits_one() {
+        let registry = default_registry();
+        let result = at_eighty(&argv(&["diagnostics"]), &registry, "test", &mut no_dispatch);
+        assert_eq!(result.exit_code, EXIT_ERROR);
+        assert!(
+            result.stderr.contains("invalid_request"),
+            "{}",
+            result.stderr
+        );
+        assert!(
+            result.stderr.contains("needs an instance context"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn secret_file_is_read_and_a_plain_password_flag_is_refused() {
+        let registry = default_registry();
+        let help = at_eighty(
+            &argv(&["user", "create", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(help.exit_code, EXIT_OK, "{}", help.stderr);
+        assert!(help.stdout.contains("--password-file"), "{}", help.stdout);
+        assert!(help.stdout.contains("--password-stdin"), "{}", help.stdout);
+        assert!(!help.stdout.contains("--password PASSWORD"));
+
+        let refused = at_eighty(
+            &argv(&[
+                "user",
+                "create",
+                "--username",
+                "ada",
+                "--password",
+                "secret",
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(refused.exit_code, EXIT_USAGE, "{}", refused.stderr);
+
+        let path = std::env::temp_dir().join("vogt-cli-secret-test");
+        std::fs::write(&path, "s3cret\n").unwrap();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(Value::Null)
+        };
+        let result = at_eighty(
+            &argv(&[
+                "user",
+                "create",
+                "--username",
+                "ada",
+                "--password-file",
+                path.to_str().unwrap(),
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert_eq!(seen.expect("dispatched")["password"], "s3cret");
+    }
+
+    #[test]
+    fn bool_and_enum_flags_follow_the_schema() {
+        let registry = default_registry();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(Value::Null)
+        };
+        let result = at_eighty(
+            &argv(&[
+                "work",
+                "create",
+                "--kind",
+                "bug",
+                "--title",
+                "x",
+                "--reason",
+                "because",
+                "--local-only",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        let params = seen.expect("dispatched");
+        assert_eq!(params["kind"], "bug");
+        assert_eq!(params["local_only"], true);
+    }
+
+    #[test]
+    fn a_brace_in_a_string_field_stays_a_string() {
+        let registry = default_registry();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(Value::Null)
+        };
+        let result = at_eighty(
+            &argv(&[
+                "work",
+                "create",
+                "--kind",
+                "bug",
+                "--title",
+                "{wip} fix",
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert_eq!(seen.expect("dispatched")["title"], "{wip} fix");
+    }
+
+    #[test]
+    fn an_optional_literal_rejects_a_value_outside_its_choices() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&[
+                "work", "update", "--ref", "WI-7", "--effort", "huge", "--reason", "because",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
+        // argparse writes a usage error to stderr, and stdout stays empty.
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result.stderr.contains("invalid choice"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn a_missing_secret_off_a_terminal_exits_one() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&["user", "create", "--username", "ada", "--reason", "because"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_ERROR, "{}", result.stderr);
+        assert!(
+            result.stderr.contains("when not on a terminal"),
+            "{}",
+            result.stderr
+        );
+        assert!(!result.stderr.starts_with("error:"), "{}", result.stderr);
+    }
+
+    #[test]
+    fn a_global_flag_after_a_group_word_is_usage() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&["work", "--json", "get", "--ref", "WI-7"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result
+                .stderr
+                .contains("usage: vogt [-h] [--version] [--data-dir DATA_DIR] [--json]"),
+            "{}",
+            result.stderr
+        );
+        assert!(
+            result
+                .stderr
+                .contains("unrecognized arguments: --json get --ref WI-7"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn an_unknown_flag_on_a_leaf_command_is_a_root_usage_error() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&["status", "--bogus", "9"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result
+                .stderr
+                .contains("usage: vogt [-h] [--version] [--data-dir DATA_DIR] [--json]"),
+            "{}",
+            result.stderr
+        );
+        assert!(
+            result.stderr.contains("unrecognized arguments: --bogus 9"),
+            "{}",
+            result.stderr
+        );
+        assert!(!result.stderr.contains("unrecognised"), "{}", result.stderr);
+    }
+
+    #[test]
+    fn a_unique_prefix_is_the_option() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&["work", "get", "--r", "WI-1"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_ne!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(
+            !result.stderr.contains("unrecognized"),
+            "--r was not taken as --ref: {}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_prefix_names_every_match() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&["work", "update", "--ref", "WI-1", "--re", "r"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result
+                .stderr
+                .contains("ambiguous option: --re could match --ref, --remove-labels, --reason"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn a_missing_option_value_names_the_option_on_stderr() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&["work", "list", "--limit"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result
+                .stderr
+                .contains("argument --limit: expected one argument"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn a_global_prefix_before_the_command_is_the_option() {
+        let registry = default_registry();
+        let json = at_eighty(
+            &argv(&["--js", "work", "list"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_ne!(json.exit_code, EXIT_USAGE, "{}", json.stderr);
+        assert!(!json.stderr.contains("unrecognized"), "{}", json.stderr);
+
+        let version = at_eighty(&argv(&["--vers"]), &registry, "9.9.9", &mut no_dispatch);
+        assert_eq!(version.exit_code, EXIT_OK, "{}", version.stderr);
+        assert_eq!(version.stdout, "vogt 9.9.9\n");
+
+        let missing = at_eighty(&argv(&["--d"]), &registry, "test", &mut no_dispatch);
+        assert_eq!(missing.exit_code, EXIT_USAGE, "{}", missing.stderr);
+        assert!(missing.stdout.is_empty(), "{}", missing.stdout);
+        assert!(
+            missing
+                .stderr
+                .contains("argument --data-dir: expected one argument"),
+            "{}",
+            missing.stderr
+        );
+        assert_eq!(
+            data_dir_of(&argv(&["--data", "DIR", "status"])).as_deref(),
+            Some("DIR")
+        );
+        assert_eq!(
+            data_dir_of(&argv(&["--data=DIR", "status"])).as_deref(),
+            Some("DIR")
+        );
+        assert_eq!(data_dir_of(&argv(&["--d"])), None);
+    }
+
+    #[test]
+    fn a_help_prefix_prints_the_help() {
+        let registry = default_registry();
+        let sub = at_eighty(
+            &argv(&["work", "list", "--he"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(sub.exit_code, EXIT_OK, "{}", sub.stderr);
+        assert!(
+            sub.stdout.contains("usage: vogt work list"),
+            "{}",
+            sub.stdout
+        );
+
+        let short = at_eighty(
+            &argv(&["work", "list", "--h"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(short.exit_code, EXIT_OK, "{}", short.stderr);
+        assert_eq!(short.stdout, sub.stdout);
+
+        let root = at_eighty(&argv(&["--he"]), &registry, "test", &mut no_dispatch);
+        assert_eq!(root.exit_code, EXIT_OK, "{}", root.stderr);
+        assert!(root.stdout.contains("usage: vogt"), "{}", root.stdout);
+        assert!(
+            root.stdout
+                .contains("with provenance and\nfreshness on every answer."),
+            "{}",
+            root.stdout
+        );
+    }
+
+    #[test]
+    fn group_help_is_the_subcommand_page() {
+        let registry = default_registry();
+        let work = at_eighty(
+            &argv(&["work", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(work.exit_code, EXIT_OK, "{}", work.stderr);
+        assert!(work.stderr.is_empty(), "{}", work.stderr);
+        assert!(
+            work.stdout
+                .starts_with("usage: vogt work [-h] <subcommand> ...\n"),
+            "{}",
+            work.stdout
+        );
+        assert!(
+            work.stdout.contains("positional arguments:"),
+            "{}",
+            work.stdout
+        );
+        assert!(
+            work.stdout.contains("\n    list         "),
+            "{}",
+            work.stdout
+        );
+        assert!(
+            work.stdout.contains("(`id` is accepted for `ref`)."),
+            "{}",
+            work.stdout
+        );
+        assert!(
+            work.stdout
+                .contains("  -h, --help     show this help message and exit\n"),
+            "{}",
+            work.stdout
+        );
+
+        let label = at_eighty(
+            &argv(&["label", "--he"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(label.exit_code, EXIT_OK, "{}", label.stderr);
+        assert!(
+            label
+                .stdout
+                .starts_with("usage: vogt label [-h] <subcommand> ...\n"),
+            "{}",
+            label.stdout
+        );
+        assert!(
+            label
+                .stdout
+                .contains("  -h, --help    show this help message and exit\n"),
+            "{}",
+            label.stdout
+        );
+    }
+
+    #[test]
+    fn a_nullable_required_field_is_an_optional_flag() {
+        let registry = default_registry();
+        let help = at_eighty(
+            &argv(&["session", "bind", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(help.exit_code, EXIT_OK, "{}", help.stderr);
+        assert!(
+            help.stdout.contains("[--work-item WORK_ITEM]"),
+            "{}",
+            help.stdout
+        );
+        assert!(
+            !help.stdout.contains(" --work-item WORK_ITEM]"),
+            "work-item must be optional, got:\n{}",
+            help.stdout
+        );
+
+        let result = at_eighty(
+            &argv(&["session", "bind", "--id", "x", "--reason", "r"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(
+            result.exit_code, EXIT_USAGE,
+            "pydantic's Field required is a usage error: {}",
+            result.stderr
+        );
+        assert!(
+            result.stderr.contains("Field required"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn a_long_choices_list_pushes_the_help_column_to_the_cap() {
+        let registry = default_registry();
+        let help = at_eighty(
+            &argv(&["work", "relate", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(help.exit_code, EXIT_OK, "{}", help.stderr);
+        assert!(
+            help.stdout
+                .contains("  -h, --help            show this help"),
+            "the choices list must push the column to 23:\n{}",
+            help.stdout
+        );
+        assert!(
+            help.stdout
+                .contains("  --target TARGET       The other work item's reference."),
+            "{}",
+            help.stdout
+        );
+    }
+
+    #[test]
+    fn an_unknown_global_stops_before_the_command() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&["--jsonx", "work", "list"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result.stderr.contains("unrecognized arguments: --jsonx\n"),
+            "{}",
+            result.stderr
+        );
+        assert!(!result.stderr.contains("work list"), "{}", result.stderr);
+    }
+
+    fn an_unknown_flag_stops_the_report_before_a_later_known_flag() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&[
+                "work", "update", "--ref", "WI-1", "--labels", "bug", "--reason", "r",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(
+            result
+                .stderr
+                .contains("unrecognized arguments: --labels bug"),
+            "{}",
+            result.stderr
+        );
+        assert!(
+            !result.stderr.contains("--reason"),
+            "a known flag after the unknown one is not unrecognized: {}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn bare_words_after_a_complete_command_are_all_unrecognized() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&[
+                "work", "update", "--ref", "WI-1", "--reason", "r", "extra1", "--zz", "3",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(
+            result
+                .stderr
+                .contains("unrecognized arguments: extra1 --zz 3"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn a_repeated_secret_file_keeps_the_last_value() {
+        let registry = default_registry();
+        let first = std::env::temp_dir().join("vogt-cli-secret-a");
+        let second = std::env::temp_dir().join("vogt-cli-secret-b");
+        std::fs::write(&first, "one\n").unwrap();
+        std::fs::write(&second, "two\n").unwrap();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(Value::Null)
+        };
+        let result = at_eighty(
+            &argv(&[
+                "user",
+                "create",
+                "--username",
+                "ada",
+                "--password-file",
+                first.to_str().unwrap(),
+                "--password-file",
+                second.to_str().unwrap(),
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert_eq!(seen.expect("dispatched")["password"], "two");
+    }
+
+    #[test]
+    fn an_earlier_missing_secret_file_is_ignored_when_a_later_one_exists() {
+        let registry = default_registry();
+        let second = std::env::temp_dir().join("vogt-cli-secret-last");
+        std::fs::write(&second, "kept\n").unwrap();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(Value::Null)
+        };
+        let result = at_eighty(
+            &argv(&[
+                "user",
+                "create",
+                "--username",
+                "ada",
+                "--password-file",
+                "/nonexistent/secret",
+                "--password-file",
+                second.to_str().unwrap(),
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        let _ = std::fs::remove_file(&second);
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert_eq!(seen.expect("dispatched")["password"], "kept");
+    }
+
+    #[test]
+    fn a_secret_file_and_stdin_together_are_usage() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&[
+                "user",
+                "create",
+                "--username",
+                "ada",
+                "--password-file",
+                "/tmp/x",
+                "--password-stdin",
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
+        assert!(
+            result.stdout.contains("not allowed with"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn text_mode_renders_like_python() {
+        let registry = default_registry();
+        let mut dispatch = |_operation: &Operation, _params: Value| {
+            Ok(serde_json::json!({"name": "ada", "active": true, "items": []}))
+        };
+        let result = at_eighty(
+            &argv(&["registry", "dump"]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert!(result.stdout.contains("name: ada"), "{}", result.stdout);
+        assert!(result.stdout.contains("active: yes"), "{}", result.stdout);
+        assert!(result.stdout.contains("items: (none)"), "{}", result.stdout);
+    }
+
+    #[test]
+    fn optional_flags_are_bracketed_and_a_bad_int_names_the_flag() {
+        let registry = default_registry();
+        let help = at_eighty(
+            &argv(&["token", "issue", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert!(help.stdout.contains("[--scopes"), "{}", help.stdout);
+        assert!(
+            help.stdout.contains("[--expires-in-days"),
+            "{}",
+            help.stdout
+        );
+        assert!(help.stdout.contains("--actor"), "{}", help.stdout);
+        let bad = at_eighty(
+            &argv(&[
+                "token",
+                "issue",
+                "--actor",
+                "a",
+                "--name",
+                "t",
+                "--reason",
+                "r",
+                "--expires-in-days",
+                "-1.5",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(bad.exit_code, EXIT_USAGE, "{}", bad.stdout);
+        assert!(
+            bad.stderr.contains("invalid int value: '-1.5'"),
+            "{}",
+            bad.stderr
+        );
+    }
+
+    /// `-5` is the value of the flag, not a new flag. The schema then rejects it
+    /// for being below the bound, which is what proves it was read as an integer
+    /// rather than refused as an unknown option.
+    #[test]
+    fn a_negative_number_is_a_value_not_a_flag() {
+        let registry = default_registry();
+        let mut dispatch = |_operation: &Operation, _params: Value| Ok(Value::Null);
+        let result = at_eighty(
+            &argv(&[
+                "token",
+                "issue",
+                "--actor",
+                "local:a",
+                "--name",
+                "t",
+                "--reason",
+                "because",
+                "--expires-in-days",
+                "-5",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        // -5 parsed as a value and the shared validator rejected it: ge=1.
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(
+            result.stderr.contains("expires_in_days"),
+            "{}",
+            result.stderr
+        );
+        assert!(
+            result.stderr.contains("greater than or equal to 1"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn data_dir_before_the_command_is_not_the_command() {
+        let registry = default_registry();
+        let mut seen = false;
+        let mut dispatch = |_operation: &Operation, _params: Value| {
+            seen = true;
+            Ok(Value::Null)
+        };
+        let result = at_eighty(
+            &argv(&["--data-dir", "/tmp/x9", "registry", "dump"]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stdout);
+        assert!(seen, "the command ran");
+        assert!(!result.stdout.contains("unknown command"));
+    }
+
+    #[test]
+    fn a_global_flag_after_the_command_is_usage() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&["registry", "dump", "--data-dir", "/tmp/nope"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
+    }
+
+    #[test]
+    fn a_bare_group_is_usage() {
+        let registry = default_registry();
+        let result = at_eighty(&argv(&["work"]), &registry, "test", &mut no_dispatch);
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
+        assert!(result.stdout.contains("usage: vogt"), "{}", result.stdout);
+    }
+
+    #[test]
+    fn bad_enum_is_usage() {
+        let registry = default_registry();
+        let result = at_eighty(
+            &argv(&[
+                "work", "create", "--kind", "nope", "--title", "x", "--reason", "because",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE);
+        assert!(result.stderr.contains("invalid choice"));
+    }
+}

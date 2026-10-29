@@ -23,11 +23,12 @@ the clocks `created_at`, `activity_changed_at`, `last_output_at`,
 rail sees none of the digest fields.** It has no project, parent or
 ready information.
 
-**Filter.** In the engine, `session_is_hidden` (`engine/server/src/sessions.rs:2126`,
-WI-1289) drops a session from the default list when all of these are true:
-it is not oversight and not kept awake; it is not running, waiting,
-awaiting approval or blocked; it is not alive and idle; no person typed in
-the window; and its last event is older than the window. The window is
+**Filter.** In the engine, `session_is_hidden` (`engine/server/src/sessions.rs`,
+WI-1289, WI-2689) drops a session from the default list when all of these are
+true: it is not oversight and not kept awake; it is not running, waiting,
+awaiting approval or blocked; no person typed in the window; and its last
+event is older than the window. Idle sessions age out with that window even
+while their process is still alive. The window is
 `ENGINE_SESSION_LIST_RETAIN_AFTER`, six hours by default.
 
 **Order.** The engine's `session_list_order` puts oversight first, then

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,26 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_AGENT = REPO_ROOT / "scripts" / "fake-agent"
+
+
+def _vogt_core_found() -> bool:
+    """The lookup `scripts/fake-agent` makes, in the same order."""
+    if os.environ.get("VOGT_CORE_BIN") or shutil.which("vogt-core"):
+        return True
+    dirs = [os.environ.get("CARGO_TARGET_DIR"), str(REPO_ROOT / "engine" / "target")]
+    return any(
+        os.access(Path(d) / profile / "vogt-core", os.X_OK)
+        for d in dirs
+        if d
+        for profile in ("debug", "release")
+    )
+
+
+# The fake agent is the Rust port (`vogt-core fake-agent`). The core-alone CI
+# job deletes engine/, so there is no binary to drive there.
+pytestmark = pytest.mark.skipif(
+    not _vogt_core_found(), reason="no vogt-core binary for scripts/fake-agent"
+)
 
 
 def run_fake_agent(

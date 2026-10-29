@@ -4,7 +4,7 @@ Everything in `tests/test_forge_provider.py` runs against a fake transport, so
 nothing there touches GitHub's real pagination, PAT scopes, check runs or the
 write-back verbs. These tests close that gap by reading and writing the real
 `TheDancingDeveloper-org/vogt-fixture` repository — the one
-`scripts/fixture_reset.py` rebuilds to the manifest's known state.
+`vogt-core fixture-reset` rebuilds to the manifest's known state.
 
 They are **opt-in and skipped by default**. Two guards stand between them and
 an ordinary `uv run pytest`:
@@ -98,7 +98,9 @@ def _live_provider_and_ref() -> tuple[GitHubProvider, RepoRef]:
     # the opt-in run skips cleanly rather than failing on an empty read.
     try:
         if provider.describe(ref) is None:
-            pytest.skip(f"fixture repo {repo!r} not present; run fixture_reset.py")
+            pytest.skip(
+                f"fixture repo {repo!r} not present; run vogt-core fixture-reset"
+            )
     except GitHubUnavailable as exc:
         pytest.skip(f"github.com unreachable or token unscoped for {repo!r}: {exc}")
     return provider, ref

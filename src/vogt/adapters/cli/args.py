@@ -71,6 +71,11 @@ def spec_for(name: str, field: FieldInfo) -> ArgSpec:
         kind = int
     elif annotation is float:
         kind = float
+    elif isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        # A nested model (`watch.create --trigger '{...}'`) is one JSON
+        # object, the same way a list of models is one JSON value per repeat
+        # and the Rust CLI already parses object-typed flags.
+        kind = json.loads
 
     return ArgSpec(
         flag=f"--{name.replace('_', '-')}",

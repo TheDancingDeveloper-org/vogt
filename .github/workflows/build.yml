@@ -35,6 +35,16 @@ name: build
 # equality on the ref, never a negation, so adding a branch must mean adding a
 # rule rather than inheriting one by accident. A `sha-` image never becomes
 # `latest`, so "which build is that?" stays answerable.
+#
+# One exception, and it is a dispatch, not a push: `rust-core` → the Rust
+# core preview (WI-2641). A `workflow_dispatch` on ref `rust-core` builds the
+# two preview images at the bottom of this file (`rust-core-image`,
+# `preview-web-image`), each `sha-<commit>` only, and none of the jobs above.
+# Those jobs carry the one negation in this file, `github.ref !=
+# 'refs/heads/rust-core'`, because they predate the preview and must keep
+# running for every ref they ran for before; the preview jobs are the
+# equality. The rule lives here and not in a separate workflow because
+# GitHub dispatches only a workflow whose file is on the default branch.
 
 on:
   push:
@@ -50,9 +60,9 @@ permissions:
   contents: read
 
 env:
-  # The core alone. Built and pushed per commit because the merged image
-  # below copies `/opt/vogt` out of it by digest — a build input, not
-  # a deployment target (DEPLOYMENT.md).
+  # The core alone. Built and pushed per commit until I7 retires the root
+  # Dockerfile. The merged image no longer takes its core from here (WI-1078),
+  # so nothing downstream reads it; it is not a deployment target (DEPLOYMENT.md).
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
   # The product — the Python core *and* the session engine in one container,
   # which is what `deploy/stack.compose.yml` runs and the one supported
@@ -76,6 +86,11 @@ env:
   # `stack.compose.yml` names it by version and reaches it over the Compose
   # network.
   VOICE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-voice
+  # The Rust core preview (WI-2641): `deploy/rust-core.Dockerfile` and the PWA
+  # bundle it is served with, built only on a dispatch of `rust-core`. Their
+  # own repositories, so a preview build can never be pinned as the product.
+  RUST_CORE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-core-rust
+  PREVIEW_WEB_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-web-preview
   # Where BuildKit's layer cache lives.
   #
   # An operator-owned plaintext LAN registry, not GHCR and not a cache mount
@@ -128,6 +143,8 @@ jobs:
   image:
     name: build and publish a commit image
     needs: base-images
+    # Not on a `rust-core` dispatch: that builds only the preview images below.
+    if: github.ref != 'refs/heads/rust-core'
     runs-on: [self-hosted, publish]
     timeout-minutes: 60
     permissions:
@@ -260,9 +277,9 @@ jobs:
           {
             echo "### Built the core from \`${GITHUB_SHA:0:7}\`"
             echo
-            echo "A build input: the merged image job lifts its core from this"
-            echo "digest. This is not the image to pin — pin the *merged* stack"
-            echo "digest reported below."
+            echo "A standalone core image. The stack image no longer takes its"
+            echo "core from this one, so this is not the image to pin: pin the"
+            echo "*merged* stack digest reported below."
             echo
             echo '```'
             echo "${IMAGE}@${DIGEST}"
@@ -275,6 +292,8 @@ jobs:
   voice-image:
     name: build and publish the voice sidecar
     needs: base-images
+    # Not on a `rust-core` dispatch: that builds only the preview images below.
+    if: github.ref != 'refs/heads/rust-core'
     runs-on: [self-hosted, publish]
     timeout-minutes: 90
     permissions:
@@ -576,6 +595,8 @@ jobs:
   pod-base:
     name: the pod base is in GHCR
     needs: base-images
+    # Not on a `rust-core` dispatch: that builds only the preview images below.
+    if: github.ref != 'refs/heads/rust-core'
     uses: ./.github/workflows/pod-base.yml
     with:
       # `lean` (no Flutter) is the pod variant the published stack builds on.
@@ -588,10 +609,9 @@ jobs:
 
   stack-image:
     name: build and publish the merged image
-    # `needs: image` is not ordering for its own sake: the merged image copies
-    # /opt/vogt out of the core image this run just published, by digest.
-    # `needs: pod-base` supplies the toolchain base it now builds `FROM`.
-    needs: [base-images, pod-base, image]
+    # `needs: pod-base` supplies the toolchain base it now builds `FROM`. The
+    # core-image job is not a dependency: the stack builds its own vogt-core.
+    needs: [base-images, pod-base]
     runs-on: [self-hosted, publish]
     timeout-minutes: 60
     permissions:
@@ -663,7 +683,6 @@ jobs:
         id: push
         env:
           POD_BASE_IMAGE: ${{ needs.pod-base.outputs.image }}
-          CORE_IMAGE: ${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
           VOGT_SOURCE_REF: ${{ github.ref_name }}
           VOGT_SOURCE_SHA: ${{ github.sha }}
           # metadata-action's `labels` output is newline-separated key=value
@@ -684,7 +703,6 @@ jobs:
             # buildx refuses a local write without an explicit entitlement.
             --allow "fs.write=${E2E_DIR}"
             --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
-            --set "*.args.CORE_IMAGE=${CORE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
             --set "*.args.VOGT_PRODUCT_VERSION=0.7.22"
@@ -795,6 +813,8 @@ jobs:
   pod-base-workbench:
     name: the workbench pod base is in GHCR
     needs: base-images
+    # Not on a `rust-core` dispatch: that builds only the preview images below.
+    if: github.ref != 'refs/heads/rust-core'
     uses: ./.github/workflows/pod-base.yml
     with:
       variant: workbench
@@ -804,7 +824,7 @@ jobs:
 
   stack-workbench-image:
     name: build and publish the workbench stack image
-    needs: [base-images, pod-base-workbench, image]
+    needs: [base-images, pod-base-workbench]
     runs-on: [self-hosted, publish]
     timeout-minutes: 60
     permissions:
@@ -848,7 +868,6 @@ jobs:
         id: push
         env:
           POD_BASE_IMAGE: ${{ needs.pod-base-workbench.outputs.image }}
-          CORE_IMAGE: ${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
           VOGT_SOURCE_REF: ${{ github.ref_name }}
           VOGT_SOURCE_SHA: ${{ github.sha }}
           LABELS: ${{ steps.meta.outputs.labels }}
@@ -860,7 +879,6 @@ jobs:
             --file .github/workbench-bake.hcl
             --metadata-file "$META_FILE"
             --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
-            --set "*.args.CORE_IMAGE=${CORE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
             --set "*.args.VOGT_PRODUCT_VERSION=0.7.22"
@@ -923,5 +941,183 @@ jobs:
             echo
             echo '```yaml'
             echo "    image: ${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─── The Rust core preview (WI-2641) ──────────────────────────────────────
+  #
+  # A dispatch of `rust-core` and nothing else. The preview is a separate
+  # instance on a copy of vogt-dev's data, with no engine and no sessions:
+  # the Rust core, and the PWA bundle served beside it (the stack lives in the
+  # ops repository, `personal/vogt-rust`). Each image is pushed by digest,
+  # smoked, and only then tagged `sha-<commit>`. Never `latest`, never a
+  # semver tag, and never the `vogt` or `vogt-stack` repositories, so nothing
+  # can promote a preview build as the product.
+  rust-core-image:
+    name: build and publish the rust-core preview core
+    needs: base-images
+    if: github.ref == 'refs/heads/rust-core'
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # The same builder as the core image above, for the same reason: the
+      # layer cache is on the operator's plaintext LAN registry.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The build stage takes the mirrored Rust base. The runtime base,
+      # `debian:bookworm-slim`, is not mirrored (nothing the mirror reads names
+      # it), so this one manual path pulls it from Docker Hub anonymously.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        id: push
+        with:
+          context: .
+          file: deploy/rust-core.Dockerfile
+          outputs: type=image,name=${{ env.RUST_CORE_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=rust-core-${{ github.sha }}
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:rust-core-preview-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:rust-core-preview-${{ github.ref_name }},mode=max
+          build-args: |
+            RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm
+
+      # What the preview stack does on every start: `init` on an empty data
+      # directory, then `serve`, and readiness answers 200. python3 is checked
+      # because vogt-lifecycle's health mode shells out to it.
+      - name: the image initialises, serves and is ready
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          CANDIDATE="${RUST_CORE_IMAGE}@${DIGEST}"
+          docker pull "$CANDIDATE"
+          docker run --rm --entrypoint vogt "$CANDIDATE" --version
+          docker run --rm --entrypoint git "$CANDIDATE" --version
+          docker run --rm --entrypoint python3 "$CANDIDATE" --version
+          name="rust-core-smoke-${GITHUB_RUN_ID}"
+          trap 'docker logs "$name" 2>&1 | tail -40 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$name" --entrypoint /bin/sh "$CANDIDATE" \
+            -c 'vogt init && exec vogt serve --host 127.0.0.1 --port 8000'
+          for _ in $(seq 1 30); do
+            if docker exec "$name" python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).status == 200 else 1)" 2>/dev/null; then
+              echo "rust core initialised, served and reported ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the rust core never reported ready" >&2
+          exit 1
+
+      - name: tag the smoked digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${RUST_CORE_IMAGE}:sha-${GITHUB_SHA:0:7}" "${RUST_CORE_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Rust core preview from \`${GITHUB_SHA:0:7}\` (rust-core)"
+            echo
+            echo "For the core-only preview stack (ops \`personal/vogt-rust\`)."
+            echo "Not a product image and not a release."
+            echo
+            echo '```yaml'
+            echo "    image: ${RUST_CORE_IMAGE}@${DIGEST}  # sha-${GITHUB_SHA:0:7}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  preview-web-image:
+    name: build and publish the rust-core preview web bundle
+    needs: base-images
+    if: github.ref == 'refs/heads/rust-core'
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        id: push
+        with:
+          context: .
+          file: deploy/rust-core-preview-web.Dockerfile
+          outputs: type=image,name=${{ env.PREVIEW_WEB_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:preview-web-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:preview-web-${{ github.ref_name }},mode=max
+          build-args: |
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=rust-core-preview
+
+      - name: the bundle is in the image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          CANDIDATE="${PREVIEW_WEB_IMAGE}@${DIGEST}"
+          docker pull "$CANDIDATE"
+          docker run --rm "$CANDIDATE" test -s /srv/web/index.html
+          docker run --rm "$CANDIDATE" ls /srv/web/assets >/dev/null
+          echo "the PWA bundle is at /srv/web"
+
+      - name: tag the smoked digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${PREVIEW_WEB_IMAGE}:sha-${GITHUB_SHA:0:7}" "${PREVIEW_WEB_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Preview web bundle from \`${GITHUB_SHA:0:7}\` (rust-core)"
+            echo
+            echo '```yaml'
+            echo "    image: ${PREVIEW_WEB_IMAGE}@${DIGEST}  # sha-${GITHUB_SHA:0:7}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

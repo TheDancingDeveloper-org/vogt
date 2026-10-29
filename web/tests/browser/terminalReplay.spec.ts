@@ -219,8 +219,14 @@ async function liveScrollbackPos(page: Page, id: string): Promise<number> {
 }
 
 test.describe("terminal replay budget (live acceptance)", () => {
-  test.beforeEach(({}, testInfo) => {
+  test.beforeEach(async ({ page }, testInfo) => {
     test.skip(!isLive(testInfo.project.name), "live only");
+    // A fresh browser has no credential, and the live stack's first-run gate
+    // asks for one. Seed the front-door token the way installFixtures does in
+    // the mocked run, or the page never reaches the terminal to replay.
+    await page.addInitScript((token) => {
+      localStorage.setItem("vogt.token", token);
+    }, LIVE_TOKEN);
   });
 
   test("symptom 1: switch away past the ring and back — bounded reattach, no disconnect", async ({

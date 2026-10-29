@@ -34,6 +34,10 @@ jobs:
     name: flag runs in progress too long
     runs-on: [self-hosted]
     timeout-minutes: 5
+    # Quarantined while `gh` is missing on the self-hosted runner (exit 127);
+    # un-quarantine once the runner image carries `gh`. Scheduled and
+    # dispatched only, so there is no merge_group variant to restrict.
+    continue-on-error: true
     steps:
       - name: find stuck runs and update the tracking issue
         env:

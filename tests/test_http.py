@@ -159,6 +159,15 @@ def test_local_only_operations_are_absent(client: TestClient) -> None:
     assert client.post(f"{API_PREFIX}/instance/init", json={}).status_code == 404
 
 
+def test_clone_has_no_rest_route(client: TestClient) -> None:
+    """Clone replaces the live stores from a server-side path, so it is local-only.
+
+    It once carried POST /instance/clone. That route is removed from the
+    registry, so nothing answers there, not even with a 405.
+    """
+    assert client.post(f"{API_PREFIX}/instance/clone", json={}).status_code == 404
+
+
 def test_the_openapi_document_is_generated(client: TestClient) -> None:
     document = client.get("/openapi.json").json()
     assert f"{API_PREFIX}/projects" in document["paths"]

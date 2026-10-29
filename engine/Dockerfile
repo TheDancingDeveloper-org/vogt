@@ -24,9 +24,9 @@
 # Stages:
 #   1. web-build    — pnpm install + vite build of web/
 #   1a. demo-web / demo-runtime — metadata-only augmentation + static demo image
-#   2. server-build — cargo build --release of engine/server, embedding the bundle
-#   3. core — the published public core image, lifted whole
-#   4. runtime      — `FROM ${POD_BASE_IMAGE}` plus both halves + entrypoint
+#   2. server-build — cargo build --release of engine/server and vogt-core,
+#                     embedding the bundle
+#   3. runtime      — `FROM ${POD_BASE_IMAGE}` plus both halves + entrypoint
 #
 # Stage order matters in one place: rust-embed reads `web/dist` at *compile*
 # time, so the web bundle is a build input to the Rust binary rather than a
@@ -69,6 +69,7 @@
 # these build args back to their Docker Hub names still works and is the
 # escape hatch for a builder that cannot reach GHCR.
 ARG NODE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm
+ARG PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 # The static demo's *runtime* base, deliberately not `NODE_IMAGE`. Building the
 # PWA needs a toolchain; serving the built bytes does not — `demo-server.mjs`
 # imports only `node:` builtins. `node:22-bookworm` derives from
@@ -81,12 +82,8 @@ ARG NODE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm
 # changed. The slim base carries 88 packages and neither of those.
 ARG DEMO_RUNTIME_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm-slim
 ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm
-# uv builds the core's virtualenv from the committed lockfile, so the image
-# contains exactly what CI tested. Same pin as the root Dockerfile;
-# they should move together.
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.9.18
-# The dev-pod toolchain base — everything stage 4 used to install itself, and
-# 22 of this image's 34 build minutes. Built and published by
+# The dev-pod toolchain base — everything the shipped stage used to install
+# itself, and 22 of this image's 34 build minutes. Built and published by
 # `.github/workflows/pod-base.yml` from `engine/Dockerfile.pod`; see either for
 # the variants and the tagging.
 #
@@ -96,13 +93,6 @@ ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.9.18
 # lives in the workflow rather than in this line, unlike the mirrored bases
 # above whose digests Renovate maintains here.
 ARG POD_BASE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean
-# The published public core image, lifted whole in stage 3. The default names
-# the public `:latest` tag so `docker build -f engine/Dockerfile .` works from a
-# clean clone with no `--build-arg`; it is a readable placeholder for a local
-# build, not a supported way to produce a shipped image. CI always overrides it
-# with a **digest** so a commit-identified build pins both halves — see stage 3
-# and `.github/workflows/build.yml`, exactly as `POD_BASE_IMAGE` above.
-ARG CORE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt:latest
 ARG VOGT_SOURCE_REF=local
 ARG VOGT_SOURCE_SHA=0000000000000000000000000000000000000000
 ARG VOGT_PRODUCT_VERSION=local/dev
@@ -193,6 +183,28 @@ ENV DEMO_BIND=0.0.0.0 \
     NODE_ENV=production
 ENTRYPOINT ["node", "/app/demo-server.mjs"]
 
+
+# ─── Stage 1b: Python core (the default until VOGT_CORE_IMPL=rust) ───────────
+# Same lockfile install as the root Dockerfile, so the console script in this
+# image is the published core, not a second resolution. Copied into the pod
+# below. Cost is the managed CPython plus the venv (on the order of the
+# core-only image); the alternative, a build-arg that drops this stage, would
+# make VOGT_CORE_IMPL=python a rebuild. See the note beside the vogt symlink.
+FROM ${PYTHON_IMAGE} AS python-core
+COPY --from=ghcr.io/astral-sh/uv:0.9.18@sha256:5713fa8217f92b80223bc83aac7db36ec80a84437dbc0d04bbc659cae030d8c9 /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON=3.13 \
+    UV_PYTHON_DOWNLOADS=automatic \
+    UV_PYTHON_INSTALL_DIR=/opt/vogt/python \
+    UV_PYTHON_PREFERENCE=only-managed \
+    UV_PROJECT_ENVIRONMENT=/opt/vogt/.venv
+WORKDIR /src
+COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./
+RUN uv sync --locked --no-install-project --no-dev
+COPY src/ ./src/
+RUN uv sync --locked --no-dev --no-editable
+
 # ─── Stage 2: rust binary with embedded web/ ────────────────────────────────
 FROM ${RUST_IMAGE} AS server-build
 ARG VOGT_SOURCE_REF
@@ -209,6 +221,12 @@ COPY engine/contract/src ./contract/src
 COPY engine/server/Cargo.toml ./server/Cargo.toml
 COPY engine/server/build.rs ./server/build.rs
 COPY engine/server/src ./server/src
+# vogt-core is a workspace member, so the workspace will not load without it,
+# and its migrations are compiled in from the checkout rather than read at
+# runtime. The stack image does not ship src/vogt.
+COPY engine/core/Cargo.toml ./core/Cargo.toml
+COPY engine/core/src ./core/src
+COPY src/vogt/storage/sqlite/migrations /app/src/vogt/storage/sqlite/migrations
 COPY --from=web-build /app/web/dist /app/web/dist
 # BuildKit cache mounts keep registry/git deps + the target dir warm across
 # rebuilds without the brittle "dummy main.rs to prime deps" dance. They are
@@ -221,9 +239,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     VOGT_SOURCE_REF="$VOGT_SOURCE_REF" \
     VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" \
     VOGT_PRODUCT_VERSION="${VOGT_PRODUCT_VERSION#v}" \
-    cargo build --release -p vogt-engine-server \
+    cargo build --release -p vogt-engine-server -p vogt-core \
     && cp target/release/vogt-engine /usr/local/bin/vogt-engine \
-    && strip /usr/local/bin/vogt-engine
+    && cp target/release/vogt-core /usr/local/bin/vogt-core \
+    && strip /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
 
 # ─── Test-only: the Codex gitguard e2e binary (WI-1356) ─────────────────────
 # Not part of the shipped image; nothing below copies from it. `build.yml`
@@ -247,35 +266,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM scratch AS codex-gitguard-e2e
 COPY --from=codex-gitguard-e2e-build /codex_gitguard_e2e /codex_gitguard_e2e
 
-FROM ${UV_IMAGE} AS uv
-
-# ─── Stage 3: the Python core, taken from the published image ───────────────
-#
-# Not built here. This is the *published public core image*, digest-pinned by
-# the caller, and `/opt/vogt` is lifted out of it whole.
-#
-# It used to be a second `uv sync` of the same source, which meant the merged
-# image contained a core that was built like the public one rather than being
-# it. "The private path is the public path plus configuration" was then a
-# claim about two builds agreeing, checkable by nobody. Now it is a digest.
-#
-# This only works because the public image bundles its own interpreter under
-# `/opt/vogt/python` (see the root Dockerfile). A venv is not self-contained
-# by default: `bin/python` links to whatever created it, so a venv built on
-# Debian and copied onto Ubuntu is a directory of scripts whose interpreter
-# does not exist — and the error names the script, not the missing
-# interpreter. Verified by copying `/opt/vogt` from the published image into
-# a bare `ubuntu` and running `vogt --version`.
-#
-# CORE_IMAGE defaults to the public `:latest` tag (declared at the top of this
-# file) so a bare `docker build` works from a clean clone. A floating tag would
-# silently decouple the two halves of a commit-identified build, so `build.yml`
-# always passes the digest its own core job just pushed — the default is the
-# local-build convenience, never the shipped path.
-ARG CORE_IMAGE
-FROM ${CORE_IMAGE} AS core
-
-# ─── Stage 4: the shipped image ─────────────────────────────────────────────
+# ─── Stage 3: the shipped image ─────────────────────────────────────────────
 #
 # Everything this stage used to install itself now lives in
 # `engine/Dockerfile.pod` and arrives as `POD_BASE_IMAGE`. It was 1344s
@@ -593,23 +584,62 @@ RUN set -eu; \
 # The server binary (built in stage 2 with the web bundle embedded; cache
 # mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).
 COPY --from=server-build /usr/local/bin/vogt-engine /usr/local/bin/vogt-engine
-RUN chmod +x /usr/local/bin/vogt-engine
-
-# The other half. `/opt/vogt` carries the standalone interpreter *and* the
-# venv built against it — see stage 3; splitting them here is how you get a
-# `vogt` that reports its own script as missing.
+COPY --from=server-build /usr/local/bin/vogt-core /usr/local/bin/vogt-core
+COPY --from=python-core /opt/vogt /opt/vogt
+# The venv is appended, not prepended. Python installs its own `vogt-mcp`
+# console script into the venv, and putting the venv first made `command -v
+# vogt-mcp` resolve there instead of to the engine script copied into
+# /usr/local/bin below, which is the one a session runs. Appending changes
+# PATH order only, so it adds no layer content.
 #
-# Symlinked onto PATH rather than prepending the venv's `bin` to it. That
-# directory also holds `python` and `python3`, and a dev pod whose `python3`
-# is silently the core's private interpreter is a pod where every agent's
-# `pip install` goes somewhere surprising. Three names, no PATH surgery — and
-# `vogt` on PATH is also what makes the core reachable from a session inside
-# this container, which is the whole point of merging the trees.
-COPY --from=core /opt/vogt /opt/vogt
-RUN ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt \
-    && ln -s /opt/vogt/.venv/bin/vogt-mcp /usr/local/bin/vogt-mcp \
-    && ln -s /opt/vogt/.venv/bin/vogt-mcp-remote /usr/local/bin/vogt-mcp-remote \
-    && vogt --version
+# Measured image size (`docker image inspect .Size`) of the local stack image
+# vogt-engine-e2e:local (id cb3998cfe1f9, built 2026-10-18 from this Dockerfile
+# before the PATH reorder and before the python-core stage): 7,555,153,795 B
+# (7.56 GB). That figure predates shipping both cores. Rebuilt at the line tip
+# on 2026-10-28 (`docker build -f engine/Dockerfile -t vogt-engine-size:tip .`,
+# id cc83e72569e0, both cores, venv appended): 7,677,095,176 B (7.68 GB),
+# +121,941,381 B over that baseline. The published comparison in
+# docs/rust-port/stack-image-numbers.md (2026-10-19, INSTALL_AI_CLIENTS=false)
+# is 7,536,275,581 B (7.54 GB) against the Python core image at 7,620,979,615 B
+# (7.62 GB).
+# /opt/vogt/bin is first so the core the entrypoint selected (the `vogt` and
+# `vogt-mcp-remote` symlinks it writes there) wins for the supervisor, for
+# `docker exec` shells, and for vogt-mcp-auth.sh, which calls `vogt-mcp-remote`
+# by name. The venv stays last so `vogt-mcp` remains the engine script in
+# /usr/local/bin rather than the Python console script.
+ENV PATH="/opt/vogt/bin:${PATH}:/opt/vogt/.venv/bin"
+RUN chmod +x /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
+
+# The other half is the Rust core, built in `server-build` and copied above, so
+# nothing is lifted from another image. Three names on PATH, all one binary:
+#
+#   vogt            — the operator's CLI (`docker exec vogt init`); it answers
+#                     `init` and `serve` only, the verbs the Rust core has.
+#   vogt-core       — the name the entrypoint runs the core under.
+#   vogt-mcp-remote — the stdio bridge. The binary chooses its mode from argv[0],
+#                     so the name alone is what mcp-bootstrap and connect ask for.
+#
+# Both cores stay in this image (WI-2660). `VOGT_CORE_IMPL` (python|rust,
+# default python, read by entrypoint.sh) picks which one the supervisor runs,
+# so merging the rust binary is not the cutover and rollback is an env flip
+# plus a redeploy, not a rebuild. A build-arg that omitted one core would
+# shrink the layer by the unused binary (and, for python, the uv venv) but
+# would make rollback a rebuild — the wrong trade for the overlap window.
+#
+# The operator names `vogt` and `vogt-mcp-remote` are NOT linked here. Linking
+# them at build time always pointed them at the rust binary, so a container
+# running with the default `VOGT_CORE_IMPL=python` still answered `vogt` and
+# `vogt-mcp-remote` with rust. entrypoint.sh retargets both from the env at
+# container start: python -> /opt/vogt/.venv/bin/*, rust -> vogt-core.
+# The links are written into /opt/vogt/bin (created below, owned by the image
+# user), which this image puts first on PATH. /usr/local/bin stays root-owned
+# and is not written at runtime. `vogt-mcp` is not linked: the engine's own
+# script of that name, copied below, is what a session runs.
+RUN set -eu; \
+    test -x /usr/local/bin/vogt-core; \
+    test -x /opt/vogt/.venv/bin/vogt; \
+    test -x /opt/vogt/.venv/bin/vogt-mcp-remote; \
+    vogt-core --version
 
 # The core's data directory (declared.sqlite3, observed.sqlite3, backups).
 # Owned by the pod's user rather than root:0 group-writable as in the
@@ -624,8 +654,12 @@ RUN ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt \
 # base defaults them to the same 1000/1000.
 ARG SPROOTY_UID=1000
 ARG SPROOTY_GID=1000
+# /opt/vogt/bin is where entrypoint.sh writes the `vogt` and `vogt-mcp-remote`
+# symlinks at start (VOGT_CORE_IMPL). It has to exist and be writable by the
+# image user. /usr/local/bin is root-owned and is not written at runtime.
 RUN install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0750 /var/lib/vogt \
-    && install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0755 /opt/vogt/agent-clis
+    && install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0755 /opt/vogt/agent-clis \
+    && install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0755 /opt/vogt/bin
 
 # Runtime scripts. Agent-specific CLIs are optional; these helpers only broker
 # credentials on demand for neutral tools already present in the image.
@@ -662,6 +696,11 @@ RUN chmod +x \
     /usr/local/bin/vogt-cargo-cache \
     /usr/local/bin/vogt-policy-hook \
     /usr/local/bin/git-forgejo
+# `vogt-mcp` must be the engine script, not the Python console script the venv
+# also installs. The venv is last on PATH, and this asserts the winner. It runs
+# after chmod: a copied script is not executable until then, and `command -v`
+# skips a non-executable file, so the check before chmod resolved the venv copy.
+RUN test "$(command -v vogt-mcp)" = /usr/local/bin/vogt-mcp
 
 # One port. vogt-core listens on loopback inside this namespace and is not
 # exposed here, because there is nothing to expose it to: the engine is the

@@ -16,7 +16,7 @@ self-hosted runners and cannot run from a fork as-is — see
 
 - [ ] Python core: `uv run pytest`, `uv run mypy`, `uv run ruff check .`,
       `uv run ruff format --check .`
-- [ ] Docs: `uv run python scripts/check_docs.py`
+- [ ] Docs: `cargo run --manifest-path engine/core/Cargo.toml --bin vogt-core -- check-docs`
 - [ ] PWA (`web/`): `pnpm typecheck`, `pnpm test`, `pnpm test:browser`
       (Playwright)
 - [ ] Engine (`engine/`): `cargo fmt --check`, `cargo clippy -- -D warnings`,

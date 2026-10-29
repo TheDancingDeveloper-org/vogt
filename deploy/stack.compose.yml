@@ -151,10 +151,16 @@ services:
 
       # One value both starts the core and tells the engine where to proxy.
       # Loopback means "the core is ours to run", so the entrypoint supervises
-      # `vogt init && vogt serve` here; the engine proxies `/api/vogt`, `/mcp`
-      # and `/ui-legacy` to the same address. Deriving one from the other is
-      # what stops a front door confidently pointed at a port nothing serves.
+      # whichever core VOGT_CORE_IMPL names (python by default, rust once
+      # flipped) and runs its `init` before every `serve`; the engine proxies
+      # `/api/vogt`, `/mcp` and `/ui-legacy` to the same address. Deriving one
+      # from the other is what stops a front door confidently pointed at a
+      # port nothing serves. docs/rust-port/swap-release-plan.md.
       VOGT_CORE_URL: "http://127.0.0.1:8000"
+      # Which core that supervision runs. `python` (default) or `rust`. The
+      # image ships both; setting this and redeploying is the cutover, and
+      # setting it back is the rollback. Neither is a rebuild.
+      VOGT_CORE_IMPL: "${VOGT_CORE_IMPL:-python}"
       # The token the engine presents on `/api/vogt`; the core adopts the same
       # file at `init` if it does not already hold one. Both halves reading one
       # file is the whole bootstrap mechanism — no second deploy. Brokered as a

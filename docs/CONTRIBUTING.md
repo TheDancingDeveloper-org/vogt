@@ -105,7 +105,7 @@ scripts/check.sh python web engine  # one or more named halves
 
 | Half | What it runs |
 | --- | --- |
-| `python` | `ruff check .`, `ruff format --check .`, `mypy` (strict), `scripts/check_docs.py`, `pytest` |
+| `python` | `ruff check .`, `ruff format --check .`, `mypy` (strict), `vogt-core check-docs`, `pytest` |
 | `web` | `pnpm typecheck`, `pnpm test` (Vitest) in `web/` |
 | `engine` | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` in `engine/` |
 
@@ -121,21 +121,24 @@ The script does not run everything. Run these yourself when they apply:
   responsive behaviour or screenshots changed. Refresh a snapshot only after
   inspecting the rendered result at desktop and phone sizes.
 - **Generated configuration docs.** `docs/CONFIG.md` and
-  `config.example.toml` are generated from `src/vogt/config.py`; never edit
-  them by hand. After a schema change:
+  `config.example.toml` are generated from the config schema
+  (`src/vogt/config.py`, mirrored by `engine/core/src/config.rs`); never edit
+  them by hand. After a schema change, regenerate them the way CI checks them:
 
   ```console
-  uv run python scripts/gen_config_docs.py
+  cargo run --quiet --manifest-path engine/core/Cargo.toml --bin vogt-core -- gen-config-docs
   git diff --exit-code -- docs/CONFIG.md config.example.toml
   ```
 
-  [`scripts/check_docs.py`](../scripts/check_docs.py) (in the `python` half)
-  checks that every relative link and heading anchor in the Markdown resolves;
+  `vogt-core check-docs` (in the `python` half; the Rust port of
+  [`scripts/check_docs.py`](../scripts/check_docs.py)) checks that every relative link and heading anchor in the Markdown resolves;
   it does not fetch external URLs.
-- **Product version.** `uv run python scripts/check_product_version.py`
-  confirms `pyproject.toml`, `src/vogt/__init__.py`, `web/package.json`,
-  `mobile/package.json` and the workflows agree on one version; a release bump
-  touches all of them. CI passes the expected version as an argument.
+- **Product version.** `vogt-core check-product-version [EXPECTED]` (the
+  Rust port of `scripts/check_product_version.py`) confirms `pyproject.toml`, `src/vogt/__init__.py`, `web/package.json`,
+  `mobile/package.json` and the workflows agree on one version. Versions move
+  only at release: a feature or fix pull request does not bump them, and CI
+  asserts that the manifests agree with each other rather than that they
+  changed. A release bump is a release change and touches all of them.
 - **Voice sidecar.** `voice/` is its own Cargo workspace with native
   prerequisites (`voice/README.md`): `cargo fmt --all -- --check`,
   `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
@@ -173,8 +176,9 @@ VOGT_IMAGE=vogt-core:local docker compose \
   -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d
 ```
 
-`VOGT_IMAGE` names both the core the base runs and the `CORE_IMAGE` the engine
-build lifts into its own image, so one variable points both at your build. The
+`VOGT_IMAGE` names the core the base runs. The engine image builds its own
+`vogt-core` from the same source rather than lifting one, so this variable is
+the only thing to point at your build. The
 engine is then the front door at `http://127.0.0.1:8910`: the PWA at `/`,
 `/api/vogt/*` proxied to the core, `/mcp` for agents, `ENGINE_TOKEN` as the
 bearer. Both containers read the core token from `deploy/vogt-core-token`, so
@@ -288,7 +292,7 @@ suite and the e2e smoke read and write.
 | Piece | Path |
 | --- | --- |
 | The known state, as data | [`tests/fixtures/forge_fixture_manifest.json`](../tests/fixtures/forge_fixture_manifest.json) |
-| The script that builds it | [`scripts/fixture_reset.py`](../scripts/fixture_reset.py) |
+| The command that builds it | `vogt-core fixture-reset` (the Rust port of [`scripts/fixture_reset.py`](../scripts/fixture_reset.py)) |
 | The opt-in suite | [`tests/test_forge_live.py`](../tests/test_forge_live.py) |
 
 The manifest is the single source of truth: the script builds to it and the
@@ -314,8 +318,8 @@ creates it only when absent, then relabels and closes or reopens to match. It
 issues no delete and never force-pushes, so a re-run reconciles drift.
 
 ```console
-uv run python scripts/fixture_reset.py --dry-run             # the plan, no network
-uv run python scripts/fixture_reset.py --token-file ./token  # or --token, $VOGT_FIXTURE_TOKEN, $GH_TOKEN
+vogt-core fixture-reset --dry-run             # the plan, no network
+vogt-core fixture-reset --token-file ./token  # or --token, $VOGT_FIXTURE_TOKEN, $GH_TOKEN
 ```
 
 **Running the live suite.** The tests carry the `live_forge` marker and are
@@ -337,7 +341,7 @@ it (the reset, the live write-back probe, the smoke's forge half) needs a
 fine-grained personal access token scoped to that one repository with write
 access to contents, issues, pull requests and workflows (the last for the
 failing-checks pull request's workflow file). CI holds one as the repository
-secret `VOGT_FIXTURE_TOKEN`, and it can reach nothing else. `fixture_reset.py`,
+secret `VOGT_FIXTURE_TOKEN`, and it can reach nothing else. `fixture-reset`,
 the live suite and `e2e_stack_smoke.sh` all read `VOGT_FIXTURE_TOKEN` (the
 first two also accept `GH_TOKEN`). A fork does not carry
 the secret; its e2e run skips the forge half, and the jobs that need the token
@@ -370,10 +374,21 @@ built and embedded first, plus the first-screen bundle budget), `voice`,
 `android` (a debug APK against the sanitised Firebase placeholder) and
 `security` (no live Firebase configuration or API key is tracked).
 
+The engine and voice jobs scope clippy, nextest and doctests to the member a
+pull request changed (`-p <crate>`), and fall back to the whole workspace when
+the change cannot be attributed to one member or when running in the queue.
+Caches are shared per workspace and only `main` saves them. `pytest` stays
+serial by design: the suite is SQLite- and I/O-bound rather than CPU-bound and
+its tests bind sockets and spawn subprocesses, so `-n auto` would cost
+reliability without buying wall clock. [`docs/ci.md`](ci.md) explains both.
+
 The `ci` job at the end is the single gate: it succeeds trivially on a
 docs-only diff and fails whenever any half failed. **Required status checks on
-`main` are `ci` and `runner-policy`.** The `e2e` workflow (§5) is not
-required; it runs after a merge and nightly.
+`main` are `ci`, `dependency review` and `runner-policy`**; the short
+"How changes land" sequence is in [`docs/ci.md`](ci.md#how-changes-land). The
+`e2e` workflow (§5) is not required; it runs after a merge and nightly. The
+release dry run ([`docs/ci.md`](ci.md#release-dry-run)) is advisory too: it
+rehearses the tag-time build on release-file pull requests and nightly.
 
 **Landing: the merge queue.** Push a branch and open a pull request. The PR
 gets only the fast, path-scoped checks above, so do not expect, or re-run by

@@ -39,6 +39,9 @@ def main() -> int:
         raise SystemExit("tagged release does not promote build.yml's images by digest")
     if '"local/dev"' not in (ROOT / "engine/server/src/product.rs").read_text():
         raise SystemExit("engine local/dev fallback is missing")
+    core = (ROOT / "engine/core/src/main.rs").read_text()
+    if f'_ => "{version}"' not in core:
+        raise SystemExit("vogt-core VERSION fallback disagrees with pyproject.toml")
     return 0
 
 

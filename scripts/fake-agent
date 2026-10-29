@@ -2,14 +2,34 @@
 # fake-agent — a deterministic stand-in for the agent CLI an agent-task run
 # drives in a PTY. The engine spawns argv[0] directly and delivers the
 # prompt as a file named in the environment, so this POSIX entry only has to
-# find a Python interpreter and hand the real work to the core beside it,
+# find the `vogt-core` binary and hand the work to `vogt-core fake-agent`,
 # passing argv and the environment through untouched.
 #
 # See scripts/fake-agent.README.md for the invocation shape it matches and the
 # scenarios it plays.
+#
+# The binary is looked for, in order: $VOGT_CORE_BIN, `vogt-core` on PATH (the
+# stack and e2e images), then a cargo build of this checkout ($CARGO_TARGET_DIR
+# or engine/target, debug before release), which `cargo test --workspace`
+# builds before it runs the engine's integration tests.
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PY=${FAKE_AGENT_PYTHON:-python3}
 
-exec "$PY" "$here/fake_agent_core.py" "$@"
+if [ -n "${VOGT_CORE_BIN:-}" ]; then
+    exec "$VOGT_CORE_BIN" fake-agent "$@"
+fi
+if command -v vogt-core >/dev/null 2>&1; then
+    exec vogt-core fake-agent "$@"
+fi
+for dir in ${CARGO_TARGET_DIR:+"$CARGO_TARGET_DIR"} "$here/../engine/target"; do
+    for profile in debug release; do
+        if [ -x "$dir/$profile/vogt-core" ]; then
+            exec "$dir/$profile/vogt-core" fake-agent "$@"
+        fi
+    done
+done
+
+echo "fake-agent: no vogt-core binary found; set VOGT_CORE_BIN, put vogt-core" \
+    "on PATH, or run: cargo build --manifest-path engine/Cargo.toml -p vogt-core" >&2
+exit 127

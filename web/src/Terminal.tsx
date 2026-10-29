@@ -29,6 +29,8 @@ import {
 import {
   createReplayQueue,
   prepareReplayTail,
+  recordReplayMeasure,
+  replayClock,
   scheduleReplay,
   shouldDeferCacheReplay,
   snapshotStartPosition,
@@ -1167,7 +1169,12 @@ const TerminalView: Component<Props> = (props) => {
         onDone();
         return;
       }
+      // One write, no replay queue, but still a replay: record it under the
+      // same measure the queued paths do, or a reload that restores F5 state
+      // reports no replay at all.
+      const startedAt = replayClock();
       term.write(restored, () => {
+        recordReplayMeasure("cache", startedAt);
         if (destroyed) return;
         term?.scrollToBottom();
         onDone();

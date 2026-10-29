@@ -115,8 +115,8 @@ Things about the build that are easy to get wrong:
   `mkdir -p web/dist && touch web/dist/.placeholder` only as a guard. A
   production build must embed a real bundle.
 - `engine/Dockerfile` takes the repository root as its build context and
-  requires `CORE_IMAGE` (the published core image, by digest in CI) — it lifts
-  the core out of that image rather than building it a second time.
+  builds `vogt-core` in `server-build`, from the same source as the engine. It
+  takes no `CORE_IMAGE`; the root `Dockerfile` core image is retired at I7.
 - The runtime stage starts from `engine/Dockerfile.pod`, the dev-pod toolchain
   base, published separately and passed in by digest as `POD_BASE_IMAGE`.
   Toolchain changes go there; per-commit things (the agent CLIs) stay in

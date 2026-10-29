@@ -10,7 +10,7 @@ overrides:
   # move. seroval is solid-js's SSR serializer and this is a client-only SPA,
   # but `pnpm audit` gates every PR. seroval-plugins follows it (its peer range
   # is seroval ^1.0).
-  seroval: '^1.6.8'
+  seroval: '>=1.6.11'
   seroval-plugins: '^1.6.8'
   # GHSA (high), 2026-10-06: source-map-js <1.2.2, via vite/postcss (dev tooling).
   source-map-js: '>=1.2.2'

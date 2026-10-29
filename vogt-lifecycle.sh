@@ -64,32 +64,18 @@ run_phase() {
 
 check_health() {
     url=${VOGT_LIFECYCLE_HEALTHCHECK_URL:?VOGT_LIFECYCLE_HEALTHCHECK_URL is required for health mode}
-    # Resolve the interpreter rather than assuming `python`: the images this
-    # runs in (the core and the stack pod) ship `python3`, and Debian/Ubuntu
-    # do not install a bare `python` alias by default. Assuming `python` made
-    # the container healthcheck exit 127 ("python: not found"), so the pod read
-    # as unhealthy forever even though the core was serving. An explicit
-    # override still wins; otherwise prefer python3, then python, and fail with
-    # a named reason rather than a bare 127 if neither exists.
-    py=${VOGT_LIFECYCLE_PYTHON:-}
-    if [ -z "$py" ]; then
-        if command -v python3 >/dev/null 2>&1; then
-            py=python3
-        elif command -v python >/dev/null 2>&1; then
-            py=python
-        else
-            echo "vogt lifecycle: no python3 or python on PATH for the health check" >&2
-            return 127
-        fi
+    # A GET that fails on a non-2xx, with a five-second cap. wget or curl,
+    # never Python: the Rust core image (WI-1082) does not ship an interpreter,
+    # and a health check that exits 127 keeps the container unhealthy forever.
+    # Prefer wget; it is the smaller package when an image has to add one.
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -T 5 -O /dev/null "$url"
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 5 -o /dev/null "$url"
+    else
+        echo "vogt lifecycle: no wget or curl on PATH for the health check" >&2
+        return 127
     fi
-    "$py" - "$url" <<'PY'
-import sys
-import urllib.request
-
-with urllib.request.urlopen(sys.argv[1], timeout=5) as response:
-    if response.status < 200 or response.status >= 300:
-        raise SystemExit("health status was %s" % response.status)
-PY
 }
 
 mkdir -p "$state_dir"

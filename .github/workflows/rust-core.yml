@@ -1,0 +1,491 @@
+name: rust-core
+
+# Gate for the Rust core. It runs on the long-lived `rust-core` branch and on
+# the WI-1076 integration (push to wi-1076-engine-core, pull requests into
+# wi-1443-main-sync), because that is where the compose job — including the
+# existing e2e and live Playwright — has to actually execute. Fast jobs have
+# no `if:`, so a pull request into main runs them too; only the live jobs are
+# gated. The parity job checks the committed golden; it never writes one.
+# A golden is recorded only by `record-golden`, dispatched with
+# record_golden=true under the pinned UV_PYTHON (WI-2661). `compose`,
+# `playwright` and `coverage` run in the merge queue and nightly, not on
+# every push (WI-2677). The 30-minute live Playwright run also starts on the
+# rust-core -> main pull request (the 1.c cutover); other pull requests do
+# not run it.
+
+on:
+  push:
+    branches: [rust-core, wi-1076-engine-core, wi-1443-main-sync]
+  pull_request:
+    # `main` is not a pull_request base: a PR into main (including the
+    # rust-core cutover) must not start this workflow. Fast jobs have no
+    # if:, so listing main spent a rust job on every core-touching PR.
+    # Paths stay narrow for the long-lived integration branches.
+    branches: [rust-core, wi-1443-main-sync]
+    paths:
+      - "engine/core/**"
+      - "engine/server/**"
+      - "engine/Dockerfile"
+      - "engine/deploy/**"
+      - "deny.toml"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "tests/parity/**"
+      - "src/vogt/**"
+      - ".github/workflows/rust-core.yml"
+  # The live suite and coverage run here, not on every push (WI-2677).
+  merge_group:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      record_golden:
+        description: "Record the parity golden and open a PR (pinned UV_PYTHON). Workers must not commit goldens."
+        type: boolean
+        default: false
+
+concurrency:
+  group: rust-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# The goldens (CLI help wrapping above all) are recorded under the Python the
+# image ships (Dockerfile pins UV_PYTHON=3.13); left unset, uv picks whatever
+# the runner has.
+env:
+  UV_PYTHON: "3.13"
+
+jobs:
+  rust:
+    name: fmt, clippy, test
+    # `bigmem` is node-b-gha-public-bigmem, the same runner CodeQL uses for
+    # the Rust analysis. A label no online runner advertises queues forever.
+    runs-on: [self-hosted, bigmem]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          # drift_ledger.py diffs against origin/main, which a shallow clone
+          # does not contain.
+          fetch-depth: 0
+
+      # The bigmem runner is a bare self-hosted image; cargo arrives here, the
+      # same way ci.yml's engine job gets it.
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: engine
+          # Shared so a push restores the cache rust-core saved, instead of
+          # starting cold and then writing a per-ref cache nothing reuses.
+          # Only rust-core saves; the save was most of this job (WI-2677).
+          shared-key: rust-core
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/rust-core' }}
+
+      - name: cargo fmt
+        working-directory: engine
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: engine
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (vogt-core)
+        working-directory: engine
+        run: cargo test -p vogt-core
+
+      # engine/server/tests/rust_core.rs fails when this binary is absent, so
+      # the build has to happen in this job. `cargo test -p vogt-core` above
+      # does not leave the binary where that test looks.
+      - name: cargo build (vogt-core) and front-door tests
+        working-directory: engine
+        run: |
+          cargo build -p vogt-core
+          cargo test -p vogt-engine-server --test rust_core
+
+      # The stack image's server-build stage copies a subset of the tree and
+      # then runs cargo. rust-core.yml never builds that image, so a workspace
+      # member the stage does not copy fails ci.yml and build.yml on the swap
+      # and nowhere else. This checks the stage's file set loads.
+      - name: server-build stage loads
+        run: |
+          set -euo pipefail
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          copy() { mkdir -p "$stage/engine/$(dirname "$2")" && cp -a "$1" "$stage/engine/$2"; }
+          copy engine/Cargo.toml Cargo.toml
+          copy engine/Cargo.lock Cargo.lock
+          copy engine/contract/Cargo.toml contract/Cargo.toml
+          copy engine/contract/src contract/src
+          copy engine/server/Cargo.toml server/Cargo.toml
+          copy engine/server/build.rs server/build.rs
+          copy engine/server/src server/src
+          copy engine/core/Cargo.toml core/Cargo.toml
+          copy engine/core/src core/src
+          mkdir -p "$stage/src/vogt/storage/sqlite" "$stage/web/dist"
+          cp -a src/vogt/storage/sqlite/migrations "$stage/src/vogt/storage/sqlite/migrations"
+          # metadata proves the workspace loads; cargo check proves the embedded SQL
+          # resolves, which a missing COPY or a wrong include_str! depth would
+          # not. --offline uses the cache the job already warmed.
+          ( cd "$stage/engine" && cargo check --offline -p vogt-core )
+
+
+  supply-chain:
+    name: cargo deny and cargo audit
+    # On every push, with rust and parity (WI-2674). cargo-deny reads deny.toml
+    # at the repo root. cargo audit uses the same reasoned ignores as ci.yml.
+    runs-on: [self-hosted, bigmem]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+
+      - name: install cargo-deny and cargo-audit
+        run: |
+          # Same idempotent install as ci.yml: a runner that already has the
+          # pinned version skips the compile.
+          # --force so a runner that has a different binary under the same
+          # name is replaced rather than left in place. cargo-audit 0.22
+          # prints "cargo-audit-audit 0.22.2" (clap name "cargo-audit", and
+          # the cargo shim prepends "cargo-"), so an exact "cargo-audit "
+          # match never holds. Same either-form check as ci.yml.
+          if ! cargo deny --version 2>/dev/null | grep -Fq 'cargo-deny 0.18.9'; then
+            cargo install --locked cargo-deny --version 0.18.9 --force
+          fi
+          audit_got="$(cargo audit --version 2>&1 || true)"
+          case "$audit_got" in
+            "cargo-audit 0.22.2"|"cargo-audit-audit 0.22.2") ;;
+            *) cargo install --locked cargo-audit --version 0.22.2 --force ;;
+          esac
+
+      - name: cargo deny
+        # deny.toml lives at the repo root and engine/ is the workspace that
+        # owns the lockfile. The step has to run there, as cargo audit does.
+        working-directory: engine
+        run: cargo deny --all-features check
+
+      - name: cargo audit
+        working-directory: engine
+        run: |
+          set -euo pipefail
+          advisory_db="${RUNNER_TEMP:-/tmp}/rustsec-advisory-db"
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0             git clone --quiet --depth 1 https://github.com/RustSec/advisory-db.git "$advisory_db"
+          # Same three ignores as ci.yml, each with a reason in deny.toml.
+          cargo audit --no-fetch --db "$advisory_db" --deny warnings             --ignore RUSTSEC-2023-0071             --ignore RUSTSEC-2025-0134             --ignore RUSTSEC-2026-0387
+  compose:
+    name: compose smoke against the Rust core
+    # Image build and stack walk only. The live browser run moved to
+    # `playwright`, and neither runs on every push (WI-2677).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, docker]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: build the Rust core image and walk the stack
+        run: bash scripts/rust_core_compose_smoke.sh
+
+  playwright:
+    name: live Playwright against the Rust core
+    # Not required, and not on every push. Nightly, manual, the merge queue,
+    # and the one pull request that cuts rust-core into main (WI-2677).
+    # head_ref is the branch name, not a SHA, so this does not match any
+    # other pull request into main. The head-repo check refuses a fork
+    # branch that happens to be named rust-core (self-hosted runners).
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.base_ref == 'main' &&
+       github.head_ref == 'rust-core' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, docker]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # One step, one shell: the stack's teardown trap belongs to the shell
+      # that brought it up, so the smoke and the live run cannot be split
+      # across steps. The live run needs the first-person state the smoke
+      # leaves behind, which is why this repeats the bring-up `compose` does
+      # rather than sharing its stack.
+      - name: build, walk the stack, then the whole live Playwright run
+        # Own project name and host ports: this job and `compose` share the
+        # runner's Docker daemon, and a fixed 18080 made one fail with "port
+        # is already allocated" while the other held it.
+        env:
+          COMPOSE_FILES: "-f deploy/vogt.compose.yml -f deploy/engine.overlay.yml -f deploy/e2e.overlay.yml -f deploy/rust-core.overlay.yml"
+          COMPOSE_PROJECT_NAME: vogt-rust-core-live-${{ github.run_id }}
+          VOGT_IMAGE: vogt-core:rust
+          VOGT_BIND_IP: 127.0.0.1
+          ENGINE_BIND: 127.0.0.1
+        run: |
+          export VOGT_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+          export ENGINE_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+          export VOGT_PUBLIC_URL="http://127.0.0.1:${VOGT_PORT}"
+          export ENGINE_PUBLIC_URL="http://127.0.0.1:${ENGINE_PORT}"
+          set -euo pipefail
+          docker build -t vogt-core:rust -f deploy/rust-core.Dockerfile .
+          docker build -t vogt-engine:local -f engine/Dockerfile .
+          docker build -t vogt-engine-e2e:local -f deploy/e2e.engine.Dockerfile .
+          docker build -t vogt-e2e-playwright:local -f deploy/e2e.playwright.Dockerfile .
+          # Tokens go through the named volume, never a host file (see `compose`).
+          export VOGT_CORE_TOKEN_VALUE="$(openssl rand -hex 32)"
+          export ENGINE_TOKEN_VALUE="$(openssl rand -hex 32)"
+          export ENGINE_TOKEN="$ENGINE_TOKEN_VALUE"
+          # shellcheck disable=SC2086
+          docker compose $COMPOSE_FILES up -d
+          trap 'docker compose $COMPOSE_FILES down -v || true' EXIT
+          ok=""
+          for _ in $(seq 1 60); do
+            if docker compose $COMPOSE_FILES exec -T engine curl -fsS http://vogt:8000/health/ready >/dev/null 2>&1; then
+              ok=yes; break
+            fi
+            sleep 5
+          done
+          test -n "$ok" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
+          front=""
+          for _ in $(seq 1 60); do
+            if docker compose $COMPOSE_FILES exec -T engine curl -fsS http://127.0.0.1:8910/healthz >/dev/null 2>&1; then
+              front=yes; break
+            fi
+            sleep 5
+          done
+          test -n "$front" || { docker compose $COMPOSE_FILES logs --tail=200; exit 1; }
+          docker compose $COMPOSE_FILES exec -T engine mkdir -p /tmp/e2e/scripts /tmp/e2e/tests/fixtures
+          docker compose $COMPOSE_FILES cp scripts/e2e_stack_smoke.sh engine:/tmp/e2e/scripts/e2e_stack_smoke.sh
+          # No VOGT_SMOKE_TOKEN, for the reason given in `compose`.
+          docker compose $COMPOSE_FILES exec -T engine \
+            bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
+          # Required: the specs that pass on the Rust core today. Operator
+          # decision, 2026-10-17: the rest of the live suite is advisory until
+          # its fixtures are fixed. Those specs fail on main's Python core too.
+          docker compose $COMPOSE_FILES --profile live run --rm -T \
+            -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright \
+            -g "Login and authentication errors present|stale provenance cannot activate demo mode|terminal replay budget \(live acceptance\)"
+          # Advisory: every other live spec. Printed, not fatal.
+          docker compose $COMPOSE_FILES --profile live run --rm -T \
+            -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright \
+            || echo "advisory: the rest of the live suite failed against the Rust core (tracked as a follow-up)"
+
+  parity:
+    name: parity
+    # Proves the harness against both cores. The Rust binary is built in this
+    # job, because the rust job runs on a different runner and its target
+    # directory is not here. This job only checks committed goldens; it never
+    # writes one. Recording is the record-golden job (WI-2661).
+    runs-on: [self-hosted]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: "0.11.23"
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: engine
+          # Shared so a push restores the cache rust-core saved, instead of
+          # starting cold and then writing a per-ref cache nothing reuses.
+          # Only rust-core saves; the save was most of this job (WI-2677).
+          shared-key: rust-core
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/rust-core' }}
+
+      - name: build vogt-core
+        working-directory: engine
+        run: cargo build -p vogt-core
+
+      - name: record then check the Python core
+        run: |
+          set -euo pipefail
+          uv sync --locked --group dev
+          export VOGT_PARITY_PYTHON_BIN="$PWD/.venv/bin/vogt"
+          uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/golden"
+          uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/again"
+          diff -q "$RUNNER_TEMP/golden/cli.json" "$RUNNER_TEMP/again/cli.json"
+          diff -q "$RUNNER_TEMP/golden/audit.cli.json" "$RUNNER_TEMP/again/audit.cli.json"
+          uv run python scripts/parity.py record --impl python --transport http --out "$RUNNER_TEMP/http"
+          uv run python scripts/parity.py record --impl python --transport http --out "$RUNNER_TEMP/http-again"
+          diff -q "$RUNNER_TEMP/http/http.json" "$RUNNER_TEMP/http-again/http.json"
+          uv run python scripts/parity.py record --impl python --transport mcp --out "$RUNNER_TEMP/mcp"
+          uv run python scripts/parity.py record --impl python --transport mcp --out "$RUNNER_TEMP/mcp-again"
+          diff -q "$RUNNER_TEMP/mcp/mcp.json" "$RUNNER_TEMP/mcp-again/mcp.json"
+          # Against the committed golden, not the recording just made: a
+          # recording that agrees with itself proves nothing about drift.
+          # Prefer the golden named for the main this branch was rebased onto.
+          # A branch whose merge-base has moved past the last recording would
+          # otherwise fail with "no golden" (WI-2662). Fall back to the newest
+          # golden directory whose commit is an ancestor of HEAD, and say so.
+          # Commit time, not directory mtime: a fresh checkout stamps every
+          # golden alike, so ls -1dt is not an order (WI-2662).
+          # shellcheck disable=SC2155  # a failed selection must stop the job
+          golden=$(scripts/select_parity_golden.sh)
+          uv run python scripts/parity.py check --impl python --golden "$golden"
+          uv run python scripts/parity.py check --impl python --transport http --golden "$golden"
+          uv run python scripts/parity.py check --impl python --transport mcp --golden "$golden"
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py check --impl rust --transport http --golden "$golden"
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py check --impl rust --transport mcp --golden "$golden"
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py check --impl rust --golden "$golden" --only dump
+          uv run python scripts/parity.py check --impl python --golden "$golden" --only actor
+          # Both cores migrate from the same SQL: the schema init leaves must
+          # match the golden, and a Python-written store must have nothing
+          # pending when the Rust core opens it (WI-1048).
+          uv run python scripts/parity.py check --impl python --golden "$golden" --only schema
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py check --impl rust --golden "$golden" --only schema
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py crossopen --writer python --reader rust
+          uv run python scripts/parity.py selftest --golden "$golden"
+          # The typed-error table is derived from the goldens, never edited.
+          uv run python scripts/parity.py errors --golden "$golden" --check
+          # The recursive --help tree, CONFIG.md and config.example.toml.
+          uv run python scripts/parity.py contract --impl python
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py contract --impl rust
+
+      - name: registry matches the Python source
+        # The Rust registry and its golden are generated. This fails the
+        # moment operations.py changes without a regeneration, instead of
+        # waiting for the next review to notice the drift.
+        run: uv run python scripts/gen_registry.py --check
+
+      - name: validator corpus matches pydantic
+        # The corpus is pydantic's own verdict on every probe. This fails the
+        # moment a model changes what pydantic accepts or how it refuses,
+        # instead of the Rust test comparing against a stale recording.
+        run: uv run python scripts/gen_validator_corpus.py --check
+
+      - name: drift ledger (report only)
+        run: uv run python scripts/drift_ledger.py
+
+  coverage:
+    name: line coverage >= 80%
+    # An instrumented rebuild, so not part of the per-push set (WI-2677).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # The Python gate was pytest --cov-fail-under=80, and this floor matches
+    # it. Measured line coverage of engine/core is 80.22% (the whole crate,
+    # tests included, at rust-core a5ac4cba; WI-1080). It only moves up.
+    # See docs/PYTHON_TEST_DISPOSITION.md.
+    runs-on: [self-hosted, bigmem]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: engine
+          # Shared so a push restores the cache rust-core saved, instead of
+          # starting cold and then writing a per-ref cache nothing reuses.
+          # Only rust-core saves; the save was most of this job (WI-2677).
+          shared-key: rust-core
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/rust-core' }}
+
+      - name: install cargo-llvm-cov
+        # Pinned. A floating install would make the floor depend on whichever
+        # release crates.io served that morning.
+        run: cargo install cargo-llvm-cov --version 0.6.16 --locked
+
+      - name: line coverage
+        working-directory: engine
+        run: cargo llvm-cov -p vogt-core --fail-under-lines 80
+  record-golden:
+    name: record the parity golden
+    # The only place a golden is written (WI-2661). A worker commit that
+    # re-records one is how three sessions wrote three goldens in a day, each
+    # with a different Python. Dispatch with record_golden=true; UV_PYTHON is
+    # pinned at the workflow env to the image's 3.13. contents: write and
+    # pull-requests: write are this job only, and only so it can push the
+    # golden branch and open the PR.
+    if: github.event_name == 'workflow_dispatch' && inputs.record_golden
+    runs-on: [self-hosted]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # The dispatched ref (github.sha), not a hard-coded rust-core. Recording
+      # against rust-core's merge-base with main, then checking that branch
+      # out, deleted every file the dispatched ref had that rust-core did not
+      # (run 40783776513: migration 0007 and the existing goldens).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: "0.11.23"
+
+      - name: record under the pinned Python and open a PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DISPATCHED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          uv sync --locked --group dev
+          # Record onto the commit that was dispatched, and name the golden
+          # after it. Never branch from a different base.
+          test "$(git rev-parse HEAD)" = "$DISPATCHED_SHA"
+          short=$(git rev-parse --short=7 HEAD)
+          out="tests/parity/golden/${short}"
+          mkdir -p "$out"
+          # Every file the parity job reads: cli, http, mcp, their audits
+          # (written with a full record), and schema.json. Recording only
+          # the default CLI transport is how a golden left the job missing
+          # http.json, mcp.json and schema.json (WI-2662).
+          uv run python scripts/parity.py record --impl python --out "$out"
+          uv run python scripts/parity.py record --impl python --transport http --out "$out"
+          uv run python scripts/parity.py record --impl python --transport mcp --out "$out"
+          uv run python scripts/parity.py record --impl python --only schema --out "$out"
+          for f in cli.json http.json mcp.json schema.json audit.cli.json audit.http.json audit.mcp.json meta.json; do
+            test -f "$out/$f" || { echo "record-golden did not write $f" >&2; exit 1; }
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Only this golden's directory. Adding the whole tree is how the
+          # last run committed deletions of files outside it.
+          git add -- "$out"
+          if git diff --cached --quiet; then
+            echo "golden ${short} already matches this recording"
+            exit 0
+          fi
+          branch="golden/${short}"
+          git checkout -B "$branch"
+          git commit -m "test: record parity golden ${short} (CI, UV_PYTHON=${UV_PYTHON})"
+          git push --force-with-lease origin "$branch"
+          # The self-hosted runner has no gh (exit 127 on run 40783776513).
+          # Open the PR, or print the one already open, through the REST API.
+          api="https://api.github.com/repos/${REPO}"
+          owner="${REPO%%/*}"
+          curl_api() { curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$@"; }
+          existing=$(curl_api "${api}/pulls?head=${owner}:${branch}&base=rust-core&state=open" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["html_url"] if d else "")')
+          if [ -n "$existing" ]; then
+            echo "$existing"
+            exit 0
+          fi
+          TITLE="test: record parity golden ${short}" BODY="Recorded by the record-golden job under UV_PYTHON=${UV_PYTHON}. Workers do not commit goldens (WI-2661)." HEAD="$branch" \
+            python3 -c 'import json,os; print(json.dumps({"title":os.environ["TITLE"],"body":os.environ["BODY"],"head":os.environ["HEAD"],"base":"rust-core"}))' \
+            | curl_api -X POST "${api}/pulls" --data @- \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["html_url"])'

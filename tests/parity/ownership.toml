@@ -1,0 +1,40 @@
+# Which port chunk owns a path. First match wins; unmatched paths land in
+# `unassigned` so a new directory is visible rather than silently dropped.
+
+[[chunk]]
+name = "storage"
+paths = ["src/vogt/storage/"]
+
+[[chunk]]
+name = "core"
+paths = ["src/vogt/core/"]
+
+[[chunk]]
+name = "application"
+paths = ["src/vogt/application/"]
+
+[[chunk]]
+name = "registry"
+paths = ["src/vogt/registry/"]
+
+[[chunk]]
+name = "adapters"
+paths = ["src/vogt/adapters/"]
+
+[[chunk]]
+name = "collectors"
+paths = ["src/vogt/collectors/"]
+
+[[chunk]]
+name = "config"
+paths = ["src/vogt/config.py", "docs/CONFIG.md", "config.example.toml"]
+
+[[chunk]]
+name = "tests"
+paths = ["tests/", "scripts/"]
+
+# The package version string, bumped by every release. The port tracks
+# its version separately, so a bump here is triaged as a no-op.
+[[chunk]]
+name = "version"
+paths = ["src/vogt/__init__.py"]

@@ -1,0 +1,10 @@
+# BuildKit reads <dockerfile>.dockerignore for this image, so the root
+# allow-list (which exists to keep the public Python image small) does not
+# apply. This one keeps the context to what the Rust core compiles.
+*
+!engine/core/
+!engine/core/**
+!src/vogt/storage/sqlite/migrations/
+!src/vogt/storage/sqlite/migrations/**
+!vogt-lifecycle.sh
+!engine/Cargo.toml

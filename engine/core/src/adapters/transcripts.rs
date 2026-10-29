@@ -1,0 +1,1644 @@
+//! A session's own agent conversation, read from the agent's transcript.
+//!
+//! A faithful port of `src/vogt/adapters/transcripts.py`. Finding the
+//! conversation, in order, with the basis reported so a caller can weigh a
+//! guess: an id the session's command names (`--session-id`, `--resume`,
+//! `codex resume`, `--session`), then the engine session id itself, then —
+//! only when `allow_cwd_guess` — the newest transcript in the session's
+//! directory written since the session started. Only the tail of one file is
+//! read, and every message is redacted with the agent-activity redactor before
+//! it leaves here. Transcript content is untrusted data.
+
+use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
+
+use crate::decisions;
+
+/// The most of a transcript's tail read looking for replies.
+pub const TAIL_BYTES: u64 = 4 * 1024 * 1024;
+/// How much of a transcript's end is read for the model it runs.
+pub const RUNTIME_TAIL_BYTES: u64 = 256 * 1024;
+/// One message is cut here.
+pub const MAX_MESSAGE_CHARS: usize = 20_000;
+/// Excerpts for session lists.
+pub const EXCERPT_CHARS: usize = 300;
+/// Directory entries considered per root, as a guard against a wrong root.
+pub const MAX_ENTRIES: usize = 20_000;
+
+const EXCERPTS_MAX: usize = 512;
+
+/// Agents whose transcripts are Claude Code's JSONL.
+const CLAUDE_FORMAT: &[&str] = &["claude", "klaudia"];
+
+/// Where a session's conversation is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transcript {
+    pub agent: String,
+    pub path: PathBuf,
+    pub conversation_id: String,
+    /// `session-id`, `resume-id`, `engine-id` or `cwd`.
+    pub basis: String,
+}
+
+/// One assistant message, redacted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reply {
+    pub text: String,
+    pub at: Option<String>,
+}
+
+type CacheKey = (String, u128, u64);
+
+struct Cache {
+    excerpts: HashMap<CacheKey, Option<String>>,
+    runtimes: HashMap<CacheKey, (Option<String>, Option<String>)>,
+}
+
+static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
+    Mutex::new(Cache {
+        excerpts: HashMap::new(),
+        runtimes: HashMap::new(),
+    })
+});
+
+/// `pathlib.Path.expanduser`. Only a leading `~` is the current user's home;
+/// `~other` is left as written, which is what Python does for an unknown name.
+fn expand_user(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let Some(std::path::Component::Normal(first)) = components.next() else {
+        return path.to_path_buf();
+    };
+    if first == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(components.as_path());
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Which transcript formats to look in, most likely first.
+pub fn agent_of(command: Option<&str>, template: Option<&str>) -> Vec<&'static str> {
+    let hint = format!("{} {}", command.unwrap_or(""), template.unwrap_or("")).to_lowercase();
+    if hint.contains("klaudia") {
+        vec!["klaudia"]
+    } else if hint.contains("codex") {
+        vec!["codex"]
+    } else if hint.contains("claude") {
+        vec!["claude"]
+    } else {
+        vec!["claude", "codex"]
+    }
+}
+
+/// Conversation ids the command line names, with what named them.
+pub fn named_ids(command: Option<&str>) -> Vec<(String, &'static str)> {
+    let Some(command) = command else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for (flag, value) in flag_values(command) {
+        let basis = if flag == "--session-id" {
+            "session-id"
+        } else {
+            "resume-id"
+        };
+        if is_id(&value) {
+            found.push((value, basis));
+        }
+    }
+    for value in codex_resume_values(command) {
+        if is_id(&value) {
+            found.push((value, "resume-id"));
+        }
+    }
+    found
+}
+
+/// The directory name Claude Code files a conversation under for `cwd`.
+/// Everything outside `[A-Za-z0-9-]` becomes `-`.
+pub fn claude_key(cwd: &str) -> String {
+    cwd.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// The transcript a session's conversation is in, or `None`.
+pub fn find(
+    roots: &HashMap<&str, &Path>,
+    engine_session_id: &str,
+    command: Option<&str>,
+    template: Option<&str>,
+    cwd: Option<&str>,
+    started_at: Option<SystemTime>,
+    allow_cwd_guess: bool,
+) -> Option<Transcript> {
+    let agents = agent_of(command, template);
+    let mut candidates = named_ids(command);
+    if is_id(engine_session_id) {
+        candidates.push((engine_session_id.to_string(), "engine-id"));
+    }
+    for agent in agents {
+        let Some(root) = roots.get(agent) else {
+            continue;
+        };
+        // Python expands here, so a default of `~/.claude/projects` is a real
+        // directory rather than a literal name that never exists.
+        let root = expand_user(root);
+        if !root.is_dir() {
+            continue;
+        }
+        for (conversation_id, basis) in &candidates {
+            if let Some(path) = by_id(agent, &root, conversation_id) {
+                return Some(Transcript {
+                    agent: agent.to_string(),
+                    path,
+                    conversation_id: conversation_id.clone(),
+                    basis: (*basis).to_string(),
+                });
+            }
+        }
+        if allow_cwd_guess {
+            if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
+                if let Some(guessed) = by_cwd(agent, &root, cwd, started_at) {
+                    return Some(guessed);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The last `n` assistant messages, oldest first, redacted.
+pub fn last_replies(transcript: &Transcript, n: usize) -> Vec<Reply> {
+    let lines = tail_lines(&transcript.path, TAIL_BYTES);
+    let messages = if CLAUDE_FORMAT.contains(&transcript.agent.as_str()) {
+        claude_messages(&lines)
+    } else {
+        codex_messages(&lines)
+    };
+    let picked = if n > 0 {
+        messages.into_iter().rev().take(n).rev().collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    picked
+        .into_iter()
+        .map(|(text, at)| Reply {
+            text: cut(&decisions::activity_redact(&text), MAX_MESSAGE_CHARS),
+            // A transcript's `_when` treats a naive value as UTC, so the JSON
+            // carries `Z`. A non-UTC offset is kept, not converted.
+            at: at
+                .as_deref()
+                .and_then(|value| render_timestamp(value, true)),
+        })
+        .collect()
+}
+
+/// A reply from somewhere other than a transcript file, redacted and cut the
+/// same way.
+pub fn reply(text: &str, at: Option<String>) -> Reply {
+    Reply {
+        text: cut(&decisions::activity_redact(text), MAX_MESSAGE_CHARS),
+        // The opencode path uses `_parse_engine_timestamp`, which does not
+        // assume a timezone: a naive value stays naive and renders with no `Z`.
+        at: at
+            .as_deref()
+            .and_then(|value| render_timestamp(value, false)),
+    }
+}
+
+/// A timestamp as pydantic writes it for `model_dump(mode="json")`, or `None`
+/// when it does not parse.
+///
+/// The value is parsed and rendered from its components, never by rewriting
+/// the input, so a short time, a basic date, a week date, a comma fraction and
+/// a `+0200` offset all come out in the one canonical form. A trailing `Z` is
+/// rewritten only when uppercase, because Python replaces only `"Z"` and
+/// rejects `z`. A zero offset renders as `Z`; any other is `±HH:MM`, with its
+/// seconds dropped. `naive_is_utc` is the transcript path (`_when`), which
+/// stamps a missing offset as UTC; the engine path leaves it naive.
+fn render_timestamp(value: &str, naive_is_utc: bool) -> Option<String> {
+    if value.is_empty() || value.ends_with('z') {
+        // Python rewrites only the uppercase `"Z"`, so a lowercase one never
+        // parses. `fromisoformat` itself would accept it.
+        return None;
+    }
+    let parsed = crate::core::parse_timestamp(&value.replace('Z', "+00:00")).ok()?;
+    let body = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute, parsed.second
+    );
+    let fraction = (parsed.micros > 0).then(|| format!(".{:06}", parsed.micros));
+    let suffix = match parsed.offset_seconds {
+        Some(0) => "Z".to_string(),
+        Some(seconds) => {
+            // pydantic drops the offset's seconds toward zero, keeping the
+            // sign: `-02:00:30` is `-02:00` and `-00:00:30` is `-00:00`.
+            let sign = if seconds < 0 { '-' } else { '+' };
+            let minutes = seconds.abs() / 60;
+            format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)
+        }
+        None if naive_is_utc => "Z".to_string(),
+        None => String::new(),
+    };
+    Some(format!("{body}{}{suffix}", fraction.unwrap_or_default()))
+}
+
+/// The one-line list excerpt of a reply's (redacted) text.
+pub fn excerpt(text: &str) -> String {
+    cut(
+        &text.split_whitespace().collect::<Vec<_>>().join(" "),
+        EXCERPT_CHARS,
+    )
+}
+
+/// A redacted one-line excerpt of the latest reply, cached by the file's size
+/// and modification time.
+pub fn last_reply_excerpt(transcript: &Transcript) -> Option<String> {
+    let (mtime_ns, size) = stat_key(&transcript.path)?;
+    let key = (transcript.path.display().to_string(), mtime_ns, size);
+    if let Some(cached) = CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.excerpts.get(&key).cloned())
+    {
+        return cached;
+    }
+    let replies = last_replies(transcript, 1);
+    let value = replies.last().map(|reply| excerpt(&reply.text));
+    if let Ok(mut cache) = CACHE.lock() {
+        if cache.excerpts.len() >= EXCERPTS_MAX {
+            cache.excerpts.clear();
+        }
+        cache.excerpts.insert(key, value.clone());
+    }
+    value
+}
+
+/// The model (and, for Codex, the reasoning effort) the conversation's latest
+/// turn ran on. Cached like the excerpt.
+pub fn runtime(transcript: &Transcript) -> (Option<String>, Option<String>) {
+    let Some((mtime_ns, size)) = stat_key(&transcript.path) else {
+        return (None, None);
+    };
+    let key = (transcript.path.display().to_string(), mtime_ns, size);
+    if let Some(cached) = CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.runtimes.get(&key).cloned())
+    {
+        return cached;
+    }
+    let lines = tail_lines(&transcript.path, RUNTIME_TAIL_BYTES);
+    let mut model: Option<String> = None;
+    let mut effort: Option<String> = None;
+    for entry in parsed(&lines) {
+        if CLAUDE_FORMAT.contains(&transcript.agent.as_str()) {
+            if entry.get("type").and_then(Value::as_str) == Some("assistant") {
+                if let Some(message) = entry.get("message").and_then(Value::as_object) {
+                    if let Some(found) = message.get("model").and_then(Value::as_str) {
+                        // `<synthetic>` is a message Claude Code made up itself.
+                        if !found.is_empty() && !found.starts_with('<') {
+                            model = Some(found.to_string());
+                        }
+                    }
+                }
+            }
+        } else if entry.get("type").and_then(Value::as_str) == Some("turn_context") {
+            if let Some(payload) = entry.get("payload").and_then(Value::as_object) {
+                if let Some(found) = payload.get("model").and_then(Value::as_str) {
+                    model = Some(found.to_string());
+                }
+                for name in ["effort", "reasoning_effort", "model_reasoning_effort"] {
+                    if let Some(found) = payload.get(name).and_then(Value::as_str) {
+                        effort = Some(found.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let found_runtime = (model, effort);
+    if let Ok(mut cache) = CACHE.lock() {
+        if cache.runtimes.len() >= EXCERPTS_MAX {
+            cache.runtimes.clear();
+        }
+        cache.runtimes.insert(key, found_runtime.clone());
+    }
+    found_runtime
+}
+
+/// Forget every cached excerpt (tests).
+pub fn clear_excerpt_cache() {
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.excerpts.clear();
+        cache.runtimes.clear();
+    }
+}
+
+pub fn excerpt_cache_size() -> usize {
+    CACHE.lock().map(|cache| cache.excerpts.len()).unwrap_or(0)
+}
+
+// -- lookup --------------------------------------------------------------------
+
+/// The transcript file for one conversation id, via the shared index.
+///
+/// The index is built from one directory listing and reused across the
+/// concurrent `session.list` calls that each ask for every live session. A
+/// root stamp change, or `INDEX_TTL_SECONDS` since the last build, drops it;
+/// an id that was absent is remembered for `NEGATIVE_TTL_SECONDS` so a miss
+/// does not rescan.
+fn by_id(agent: &str, root: &Path, conversation_id: &str) -> Option<PathBuf> {
+    let key = (
+        if CLAUDE_FORMAT.contains(&agent) {
+            "claude"
+        } else {
+            "codex"
+        },
+        root.to_string_lossy().into_owned(),
+    );
+    let now = clock();
+    {
+        let mut indexes = INDEXES.lock().unwrap_or_else(|e| e.into_inner());
+        // No stat here. Inside the TTL a list of N sessions costs N map
+        // reads; a new file waits at most INDEX_TTL_SECONDS.
+        if let Some(current) = indexes.get_mut(&key) {
+            if now - current.built_at < INDEX_TTL_SECONDS {
+                return current.lookup(conversation_id);
+            }
+        }
+    }
+    // The TTL elapsed. One stat per directory down the tree: unchanged means
+    // the files are unchanged, so the previous index stands.
+    let stamp = tree_stamp(root);
+    {
+        let mut indexes = INDEXES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = indexes.get_mut(&key) {
+            if current.root_mtime == stamp {
+                current.built_at = clock();
+                return current.lookup(conversation_id);
+            }
+        }
+    }
+    let mut built = scan(agent, root, clock());
+    let found = built.lookup(conversation_id);
+    let mut indexes = INDEXES.lock().unwrap_or_else(|e| e.into_inner());
+    indexes.insert(key, built);
+    found
+}
+
+// -- conversation-id index (WI-1413) -------------------------------------------
+//
+// `session.list` resolves one transcript per live session, and several lists
+// run at once. Walking the transcript root once per session per call is the
+// slow part. One index per (agent format, root) is built from a single listing
+// and swapped in under a lock; lookups after that are map reads.
+
+/// How long a conversation-id index is reused without re-checking the root.
+pub const INDEX_TTL_SECONDS: f64 = 5.0;
+/// How long a conversation id that was not on disk stays a miss.
+pub const NEGATIVE_TTL_SECONDS: f64 = 2.0;
+
+/// One scan of a transcript root, plus ids known to be absent.
+struct Index {
+    built_at: f64,
+    /// The tree stamp when this index was built. A new child directory moves
+    /// it; a new file inside an existing directory does not, and that waits
+    /// for the TTL.
+    root_mtime: Duration,
+    by_id: HashMap<String, PathBuf>,
+    /// Conversation id → clock time it was found missing.
+    negative: HashMap<String, f64>,
+}
+
+impl Index {
+    fn lookup(&mut self, conversation_id: &str) -> Option<PathBuf> {
+        if let Some(path) = self.by_id.get(conversation_id) {
+            return Some(path.clone());
+        }
+        let now = clock();
+        if let Some(seen) = self.negative.get(conversation_id) {
+            if now - seen < NEGATIVE_TTL_SECONDS {
+                return None;
+            }
+        }
+        // Record the miss only. The id stays absent until the index is
+        // rebuilt, which happens when the stamp moves or the TTL expires.
+        self.negative.insert(conversation_id.to_string(), now);
+        None
+    }
+}
+
+type IndexKey = (&'static str, String);
+
+static INDEXES: LazyLock<Mutex<HashMap<IndexKey, Index>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static CLOCK_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: seconds added to this thread's clock.
+    static CLOCK_SKEW: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// Test seam: directory listings this thread made, per directory.
+    static LISTINGS: std::cell::RefCell<HashMap<PathBuf, usize>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Monotonic seconds; Python's `time.monotonic()`.
+fn clock() -> f64 {
+    let now = CLOCK_ORIGIN.elapsed().as_secs_f64();
+    #[cfg(test)]
+    let now = now + CLOCK_SKEW.with(|skew| skew.get());
+    now
+}
+
+/// Count one directory listing (test seam; no-op outside tests).
+fn listed(_path: &Path) {
+    #[cfg(test)]
+    LISTINGS.with(|counts| *counts.borrow_mut().entry(_path.to_path_buf()).or_default() += 1);
+}
+
+/// One pass over the root. The stamp is the newest mtime seen in it.
+fn scan(agent: &str, root: &Path, now: f64) -> Index {
+    let mut by_id: HashMap<String, PathBuf> = HashMap::new();
+    let mut stamp = mtime(root);
+    if CLAUDE_FORMAT.contains(&agent) {
+        for entry in entries(root) {
+            stamp = stamp.max(mtime(&entry));
+            let Ok(read) = fs::read_dir(&entry) else {
+                continue;
+            };
+            listed(&entry);
+            for (count, child) in read.filter_map(|c| c.ok()).enumerate() {
+                if count >= MAX_ENTRIES {
+                    break;
+                }
+                let Ok(name) = child.file_name().into_string() else {
+                    continue;
+                };
+                if let Some(stem) = name.strip_suffix(".jsonl") {
+                    // `is_file` follows a symlink, as Python's DirEntry does.
+                    let path = child.path();
+                    if path.is_file() {
+                        by_id.entry(stem.to_string()).or_insert(path);
+                    }
+                }
+            }
+        }
+    } else {
+        for day in codex_days(root) {
+            stamp = stamp.max(mtime(&day));
+        }
+        for path in codex_files(root) {
+            let stem = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let conversation = uuid_tail(&stem).unwrap_or(stem);
+            // Newest dates come first, so the first hit is the one a walk finds.
+            by_id.entry(conversation).or_insert(path);
+        }
+    }
+    Index {
+        built_at: now,
+        root_mtime: stamp,
+        by_id,
+        negative: HashMap::new(),
+    }
+}
+
+/// A stamp that moves when a transcript file appears.
+///
+/// Claude files a conversation directly under a child of the root, so the
+/// children's mtimes cover it. Codex files under `YYYY/MM/DD/`, and a new
+/// rollout in today's directory moves that day's mtime, not the year's, so
+/// the stamp follows the tree down to the day directories.
+fn tree_stamp(root: &Path) -> Duration {
+    let mut stamp = mtime(root);
+    for year in entries(root) {
+        stamp = stamp.max(mtime(&year));
+        for month in entries(&year) {
+            stamp = stamp.max(mtime(&month));
+            for day in entries(&month) {
+                stamp = stamp.max(mtime(&day));
+            }
+        }
+    }
+    stamp
+}
+
+/// The day directories under a Codex root, newest first.
+fn codex_days(root: &Path) -> Vec<PathBuf> {
+    let mut days = Vec::new();
+    for year in sorted_desc(entries(root)) {
+        for month in sorted_desc(entries(&year)) {
+            days.extend(sorted_desc(entries(&month)));
+        }
+    }
+    days
+}
+
+fn sorted_desc(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.sort();
+    paths.reverse();
+    paths
+}
+
+fn by_cwd(
+    agent: &str,
+    root: &Path,
+    cwd: &str,
+    started_at: Option<SystemTime>,
+) -> Option<Transcript> {
+    let since = started_at
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or(Duration::ZERO);
+    let files: Vec<PathBuf> = if CLAUDE_FORMAT.contains(&agent) {
+        let directory = root.join(claude_key(cwd));
+        if !directory.is_dir() {
+            return None;
+        }
+        fs::read_dir(&directory)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().and_then(|e| e.to_str()) == Some("jsonl") && mtime(path) >= since
+            })
+            .collect()
+    } else {
+        codex_files(root)
+            .filter(|path| mtime(path) >= since && codex_cwd(path).as_deref() == Some(cwd))
+            .collect()
+    };
+    let newest = files.into_iter().max_by_key(|path| mtime(path))?;
+    let stem = newest
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let conversation = if agent == "codex" {
+        uuid_tail(&stem).unwrap_or(stem)
+    } else {
+        stem
+    };
+    Some(Transcript {
+        agent: agent.to_string(),
+        path: newest,
+        conversation_id: conversation,
+        basis: "cwd".to_string(),
+    })
+}
+
+fn entries(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(read) = fs::read_dir(root) else {
+        return out;
+    };
+    listed(root);
+    for (count, entry) in read.filter_map(|e| e.ok()).enumerate() {
+        if count >= MAX_ENTRIES {
+            break;
+        }
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            out.push(entry.path());
+        }
+    }
+    out
+}
+
+/// Rollouts under `root/YYYY/MM/DD/`, newest dates first.
+fn codex_files(root: &Path) -> impl Iterator<Item = PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = 0usize;
+    let mut years = entries(root);
+    years.sort();
+    years.reverse();
+    'outer: for year in years {
+        let mut months = entries(&year);
+        months.sort();
+        months.reverse();
+        for month in months {
+            let mut days = entries(&month);
+            days.sort();
+            days.reverse();
+            for day in days {
+                listed(&day);
+                let mut names: Vec<String> = fs::read_dir(&day)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.ok())
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .collect();
+                names.sort();
+                names.reverse();
+                for name in names {
+                    seen += 1;
+                    if seen > MAX_ENTRIES {
+                        break 'outer;
+                    }
+                    if name.ends_with(".jsonl") {
+                        out.push(day.join(name));
+                    }
+                }
+            }
+        }
+    }
+    out.into_iter()
+}
+
+fn codex_cwd(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut buf = vec![0u8; 256 * 1024];
+    let read = file.read(&mut buf).ok()?;
+    let line = buf[..read]
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or(&[]);
+    let entry: Value = serde_json::from_slice(line).ok()?;
+    entry
+        .get("payload")
+        .and_then(|p| p.get("cwd"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn mtime(path: &Path) -> Duration {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or(Duration::ZERO)
+}
+
+fn stat_key(path: &Path) -> Option<(u128, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some((modified.as_nanos(), meta.len()))
+}
+
+// -- reading -------------------------------------------------------------------
+
+fn tail_lines(path: &Path, limit: u64) -> Vec<Vec<u8>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Vec::new(),
+    };
+    let size = file.seek(SeekFrom::End(0)).unwrap_or(0);
+    let start = size.saturating_sub(limit);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut data = Vec::new();
+    if file.read_to_end(&mut data).is_err() {
+        return Vec::new();
+    }
+    let mut lines: Vec<&[u8]> = data.split(|byte| *byte == b'\n').collect();
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0); // the first line is cut mid-way
+    }
+    lines
+        .into_iter()
+        .filter(|line| !line.iter().all(|byte| byte.is_ascii_whitespace()))
+        .map(|line| line.to_vec())
+        .collect()
+}
+
+fn parsed(lines: &[Vec<u8>]) -> Vec<Value> {
+    lines
+        .iter()
+        .filter_map(|raw| serde_json::from_slice::<Value>(raw).ok())
+        .filter(|entry| entry.is_object())
+        .collect()
+}
+
+/// Assistant text, one item per API message (its streamed entries joined).
+fn claude_messages(lines: &[Vec<u8>]) -> Vec<(String, Option<String>)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut texts: HashMap<String, Vec<String>> = HashMap::new();
+    let mut times: HashMap<String, Option<String>> = HashMap::new();
+    for (index, entry) in parsed(lines).into_iter().enumerate() {
+        if entry.get("type").and_then(Value::as_str) != Some("assistant")
+            || entry.get("isSidechain").and_then(Value::as_bool) == Some(true)
+        {
+            continue;
+        }
+        let Some(message) = entry.get("message").and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(content) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        let parts: Vec<String> = content
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_string)
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let key = message
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("line-{index}"));
+        if !texts.contains_key(&key) {
+            order.push(key.clone());
+            times.insert(key.clone(), when(entry.get("timestamp")));
+        }
+        texts.entry(key).or_default().extend(parts);
+    }
+    order
+        .into_iter()
+        .map(|key| (texts[&key].join("\n\n"), times[&key].clone()))
+        .collect()
+}
+
+fn codex_messages(lines: &[Vec<u8>]) -> Vec<(String, Option<String>)> {
+    let mut found = Vec::new();
+    for entry in parsed(lines) {
+        if entry.get("type").and_then(Value::as_str) != Some("response_item") {
+            continue;
+        }
+        let Some(payload) = entry.get("payload").and_then(Value::as_object) else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("message")
+            || payload.get("role").and_then(Value::as_str) != Some("assistant")
+        {
+            continue;
+        }
+        let Some(content) = payload.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        let text = content
+            .iter()
+            .filter(|block| {
+                matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("output_text" | "text")
+                )
+            })
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        if !text.is_empty() {
+            found.push((text, when(entry.get("timestamp"))));
+        }
+    }
+    found
+}
+
+fn when(value: Option<&Value>) -> Option<String> {
+    // `render_timestamp` is the gate: it parses with `fromisoformat` and
+    // stamps a naive or date-only value as UTC, the way `_when` does. A shape
+    // check here would drop the forms Python accepts, such as a basic date or
+    // a week date.
+    value
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn cut(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        text.to_string()
+    } else {
+        let head: String = text.chars().take(limit - 1).collect();
+        format!("{head}…")
+    }
+}
+
+// -- command parsing -----------------------------------------------------------
+
+fn is_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphanumeric() || matches!(first, '.' | '_')) || value.chars().count() > 128
+    {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
+/// `(--session-id|--resume|--session)[= ]'?value`.
+fn flag_values(command: &str) -> Vec<(&str, String)> {
+    let mut out = Vec::new();
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(flag) = ["--session-id", "--resume", "--session"]
+            .into_iter()
+            .find(|flag| command[index..].starts_with(flag) && boundary(bytes, index))
+        {
+            let mut cursor = index + flag.len();
+            // `--session` must not swallow the prefix of `--session-id`.
+            if cursor < bytes.len() && is_id_byte(bytes[cursor]) {
+                index += 1;
+                continue;
+            }
+            if cursor < bytes.len() && (bytes[cursor] == b'=' || bytes[cursor] == b' ') {
+                cursor += 1;
+                if cursor < bytes.len() && bytes[cursor] == b'\'' {
+                    cursor += 1;
+                }
+                let start = cursor;
+                while cursor < bytes.len() && is_id_byte(bytes[cursor]) {
+                    cursor += 1;
+                }
+                if cursor > start {
+                    out.push((flag, command[start..cursor].to_string()));
+                }
+                index = cursor;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    out
+}
+
+fn codex_resume_values(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    while index + "codex".len() <= bytes.len() {
+        if command[index..].starts_with("codex") && boundary(bytes, index) {
+            let mut cursor = index + "codex".len();
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if command[cursor..].starts_with("resume") {
+                cursor += "resume".len();
+                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                if cursor < bytes.len() && bytes[cursor] == b'\'' {
+                    cursor += 1;
+                }
+                let start = cursor;
+                while cursor < bytes.len() && is_id_byte(bytes[cursor]) {
+                    cursor += 1;
+                }
+                if cursor > start {
+                    out.push(command[start..cursor].to_string());
+                }
+                index = cursor;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    out
+}
+
+fn boundary(bytes: &[u8], index: usize) -> bool {
+    index == 0 || !is_id_byte(bytes[index - 1])
+}
+
+fn is_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+}
+
+fn uuid_tail(stem: &str) -> Option<String> {
+    if stem.len() < 36 {
+        return None;
+    }
+    let tail = &stem[stem.len() - 36..];
+    let bytes = tail.as_bytes();
+    let groups = [8, 4, 4, 4, 12];
+    let mut cursor = 0;
+    for (index, length) in groups.iter().enumerate() {
+        if index > 0 {
+            if bytes.get(cursor) != Some(&b'-') {
+                return None;
+            }
+            cursor += 1;
+        }
+        if !bytes[cursor..cursor + length]
+            .iter()
+            .all(|b| b.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        cursor += length;
+    }
+    Some(tail.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    const ROOT_CWD: &str = "/srv/vogt";
+    const ENGINE_ID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+
+    fn secret() -> String {
+        format!("ghp_{}", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
+    }
+
+    /// Assembled at runtime, so this file never holds a whole credential a
+    /// scanner would refuse, and so the test proves the shape rather than one
+    /// value. Each is a shape Python's agent-activity redactor replaces and the
+    /// log-line redactor does not.
+    fn pem_block() -> String {
+        format!(
+            "-----BEGIN {}-----\n{}{}\n-----END {}-----",
+            "OPENSSH PRIVATE KEY",
+            "b3BlbnNzaC1rZXktdjEAAAAA",
+            "BG5vbmUAAAAEbm9uZQ",
+            "OPENSSH PRIVATE KEY",
+        )
+    }
+
+    fn kube_ca() -> String {
+        format!(
+            "{}: {}",
+            "certificate-authority-data",
+            "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCkZha2VDZXJ0Rm9yVGVzdHM="
+        )
+    }
+
+    fn aws_access_key() -> String {
+        format!("{}{}", "AKIA", "QWERTYUIOP234567")
+    }
+
+    fn slack_token() -> String {
+        format!(
+            "{}-{}-{}",
+            "xoxb", "123456789012", "AbCdEfGhIjKlMnOpQrStUvWx"
+        )
+    }
+
+    #[test]
+    fn replies_use_the_agent_activity_redactor() {
+        let reply = reply(
+            &format!(
+                "key {} then {} then {} then {}",
+                pem_block(),
+                kube_ca(),
+                aws_access_key(),
+                slack_token(),
+            ),
+            None,
+        );
+        assert!(reply.text.contains("[REDACTED:pem]"));
+        assert!(reply.text.contains("[REDACTED:token]"));
+        assert!(!reply.text.contains("OPENSSH"));
+        assert!(!reply.text.contains(&aws_access_key()));
+        assert!(!reply.text.contains(&slack_token()));
+        // A kubeconfig line is not a token shape. Python withholds it as a
+        // whole dump (`looks_like_dump`), and the redactor leaves the label.
+        assert!(reply.text.contains("authority-data"));
+        assert!(!reply.text.contains("LS0tLS1CRUdJTi"));
+    }
+
+    #[test]
+    fn a_reply_timestamp_is_rendered_as_pydantic_writes_it() {
+        // `+00:00` is what the engine stores; the answer's JSON carries `Z`.
+        let offset = reply("done", Some("2026-10-05T00:01:00+00:00".to_string()));
+        assert_eq!(offset.at.as_deref(), Some("2026-10-05T00:01:00Z"));
+        // A trailing `Z` parses the same and stays `Z`. A short fraction is
+        // padded to the six digits pydantic writes, not trimmed.
+        let zulu = reply("done", Some("2026-10-05T00:01:00.5Z".to_string()));
+        assert_eq!(zulu.at.as_deref(), Some("2026-10-05T00:01:00.500000Z"));
+        // A non-UTC offset is kept as written, never shifted into UTC.
+        let ahead = reply("done", Some("2026-10-05T02:01:00.000+02:00".to_string()));
+        assert_eq!(ahead.at.as_deref(), Some("2026-10-05T02:01:00+02:00"));
+        // Nine digits are cut to the microseconds pydantic keeps.
+        let fine = reply(
+            "done",
+            Some("2026-10-05T02:01:00.123456789+02:00".to_string()),
+        );
+        assert_eq!(fine.at.as_deref(), Some("2026-10-05T02:01:00.123456+02:00"));
+        // The engine path leaves a naive value naive: no `Z`.
+        let naive = reply("done", Some("2026-01-02T01:00:00".to_string()));
+        assert_eq!(naive.at.as_deref(), Some("2026-01-02T01:00:00"));
+        // Less common ISO forms parse and render in the canonical shape rather
+        // than by rewriting the input text. Each expected value is what
+        // pydantic 2.13.4 `model_dump(mode="json")` writes for the naive form.
+        for (written, expected) in [
+            ("2026-01-02T01", "2026-01-02T01:00:00"),
+            ("2026-01-02T01:00", "2026-01-02T01:00:00"),
+            ("2026-01-02 01:00", "2026-01-02T01:00:00"),
+            ("2026-01-02T01:00:00,5Z", "2026-01-02T01:00:00.500000Z"),
+            ("2026-01-02T01:00:00+0200", "2026-01-02T01:00:00+02:00"),
+            ("2026-01-02T01:00:00+02:00:30", "2026-01-02T01:00:00+02:00"),
+            ("20260102T010000Z", "2026-01-02T01:00:00Z"),
+            ("2026-W01-5", "2026-01-02T00:00:00"),
+            ("2026-01-02T01:00:00-00:30", "2026-01-02T01:00:00-00:30"),
+            // A negative offset's seconds are cut toward zero, sign kept.
+            ("2026-01-02T01:00:00-02:00:30", "2026-01-02T01:00:00-02:00"),
+            ("2026-01-02T01:00:00-00:00:30", "2026-01-02T01:00:00-00:00"),
+        ] {
+            assert_eq!(
+                reply("done", Some(written.to_string())).at.as_deref(),
+                Some(expected),
+                "{written}"
+            );
+        }
+        // Python rewrites only the uppercase `Z`, so a lowercase one is not a
+        // timestamp at all.
+        assert_eq!(
+            reply("done", Some("2026-01-02T01:00:00z".to_string())).at,
+            None
+        );
+        // Anything that is not an instant is no time, in both paths.
+        assert_eq!(reply("done", Some("yesterday".to_string())).at, None);
+        assert_eq!(reply("done", Some(String::new())).at, None);
+        assert_eq!(reply("done", None).at, None);
+    }
+
+    #[test]
+    fn a_transcript_timestamp_treats_a_naive_value_as_utc() {
+        let base = temp();
+        let root = base.join("claude");
+        let mut roots = HashMap::new();
+        roots.insert("claude", root.as_path());
+        let cases = [
+            ("2026-01-02T01:00:00", "2026-01-02T01:00:00Z"),
+            ("2026-01-02", "2026-01-02T00:00:00Z"),
+            ("2026-01-02T01", "2026-01-02T01:00:00Z"),
+            ("2026-W01-5", "2026-01-02T00:00:00Z"),
+            ("20260102T010000Z", "2026-01-02T01:00:00Z"),
+            ("2026-01-02T03:00:00.000+02:00", "2026-01-02T03:00:00+02:00"),
+        ];
+        for (written, expected) in cases {
+            write_claude(
+                &root,
+                ENGINE_ID,
+                &[claude_line_at(written, "said", written)],
+            );
+            let found = find(&roots, ENGINE_ID, Some("claude"), None, None, None, false).unwrap();
+            let replies = last_replies(&found, cases.len());
+            let got = replies
+                .iter()
+                .find(|reply| reply.at.as_deref() == Some(expected));
+            assert!(got.is_some(), "{written}: {replies:?}");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_tilde_root_is_expanded_before_it_is_looked_up() {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let Some(home) = home else {
+            return;
+        };
+        let base = temp();
+        // Put the transcript under the real home so expanduser reaches it,
+        // then look it up through a `~` root the way the defaults are written.
+        let real = home.join(".vogt-transcripts-tilde-test");
+        let _ = fs::remove_dir_all(&real);
+        write_claude(&real, ENGINE_ID, &[claude_line("m", "found at home")]);
+        let tilde = PathBuf::from("~/.vogt-transcripts-tilde-test");
+        let mut roots = HashMap::new();
+        roots.insert("claude", tilde.as_path());
+        let found = find(&roots, ENGINE_ID, Some("claude"), None, None, None, false);
+        let found = found.expect("a ~ root must be expanded, not taken literally");
+        let replies = last_replies(&found, 1);
+        let _ = fs::remove_dir_all(&real);
+        let _ = fs::remove_dir_all(&base);
+        assert_eq!(found.basis, "engine-id");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].text, "found at home");
+    }
+
+    fn claude_line(message_id: &str, text: &str) -> String {
+        claude_line_at(message_id, text, "2026-10-05T00:01:00Z")
+    }
+
+    fn claude_line_at(message_id: &str, text: &str, timestamp: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": timestamp,
+            "cwd": ROOT_CWD,
+            "message": {"id": message_id, "role": "assistant", "content": [{"type": "text", "text": text}]}
+        })
+        .to_string()
+    }
+
+    fn write_claude(root: &Path, conversation: &str, lines: &[String]) -> PathBuf {
+        let directory = root.join(claude_key(ROOT_CWD));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("{conversation}.jsonl"));
+        fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+        path
+    }
+
+    fn temp() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "vogt-transcripts-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn claude_key_replaces_everything_outside_the_alphabet() {
+        assert_eq!(claude_key("/srv/vogt"), "-srv-vogt");
+        assert_eq!(claude_key("a b_c.d"), "a-b-c-d");
+    }
+
+    #[test]
+    fn claude_replies_are_grouped_by_message_and_redacted() {
+        let base = temp();
+        let root = base.join("claude");
+        write_claude(
+            &root,
+            ENGINE_ID,
+            &[
+                serde_json::json!({"type": "user", "message": {"content": "hi"}}).to_string(),
+                claude_line("m1", "First reply."),
+                claude_line("m2", "Part one,"),
+                serde_json::json!({"type": "assistant", "message": {"id": "m2", "content": [{"type": "tool_use", "name": "Bash"}]}}).to_string(),
+                claude_line("m2", &format!("part two with {}.", secret())),
+                serde_json::json!({"type": "assistant", "isSidechain": true, "message": {"id": "sub", "content": [{"type": "text", "text": "a subagent's reply"}]}}).to_string(),
+                "not json".to_string(),
+            ],
+        );
+        let mut roots = HashMap::new();
+        roots.insert("claude", root.as_path());
+        let found = find(
+            &roots,
+            ENGINE_ID,
+            Some(&format!(
+                "vogt-agent-auth run -- claude --session-id {ENGINE_ID}"
+            )),
+            None,
+            Some(ROOT_CWD),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(found.basis, "session-id");
+        assert_eq!(found.agent, "claude");
+        let replies = last_replies(&found, 5);
+        assert_eq!(
+            replies
+                .iter()
+                .map(|r| r.text.split_whitespace().next().unwrap())
+                .collect::<Vec<_>>(),
+            ["First", "Part"]
+        );
+        assert!(replies.last().unwrap().text.contains("part two"));
+        assert!(!replies.last().unwrap().text.contains(&secret()));
+        assert!(replies.last().unwrap().at.is_some());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_resumed_or_engine_started_conversation_is_found_by_its_id() {
+        let base = temp();
+        let root = base.join("claude");
+        write_claude(&root, "resumed-1", &[claude_line("m", "resumed reply")]);
+        let mut roots = HashMap::new();
+        roots.insert("claude", root.as_path());
+        let by_resume = find(
+            &roots,
+            "11111111-2222-4333-8444-555555555555",
+            Some("claude --resume resumed-1"),
+            None,
+            Some(ROOT_CWD),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(by_resume.basis, "resume-id");
+        // A second transcript written into the same directory, inside the
+        // index TTL. The index only notices it once the TTL has passed.
+        forget_index(&root);
+        write_claude(&root, ENGINE_ID, &[claude_line("m", "pinned")]);
+        let by_engine = find(
+            &roots,
+            ENGINE_ID,
+            Some("claude"),
+            Some("claude"),
+            Some(ROOT_CWD),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(by_engine.basis, "engine-id");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_directory_guess_is_only_made_when_allowed() {
+        let base = temp();
+        let root = base.join("claude");
+        write_claude(&root, "some-other-id", &[claude_line("m", "guessed")]);
+        let mut roots = HashMap::new();
+        roots.insert("claude", root.as_path());
+        assert!(find(
+            &roots,
+            ENGINE_ID,
+            Some("bash"),
+            None,
+            Some(ROOT_CWD),
+            None,
+            false
+        )
+        .is_none());
+        let guessed = find(
+            &roots,
+            ENGINE_ID,
+            Some("bash"),
+            None,
+            Some(ROOT_CWD),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(guessed.basis, "cwd");
+        assert_eq!(guessed.conversation_id, "some-other-id");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn codex_rollouts_by_id_and_by_directory() {
+        let base = temp();
+        let root = base.join("codex");
+        let day = root.join("2026").join("10").join("05");
+        fs::create_dir_all(&day).unwrap();
+        let conversation = "0199aaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let rollout = day.join(format!("rollout-2026-10-05T00-00-00-{conversation}.jsonl"));
+        let body = [
+            serde_json::json!({"type": "session_meta", "payload": {"id": conversation, "cwd": ROOT_CWD}}),
+            serde_json::json!({"type": "response_item", "timestamp": "2026-10-05T00:02:00Z", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Codex says hi"}]}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "not a reply"}]}}),
+        ]
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        fs::write(&rollout, format!("{body}\n")).unwrap();
+        let mut roots = HashMap::new();
+        roots.insert("codex", root.as_path());
+        let by_id = find(
+            &roots,
+            ENGINE_ID,
+            Some(&format!("codex resume {conversation}")),
+            None,
+            Some(ROOT_CWD),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(by_id.agent, "codex");
+        assert_eq!(
+            last_replies(&by_id, 3)
+                .iter()
+                .map(|r| r.text.clone())
+                .collect::<Vec<_>>(),
+            ["Codex says hi"]
+        );
+        let by_cwd = find(
+            &roots,
+            ENGINE_ID,
+            Some("codex"),
+            None,
+            Some(ROOT_CWD),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(by_cwd.conversation_id, conversation);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_excerpt_is_cached_by_the_files_size_and_time() {
+        clear_excerpt_cache();
+        let base = temp();
+        let path = write_claude(
+            &base.join("claude"),
+            ENGINE_ID,
+            &[claude_line("m", &"word ".repeat(200))],
+        );
+        let found = Transcript {
+            agent: "claude".to_string(),
+            path: path.clone(),
+            conversation_id: ENGINE_ID.to_string(),
+            basis: "engine-id".to_string(),
+        };
+        let first = last_reply_excerpt(&found).unwrap();
+        assert!(first.chars().count() <= EXCERPT_CHARS);
+        assert_eq!(last_reply_excerpt(&found).as_deref(), Some(first.as_str()));
+        // A new reply changes the size, so the cache misses and it is re-read.
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{}", claude_line("m9", "the newest reply")).unwrap();
+        drop(file);
+        assert_eq!(
+            last_reply_excerpt(&found).as_deref(),
+            Some("the newest reply")
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn named_ids_ignore_anything_that_is_not_an_id() {
+        assert_eq!(
+            named_ids(Some("claude --resume abc-1 --model x")),
+            vec![("abc-1".to_string(), "resume-id")]
+        );
+        assert_eq!(
+            named_ids(Some("claude --session-id 'u-1'")),
+            vec![("u-1".to_string(), "session-id")]
+        );
+        assert!(named_ids(None).is_empty());
+        // A flag value that is not an id never counts.
+        assert!(named_ids(Some("claude --resume --model")).is_empty());
+    }
+
+    #[test]
+    fn codex_records_model_and_effort_per_turn() {
+        let base = temp();
+        let conversation = "0199aaaa-bbbb-4ccc-8ddd-eeeeeeeeeeef";
+        let path = base.join(format!("rollout-{conversation}.jsonl"));
+        let body = [
+            serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-5.5", "effort": "low"}}),
+            serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-5.6", "effort": "high"}}),
+        ]
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        fs::write(&path, format!("{body}\n")).unwrap();
+        let found = Transcript {
+            agent: "codex".to_string(),
+            path,
+            conversation_id: conversation.to_string(),
+            basis: "resume-id".to_string(),
+        };
+        assert_eq!(
+            runtime(&found),
+            (Some("gpt-5.6".to_string()), Some("high".to_string()))
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_klaudia_session_is_read_from_its_own_root() {
+        let base = temp();
+        let claude_root = base.join("claude");
+        let klaudia_root = base.join("klaudia");
+        write_claude(
+            &claude_root,
+            ENGINE_ID,
+            &[claude_line("m", "the wrong agent")],
+        );
+        let directory = klaudia_root.join(claude_key(ROOT_CWD));
+        fs::create_dir_all(&directory).unwrap();
+        let body = [
+            serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": "go"}]}}),
+            serde_json::json!({"type": "assistant", "timestamp": "2026-10-06T09:52:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Iteration one done."}]}}),
+            serde_json::json!({"type": "assistant", "timestamp": "2026-10-06T09:53:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": format!("Pushed with {}.", secret())}]}}),
+        ]
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        fs::write(
+            directory.join(format!("{ENGINE_ID}.jsonl")),
+            format!("{body}\n"),
+        )
+        .unwrap();
+        let mut roots = HashMap::new();
+        roots.insert("claude", claude_root.as_path());
+        roots.insert("klaudia", klaudia_root.as_path());
+        let found = find(
+            &roots,
+            ENGINE_ID,
+            Some(&format!(
+                "vogt-agent-auth run -- klaudia --model grok-4.7 --session-id {ENGINE_ID}"
+            )),
+            Some("klaudia"),
+            Some(ROOT_CWD),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (found.agent.as_str(), found.basis.as_str()),
+            ("klaudia", "session-id")
+        );
+        let replies = last_replies(&found, 5);
+        assert_eq!(
+            replies
+                .iter()
+                .map(|r| r.text.split_whitespace().next().unwrap())
+                .collect::<Vec<_>>(),
+            ["Iteration", "Pushed"]
+        );
+        assert!(!replies.last().unwrap().text.contains(&secret()));
+        assert_eq!(runtime(&found), (None, None));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_synthetic_model_is_no_model() {
+        let base = temp();
+        let path = write_claude(
+            &base.join("claude"),
+            ENGINE_ID,
+            &[serde_json::json!({"type": "assistant", "message": {"id": "c", "model": "<synthetic>", "content": [{"type": "text", "text": "x"}]}}).to_string()],
+        );
+        let found = Transcript {
+            agent: "claude".to_string(),
+            path,
+            conversation_id: ENGINE_ID.to_string(),
+            basis: "engine-id".to_string(),
+        };
+        assert_eq!(runtime(&found), (None, None));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // -- test_transcript_index.py (WI-1080, WI-1074) --------------------------
+    // Every test uses its own root, so the shared index needs no clearing;
+    // the clock skew and the listing counter are per test thread.
+
+    /// Move this thread's clock past every TTL, as Python's tests patch
+    /// `_clock` to `monotonic() + 100`.
+    ///
+    /// Move a directory's mtime forward. A file written in the same tick as
+    /// the scan leaves a coarse filesystem stamp unchanged (WI-2242).
+    fn bump_mtime(path: &Path) {
+        let later = SystemTime::UNIX_EPOCH + mtime(path) + Duration::from_secs(10);
+        let file = fs::File::open(path).unwrap();
+        file.set_modified(later).unwrap();
+    }
+
+    fn skew_clock(seconds: f64) {
+        CLOCK_SKEW.with(|skew| skew.set(seconds));
+    }
+
+    fn listings_of(path: &Path) -> usize {
+        LISTINGS.with(|counts| counts.borrow().get(path).copied().unwrap_or(0))
+    }
+
+    /// Python's `transcripts._indexes.clear()`, narrowed to one root so
+    /// concurrently running tests keep their own indexes.
+    fn forget_index(root: &Path) {
+        let root = root.to_string_lossy();
+        INDEXES
+            .lock()
+            .unwrap()
+            .retain(|(_, indexed), _| *indexed != root);
+    }
+
+    fn listings_total() -> usize {
+        LISTINGS.with(|counts| counts.borrow().values().sum())
+    }
+
+    fn claude_root(base: &Path, sessions: usize, decoys: usize) -> PathBuf {
+        let root = base.join("claude");
+        for n in 0..decoys {
+            fs::create_dir_all(root.join(format!("dir-{n:05}"))).unwrap();
+        }
+        let keep = root.join("dir-keep");
+        fs::create_dir_all(&keep).unwrap();
+        for n in 0..sessions {
+            fs::write(keep.join(format!("conv-{n:05}.jsonl")), "{}\n").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn many_lookups_scan_the_root_once() {
+        let tmp = temp();
+        let root = claude_root(tmp.as_path(), 70, 300);
+        for n in 0..70 {
+            let found = by_id("claude", &root, &format!("conv-{n:05}")).unwrap();
+            assert_eq!(
+                found.file_name().unwrap().to_str().unwrap(),
+                format!("conv-{n:05}.jsonl")
+            );
+        }
+        // One listing of the root builds the index. A second listing is the
+        // freshness stamp, taken once for the whole batch, not once per session.
+        assert!(listings_of(&root) <= 2, "{}", listings_of(&root));
+    }
+
+    #[test]
+    fn a_missing_id_does_not_rescan_within_the_ttl() {
+        let tmp = temp();
+        let root = claude_root(tmp.as_path(), 1, 50);
+        for _ in 0..40 {
+            assert!(by_id("claude", &root, "does-not-exist").is_none());
+        }
+        assert!(listings_of(&root) <= 2, "{}", listings_of(&root));
+    }
+
+    #[test]
+    fn a_new_claude_file_is_found_once_the_index_expires() {
+        let tmp = temp();
+        let root = claude_root(tmp.as_path(), 1, 2);
+        assert!(by_id("claude", &root, "conv-00000").is_some());
+        fs::write(root.join("dir-keep").join("conv-new.jsonl"), "{}\n").unwrap();
+        // Coarse filesystem mtime: a write in the same tick leaves the child
+        // directory's stamp unchanged, so move it on (WI-2242).
+        let keep = root.join("dir-keep");
+        bump_mtime(&keep);
+        // Still inside the TTL: the index stands and the new file is invisible.
+        assert!(by_id("claude", &root, "conv-new").is_none());
+        skew_clock(100.0);
+        let found = by_id("claude", &root, "conv-new").unwrap();
+        assert_eq!(found.file_name().unwrap(), "conv-new.jsonl");
+    }
+
+    #[test]
+    fn codex_ids_share_one_scan_and_a_new_file_in_the_same_day_is_found_after_the_ttl() {
+        let tmp = temp();
+        let root = tmp.as_path().join("codex");
+        let day = root.join("2026").join("10").join("14");
+        fs::create_dir_all(&day).unwrap();
+        let first = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        fs::write(
+            day.join(format!("rollout-2026-10-14T00-00-00-{first}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+        for _ in 0..10 {
+            assert!(by_id("codex", &root, first).is_some());
+        }
+        let scans = listings_total();
+        for _ in 0..10 {
+            assert!(by_id("codex", &root, first).is_some());
+        }
+        assert_eq!(listings_total(), scans);
+        assert!(scans > 0);
+        // Written into the same day directory: no new month or year appears.
+        let second = "11111111-2222-4333-8444-555555555555";
+        fs::write(
+            day.join(format!("rollout-2026-10-14T01-00-00-{second}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+        // A new rollout in today's directory moves that day's mtime, but a
+        // same-tick write may not; move the stamp on explicitly (WI-2242).
+        bump_mtime(&day);
+        assert!(by_id("codex", &root, second).is_none());
+        skew_clock(100.0);
+        let found = by_id("codex", &root, second).unwrap();
+        assert_eq!(found.parent().unwrap(), day);
+    }
+
+    #[test]
+    fn a_non_uuid_codex_name_still_resolves() {
+        let tmp = temp();
+        let day = tmp
+            .as_path()
+            .join("codex")
+            .join("2026")
+            .join("10")
+            .join("14");
+        fs::create_dir_all(&day).unwrap();
+        fs::write(day.join("rollout-session-7.jsonl"), "{}\n").unwrap();
+        let found = by_id("codex", &tmp.as_path().join("codex"), "rollout-session-7").unwrap();
+        assert_eq!(found.file_name().unwrap(), "rollout-session-7.jsonl");
+    }
+
+    #[test]
+    fn a_symlinked_transcript_is_followed() {
+        let tmp = temp();
+        let root = tmp.as_path().join("claude");
+        let real = tmp.as_path().join("elsewhere");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("conv-1.jsonl"), "{}\n").unwrap();
+        let link_dir = root.join("dir-keep");
+        fs::create_dir_all(&link_dir).unwrap();
+        std::os::unix::fs::symlink(real.join("conv-1.jsonl"), link_dir.join("conv-1.jsonl"))
+            .unwrap();
+        let found = by_id("claude", &root, "conv-1").unwrap();
+        assert_eq!(found.file_name().unwrap(), "conv-1.jsonl");
+    }
+}

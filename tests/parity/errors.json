@@ -1,0 +1,938 @@
+{
+  "codes": {
+    "conflict": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [],
+      "transports": [
+        "cli",
+        "mcp"
+      ]
+    },
+    "engine_unavailable": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [
+        502
+      ],
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ]
+    },
+    "forbidden": {
+      "cli_exit": [],
+      "http_status": [
+        403
+      ],
+      "transports": [
+        "http"
+      ]
+    },
+    "forge_link_refused": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [],
+      "transports": [
+        "cli",
+        "mcp"
+      ]
+    },
+    "forge_publish_refused": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [],
+      "transports": [
+        "cli",
+        "mcp"
+      ]
+    },
+    "inbox_entry_not_found": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [],
+      "transports": [
+        "cli",
+        "mcp"
+      ]
+    },
+    "invalid_params": {
+      "cli_exit": [],
+      "http_status": [],
+      "transports": [
+        "mcp"
+      ]
+    },
+    "invalid_preference": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [],
+      "transports": [
+        "cli",
+        "mcp"
+      ]
+    },
+    "invalid_request": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [
+        400
+      ],
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ]
+    },
+    "invalid_snooze": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [],
+      "transports": [
+        "cli",
+        "mcp"
+      ]
+    },
+    "not_found": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [
+        404
+      ],
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ]
+    },
+    "preference_version_conflict": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [],
+      "transports": [
+        "cli",
+        "mcp"
+      ]
+    },
+    "project_not_linked": {
+      "cli_exit": [
+        1
+      ],
+      "http_status": [],
+      "transports": [
+        "cli",
+        "mcp"
+      ]
+    }
+  },
+  "generated_by": "scripts/parity.py errors",
+  "golden": "84ec105",
+  "steps": [
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "initiative.publish",
+      "step": 28
+    },
+    {
+      "cli": {
+        "error_code": "preference_version_conflict",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "preference_version_conflict"
+      },
+      "operation": "preference.set",
+      "step": 31
+    },
+    {
+      "cli": {
+        "error_code": "inbox_entry_not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "inbox_entry_not_found"
+      },
+      "operation": "inbox.archive",
+      "step": 34
+    },
+    {
+      "cli": {
+        "error_code": "invalid_snooze",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_snooze"
+      },
+      "operation": "inbox.snooze",
+      "step": 35
+    },
+    {
+      "cli": {
+        "error_code": "inbox_entry_not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "inbox_entry_not_found"
+      },
+      "operation": "inbox.restore",
+      "step": 36
+    },
+    {
+      "mcp": {
+        "error_code": "invalid_params"
+      },
+      "operation": "work.create",
+      "step": 39
+    },
+    {
+      "cli": {
+        "error_code": "project_not_linked",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "project_not_linked"
+      },
+      "operation": "work.create",
+      "step": 40
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "work.list",
+      "step": 42
+    },
+    {
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "work.relate",
+      "step": 46
+    },
+    {
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "work.unrelate",
+      "step": 47
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "backlog",
+      "step": 50
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "bugs",
+      "step": 52
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "deps",
+      "step": 53
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "forge.repos",
+      "step": 59
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "forge.account_link",
+      "step": 61
+    },
+    {
+      "cli": {
+        "error_code": "forge_link_refused",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "forge_link_refused"
+      },
+      "operation": "forge.link",
+      "step": 62
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "forge.link",
+      "step": 63
+    },
+    {
+      "cli": {
+        "error_code": "forge_publish_refused",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "forge_publish_refused"
+      },
+      "operation": "forge.publish",
+      "step": 64
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "forge.publish",
+      "step": 65
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "forge.import",
+      "step": 66
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "forge.import",
+      "step": 67
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "forge.onboard",
+      "step": 69
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "forge.account_unlink",
+      "step": 70
+    },
+    {
+      "http": {
+        "error_code": "not_found",
+        "status": 404
+      },
+      "operation": "why",
+      "step": 72
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "not_found",
+        "status": 404
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "why",
+      "step": 73
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "not_found",
+        "status": 404
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "work.bind_branch",
+      "step": 78
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "not_found",
+        "status": 404
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "work.adopt",
+      "step": 79
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.start",
+      "step": 89
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.input",
+      "step": 90
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.screen",
+      "step": 91
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.wait",
+      "step": 92
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.answer",
+      "step": 93
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.hibernate",
+      "step": 94
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.keep_awake",
+      "step": 95
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.set_role",
+      "step": 96
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.wake",
+      "step": 97
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "not_found",
+        "status": 404
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "session.stop",
+      "step": 98
+    },
+    {
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "operation": "session.grant_request",
+      "step": 99
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "not_found",
+        "status": 404
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "session.bind_work",
+      "step": 104
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "not_found",
+        "status": 404
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "session.last_reply",
+      "step": 105
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.report_blocked",
+      "step": 107
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.report_unblocked",
+      "step": 108
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.changes",
+      "step": 109
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.wait_any",
+      "step": 110
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "engine_unavailable",
+        "status": 502
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "session.commit_for",
+      "step": 111
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "not_found",
+        "status": 404
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "session.economics",
+      "step": 112
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "not_found",
+        "status": 404
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "session.digest",
+      "step": 113
+    },
+    {
+      "http": {
+        "error_code": "forbidden",
+        "status": 403
+      },
+      "operation": "label.create",
+      "step": 118
+    },
+    {
+      "cli": {
+        "error_code": "engine_unavailable",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "engine_unavailable"
+      },
+      "operation": "chat.list",
+      "step": 120
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "chat.get",
+      "step": 121
+    },
+    {
+      "cli": {
+        "error_code": null,
+        "exit": 2
+      },
+      "mcp": {
+        "error_code": "invalid_params"
+      },
+      "operation": "token.issue",
+      "step": 126
+    },
+    {
+      "cli": {
+        "error_code": "conflict",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "conflict"
+      },
+      "operation": "backup",
+      "step": 131
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "restore",
+      "step": 132
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "clone",
+      "step": 141
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "clone",
+      "step": 142
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "clone",
+      "step": 143
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "invalid_request",
+        "status": 400
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "project.import",
+      "step": 144
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "invalid_request",
+        "status": 400
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "project.import",
+      "step": 145
+    },
+    {
+      "cli": {
+        "error_code": "conflict",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "conflict"
+      },
+      "operation": "decision.answer",
+      "step": 152
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "decision.answer",
+      "step": 153
+    },
+    {
+      "cli": {
+        "error_code": "invalid_preference",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_preference"
+      },
+      "operation": "preference.set",
+      "step": 157
+    },
+    {
+      "cli": {
+        "error_code": "invalid_preference",
+        "exit": 1
+      },
+      "mcp": {
+        "error_code": "invalid_preference"
+      },
+      "operation": "preference.set",
+      "step": 158
+    },
+    {
+      "cli": {
+        "error_code": "invalid_request",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "invalid_request",
+        "status": 400
+      },
+      "mcp": {
+        "error_code": "invalid_request"
+      },
+      "operation": "agent_cli.update",
+      "step": 161
+    },
+    {
+      "http": {
+        "error_code": null,
+        "status": 404
+      },
+      "operation": "connect",
+      "step": 162
+    },
+    {
+      "cli": {
+        "error_code": "not_found",
+        "exit": 1
+      },
+      "http": {
+        "error_code": "not_found",
+        "status": 404
+      },
+      "mcp": {
+        "error_code": "not_found"
+      },
+      "operation": "drift.resolve",
+      "step": 179
+    }
+  ]
+}

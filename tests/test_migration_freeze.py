@@ -57,6 +57,7 @@ FROZEN: dict[str, str] = {
     "observed/0004_forge_sync": "8d5cffbb2acb6ff18099ad73384eaa4ea5ebca7a6f45afb79d353fb4cbbcaee6",
     "observed/0005_perf_indexes": "e6902e6616ab9948f9d222b2763ce9bc421a136b6acb1422240e5957683e5e45",
     "observed/0006_agent_activity": "e0e959f4bf4f39db47d5e41ac11391d5f80a0b73bcce57d36168572062b1ab66",
+    "observed/0007_coverage_index": "4439cea33143634769fbf8f3fad8719decc9e2e2553e6f8ca711844fe4f4a8a3",
 }
 
 
