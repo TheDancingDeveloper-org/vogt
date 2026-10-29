@@ -98,6 +98,11 @@ def main(argv: list[str] | None = None) -> int:
         return _crossopen(_resolve(args.writer), _resolve(args.reader))
 
     binary = _resolve(args.impl)
+    if args.command == "check" and args.only != "schema":
+        missing = _missing_golden(args.golden, args.transport, args.only)
+        if missing is not None:
+            print(missing, file=sys.stderr)
+            return 1
     if args.only == "schema":
         return _schema_command(args, binary)
     # `--only dump` runs the whole script and keeps only the dumps: a dump
@@ -133,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     golden = json.loads((args.golden / f"{args.transport}.json").read_text())
     if not args.only:
         # The audit trail is the whole run's, so only a full run compares it.
+        # Presence was checked before the run, so a missing file is an error
+        # message rather than a traceback, and the run is not wasted.
         trail = json.loads((args.golden / audit_name).read_text())
         if _diff(trail, audit, audit_name) != 0:
             print(f"{audit_name} differs from the golden", file=sys.stderr)
@@ -152,6 +159,29 @@ def main(argv: list[str] | None = None) -> int:
             step for step in recorded if step["operation"].startswith(args.only)
         ]
     return _diff(golden, recorded, args.only)
+
+
+def _missing_golden(golden: Path, transport: str, only: str) -> str | None:
+    """A clear error when a check's golden file was never recorded.
+
+    The parity job reads ``<transport>.json`` and, for a full run,
+    ``audit.<transport>.json``. A golden recorded for one transport only
+    used to die here as FileNotFoundError after the whole script had run.
+    """
+    body = golden / f"{transport}.json"
+    if not body.is_file():
+        return (
+            f"no {transport} golden at {body} "
+            f"(record with: parity.py record --impl python "
+            f"--transport {transport})"
+        )
+    audit = golden / f"audit.{transport}.json"
+    if not only and not audit.is_file():
+        return (
+            f"no {transport} audit golden at {audit} "
+            f"(a full record writes audit.{transport}.json)"
+        )
+    return None
 
 
 def _schema_command(args: argparse.Namespace, binary: str) -> int:
