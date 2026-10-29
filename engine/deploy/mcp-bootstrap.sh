@@ -433,6 +433,10 @@ path = os.environ["CODEX_CONFIG"]
 # qwen3-coder, qwen3-8-27b and gpt-oss-120b are not here either: they fail
 # inside LiteLLM (408 / hang, WI-1147 cmt_01M4YZWG8B7E9YE5Y8FNJ7H2GH).
 # Re-adding them is WI-1631.
+# theclawbay Responses models (gpt-5.5, gpt-5.6, gpt-5.6-sol, gpt-5.6-luna,
+# gpt-5.6-terra, gpt-6-astra) are listed before premium so they stay visible;
+# premium stays last and hidden. They need the router to serve them over the
+# Responses wire (ops config), which this catalog does not configure.
 ROUTER_GROUPS = (
     "grok",
     "code",
@@ -452,6 +456,12 @@ ROUTER_GROUPS = (
     "dlab-glm-5-3-flash",
     "dlab-glm-5-3-flashx",
     "dlab-kimi-k3",
+    "gpt-5.5",
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-6-astra",
     "premium",
 )
 

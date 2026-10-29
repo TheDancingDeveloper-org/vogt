@@ -746,6 +746,12 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
         "dlab-glm-5-3-flash",
         "dlab-glm-5-3-flashx",
         "dlab-kimi-k3",
+        "gpt-5.5",
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-6-astra",
         "premium",
     ]
     assert by_priority[0]["slug"] == "grok"
@@ -790,9 +796,10 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     assert text.count("[model_providers.theclawbay]") == 1
 
     # A model the router does not serve, left over from theclawbay, moves to
-    # grok; a catalog group stays (WI-1640).
+    # grok; a catalog group stays (WI-1640). gpt-6-astra is itself a catalog
+    # slug now, so the leftover uses an id the catalog still does not list.
     config.write_text(
-        'model = "gpt-6-astra"\nmodel_provider = "litellm"\n', encoding="utf-8"
+        'model = "gpt-6-unlisted"\nmodel_provider = "litellm"\n', encoding="utf-8"
     )
     stale_run = _codex_bootstrap(tmp_path, {})
     assert stale_run.returncode == 0, stale_run.stderr
