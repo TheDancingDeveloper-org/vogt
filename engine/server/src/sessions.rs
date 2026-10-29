@@ -2370,11 +2370,13 @@ fn parse_rfc3339(raw: &str) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339).ok()
 }
 
-/// Whether the default list leaves this session out (WI-1289). A session
-/// stays listed when any of these hold: it is oversight or pinned awake; a
-/// turn is running, a dialog is open, or it is blocked; it is waiting for a
-/// person; it is still alive and idle (a live agent between turns); a person
-/// typed within the window; or its latest event is inside the window.
+/// Whether the default list leaves this session out (WI-1289, WI-2689). A
+/// session stays listed when any of these hold: it is oversight or pinned
+/// awake; a turn is running, a dialog is open, or it is blocked; it is
+/// waiting for a person; a person typed within the window; or its latest
+/// event is inside the window. An idle session ages out with the window even
+/// while its process is still alive: an agent CLI sits idle at its prompt
+/// after it finishes.
 /// `retain` of `None` (`ENGINE_SESSION_LIST_RETAIN_AFTER=off`) hides nothing.
 fn session_is_hidden(
     summary: &SessionSummary,
@@ -2393,12 +2395,6 @@ fn session_is_hidden(
     ) || summary.blocked.is_some()
         || summary.approval.is_some()
     {
-        return false;
-    }
-    // A live idle session is an agent between turns. Only a session that has
-    // finished — exited, stopped, hibernated, or idle with no process — ages
-    // out, and only once both clocks are past the window.
-    if summary.alive && summary.activity == ActivityState::Idle {
         return false;
     }
     let window_start = now - retain;
@@ -2895,7 +2891,26 @@ mod tests {
         let mut idle = aged(1, vogt_engine_contract::ActivityState::Idle);
         assert!(hidden(&idle), "idle with no process hides");
         idle.alive = true;
-        assert!(!hidden(&idle), "a live idle agent stays listed");
+        assert!(
+            hidden(&idle),
+            "a live idle session past the window hides too"
+        );
+    }
+
+    #[test]
+    fn a_live_idle_session_hides_only_past_the_window() {
+        let mut recent = aged(1, vogt_engine_contract::ActivityState::Idle);
+        recent.alive = true;
+        recent.last_event_at = Some("2026-10-12T10:00:00Z".into());
+        assert!(
+            !hidden(&recent),
+            "alive and idle inside the window stays listed"
+        );
+
+        let mut old = aged(2, vogt_engine_contract::ActivityState::Idle);
+        old.alive = true;
+        old.last_event_at = Some("2026-10-12T00:00:00Z".into());
+        assert!(hidden(&old), "alive and idle past the window hides");
     }
 
     #[test]

@@ -724,7 +724,7 @@ than these routes.
   those rows as well. A session is hidden only when all of these hold: it is
   not oversight and not pinned with `keep_awake`; it is not running a turn,
   awaiting approval, blocked, or waiting for input; its state is exited,
-  stopped, hibernated, or idle-and-not-alive; `now - last_event_at` is at
+  stopped, hibernated, or idle (alive or not); `now - last_event_at` is at
   least `ENGINE_SESSION_LIST_RETAIN_AFTER` (default `6h`; `off` or `0`
   disables hiding); and no person typed in that window. Agent input does not
   count as a person typing. Hiding is a list filter: `GET /api/sessions/:id`
