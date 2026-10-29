@@ -102,10 +102,11 @@ Cursor = tuple[str, str]
 def list_inbox(ctx: AppContext, params: InboxListParams) -> InboxListResult:
     snapshot_at = ctx.clock()
     with ctx.declared.read() as view:
-        entries = _collect(ctx, view)
-        project_ids = {
-            p.slug: p.id for p in view.list_projects(limit=MAX_SCAN, offset=0)
-        }
+        stored, live_entries, engine_error = _inbox_parts(ctx, view)
+        # The stored half is already triaged inside the memo. Live entries
+        # are triaged once here, the same way the badge does.
+        entries = [*stored.entries, *_triaged(ctx, view, live_entries)]
+        project_ids = {project.slug: project.id for project in stored.projects.values()}
         project_filter = params.project
         if project_filter is not None:
             project_ids = {project_filter: _resolve.project(view, project_filter).id}
@@ -153,8 +154,10 @@ def list_inbox(ctx: AppContext, params: InboxListParams) -> InboxListResult:
                 snapshot_at=snapshot_at,
                 high_water=source_water,
             )
-        coverage = _coverage(ctx, view, entries)
-        engine_status, engine_detail = _engine_status(ctx)
+        coverage = _coverage(ctx, view, entries, registered=len(stored.projects))
+        engine_status, engine_detail = _engine_status(
+            ctx, probed=(live_entries, engine_error)
+        )
         counts = {
             state: sum(1 for entry in entries if entry.triage_state == state)
             for state in ("active", "archived", "snoozed")
@@ -293,8 +296,13 @@ class _StoredInbox:
     entries: list[InboxEntry]
 
 
-#: The stored half, shared between every badge read while the stores have not
-#: moved (WI-1224). Every open tab and device nudges its badge on the same
+#: The stored half of the Inbox, shared between `inbox.list` and the badge
+#: while the stores have not moved (WI-1224, WI-2691). `inbox.list` asks the
+#: engine for sessions once per request and the reachability line reuses that
+#: answer. Local seed (30 linked projects, 400 chores, 300 markers,
+#: sqlite_synchronous=off, 2026-10-29): cold 3.7 ms, warm median 0.49 ms.
+#: Prod before this memo was 1.4–1.9 s (WI-2690); the prod ≤100 ms check is
+#: not this machine. Every open tab and device nudges its badge on the same
 #: event; before, each one rebuilt the whole projection, and the cache that
 #: was meant to share it was keyed on the store *objects*, which are built
 #: per request, so it never hit across requests. The live half is not in it:
@@ -315,7 +323,10 @@ def inbox_badge(ctx: AppContext, saved: InboxSavedFilter | None) -> InboxBadge:
     """
     stored = _stored_memo.get(ctx, lambda: _stored_triaged(ctx))
     with ctx.declared.read() as view:
-        live = _triaged(ctx, view, _collect_live(ctx, view, stored.projects))
+        live_sessions, _error = _read_engine_sessions(ctx)
+        live = _triaged(
+            ctx, view, _collect_live(ctx, view, stored.projects, live_sessions)
+        )
     entries = [*stored.entries, *live]
     moment = ctx.clock()
     active_total = sum(
@@ -355,9 +366,19 @@ def _triaged(
 
 
 def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
-    stored = _collect_stored(ctx, view)
-    live = _collect_live(ctx, view, stored.projects)
-    return _triaged(ctx, view, [*stored.entries, *live])
+    stored, live, _error = _inbox_parts(ctx, view)
+    return [*stored.entries, *live]
+
+
+def _inbox_parts(
+    ctx: AppContext, view: ReadView
+) -> tuple[_StoredInbox, list[InboxEntry], EngineUnavailable | None]:
+    """The stored half (shared while the stores have not moved) plus one
+    live read of the engine, reused for the reachability line."""
+    stored = _stored_memo.get(ctx, lambda: _stored_triaged(ctx))
+    live, error = _read_engine_sessions(ctx)
+    entries = _collect_live(ctx, view, stored.projects, live)
+    return stored, entries, error
 
 
 def _collect_stored(ctx: AppContext, view: ReadView) -> _StoredInbox:
@@ -536,18 +557,35 @@ def _collect_stored(ctx: AppContext, view: ReadView) -> _StoredInbox:
     return _StoredInbox(projects=projects, entries=entries)
 
 
+def _read_engine_sessions(
+    ctx: AppContext,
+) -> tuple[list[EngineSession], EngineUnavailable | None]:
+    """One `list_sessions` for the request. The error is the reachability
+    probe: a second call would only repeat it."""
+    if ctx.engine is None:
+        return [], None
+    try:
+        live, _hidden = ctx.engine.list_sessions()
+    except EngineUnavailable as error:
+        return [], error
+    return live, None
+
+
 def _collect_live(
-    ctx: AppContext, view: ReadView, projects: dict[str, Project]
+    ctx: AppContext,
+    view: ReadView,
+    projects: dict[str, Project],
+    live: list[EngineSession] | None = None,
 ) -> list[InboxEntry]:
     """The live half, untriaged: grants waiting for a person and the engine's
-    sessions that need one. Read on every call — the engine is its truth."""
+    sessions that need one. Read on every call — the engine is its truth.
+
+    `live` is a session list this request already fetched. Without it the
+    engine is asked once here.
+    """
     entries: list[InboxEntry] = []
-    live: list[EngineSession] = []
-    if ctx.engine is not None:
-        try:
-            live, _hidden = ctx.engine.list_sessions()
-        except EngineUnavailable:
-            live = []
+    if live is None:
+        live, _error = _read_engine_sessions(ctx)
 
     # Grants waiting for a person (WI-973): one entry per request, decided
     # with Approve/Deny on the entry itself. The target is named as the
@@ -1353,9 +1391,14 @@ def _within_water(entry: InboxEntry, water: dict[InboxSource, datetime | None]) 
 
 
 def _coverage(
-    ctx: AppContext, view: ReadView, entries: list[InboxEntry]
+    ctx: AppContext,
+    view: ReadView,
+    entries: list[InboxEntry],
+    *,
+    registered: int | None = None,
 ) -> dict[InboxSource, InboxCoverage]:
-    registered = len(view.list_projects(limit=MAX_SCAN, offset=0))
+    if registered is None:
+        registered = len(view.list_projects(limit=MAX_SCAN, offset=0))
     sweeps = ctx.observed.coverage()
     result: dict[InboxSource, InboxCoverage] = {}
     for source, collector in (
@@ -1391,12 +1434,17 @@ def _coverage(
     return result
 
 
-def _engine_status(ctx: AppContext) -> tuple[EngineStatus, str | None]:
+def _engine_status(
+    ctx: AppContext,
+    *,
+    probed: tuple[object, EngineUnavailable | None] | None = None,
+) -> tuple[EngineStatus, str | None]:
+    """Whether the engine answered. `probed` is a `list_sessions` this
+    request already made, so the status line does not make another."""
     if ctx.engine is None:
         return "not_configured", "no session engine is configured"
-    try:
-        ctx.engine.list_sessions()
-    except EngineUnavailable as error:
+    error = _read_engine_sessions(ctx)[1] if probed is None else probed[1]
+    if error is not None:
         return "unreachable", str(error)
     return "available", None
 

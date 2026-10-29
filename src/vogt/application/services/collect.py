@@ -15,6 +15,7 @@ from pathlib import Path
 
 from vogt.adapters.forge.kinds import COLLECTOR_CHECKS
 from vogt.application.context import AppContext
+from vogt.application.memo import StoreMemo
 from vogt.application.models import (
     CoverageEntry,
     CoverageParams,
@@ -436,6 +437,17 @@ def _resolve_target(
 # -- reads -----------------------------------------------------------------
 
 
+# WI-2691. Same seed as the inbox note: cold 1.5 ms, warm median 0.18 ms.
+# `age_seconds` is restated on every call. Prod before this memo was
+# 1.5–2.1 s (WI-2690).
+_coverage_memo: StoreMemo[CoverageResult] = StoreMemo()
+
+
+def clear_coverage_cache() -> None:
+    """Drop the remembered coverage answer (tests)."""
+    _coverage_memo.clear()
+
+
 def coverage(ctx: AppContext, params: CoverageParams) -> CoverageResult:
     """What has looked at what, and how long ago.
 
@@ -445,6 +457,29 @@ def coverage(ctx: AppContext, params: CoverageParams) -> CoverageResult:
     del params
     if not ctx.observed.has_evidence_tables():
         return CoverageResult(collectors=[], swept_project_ids=[])
+    remembered = _coverage_memo.get(ctx, lambda: _coverage_now(ctx))
+    # `age_seconds` is the clock, not the stores, so it is restated per call.
+    return _aged(remembered, ctx)
+
+
+def _aged(result: CoverageResult, ctx: AppContext) -> CoverageResult:
+    now = ctx.clock()
+    collectors = [
+        entry.model_copy(
+            update={
+                "age_seconds": (
+                    None
+                    if entry.last_swept_at is None
+                    else int((now - entry.last_swept_at).total_seconds())
+                )
+            }
+        )
+        for entry in result.collectors
+    ]
+    return result.model_copy(update={"collectors": collectors})
+
+
+def _coverage_now(ctx: AppContext) -> CoverageResult:
 
     newest = ctx.observed.coverage()
     # Cumulative rather than last-sweep, because the question this operation

@@ -328,16 +328,22 @@ def fresh_process_caches() -> Iterator[None]:
     fake forge answer another's question."""
     from vogt.adapters.forge.actors import RESOLVER
     from vogt.application.context import release_store_connections
+    from vogt.application.services.collect import clear_coverage_cache
     from vogt.application.services.inbox import clear_badge_cache
     from vogt.application.services.place import clear_metrics_cache
+    from vogt.application.services.views import clear_backlog_cache
 
     RESOLVER.clear()
     clear_badge_cache()
     clear_metrics_cache()
+    clear_backlog_cache()
+    clear_coverage_cache()
     yield
     RESOLVER.clear()
     clear_badge_cache()
     clear_metrics_cache()
+    clear_backlog_cache()
+    clear_coverage_cache()
     release_store_connections()
 
 
