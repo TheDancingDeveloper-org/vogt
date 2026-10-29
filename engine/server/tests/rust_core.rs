@@ -64,7 +64,22 @@ fn boot_core() -> Core {
         .spawn()
         .unwrap();
     let status = child.wait().unwrap();
-    assert!(status.success(), "vogt-core init failed: {status}");
+    // Init's stderr is the only account of why the core did not come up.
+    // Swallowing it turns "the core never started" into an empty tool list
+    // several assertions later.
+    let stderr = child
+        .stderr
+        .take()
+        .map(|mut pipe| {
+            let mut buf = String::new();
+            let _ = std::io::Read::read_to_string(&mut pipe, &mut buf);
+            buf
+        })
+        .unwrap_or_default();
+    assert!(
+        status.success(),
+        "vogt-core init failed: {status}\n{stderr}"
+    );
 
     // The core announces the port it was given, not the one the kernel
     // chose, so port 0 comes back as http://127.0.0.1:0. Pick a free port.
@@ -610,6 +625,15 @@ async fn an_assistant_turn_reads_the_real_rust_core() {
     // real core's status, which names its data dir or principal.
     let model = model.lock().unwrap();
     assert_eq!(model.seen.len(), 2, "one tool round, then the answer");
+    // The first request is what the door offered the model. An empty vogt_*
+    // set means tools/list failed or curated nothing; the turn then answers
+    // "unknown tool" and the assertion below only shows the symptom. Fail
+    // here, naming the tools that were offered.
+    let offered = model.seen[0].to_string();
+    assert!(
+        offered.contains("vogt_status"),
+        "the model was not offered vogt_status; tools/list came back empty or was not curated: {offered}"
+    );
     let tool_result = model.seen[1].to_string();
     assert!(
         tool_result.contains("data_dir") || tool_result.contains("principal"),
