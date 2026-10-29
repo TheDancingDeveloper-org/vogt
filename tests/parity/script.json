@@ -1854,6 +1854,39 @@
       }
     },
     {
+      "why": "read the workspace charter before one is set",
+      "operation": "charter.get",
+      "params": {
+        "scope": "workspace"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "set the workspace charter",
+      "operation": "charter.set",
+      "params": {
+        "scope": "workspace",
+        "body": "Be brief.",
+        "expected_version": 0,
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "read the charter that was just set",
+      "operation": "charter.get",
+      "params": {
+        "scope": "workspace"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
       "why": "arm a watch that wakes the started session when a second session ends; the trigger names a stand-in id the GET session route accepts",
       "operation": "watch.create",
       "engine": true,
