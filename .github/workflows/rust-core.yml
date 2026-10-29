@@ -26,6 +26,12 @@ on:
     branches: [rust-core, wi-1443-main-sync, main]
     paths:
       - "engine/core/**"
+      - "engine/server/**"
+      - "engine/Dockerfile"
+      - "engine/deploy/**"
+      - "deny.toml"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
       - "tests/parity/**"
       - "src/vogt/**"
       - ".github/workflows/rust-core.yml"
@@ -145,12 +151,19 @@ jobs:
         run: |
           # Same idempotent install as ci.yml: a runner that already has the
           # pinned version skips the compile.
+          # --force so a runner that has a different binary under the same
+          # name is replaced rather than left in place. cargo-audit 0.22
+          # prints "cargo-audit-audit 0.22.2" (clap name "cargo-audit", and
+          # the cargo shim prepends "cargo-"), so an exact "cargo-audit "
+          # match never holds. Same either-form check as ci.yml.
           if ! cargo deny --version 2>/dev/null | grep -Fq 'cargo-deny 0.18.9'; then
-            cargo install --locked cargo-deny --version 0.18.9
+            cargo install --locked cargo-deny --version 0.18.9 --force
           fi
-          if ! cargo audit --version 2>/dev/null | grep -Fq 'cargo-audit 0.22.2'; then
-            cargo install --locked cargo-audit --version 0.22.2
-          fi
+          audit_got="$(cargo audit --version 2>&1 || true)"
+          case "$audit_got" in
+            "cargo-audit 0.22.2"|"cargo-audit-audit 0.22.2") ;;
+            *) cargo install --locked cargo-audit --version 0.22.2 --force ;;
+          esac
 
       - name: cargo deny
         run: cargo deny --all-features check

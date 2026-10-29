@@ -506,18 +506,19 @@ fn the_engine_image_builds_its_own_rust_core() {
         text.contains("COPY --from=server-build /usr/local/bin/vogt-core /usr/local/bin/vogt-core"),
         "engine/Dockerfile no longer copies vogt-core into the runtime image"
     );
-    for retired in [
-        "CORE_IMAGE",
-        "UV_IMAGE",
-        "AS core",
-        "AS uv",
-        "/opt/vogt/.venv",
-    ] {
+    for retired in ["CORE_IMAGE", "UV_IMAGE", "AS core", "AS uv"] {
         assert!(
             !text.contains(retired),
             "engine/Dockerfile still refers to the retired {retired}"
         );
     }
+    // The Python stage is back for the overlap: VOGT_CORE_IMPL defaults to
+    // python, so the venv console scripts have to be in the image. A build
+    // that drops them is the cutover, not the gate.
+    assert!(
+        text.contains("/opt/vogt/.venv"),
+        "engine/Dockerfile no longer ships the Python venv the overlap needs"
+    );
     let rust = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/rust-core.Dockerfile");
     let rust_text = std::fs::read_to_string(&rust).expect("rust core Dockerfile");
     assert!(

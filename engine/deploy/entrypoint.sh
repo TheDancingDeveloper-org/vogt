@@ -323,7 +323,8 @@ link_vogt_names() {
             mcp="$cli"
             ;;
         *)
-            echo "vogt-core: VOGT_CORE_IMPL=${impl} is not python or rust —"                  "refusing to guess" >&2
+            echo "vogt-core: VOGT_CORE_IMPL=${impl} is not python or rust —" \
+                 "refusing to guess" >&2
             return 78
             ;;
     esac
@@ -438,18 +439,22 @@ if [[ -n "${VOGT_CORE_URL:-}" ]]; then
                  "imported projects will be invisible to sessions (§6.3)" >&2
         fi
 
-        # Same selection the supervisor uses, applied to the names an
-        # operator types. A failure here is the same closed refusal as a bad
-        # impl: do not start a core the CLI names disagree with.
-        if ! link_vogt_names; then
-            echo "vogt-core: not linking operator names (see above)" >&2
-            exit 78
-        fi
         supervise_vogt_core "$core_host" "$core_port" &
         echo "vogt-core: supervisor started (PID $!)"
     fi
 else
     echo "vogt-core: VOGT_CORE_URL unset; running the engine alone"
+fi
+
+# The operator names follow VOGT_CORE_IMPL whether or not a core is
+# supervised here. A loopback VOGT_CORE_URL is what starts the supervisor;
+# a docker exec shell and vogt-mcp-auth.sh still call `vogt` and
+# `vogt-mcp-remote` by name when the engine runs alone, and those names
+# have to be the selected core. A failure is the same closed refusal as a
+# bad impl: do not leave names that disagree with the flag.
+if ! link_vogt_names; then
+    echo "vogt-core: not linking operator names (see above)" >&2
+    exit 78
 fi
 
 # `exec` so the server becomes the container's foreground process from here;
