@@ -493,10 +493,19 @@ fn stamp_if(clock: &mut Option<crate::core::StepClock>, due: bool) -> String {
 
 /// Process start, the Rust stand-in for `PROCESS_STARTED_AT` in
 /// `observability.py`: the first time this process is asked, in UTC.
+///
+/// A golden recording sets `VOGT_TEST_CLOCK_START`. Python pins process start
+/// to that instant so two recordings agree on `instance.diagnostics`'
+/// `started_at`. The same rule applies here. A malformed value is ignored:
+/// `clock_from_env` refuses it later, when the context is built, and reading
+/// process start must not panic.
 fn process_started_at() -> crate::core::Moment {
     use std::sync::OnceLock;
     static STARTED: OnceLock<crate::core::Moment> = OnceLock::new();
-    *STARTED.get_or_init(crate::core::utc_now)
+    *STARTED.get_or_init(|| match std::env::var(crate::core::CLOCK_ENV) {
+        Ok(raw) => crate::core::from_iso(raw.trim()).unwrap_or_else(|_| crate::core::utc_now()),
+        Err(_) => crate::core::utc_now(),
+    })
 }
 
 /// `instance.diagnostics`, as the registry calls it. Ports
