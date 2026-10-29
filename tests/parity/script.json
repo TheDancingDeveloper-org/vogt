@@ -1662,6 +1662,7 @@
     {
       "why": "every diagnostics check reports; an empty instance does not raise",
       "operation": "instance.diagnostics",
+      "cli": ["diagnostics"],
       "params": {},
       "expect": {
         "exit": 0
