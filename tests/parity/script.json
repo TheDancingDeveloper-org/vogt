@@ -1059,6 +1059,20 @@
       }
     },
     {
+      "why": "the started session reports its own progress through the stand-in",
+      "operation": "session.report",
+      "engine": true,
+      "params": {
+        "id": "{seen:session.start#session.engine_session_id}",
+        "kind": "progress",
+        "summary": "parity report",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
       "why": "stand-in engine success path",
       "operation": "session.input",
       "engine": true,
@@ -1640,6 +1654,30 @@
     {
       "why": "auth.decisions lists the allow/deny log (store-only; no engine)",
       "operation": "auth.decisions",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "every diagnostics check reports; an empty instance does not raise",
+      "operation": "instance.diagnostics",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "an unconfigured board still answers, with the not-configured detail",
+      "operation": "usage.board",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "why": "the registry manifest the adapters are generated from",
+      "operation": "registry.dump",
       "params": {},
       "expect": {
         "exit": 0
