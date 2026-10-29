@@ -32,3 +32,30 @@ been resubmitted stops instead. The session record itself is the same shape.
 `project.update`'s `agent_policy` does not yet enforce the WI-1590 model
 policy (allowed models, never-models) on the Rust core. The field is stored
 and returned; the refusal Python raises for a disallowed model is not.
+
+## A5 — config keys parsed and not read (WI-2671)
+
+`UNREAD_KEYS` in `engine/core/src/config.rs` is the closed list. Each key is
+parsed and stored; nothing outside that module reads it. `sweep_interval_seconds`
+is not on the list: the collector schedule reads it (A1).
+
+- `watch_interval_seconds` (WI-2021). See A1. A loop here would expire watches
+  `evaluate_watches` cannot deliver.
+- `forge_posture_interval_seconds` (WI-2021). Python runs forge-posture on its
+  own cadence. Rust runs it inside `sweep` when a forge is configured.
+- `github_rate_limit_floor` and `github_app_installation_id` (WI-2021). The
+  Rust forge client reports a 403 and does not keep a rate budget or GitHub
+  App installation auth. Calls use the configured token.
+- `usage_accounts`, `usage_litellm_url`, `usage_litellm_keys`,
+  `usage_daily_spend_alert_usd` (WI-2666). `usage.board` is registered and
+  not ported. These keys are its only inputs.
+- `cold_wake_compaction`, `cold_wake_threshold_tokens`, `cold_wake_ttl_seconds`
+  (WI-2588). Cold-wake compaction is decided when a session wakes. This core
+  stores the per-session opt-out and does not decide compaction.
+- `session_scratch_project` (WI-2666). Python resolves a scratch project when
+  `session.start` names no project. Rust `session.start` requires one.
+- `autopilot_done_requires_result_report` (WI-2666). Python refuses to treat
+  an autopilot session as finished until a result report. `session.report` is
+  not ported.
+- `image_digest` (WI-2666). Python's `instance.diagnostics` returns the digest
+  the deployment stated. That operation is registered and not ported.
