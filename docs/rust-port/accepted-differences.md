@@ -59,3 +59,24 @@ is not on the list: the collector schedule reads it (A1).
   not ported.
 - `image_digest` (WI-2666). Python's `instance.diagnostics` returns the digest
   the deployment stated. That operation is registered and not ported.
+
+## A6 — read-API residue on a core-only process (WI-2672)
+
+A live comparison of this core against vogt-dev still differs on these rows.
+They are the engine's data, not a missing core field. A normaliser that drops
+them is correct for a core-only preview.
+
+- `status.disk` is null. The core does not stat the workspace; the engine does.
+- `project.list` `writable_reason` adds "no forge credential resolves" when no
+  token file resolves. Dev has a credential; the preview does not.
+- `engine.status` is a short unavailable string. Python returns a typed object
+  once an engine is configured. This build has no engine client for that read.
+- `session.history_list` is empty. Those rows live in the engine's history.
+- `inbox.list` `coverage.agent` reads unconfigured, and session reports are not
+  joined, because there is no engine transcript store.
+
+Already the same shape on both cores, so not repeated here: `project.brief`
+checks and `dependencies.detail`, `place.metrics` `work_total`, the
+deploy-lanes collector when a lane is configured, `initiative.list`
+`mode=summary`, `preference.set` `dispatch.budget_restarts_per_item`, and
+`clone` with no HTTP route (Python declares none either).
