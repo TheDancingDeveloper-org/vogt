@@ -63,8 +63,10 @@ is not on the list: the collector schedule reads it (A1).
 ## A6 — read-API residue on a core-only process (WI-2672)
 
 A live comparison of this core against vogt-dev still differs on these rows.
-They are the engine's data, not a missing core field. A normaliser that drops
-them is correct for a core-only preview.
+They are the engine's data, not a missing core field. The parity harness
+(`tests/parity/normalise.toml`, the `[volatile]` keys) blanks the volatile
+parts of an answer before the two cores are compared, and that is the right
+place for a rule that drops a value the core cannot produce.
 
 - `status.disk` is null. The core does not stat the workspace; the engine does.
 - `project.list` `writable_reason` adds "no forge credential resolves" when no

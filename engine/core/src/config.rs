@@ -2366,22 +2366,58 @@ mod tests {
     }
 
     /// The unread-key allowlist is exactly the keys this build parses and never
-    /// reads. It may shrink as a feature is wired; it may not grow.
+    /// reads, and exactly the keys section A5 of
+    /// `docs/rust-port/accepted-differences.md` names. It may shrink as a
+    /// feature is wired; it may not grow, and a renamed or re-owned key must
+    /// change both lists together.
     #[test]
     fn unread_keys_are_the_known_set() {
-        assert_eq!(
-            UNREAD_KEYS.len(),
-            13,
-            "a config key was added to UNREAD_KEYS; wire it, or this list is wrong"
-        );
-        let documented: std::collections::HashSet<&str> =
+        let doc = include_str!("../../../docs/rust-port/accepted-differences.md");
+        let section = doc
+            .split("## A5 —")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("accepted-differences.md has an A5 section");
+        // A bullet may wrap, so a config key named on a continuation line
+        // counts too. Only names that are real config keys count, so prose
+        // in backticks (an operation, a function) is not an unread key.
+        let fields: std::collections::HashSet<&str> =
             describe_fields().iter().map(|field| field.name).collect();
+        let mut documented_unread: Vec<&str> = Vec::new();
+        let mut in_bullet = false;
+        for line in section.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("- ") {
+                in_bullet = true;
+            } else if trimmed.is_empty() || !line.starts_with(' ') {
+                in_bullet = false;
+            }
+            if !in_bullet {
+                continue;
+            }
+            let mut rest = trimmed;
+            while let Some(start) = rest.find('`') {
+                rest = &rest[start + 1..];
+                let Some(end) = rest.find('`') else { break };
+                let name = &rest[..end];
+                if fields.contains(name) {
+                    documented_unread.push(name);
+                }
+                rest = &rest[end + 1..];
+            }
+        }
+        documented_unread.sort_unstable();
+        let mut code: Vec<&str> = UNREAD_KEYS.iter().map(|(name, _)| *name).collect();
+        code.sort_unstable();
+        assert_eq!(
+            code, documented_unread,
+            "UNREAD_KEYS must name exactly the keys section A5 documents"
+        );
         for (name, work_item) in UNREAD_KEYS {
-            assert!(documented.contains(name), "{name} is not a config key");
+            assert!(fields.contains(name), "{name} is not a config key");
             assert!(
-                work_item.starts_with("WI-")
-                    && work_item[3..].chars().all(|ch| ch.is_ascii_digit()),
-                "{name} needs a WI ref, got {work_item}"
+                section.contains(&format!("`{name}`")) && section.contains(work_item),
+                "{name} ({work_item}) is not named with its owning item in A5"
             );
         }
     }
