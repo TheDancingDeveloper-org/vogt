@@ -814,10 +814,10 @@ class _StandInHandler(BaseHTTPRequestHandler):
             _StandInState.chats[chat_id] = chat
             return self._reply(200, {"chat": chat, "entries": [], "finished": False})
         if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "messages":
-            chat = _StandInState.chats.get(parts[2])
-            if chat is None:
+            found = _StandInState.chats.get(parts[2])
+            if found is None:
                 return self._reply(404, None)
-            return self._reply(200, {"chat": chat, "entries": [], "finished": True})
+            return self._reply(200, {"chat": found, "entries": [], "finished": True})
         if (
             len(parts) == 5
             and parts[:2] == ["api", "chats"]
@@ -833,29 +833,29 @@ class _StandInHandler(BaseHTTPRequestHandler):
                 },
             )
         if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "model":
-            chat = _StandInState.chats.get(parts[2])
-            if chat is None:
+            found = _StandInState.chats.get(parts[2])
+            if found is None:
                 return self._reply(404, None)
-            chat["model"] = payload.get("model")
-            return self._reply(200, chat)
+            found["model"] = payload.get("model")
+            return self._reply(200, found)
         if (
             len(parts) == 4
             and parts[:2] == ["api", "chats"]
             and parts[3] == "interrupt"
         ):
-            chat = _StandInState.chats.get(parts[2])
-            if chat is None:
+            found = _StandInState.chats.get(parts[2])
+            if found is None:
                 return self._reply(404, None)
-            return self._reply(200, chat)
+            return self._reply(200, found)
         if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "archive":
-            chat = _StandInState.chats.get(parts[2])
-            if chat is None:
+            found = _StandInState.chats.get(parts[2])
+            if found is None:
                 return self._reply(404, None)
-            chat["archived"] = bool(payload.get("archived", True))
-            return self._reply(200, chat)
+            found["archived"] = bool(payload.get("archived", True))
+            return self._reply(200, found)
         if len(parts) == 4 and parts[:2] == ["api", "chats"] and parts[3] == "promote":
-            chat = _StandInState.chats.get(parts[2])
-            if chat is None:
+            found = _StandInState.chats.get(parts[2])
+            if found is None:
                 return self._reply(404, None)
             session_id = _StandInState.fresh("eng")
             return self._reply(
@@ -1382,7 +1382,7 @@ def _walk(
         digests = rules.get("digests", {})
         path_bearing = set(digests.get("path_bearing_operations", []))
         path_bearing_kinds = set(digests.get("path_bearing_observation_kinds", []))
-        walked = {}
+        walked: dict[str, Any] = {}
         for key, item in value.items():
             if key in drop:
                 continue
@@ -1402,14 +1402,12 @@ def _walk(
             walked["payload_digest"] = "<path-bearing>"
         if walked.get("kind") in path_bearing_kinds and "content_digest" in walked:
             walked["content_digest"] = "<path-bearing>"
-        if (
-            in_schema
-            and schema["sort_any_of"]
-            and isinstance(walked.get("anyOf"), list)
-        ):
-            walked["anyOf"] = sorted(
-                walked["anyOf"], key=lambda item: json.dumps(item, sort_keys=True)
-            )
+        if in_schema and schema["sort_any_of"]:
+            any_of = walked.get("anyOf")
+            if isinstance(any_of, list):
+                walked["anyOf"] = sorted(
+                    any_of, key=lambda item: json.dumps(item, sort_keys=True)
+                )
         return walked
     if isinstance(value, list):
         return [

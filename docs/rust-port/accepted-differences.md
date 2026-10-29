@@ -6,12 +6,13 @@ does not yet have the infrastructure they need. They are accepted until the
 named work item lands. A parity failure that is one of these is not a
 regression; any other divergence is.
 
-## A1 — scheduler (WI-2021)
+## A1 — watch schedule (WI-2021)
 
-The Python core runs a collector scheduler. The Rust core has no scheduler
-process, so sweep timing, the recheck interval and anything that exists only
-as a scheduled tick are Python-only. A caller still runs `sweep` itself on
-both cores.
+The collector schedule is ported: `vogt-core serve` sweeps every
+`sweep_interval_seconds` and then settles budget stops, unless `--no-schedule`
+or an interval of zero. The watch schedule is not. `evaluate_watches` is not
+ported, so `watch_interval_seconds` is unread and no watch loop runs. A caller
+still runs `sweep` itself on both cores.
 
 ## A2 — digest rows (WI-2022)
 

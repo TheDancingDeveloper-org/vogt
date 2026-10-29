@@ -474,6 +474,11 @@ fn budget_wire(budget: &SessionBudget) -> Value {
 /// object is the answer, even an empty one. Asked nothing, a worker running an
 /// agent template on a task gets the default, plus the project's whole-session
 /// wall clock when its policy sets one. Any other start gets none.
+/// Python `_CLAUDE_MODEL`: aliases and `claude-…` ids.
+fn is_claude_model(model: &str) -> bool {
+    matches!(model, "opus" | "sonnet" | "haiku" | "fable") || model.starts_with("claude-")
+}
+
 fn effective_budget(
     params: &StartSessionParams,
     policy: &crate::core::AgentPolicy,
@@ -2815,6 +2820,9 @@ where
     let profile = settings.profile(purpose).ok_or_else(|| {
         VogtError::InvalidRequest(format!("no dispatch profile for {}", py_repr(purpose)))
     })?;
+    // Sized by the model the start will run, the caller's or the profile's
+    // (Python `Profile.turns_for`). A Claude model on another agent's profile
+    // is switched to claude below, so the family is read after that decision.
     // A field is the caller's when it carries a value or an explicit null.
     let set = |name: &str, given: bool| given || params.explicit_null.contains(&name);
     let given = [
@@ -2836,6 +2844,14 @@ where
     if !caller("template") {
         filled.template = Some(profile.template.clone());
     }
+    // A Claude model on the profile's other agent never runs (WI-1852).
+    if caller("model")
+        && !caller("template")
+        && params.model.as_deref().is_some_and(is_claude_model)
+        && profile.template != "claude"
+    {
+        filled.template = Some("claude".to_string());
+    }
     if !caller("model") {
         filled.model = Some(profile.model.clone());
     }
@@ -2843,13 +2859,15 @@ where
         filled.effort = profile.effort.clone();
     }
     if !caller("budget") {
-        filled.budget = (profile.budget_turns.is_some()
-            || profile.budget_wall_clock_minutes.is_some())
-        .then(|| SessionBudget {
-            turns: profile.budget_turns,
-            wall_clock_minutes: profile.budget_wall_clock_minutes,
-            ..SessionBudget::default()
-        });
+        let turns = profile.turns_for(filled.model.as_deref());
+        filled.budget =
+            (turns.is_some() || profile.budget_wall_clock_minutes.is_some()).then(|| {
+                SessionBudget {
+                    turns,
+                    wall_clock_minutes: profile.budget_wall_clock_minutes,
+                    ..SessionBudget::default()
+                }
+            });
     }
     if !caller("worktree") {
         filled.worktree = Some(profile.worktree);

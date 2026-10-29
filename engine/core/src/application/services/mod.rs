@@ -154,4 +154,6 @@ where
 mod sessions_test;
 
 #[cfg(test)]
+mod budget_handoff_test;
+#[cfg(test)]
 mod handoff_test;

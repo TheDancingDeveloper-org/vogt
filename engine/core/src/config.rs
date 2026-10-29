@@ -375,11 +375,12 @@ pub struct VogtConfig {
 /// the GitHub rate-limit floor, GitHub App installation auth, the usage board
 /// (WI-2666), cold-wake compaction (WI-2588), the session-scratch project, the
 /// autopilot result-report gate, and `image_digest` on `instance.diagnostics`
-/// (WI-2666). The collector schedule reads `sweep_interval_seconds` and
-/// `watch_interval_seconds` (WI-2021); the watch loop itself waits on
-/// `evaluate_watches`, which is not ported.
+/// (WI-2666). The collector schedule reads `sweep_interval_seconds` (WI-2021).
+/// `watch_interval_seconds` stays unread: `evaluate_watches` is not ported, so
+/// no watch loop runs and nothing else reads the key.
 #[allow(dead_code)] // Read by the unread-key regression in this module's tests.
 pub const UNREAD_KEYS: &[(&str, &str)] = &[
+    ("watch_interval_seconds", "WI-2021"),
     ("forge_posture_interval_seconds", "WI-2021"),
     ("github_rate_limit_floor", "WI-2021"),
     ("github_app_installation_id", "WI-2021"),
@@ -2370,7 +2371,7 @@ mod tests {
     fn unread_keys_are_the_known_set() {
         assert_eq!(
             UNREAD_KEYS.len(),
-            13,
+            14,
             "a config key was added to UNREAD_KEYS; wire it, or this list is wrong"
         );
         let documented: std::collections::HashSet<&str> =

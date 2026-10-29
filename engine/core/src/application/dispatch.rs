@@ -51,6 +51,8 @@ pub struct Profile {
     pub model: String,
     pub effort: Option<String>,
     pub budget_turns: Option<i64>,
+    /// Turns by the model the start resolves to, over `budget_turns` (WI-1833).
+    pub budget_turns_by_model: std::collections::BTreeMap<String, i64>,
     pub budget_wall_clock_minutes: Option<i64>,
     pub worktree: bool,
     pub repo_map: bool,
@@ -73,6 +75,8 @@ pub struct ProfileOverride {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_turns: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_turns_by_model: Option<std::collections::BTreeMap<String, i64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_wall_clock_minutes: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -345,6 +349,7 @@ fn default_profiles() -> BTreeMap<String, Profile> {
         model: model.to_string(),
         effort: None,
         budget_turns: None,
+        budget_turns_by_model: std::collections::BTreeMap::new(),
         budget_wall_clock_minutes: None,
         worktree: false,
         repo_map: false,
@@ -356,6 +361,7 @@ fn default_profiles() -> BTreeMap<String, Profile> {
         "implement".to_string(),
         Profile {
             budget_turns: Some(120),
+            budget_turns_by_model: [("haiku".to_string(), 200)].into(),
             budget_wall_clock_minutes: Some(90),
             worktree: true,
             repo_map: true,
@@ -406,6 +412,30 @@ fn default_profiles() -> BTreeMap<String, Profile> {
     profiles
 }
 
+impl Profile {
+    /// The turn budget for a start that runs `model` (Python `Profile.turns_for`).
+    pub fn turns_for(&self, model: Option<&str>) -> Option<i64> {
+        let Some(model) = model else {
+            return self.budget_turns;
+        };
+        if let Some(turns) = self.budget_turns_by_model.get(model) {
+            return Some(*turns);
+        }
+        // A family name matches the model ids that carry it: `haiku` sizes
+        // `claude-haiku-4-5-20251001` too. The longest matching key wins.
+        let mut best: Option<&str> = None;
+        for key in self.budget_turns_by_model.keys() {
+            let family =
+                model.split('-').any(|part| part == key) || model.starts_with(&format!("{key}-"));
+            if family && best.is_none_or(|have| key.len() > have.len()) {
+                best = Some(key.as_str());
+            }
+        }
+        best.and_then(|key| self.budget_turns_by_model.get(key).copied())
+            .or(self.budget_turns)
+    }
+}
+
 /// The dispatch table from the stored `dispatch.*` values over the defaults.
 ///
 /// `stored` maps a key to its value; a missing or empty key is its default. A
@@ -450,6 +480,9 @@ fn merge(profile: &mut Profile, over: ProfileOverride) {
     }
     if let Some(turns) = over.budget_turns {
         profile.budget_turns = Some(turns);
+    }
+    if let Some(by_model) = over.budget_turns_by_model {
+        profile.budget_turns_by_model = by_model;
     }
     if let Some(minutes) = over.budget_wall_clock_minutes {
         profile.budget_wall_clock_minutes = Some(minutes);

@@ -852,6 +852,10 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
             wait_for_stop().await;
             let _ = stop_tx.send(true);
         });
+        // Built here, started only after the listener is bound and TLS is
+        // loaded. Starting first would sweep (and fail TLS) while the port
+        // was still closed, which Python does not: its lifespan starts the
+        // schedule once uvicorn has bound.
         let mut schedule = adapters::http::scheduler::CollectorSchedule::new(
             adapters::http::scheduler::serve_tick(config.clone()),
             if no_schedule {
@@ -860,12 +864,12 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 config.sweep_interval_seconds
             },
         );
-        // Read, not started: evaluate_watches is not ported. The read is what
-        // takes the key off the unread list.
-        let _watch_interval = adapters::http::scheduler::CollectorSchedule::watch_interval_seconds(
-            config.watch_interval_seconds,
-        );
-        schedule.start(stop_rx.clone());
+        // watch_interval_seconds is unread on purpose: evaluate_watches is not
+        // ported, so no watch loop is started and the key stays on UNREAD_KEYS.
+        // The schedule starts only after TLS has loaded and the listener has
+        // bound. A certificate that will not parse, or a port that will not
+        // bind, must not begin a sweep — Python starts its schedule in the
+        // lifespan, after uvicorn has bound.
         let outcome = match tls_cert {
             Some(pem) => {
                 let tls = load_tls(pem, tls_key)?;
@@ -880,13 +884,24 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                     let _ = notified(shutdown).await;
                     signal.graceful_shutdown(Some(SHUTDOWN_GRACE));
                 });
-                let serve = axum_server::bind_rustls(addr, tls)
-                    .handle(handle)
-                    .serve(router.into_make_service_with_connect_info::<SocketAddr>());
-                bounded_serve(serve, notified(stop_rx.clone()), SHUTDOWN_GRACE).await
+                // Bind the socket ourselves. `bind_rustls` only stores the
+                // address and binds inside `serve`, which is too late: the
+                // schedule must not start until the port is open.
+                let listener = std::net::TcpListener::bind(addr)?;
+                listener.set_nonblocking(true)?;
+                schedule.start(stop_rx.clone());
+                bounded_serve(
+                    axum_server::from_tcp_rustls(listener, tls)?
+                        .handle(handle)
+                        .serve(router.into_make_service_with_connect_info::<SocketAddr>()),
+                    notified(stop_rx.clone()),
+                    SHUTDOWN_GRACE,
+                )
+                .await
             }
             None => {
                 let listener = tokio::net::TcpListener::bind(addr).await?;
+                schedule.start(stop_rx.clone());
                 // `notified`, not `shutdown`: axum's graceful shutdown stops
                 // accepting and then drains with no bound of its own. Sleeping
                 // the grace inside that future would keep accepting for the
