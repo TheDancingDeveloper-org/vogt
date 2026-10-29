@@ -11,8 +11,13 @@
 // `resume_from` delta (`reset:false`) instead of a cold full snapshot.
 //
 // Design decisions:
-//   1. Warm up to `MAX_PREWARM_SESSIONS` (== `MAX_CACHED_SESSIONS`), most
-//      recently active first, each a single bounded warm attach.
+//   1. Warm up to `MAX_PREWARM_SESSIONS` (== `MAX_CACHED_SESSIONS`) in total
+//      per page load, most recently active first, each a single bounded warm
+//      attach. The cap is on the pass, not on each selection: sliding an
+//      8-window down a large roster is how a phone attached thousands of
+//      times a minute. Hibernated and exited sessions are never warmed (a
+//      hibernated attach returns a kept screen and closes immediately, and
+//      there is no live PTY to cache).
 //   2. Foreground preempts background. We deliberately do NOT touch the shared
 //      FIFO replay queue in `terminalReplay.ts`: a warm attach never writes to
 //      xterm, so it can never sit in that queue ahead of the pane the reader
@@ -24,7 +29,11 @@
 //      once (the outbound coalesce cap), and the gate is re-checked
 //      between every attach.
 //   4. Document visibility is respected: the loop pauses while hidden and is
-//      kicked again when the tab becomes visible.
+//      kicked again when the tab becomes visible. Visibility and
+//      foreground-idle kicks are debounced so a burst of them shares one pass.
+//   4b. Prewarm is off on a narrow viewport (the mobile breakpoint) and when
+//      the browser asks to save data. A phone cannot usefully hold eight
+//      terminal caches, and the roster walk is what made reconnects janky.
 //   5. Warm-up does not begin until after boot AND the active pane (if any) has
 //      finished its own replay — the active pane holds `foregroundReplayActive`
 //      until its snapshot completes, which keeps the loop paused until then.
@@ -40,7 +49,21 @@ import type { SessionSummary } from "./api";
 import { openAttach } from "./api";
 import { MAX_TERMINAL_CACHE_BYTES, saveTerminalCache } from "./terminalCache";
 import { sessionsStore } from "./store";
+import { NARROW_QUERY } from "./narrow";
 import { tabsStore } from "./tabs";
+
+/** The client facts that turn prewarm off. Testable without the coordinator. */
+export function readPrewarmEnvironment(): { narrow: boolean; saveData: boolean } {
+  const narrow =
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia(NARROW_QUERY).matches;
+  const connection = (
+    navigator as Navigator & { connection?: { saveData?: boolean } }
+  ).connection;
+  return { narrow, saveData: connection?.saveData === true };
+}
+
 
 /**
  * How many sessions to warm. Matches `MAX_CACHED_SESSIONS` in
@@ -54,6 +77,19 @@ const WARM_ATTACH_TIMEOUT_MS = 15_000;
 
 /** Politeness delay before the first warm attach after `start()`. */
 const START_DELAY_MS = 750;
+
+/**
+ * Coalesce visibilitychange and foreground-gate kicks. One pass covers a
+ * burst; we do not start a second walk because the tab flickered visible.
+ */
+const KICK_DEBOUNCE_MS = 250;
+
+/**
+ * Failed attaches still consume an attempt, so a roster of sessions that
+ * refuse the socket cannot spin. Successful warms are what count toward
+ * `limit`; attempts may go as far as twice that, then the pass stops.
+ */
+const MAX_ATTEMPTS_PER_LIMIT = 2;
 
 // ---------------------------------------------------------------------------
 // Foreground-replay gate. Shared module state so `Terminal.tsx` can pause the
@@ -100,6 +136,9 @@ export function resetForegroundReplayForTest(): void {
  * The sessions to warm, most-recently-active first, excluding those the reader
  * already opened and those already warmed, capped at `limit`. A session that
  * has exited is skipped: attaching to a dead PTY yields nothing worth caching.
+ * A hibernated session is skipped too: its attach returns the kept screen and
+ * closes immediately, so warming it writes nothing useful and still costs a
+ * socket.
  */
 export function selectPrewarmTargets(
   sessions: readonly SessionSummary[],
@@ -113,12 +152,26 @@ export function selectPrewarmTargets(
     .filter(
       (s) =>
         s.exit_code === null &&
+        s.activity !== "hibernated" &&
         !openSessionIds.has(s.id) &&
         !alreadyWarmed.has(s.id),
     )
     .sort((a, b) => recency(b) - recency(a))
     .slice(0, Math.max(0, limit))
     .map((s) => s.id);
+}
+
+/**
+ * Whether this client should prewarm at all. Narrow viewports (the same
+ * breakpoint as the mobile layout) and `navigator.connection.saveData` both
+ * turn it off: the cache only keeps eight panes, and a phone paying for every
+ * attach is the failure this cap exists to stop.
+ */
+export function prewarmEnabled(env: {
+  narrow: boolean;
+  saveData: boolean;
+}): boolean {
+  return !env.narrow && !env.saveData;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +306,11 @@ export interface PrewarmDeps {
   openSessionIds: () => ReadonlySet<string>;
   /** Whether the document is currently visible. */
   isVisible: () => boolean;
+  /**
+   * Whether prewarm is allowed on this client (wide viewport, not save-data).
+   * Defaults to allowed so unit tests that do not care stay on the warm path.
+   */
+  prewarmAllowed?: () => boolean;
   /** Whether a foreground pane is mid initial replay/attach. */
   foregroundActive: () => boolean;
   /** Perform one warm attach for a session. */
@@ -282,34 +340,51 @@ export function createPrewarmCoordinator(
   const limit = deps.limit ?? MAX_PREWARM_SESSIONS;
   const startDelayMs = deps.startDelayMs ?? START_DELAY_MS;
   const warmed = new Set<string>();
+  /** Ids whose warm attach cached a tail. Only these count toward `limit`. */
+  const succeeded = new Set<string>();
 
   let started = false;
   let stopped = false;
   let running: Promise<void> | null = null;
   let startTimer: ReturnType<typeof setTimeout> | null = null;
+  let kickTimer: ReturnType<typeof setTimeout> | null = null;
   let abort: AbortController | null = null;
+  // Page-load budget. A later kick must not start a fresh 2×limit walk.
+  let attempts = 0;
+
+  const allowed = (): boolean =>
+    deps.prewarmAllowed ? deps.prewarmAllowed() : true;
 
   const paused = (): boolean =>
-    stopped || !deps.isVisible() || deps.foregroundActive();
+    stopped || !allowed() || !deps.isVisible() || deps.foregroundActive();
 
   async function runPass(): Promise<void> {
     // Strictly sequential: one socket at a time, re-checking the gate between
     // every attach so a foreground open pauses the very next warm attach.
-    while (!paused()) {
+    // `limit` is the total for this page load, not the size of one selection.
+    // Selecting the next un-warmed slice and looping used to walk the whole
+    // roster (every exit_code===null session), which is the 1,596 attaches/min
+    // failure. Attempts are capped at 2×limit so failures cannot spin either.
+    const maxAttempts = Math.max(0, limit) * MAX_ATTEMPTS_PER_LIMIT;
+    while (!paused() && succeeded.size < limit && attempts < maxAttempts) {
+      const remaining = limit - succeeded.size;
       const targets = selectPrewarmTargets(
         deps.listSessions(),
         deps.openSessionIds(),
         warmed,
-        limit,
+        remaining,
       );
       const id = targets[0];
       if (id === undefined) break;
       // Mark before attaching so a concurrent selection cannot re-pick it and
-      // so a failed attach is not retried in a tight loop.
+      // so a failed attach is not retried in a tight loop. A failure still
+      // counts as an attempt; only a cached tail counts toward the cap.
       warmed.add(id);
+      attempts += 1;
       abort = new AbortController();
       try {
-        await deps.warmAttach(id, abort.signal);
+        const ok = await deps.warmAttach(id, abort.signal);
+        if (ok) succeeded.add(id);
       } catch {
         /* a warm attach never rejects, but never let one stall the pass */
       } finally {
@@ -318,11 +393,29 @@ export function createPrewarmCoordinator(
     }
   }
 
-  function kick(): void {
+  function kickNow(): void {
     if (!started || stopped || running || paused()) return;
     running = runPass().finally(() => {
       running = null;
+      // A kick that arrived while the pass was running is coalesced into one
+      // follow-up, still debounced, and still bounded by the same cap.
+      if (kickTimer !== null) {
+        clearTimeout(kickTimer);
+        kickTimer = setTimeout(() => {
+          kickTimer = null;
+          kickNow();
+        }, KICK_DEBOUNCE_MS);
+      }
     });
+  }
+
+  function kick(): void {
+    if (!started || stopped) return;
+    if (kickTimer !== null) clearTimeout(kickTimer);
+    kickTimer = setTimeout(() => {
+      kickTimer = null;
+      kickNow();
+    }, KICK_DEBOUNCE_MS);
   }
 
   function start(): void {
@@ -342,6 +435,10 @@ export function createPrewarmCoordinator(
     if (startTimer !== null) {
       clearTimeout(startTimer);
       startTimer = null;
+    }
+    if (kickTimer !== null) {
+      clearTimeout(kickTimer);
+      kickTimer = null;
     }
     abort?.abort();
   }
@@ -380,11 +477,12 @@ function defaultCoordinator(): PrewarmCoordinator {
     isVisible: () =>
       typeof document === "undefined" ||
       document.visibilityState === "visible",
+    prewarmAllowed: () => prewarmEnabled(readPrewarmEnvironment()),
     foregroundActive: foregroundReplayActive,
     warmAttach: warmAttachOnce,
   });
   // A foreground pane going idle, or the tab becoming visible, both re-open the
-  // gate — re-evaluate then.
+  // gate. `kick` debounces, so a burst of those events is one pass.
   foregroundIdleListeners.add(() => singleton?.kick());
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", () => {
