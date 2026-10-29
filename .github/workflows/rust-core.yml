@@ -164,6 +164,9 @@ jobs:
           esac
 
       - name: cargo deny
+        # deny.toml lives at the repo root and engine/ is the workspace that
+        # owns the lockfile. The step has to run there, as cargo audit does.
+        working-directory: engine
         run: cargo deny --all-features check
 
       - name: cargo audit
