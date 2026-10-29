@@ -4368,6 +4368,7 @@ dependencies = [
  "http-body",
  "libc",
  "openssl-probe 0.2.2",
+ "parking_lot",
  "portable-pty",
  "regex",
  "rsa",
