@@ -141,16 +141,11 @@ pub fn capabilities_for_scopes(scopes: &[String]) -> Vec<TokenCapability> {
 /// `git-write` reaches `POST /api/git/op` for the core's `session.commit_for`
 /// (C14); the handler lets this credential make a commit for a session and
 /// nothing else (WI-1255). Without it every commit_for was refused here.
-/// `assistant` is how the engine drives its own tool loop when the only
-/// credential is this secret (no break-glass `ENGINE_TOKEN`). The turn then
-/// offers the core's tools under this same bearer. It is not `vogt-write`:
-/// mutating Vogt routes through the front door stay refused.
-const STACK_SECRET_CAPABILITIES: [TokenCapability; 5] = [
+const STACK_SECRET_CAPABILITIES: [TokenCapability; 4] = [
     TokenCapability::Sessions,
     TokenCapability::History,
     TokenCapability::AgentClisWrite,
     TokenCapability::GitWrite,
-    TokenCapability::Assistant,
 ];
 
 pub struct AuthRuntime {
@@ -215,11 +210,10 @@ pub struct AuthorizedIdentity {
     /// The core scopes behind that, when the core resolved the caller.
     /// Empty for the two static credentials.
     pub scopes: Vec<String>,
-    /// The credential `/api/vogt` and the assistant present to the core on
-    /// this caller's behalf: the caller's own bearer when the core resolved
-    /// it, the stack secret for the break-glass token and for the stack
-    /// secret itself, `None` when there is nothing to present (a break-glass
-    /// token on a door with no stack secret).
+    /// The credential `/api/vogt` presents to the core on this caller's
+    /// behalf: the caller's own bearer when the core resolved it, the stack
+    /// secret for the break-glass token, `None` when there is nothing to
+    /// present (a break-glass token on a door with no stack secret).
     pub core_bearer: Option<String>,
     pub mutating_requests_per_minute: u32,
     /// Whether the bearer *was* the stack secret: vogt-core's own identity,
@@ -678,9 +672,9 @@ fn is_workspace_read(path: &str) -> bool {
 pub fn capability_refusal(access: &AuthorizedIdentity, required: TokenCapability) -> String {
     let who = if access.name == STACK_SECRET_NAME {
         "this credential is the stack secret (vogt-core's own identity), which \
-         may drive sessions, read history and run the assistant, but never \
-         writes to Vogt through the front door; use a core token instead (a \
-         session's own VOGT_HTTP_TOKEN, or one issued with `vogt token issue`)"
+         may drive sessions and read history but never writes to Vogt through \
+         the front door; use a core token instead (a session's own \
+         VOGT_HTTP_TOKEN, or one issued with `vogt token issue`)"
             .to_string()
     } else if access.scopes.is_empty() {
         format!("this credential ({}) carries no core scopes", access.name)
