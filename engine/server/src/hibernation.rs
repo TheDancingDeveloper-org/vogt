@@ -151,6 +151,12 @@ pub struct Record {
     /// onto a summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub economics: Option<String>,
+    /// Bytes of the kept screen at hibernation (WI-2692). A rail list reads
+    /// this instead of the screen file. Absent on a record written before
+    /// the field existed; the list then uses the file's metadata length,
+    /// never its contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_len: Option<u64>,
     /// The terminal size at hibernation, to render the kept screen with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
@@ -228,6 +234,7 @@ impl Record {
             superseded_by: None,
             hibernation: None,
             economics: None,
+            screen_len: None,
             rows: None,
             cols: None,
             blocked: None,
@@ -304,8 +311,17 @@ pub fn write_screen(state_dir: &Path, id: Uuid, bytes: &[u8]) -> std::io::Result
 }
 
 /// The kept output of a hibernated session; empty when there is none.
+/// The rail list must not call this: it uses [`screen_metadata_len`].
 pub fn read_screen(state_dir: &Path, id: Uuid) -> Vec<u8> {
     std::fs::read(screen_path(state_dir, id)).unwrap_or_default()
+}
+
+/// The screen file's length, or zero when there is no file. Never reads
+/// the bytes (WI-2692).
+pub fn screen_metadata_len(state_dir: &Path, id: Uuid) -> u64 {
+    std::fs::metadata(screen_path(state_dir, id))
+        .map(|m| m.len())
+        .unwrap_or(0)
 }
 
 pub fn remove_screen(state_dir: &Path, id: Uuid) {
