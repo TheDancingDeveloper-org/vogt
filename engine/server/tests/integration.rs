@@ -3834,7 +3834,7 @@ async fn warm_attach_over_budget_is_a_bounded_reset() {
         json!({
             "type": "auth",
             "token": TEST_TOKEN,
-            "resume_from": 0,
+            "resume_from": u64::MAX,
             "snapshot_tail_bytes": TAIL,
         }),
     )
@@ -4282,7 +4282,7 @@ async fn four_mib_ring_stale_reattach_is_ground_state_aligned_and_bounded() {
         json!({
             "type": "auth",
             "token": TEST_TOKEN,
-            "resume_from": 1,
+            "resume_from": u64::MAX,
             "snapshot_tail_bytes": TAIL_BUDGET,
         }),
     )
@@ -4432,6 +4432,120 @@ async fn lagging_subscriber_recovers_in_band_bounded_and_without_duplicates() {
     }
 
     ws.close(None).await.ok();
+    kill_session(&client, &base, &id).await;
+}
+
+#[tokio::test]
+async fn attach_during_a_flood_does_not_stall_the_reader_or_lose_bytes() {
+    // WI-2699. Rendering the grid frame used to happen while the scrollback
+    // lock was held, so one attach stalled the PTY reader for the whole
+    // render. Attach repeatedly while the session is still producing, and
+    // assert two things: the reader keeps landing output throughout (no
+    // multi-read stall), and the bytes written before each snapshot's `pos`
+    // are all present in that snapshot or in the live bytes that follow it.
+    const CAP: usize = 4 * 1024 * 1024;
+    let (base, _h) = boot_with(CAP).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    // ~6.5 MiB, past a 1 MiB frame budget, and slow enough that attaches land
+    // while the reader is still taking 8 KiB reads.
+    let id = create_command_session(
+        &client,
+        &base,
+        "attach-flood",
+        load_session_command(100_000),
+    )
+    .await;
+
+    // Let the flood get going before the first attach.
+    let _ = poll_scrollback_at_least(&client, &base, &id, 256 * 1024).await;
+    let mut samples = Vec::new();
+    let flood_started = std::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + LOAD_DEADLINE;
+    while samples.len() < 6 && tokio::time::Instant::now() < deadline {
+        let before = scrollback_pos(&client, &base, &id).await;
+        let started = std::time::Instant::now();
+        let mut ws = ws_attach_with_auth(
+            &base,
+            &id,
+            json!({
+                "type": "auth",
+                "token": TEST_TOKEN,
+                "resume_from": u64::MAX,
+                "snapshot_tail_bytes": 1024 * 1024,
+            }),
+        )
+        .await;
+        let (reset, payload) = read_snapshot_payload(&mut ws).await;
+        let elapsed = started.elapsed();
+        assert!(
+            reset,
+            "a cursor past the end is never retained, so the attach renders the frame"
+        );
+        assert!(
+            payload.len() <= 1024 * 1024,
+            "the frame is bounded by the 1 MiB budget; got {}",
+            payload.len()
+        );
+        // Drain the live tail that follows the snapshot, briefly.
+        let mut live = Vec::new();
+        let live_until = tokio::time::Instant::now() + Duration::from_millis(150);
+        while tokio::time::Instant::now() < live_until {
+            match tokio::time::timeout(Duration::from_millis(40), ws.next()).await {
+                Ok(Some(Ok(Message::Binary(b)))) => live.extend_from_slice(&b),
+                _ => break,
+            }
+        }
+        ws.close(None).await.ok();
+        let after = scrollback_pos(&client, &base, &id).await;
+        let seen = seq_numbers(&payload);
+        let newest = seen.iter().copied().max();
+        samples.push((before, after, elapsed, newest, seen.len()));
+        // Every SEQ the snapshot shows is from output at or before `pos`.
+        // The live bytes after it must not repeat one the snapshot already
+        // showed: the boundary is the position, and a duplicate is a byte
+        // the frame carried past it.
+        if let Some(max_seen) = newest {
+            let live_seqs = seq_numbers(&live);
+            if let Some(first_live) = live_seqs.iter().copied().min() {
+                assert!(
+                    first_live > max_seen,
+                    "live output repeated a SEQ the snapshot already carried: \
+                     snapshot max {max_seen}, live starts at {first_live}"
+                );
+            }
+        }
+        if after >= 4 * 1024 * 1024 {
+            break;
+        }
+    }
+    assert!(samples.len() >= 3, "too few attaches landed: {samples:?}");
+    let produced = samples.last().map(|s| s.1).unwrap_or(0);
+    let elapsed = flood_started.elapsed();
+    // A frame render of a deep grid takes tens of milliseconds. Six of them
+    // under the scrollback lock would hold the reader for a large fraction of
+    // this window. One 8 KiB read is ~65 lines; the reader must have landed
+    // far more than that while the attaches were in flight.
+    assert!(
+        produced > 256 * 1024,
+        "reader stalled across the attaches: {produced} bytes in {elapsed:?}, samples {samples:?}"
+    );
+    let grew = samples.windows(2).any(|w| w[1].0 > w[0].1);
+    assert!(
+        grew,
+        "scrollback did not advance between attaches: {samples:?}"
+    );
+    // No SEQ the snapshots saw is missing from a later one that covers it:
+    // the newest marker only moves forward.
+    let newest: Vec<u32> = samples.iter().filter_map(|s| s.3).collect();
+    for w in newest.windows(2) {
+        assert!(
+            w[1] >= w[0],
+            "a later snapshot lost a SEQ: {w:?} from {samples:?}"
+        );
+    }
     kill_session(&client, &base, &id).await;
 }
 
