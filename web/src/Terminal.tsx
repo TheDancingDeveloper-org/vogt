@@ -441,6 +441,9 @@ const TerminalView: Component<Props> = (props) => {
   // when serialization is unavailable or throws, so persistCache can fall back
   // to the raw ring.
   const trySerialize = (): string | null => {
+    // Pending live frames are already counted in outputPosition. Flush them
+    // first so the serialized screen matches that cursor.
+    liveWrites?.flush();
     if (!serializeAddon) return null;
     try {
       return serializeAddon.serialize({ scrollback: SERIALIZE_MAX_SCROLLBACK });
@@ -501,6 +504,9 @@ const TerminalView: Component<Props> = (props) => {
     const target = size.target();
     if (!term || !target) return;
     if (term.cols === target.cols && term.rows === target.rows) return;
+    // Flush first so bytes painted for the old size are parsed before the
+    // resize changes the grid they land on.
+    liveWrites?.flush();
     try {
       term.resize(target.cols, target.rows);
     } catch {
@@ -1182,6 +1188,8 @@ const TerminalView: Component<Props> = (props) => {
   function restoreCache(cached: TerminalCacheEntry, onDone: () => void): void {
     setStatusText("Restoring terminal...");
     if (typeof cached.serialized === "string") {
+      // A queued live frame belongs to the screen being replaced.
+      liveWrites?.cancel();
       term?.reset();
       cacheChunks = [];
       cacheBytes = 0;
@@ -1300,6 +1308,9 @@ const TerminalView: Component<Props> = (props) => {
               { kind: "snapshot" },
             );
             if (ctrl.reset !== false) {
+              // Drop frames queued before this snapshot so they cannot land
+              // ahead of the replay (a later rAF would otherwise write them).
+              liveWrites?.cancel();
               term?.reset();
               cacheChunks = [];
               cacheBytes = 0;
