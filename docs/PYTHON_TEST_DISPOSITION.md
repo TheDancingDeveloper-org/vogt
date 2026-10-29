@@ -39,7 +39,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_agent_ergonomics.py | ported | Registry aliases, the workflow walk, and summary mode in `registry.rs` and the work services. |
 | test_audit_query.py | ported | Audit filters in `storage/sqlite/declared.rs` and the audit service. |
 | test_auth.py | ported | `auth.rs` and `application/services/auth.rs`. |
-| test_benchmark.py | retired | Scale tripwire over the Python process. Not a behaviour assertion. |
+| test_benchmark.py | retired | Scale tripwire over the Python process. The cap itself is `the_backlog_is_capped_rather_than_unbounded` in `application/views.rs` (`RANKING_CANDIDATE_LIMIT`). The wall-clock suite is not re-run. |
 | test_board_honesty.py | ported | Board honesty reads in `application/views.rs`. |
 | test_board_paging.py | ported | Bounded board pages in `application/views.rs`. |
 | test_bootstrap_agent_token.py | ported | Agent-token adoption in `application/services/install.rs`. |
@@ -57,7 +57,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_checks.py | ported | CI-revision reads in the collectors and the project brief. |
 | test_ci_watch.py | ported | Watched-ref and deployed-version reads are in `application/deployed.rs`. The bound-branch announce is in `application/ci_watch.rs`: the feed event once per conclusion, staleness, the notice text, and the session nudge (notice, then Enter; none at a permission prompt). `test_a_sweep_announces_and_survives_an_announce_failure` is `a_failed_announce_does_not_fail_the_sweep` in `application/collect.rs`, driven by the `ci_watch::seam` failure switch. |
 | test_claim_check.py | unported | Completion claims checked against git and the forge are not yet in the Rust core. Deferred to WI-2588.
-| test_claude_profile.py | retired | `engine/deploy/claude-profile.sh` and `mcp-bootstrap.sh` (WI-1306, done). Shell in the engine image, not the core crate; the Python test keeps driving the scripts. Named accounts on `session.start` are a sessions concern and are tested with that service. |
+| test_claude_profile.py | retired | `engine/deploy/claude-profile.sh` and `mcp-bootstrap.sh` (WI-1306, done). Shell in the engine image, not the core crate; there is no Rust replacement for the script driver — the Python test remains the one that runs the shell. Named accounts on `session.start` are a sessions concern and are tested with that service. |
 | test_cli.py | ported | `adapters/cli.rs`. |
 | test_clone.py | ported | Clone service under `application/services`. |
 | test_cold_wake.py | unported | Cold-wake compaction decision is not yet in the Rust core. Deferred to WI-2588.
@@ -96,10 +96,10 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_http.py | ported | `adapters/http/app.rs` (status, etag, validation, openapi). |
 | test_import.py | ported | `application/services/project_import_test.rs`: `project.import` through a recording cloner (remote root-path containment for register, create and import; the default root and an explicit root; audited as an import; the duplicate slug refused before any clone; the ways a repository is named and the references refused; the required reason; consolidation under the stand-in forge with no write upstream; the invisible repository refused before a clone; the unconfigured adapter saying "not collected"), and `clone_repository` against a real local git (clone, reuse at parity, the dirty-tree and diverged-branch refusals, a different repository, a checkout with no origin, unrelated files, an empty destination, no token in the clone config and no helper left behind, no credential in a failure message). Not ported: the `subprocess.run` spies (git argv with no `fetch`/`merge`/`rebase`/`pull`/`stash` on a reuse, no `ls-remote` on a fresh clone, no token on any command line, a `which` that finds no git, a git that cannot execute), since `run_git` runs its fixed argument lists internally and has no seam. |
 | test_inbox_actors.py | ported | Inbox actor classification in the views service. |
-| test_inbox_cost.py | retired | Inbox cost ceiling against the Python process. A performance tripwire, not a behaviour the port re-pins in-process. |
+| test_inbox_cost.py | retired | Inbox cost ceiling. Behaviour is `inbox_reads_the_store_a_fixed_number_of_times_however_many_checks_fail`, `triage_for_a_page_is_one_lookup` and `a_batched_triage_lookup_survives_the_bound_parameter_ceiling` in `application/services/inbox.rs`. The 100k-row wall-clock suite is not re-run. |
 | test_initiative_projection.py | ported | Initiative ranking projection in `application/views.rs`. |
 | test_initiative_publish.py | ported | Initiative publish service. |
-| test_install.py | retired | Packaging and `uv` checks, plus pytest fixtures around `AppContext`. Install-mode product behaviour is ported in `application/services/install.rs`. The wheel and `uv` assertions are Python-specific and are not re-implemented. |
+| test_install.py | retired | Packaging and `uv` checks, plus pytest fixtures around `AppContext`. Install-mode product behaviour is `the_first_bootstrap_closes_the_door` and the rest of the `tests` module in `application/services/install.rs`. The wheel and `uv` assertions are Python-specific and are not re-implemented. |
 | test_instance_merge.py | ported | `merge.rs` and the import/merge service. |
 | test_lifecycle.py | ported | `application/services/lifecycle.rs`. |
 | test_lifecycle_runner.py | retired | `vogt-lifecycle.sh`. A shell runner, not the core crate. |
@@ -113,7 +113,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_mcp.py | ported | `adapters/mcp/framing.rs` and the MCP HTTP adapter. |
 | test_mcp_stdio.py | ported | MCP stdio serving in `main.rs` and `adapters/mcp`. |
 | test_metrics.py | ported | `adapters/http/metrics.rs` (WI-1080): the opt-in `VOGT_METRICS_ADDR` listener on its own port, wired into `serve`. Ported: nothing listens without the env, a bare port or a missing host is refused, every series carries `component="core"` under the stock process-exporter names (resident and virtual memory, CPU seconds, open fds, start time, read from `/proc/self`), a scrape is served and logs nothing, and a second start does not rebind. Python's `python_gc_*` series have no Rust counterpart. |
-| test_migration_freeze.py | retired | The pytest copy of the append-only migration freeze. The rule itself is ported in `storage/sqlite/migrator.rs`. |
+| test_migration_freeze.py | retired | The pytest copy of the append-only migration freeze. The rule is `shipped_migration_ids_are_an_append_only_prefix` in `storage/sqlite/migrator.rs`. |
 | test_migrations.py | ported | `storage/sqlite/migrator.rs` (order, checksum, lock, rollback, upgrade-with-data). |
 | test_mobile_identity.py | retired | Capacitor application id and the Android manifest. `mobile/`, not the core. |
 | test_native_migration.py | ported | Retire-by-marker in `storage/sqlite/declared.rs`. |
@@ -125,7 +125,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_place_metrics_cache.py | ported | `application/memo_test.rs` (WI-1054): the counts are shared across per-request contexts; a declared write, a rebuilt observed projection (`ObservedStore::latest_generation`) and an observed-side event each invalidate them; two data directories never share an answer; the key moves with each kind of change; a burst of callers costs one computation; a waiter takes only a computation that read the stores after it arrived; an answer `keep` refuses is asked for again (Python's provider-missing case, at the memo, since there is no monkeypatch to break `backlog`); the least recent stores are forgotten; the live Inbox half is read on every badge while the stored half is shared. Restore clears both memos. Not ported: the pooled read connections (`borrow_read`). Each Rust read opens its own rusqlite connection and is not serialised by a GIL. The engine's split read cap is engine-side and already on main. |
 | test_play_preflight.py | retired | `scripts/play_preflight.py` for the browser suite. `web/`, not the core. |
 | test_policy_conflicts.py | unported | Landing-rule contradiction reading is not yet in the Rust core. Deferred to WI-2588.
-| test_policy_hook.py | retired | `engine/deploy/policy-hook.sh` and `install-policy`, the PreToolUse hook driven through the real script. Shell, not the core crate; the policy decision it asks the engine for is tested with the engine policy route. |
+| test_policy_hook.py | retired | `engine/deploy/policy-hook.sh` and `install-policy`, the PreToolUse hook driven through the real script. Shell, not the core crate; there is no Rust replacement for the script driver. The decision the hook asks for is `allows_a_read`, `forbidden_text_matches_a_write_and_not_a_read` and `merge_is_always_refused` in `engine/server/src/policy.rs`. |
 | test_pr_work_item_edge.py | ported | `implemented_by` from pull requests, in forge sync and the work services. |
 | test_product_identity.py | retired | User-facing rename and legacy compatibility names across Python packaging. The Rust binary stays `vogt-core` for the overlap. |
 | test_product_version.py | ported | `VERSION` in `main.rs`. `scripts/check_product_version.py` keeps the fallback equal to `pyproject.toml`. |
