@@ -32,8 +32,11 @@ pub struct SessionHistory {
     /// Last on-disk footprint (db bytes, log file count, log bytes) and when
     /// it was taken. `/api/status` is polled; walking the log dir on every
     /// call is what it is not allowed to do (WI-2700).
-    disk_stats: parking_lot::Mutex<Option<(std::time::Instant, (u64, u64, u64))>>,
+    disk_stats: parking_lot::Mutex<Option<(std::time::Instant, DiskStats)>>,
 }
+
+/// db bytes, log file count, log bytes.
+type DiskStats = (u64, u64, u64);
 
 /// How long `/api/status` may report a cached on-disk footprint.
 pub const STORAGE_STATS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -460,7 +463,7 @@ impl SessionHistory {
 
     /// The db and log-dir footprint, rescanned off the runtime at most once
     /// per [`STORAGE_STATS_TTL`].
-    async fn disk_stats(&self) -> Result<(u64, u64, u64)> {
+    async fn disk_stats(&self) -> Result<DiskStats> {
         if let Some((at, stats)) = *self.disk_stats.lock() {
             if at.elapsed() < STORAGE_STATS_TTL {
                 return Ok(stats);
@@ -468,7 +471,7 @@ impl SessionHistory {
         }
         let db_path = self.db_path.clone();
         let log_dir = self.log_dir.clone();
-        let stats = tokio::task::spawn_blocking(move || -> Result<(u64, u64, u64)> {
+        let stats = tokio::task::spawn_blocking(move || -> Result<DiskStats> {
             let db_bytes = std::fs::metadata(&db_path)
                 .map(|meta| meta.len())
                 .unwrap_or(0);
