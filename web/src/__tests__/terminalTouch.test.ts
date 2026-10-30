@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   beginTerminalTouch,
+  startTerminalFling,
+  stepTerminalFling,
   moveTerminalTouch,
   TERMINAL_TOUCH_INTENT_PX,
   type TerminalTouchGesture,
@@ -36,11 +38,10 @@ function swipe(
 }
 
 describe("terminal touch arbitration", () => {
-  it("claims a vertical-leaning move from the very first pixel", () => {
-    // Below the intent threshold — the moves the old handler let through,
-    // and the moves an Android WebView needs to start a native pan.
+  it("claims nothing before the intent threshold, so a long-press can start", () => {
+    // The host's touch-action: none already stops a native pan (WI-2707).
     const { claims, gesture } = swipe([[100, 302], [101, 305]]);
-    expect(claims).toEqual([true, true]);
+    expect(claims).toEqual([false, false]);
     expect(gesture.axis).toBe("pending");
   });
 
@@ -119,4 +120,43 @@ it("routes a normal-buffer mouse-tracking application's swipe to wheel input", (
   const move = moveTerminalTouch(beginTerminalTouch(100, 100), 100, 160, CELL, "normal", true);
   expect(move.wheelLines).toBe(-3);
   expect(move.scrollLines).toBe(0);
+});
+
+describe("terminal fling (WI-2707)", () => {
+  function flick(dyPerMs: number, buffer: "normal" | "alternate" = "normal") {
+    let g = beginTerminalTouch(100, 300);
+    let t = 1000;
+    g = moveTerminalTouch(g, 100, 300, CELL, buffer, false, t).gesture;
+    for (let i = 1; i <= 5; i++) {
+      t += 16;
+      g = moveTerminalTouch(g, 100, 300 + dyPerMs * 16 * i, CELL, buffer, false, t).gesture;
+    }
+    return { g, t };
+  }
+
+  it("carries a fast normal-buffer flick on after release, decaying to a stop", () => {
+    const { g, t } = flick(-1.5); // finger up fast
+    let fling = startTerminalFling(g, t + 10, CELL, "normal");
+    expect(fling).not.toBeNull();
+    let total = 0;
+    let frames = 0;
+    while (fling && frames < 2000) {
+      const step = stepTerminalFling(fling, 16, CELL);
+      total += step.lines;
+      fling = step.fling;
+      frames++;
+    }
+    expect(fling).toBeNull();
+    expect(total).toBeGreaterThan(5); // toward newer output
+  });
+
+  it("does not fling the alternate screen, a slow drag, or a rested finger", () => {
+    const fast = flick(-1.5, "alternate");
+    expect(startTerminalFling(fast.g, fast.t, CELL, "alternate")).toBeNull();
+    const slow = flick(-0.1);
+    expect(startTerminalFling(slow.g, slow.t, CELL, "normal")).toBeNull();
+    const rested = flick(-1.5);
+    expect(startTerminalFling(rested.g, rested.t + 500, CELL, "normal")).toBeNull();
+    expect(startTerminalFling(rested.g, rested.t, CELL, "normal", true)).toBeNull();
+  });
 });
