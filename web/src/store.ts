@@ -356,6 +356,11 @@ function streamHealthy(): boolean {
   );
 }
 
+/** Whether the event stream is open and has spoken recently (WI-2328). */
+export function eventStreamHealthy(): boolean {
+  return streamHealthy();
+}
+
 /** When the pending connect was started, or null when none is pending. */
 let connectStartedAt: number | null = null;
 

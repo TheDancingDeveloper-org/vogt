@@ -96,6 +96,7 @@ import { ApiError } from "./api";
 import { openWorkItemTab } from "./tabs";
 import { ViewAgeBadge, createViewAge, honestyToneClass, onVogtLive } from "./viewAge";
 import { isCircuitOpen } from "./connectionHealth";
+import { eventStreamHealthy } from "./store";
 import { renderMarkdown } from "./markdown";
 import { MeasuredWindow } from "./measuredWindow";
 import SurfaceHeader from "./SurfaceHeader";
@@ -154,6 +155,27 @@ const CARD_SPACING_PX = 8;
 
 const POLL_CHOICES = [10, 20, 60, 0] as const;
 const DEFAULT_POLL_SECONDS = 20;
+
+/**
+ * Whether a poll tick should read the board (WI-2328). While the event stream
+ * is healthy it carries every change, so the poll is only the floor for a
+ * stream that died quietly: a tick then reads only once the view is two
+ * intervals old, which keeps the badge (stale at three) honest without a
+ * read every interval on every open tab.
+ */
+export function boardPollDue(input: {
+  hidden: boolean;
+  circuitOpen: boolean;
+  pending: boolean;
+  streamHealthy: boolean;
+  loadedAt: number | null;
+  now: number;
+  pollSeconds: number;
+}): boolean {
+  if (input.hidden || input.circuitOpen || input.pending) return false;
+  if (!input.streamHealthy || input.loadedAt === null) return true;
+  return input.now - input.loadedAt >= 2 * input.pollSeconds * 1000;
+}
 
 const LAYOUT_KEY = "vogt.boardLayout.v1";
 
@@ -1541,12 +1563,20 @@ const Board: Component<Props> = (props) => {
     if (seconds <= 0) return;
     const timer = window.setInterval(() => {
       // A hidden tab is not a view anybody is being misled by, and the
-      // visibility handler below reconciles the moment it comes back.
-      if (typeof document !== "undefined" && document.hidden) return;
-      // A dead connection is not hammered on the poll cadence: the transport
-      // breaker is open, so skip until the event stream has replaced it (#681).
-      if (isCircuitOpen()) return;
-      if (pending()) return; // never race a write the user is composing
+      // visibility handler below reconciles the moment it comes back. A dead
+      // connection is not hammered on the poll cadence (#681), a write the
+      // user is composing is never raced, and a healthy stream stands in for
+      // the poll (WI-2328).
+      const due = boardPollDue({
+        hidden: typeof document !== "undefined" && document.hidden,
+        circuitOpen: isCircuitOpen(),
+        pending: Boolean(pending()),
+        streamHealthy: eventStreamHealthy(),
+        loadedAt: loadedAt(),
+        now: Date.now(),
+        pollSeconds: seconds,
+      });
+      if (!due) return;
       if (filters().q.trim()) void loadSearch(0, false);
       else void loadItems(true);
     }, seconds * 1000);
