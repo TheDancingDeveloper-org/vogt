@@ -123,37 +123,65 @@ export async function loadTerminalCache(
   }
 }
 
+/**
+ * How a save ended. `stale` means the store already held this session at the
+ * same or a later offset, so the incoming record was dropped: worker writes,
+ * the pagehide flush, other tabs and pre-warm all race on one key, and the
+ * newest cursor must win regardless of commit order. A caller whose stream
+ * restarted passes `replace` to bypass the check.
+ */
+export type TerminalCacheSaveResult = "written" | "stale" | "failed";
+
 export async function saveTerminalCache(
   sessionId: string,
   outputPosition: number,
   payload: TerminalCachePayload,
-): Promise<void> {
+  replace = false,
+): Promise<TerminalCacheSaveResult> {
   if (typeof indexedDB === "undefined" || !Number.isSafeInteger(outputPosition)) {
-    return;
+    return "failed";
   }
   try {
     const db = await openCache();
     const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    const stored: TerminalCacheEntry =
-      "serialized" in payload
-        ? { sessionId, outputPosition, serialized: payload.serialized, updatedAt: Date.now() }
-        : { sessionId, outputPosition, data: payload.data.slice().buffer, updatedAt: Date.now() };
-    store.put(stored);
-
-    const entries = await requestResult(
-      store.index("updatedAt").getAllKeys() as IDBRequest<IDBValidKey[]>,
-    );
-    for (const stale of entries.slice(0, -MAX_CACHED_SESSIONS)) {
-      store.delete(stale);
-    }
-    await new Promise<void>((resolve, reject) => {
+    const committed = new Promise<void>((resolve, reject) => {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
     });
+    const store = tx.objectStore(STORE_NAME);
+    // Read and put in the same transaction, so no other writer can land
+    // between the offset check and the put.
+    const existing = await requestResult(
+      store.get(sessionId) as IDBRequest<TerminalCacheEntry | undefined>,
+    );
+    let result: TerminalCacheSaveResult = "stale";
+    // `replace` is a new stream for this session (a woken process, a server
+    // restart): its offsets restart at 0, so the old record must not win.
+    if (replace || !existing || !(existing.outputPosition >= outputPosition)) {
+      const stored: TerminalCacheEntry =
+        "serialized" in payload
+          ? { sessionId, outputPosition, serialized: payload.serialized, updatedAt: Date.now() }
+          : { sessionId, outputPosition, data: payload.data.slice().buffer, updatedAt: Date.now() };
+      store.put(stored);
+      result = "written";
+      const entries = await requestResult(
+        store.index("updatedAt").getAllKeys() as IDBRequest<IDBValidKey[]>,
+      );
+      for (const stale of entries.slice(0, -MAX_CACHED_SESSIONS)) {
+        store.delete(stale);
+      }
+    }
+    await committed;
     db.close();
-  } catch {
-    /* Cache failure should never prevent terminal attachment. */
+    return result;
+  } catch (err) {
+    // Cache failure must never prevent terminal attachment, but a full quota
+    // should be visible rather than silently swallowed.
+    console.warn("[vogt] terminal cache write failed", {
+      sessionId,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
+    return "failed";
   }
 }
