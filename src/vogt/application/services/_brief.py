@@ -195,7 +195,8 @@ def _landing_section(project: Project, item: WorkItem | None) -> list[str]:
     if item is not None and "-" in item.ref:
         number = item.ref.split("-", 1)[1]
     pattern = landing.branch_pattern.replace("{n}", number or "{n}")
-    lands_by = landing.worker_lands_by
+    # Prose for the brief, not the policy value: the Literal would reject it.
+    lands_by: str = landing.worker_lands_by
     if landing.graft is not None:
         graft = landing.graft
         lands_by = (
