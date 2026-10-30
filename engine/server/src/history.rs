@@ -230,10 +230,12 @@ impl SessionHistory {
     /// the file.
     pub async fn exec_and_close(&self, sql: &str) -> Result<()> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::ExecAndClose {
-            sql: sql.to_owned(),
-            reply,
-        })?;
+        self.writer
+            .enqueue(Write::ExecAndClose {
+                sql: sql.to_owned(),
+                reply,
+            })
+            .await?;
         history_writer::writer_reply(rx, "exec and close").await
     }
 
@@ -241,8 +243,23 @@ impl SessionHistory {
     /// do not wait out the coalesce interval.
     pub async fn flush_economics(&self) -> Result<usize> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::FlushEconomics { reply })?;
+        self.writer.enqueue(Write::FlushEconomics { reply }).await?;
         history_writer::writer_reply(rx, "flush economics").await
+    }
+
+    /// Flush coalesced economics, drain the queue and stop the writer task.
+    /// The graceful-shutdown path awaits this after `drain_to_history` so a
+    /// redeploy loses none of the last writes. A failure to stop cleanly is
+    /// logged, not returned: the process is exiting either way.
+    pub async fn shutdown(&self) {
+        let (reply, rx) = oneshot::channel();
+        if let Err(e) = self.writer.enqueue(Write::Shutdown { reply }).await {
+            tracing::warn!(error = %e, "history writer shutdown: enqueue failed");
+            return;
+        }
+        if rx.await.is_err() {
+            tracing::warn!("history writer shutdown: the writer stopped without replying");
+        }
     }
 
     /// Directory where per-session scrollback logs are persisted for replay.
@@ -337,11 +354,13 @@ impl SessionHistory {
     /// writer connection; see [`history_writer`] for the conflict rules.
     pub async fn archive_session(&self, record: ArchiveRecord) -> Result<()> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::Archive {
-            record: Box::new(record),
-            output: None,
-            reply,
-        })?;
+        self.writer
+            .enqueue(Write::Archive {
+                record: Box::new(record),
+                output: None,
+                reply,
+            })
+            .await?;
         history_writer::writer_reply(rx, "archive").await
     }
 
@@ -353,23 +372,27 @@ impl SessionHistory {
         conversation: Option<&vogt_engine_contract::AgentConversation>,
     ) -> Result<bool> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::SetIdentity {
-            id,
-            role,
-            conversation: conversation.cloned(),
-            reply,
-        })?;
+        self.writer
+            .enqueue(Write::SetIdentity {
+                id,
+                role,
+                conversation: conversation.cloned(),
+                reply,
+            })
+            .await?;
         history_writer::writer_reply(rx, "identity").await
     }
 
     /// Set or clear a session row's work item (WI-998).
     pub async fn set_work_item(&self, id: Uuid, work_item: Option<&str>) -> Result<bool> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::SetWorkItem {
-            id,
-            work_item: work_item.map(str::to_owned),
-            reply,
-        })?;
+        self.writer
+            .enqueue(Write::SetWorkItem {
+                id,
+                work_item: work_item.map(str::to_owned),
+                reply,
+            })
+            .await?;
         history_writer::writer_reply(rx, "work item").await
     }
 
@@ -383,11 +406,13 @@ impl SessionHistory {
     /// row that does not exist yet updates nothing when the batch commits.
     pub async fn set_economics(&self, id: Uuid, economics: &str) -> Result<bool> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::SetEconomics {
-            id,
-            economics: economics.to_owned(),
-            reply,
-        })?;
+        self.writer
+            .enqueue(Write::SetEconomics {
+                id,
+                economics: economics.to_owned(),
+                reply,
+            })
+            .await?;
         history_writer::writer_reply(rx, "economics").await
     }
 
@@ -480,11 +505,13 @@ impl SessionHistory {
     /// Replace indexed output for a session, on the writer connection.
     pub async fn replace_index_output(&self, session_id: Uuid, output: &str) -> Result<()> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::ReplaceIndex {
-            id: session_id,
-            output: output.to_owned(),
-            reply,
-        })?;
+        self.writer
+            .enqueue(Write::ReplaceIndex {
+                id: session_id,
+                output: output.to_owned(),
+                reply,
+            })
+            .await?;
         history_writer::writer_reply(rx, "index").await
     }
 
@@ -495,11 +522,13 @@ impl SessionHistory {
         output: &str,
     ) -> Result<()> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::Archive {
-            record: Box::new(record),
-            output: Some(output.to_owned()),
-            reply,
-        })?;
+        self.writer
+            .enqueue(Write::Archive {
+                record: Box::new(record),
+                output: Some(output.to_owned()),
+                reply,
+            })
+            .await?;
         history_writer::writer_reply(rx, "archive with output").await
     }
 
@@ -514,18 +543,20 @@ impl SessionHistory {
     /// written before `booted_at`.
     pub async fn backfill_orphaned_logs_before(&self, booted_at: OffsetDateTime) -> Result<usize> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::Backfill {
-            booted_at,
-            log_dir: self.log_dir.clone(),
-            reply,
-        })?;
+        self.writer
+            .enqueue(Write::Backfill {
+                booted_at,
+                log_dir: self.log_dir.clone(),
+                reply,
+            })
+            .await?;
         history_writer::writer_reply(rx, "backfill").await
     }
 
     /// Close out rows a previous engine process left unfinished.
     pub async fn reconcile_unfinished(&self) -> Result<usize> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::Reconcile { reply })?;
+        self.writer.enqueue(Write::Reconcile { reply }).await?;
         history_writer::writer_reply(rx, "reconcile").await
     }
 
@@ -604,17 +635,19 @@ impl SessionHistory {
     /// Clean up old sessions beyond the retention period, on the writer.
     pub async fn cleanup_old_sessions(&self, retention_days: u32) -> Result<usize> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::Cleanup {
-            retention_days,
-            reply,
-        })?;
+        self.writer
+            .enqueue(Write::Cleanup {
+                retention_days,
+                reply,
+            })
+            .await?;
         history_writer::writer_reply(rx, "cleanup").await
     }
 
     /// Delete archived metadata, searchable output, and the raw log.
     pub async fn delete_session(&self, id: Uuid) -> Result<bool> {
         let (reply, rx) = oneshot::channel();
-        self.writer.enqueue(Write::Delete { id, reply })?;
+        self.writer.enqueue(Write::Delete { id, reply }).await?;
         history_writer::writer_reply(rx, "delete").await
     }
 }
@@ -1069,5 +1102,72 @@ mod tests {
         );
         assert!(!listed.is_empty());
         burst.await.unwrap();
+    }
+
+    /// A shutdown flushes coalesced economics, drains the queue and stops
+    /// the writer — the graceful-shutdown path loses no pending snapshot.
+    #[tokio::test]
+    async fn shutdown_flushes_pending_economics() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = SessionHistory::new(dir.path()).await.unwrap();
+        let id = Uuid::new_v4();
+        history
+            .archive_session(archive_row(id, "shut"))
+            .await
+            .unwrap();
+        assert!(history.set_economics(id, r#"{"turns":3}"#).await.unwrap());
+        history.shutdown().await;
+        assert_eq!(
+            read_economics(&history, id).await.as_deref(),
+            Some(r#"{"turns":3}"#),
+            "the shutdown flushed the coalesced snapshot"
+        );
+    }
+
+    /// An economics flush that fails before an archive is logged and does
+    /// not stop the archive: the row is still written.
+    #[tokio::test]
+    async fn a_failed_economics_write_still_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = SessionHistory::new(dir.path()).await.unwrap();
+        let id = Uuid::new_v4();
+        history
+            .archive_session(archive_row(id, "econ-fail"))
+            .await
+            .unwrap();
+        assert!(history.set_economics(id, r#"{"turns":1}"#).await.unwrap());
+        // Fail every economics UPDATE while leaving INSERT alone. A trigger
+        // is the deterministic way to fail exactly that one statement; a
+        // dropped column or closed database would fail the archive too.
+        // Create it on a writable connection: the session-history read pool
+        // is read-only.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(dir.path().join("history.db"))
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_econ BEFORE UPDATE OF economics ON sessions \
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Delete the provisional row so the next archive is an INSERT, not
+        // the upsert — the upsert also touches economics and would fail.
+        history.delete_session(id).await.unwrap();
+        let mut record = archive_row(id, "econ-fail");
+        record.ended_at = Some(OffsetDateTime::now_utc());
+        history
+            .archive_session(record)
+            .await
+            .expect("the archive still lands when the coalesced economics write fails");
+        let row = history.get_session(id).await.unwrap();
+        assert_eq!(row.name, "econ-fail");
+        assert!(row.ended_at.is_some(), "the archive row was written");
     }
 }
