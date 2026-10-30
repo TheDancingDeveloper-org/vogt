@@ -38,6 +38,15 @@ export interface WakeTelemetry {
 }
 
 const DEBOUNCE_MS = 250;
+/**
+ * A lifecycle wake this soon after the previous one, with no hidden spell in
+ * between, is the same return to the front arriving late: Android delivers
+ * resume, visibilitychange and window focus spread over several hundred ms,
+ * and the focus that lands past the debounce used to tear the event stream
+ * down a second time.
+ */
+export const FOLD_WINDOW_MS = 2_000;
+const FOLDABLE: ReadonlySet<WakeReason> = new Set(["visibility", "focus", "resume"]);
 const LOG_LIMIT = 50;
 let nextToken = 0;
 let pendingReason: WakeReason | null = null;
@@ -46,6 +55,9 @@ let pendingHiddenMs = 0;
 let hiddenSince: number | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let latest: Wake | null = null;
+/** Bumped on every hidden edge; a wake only folds into one of its own epoch. */
+let visibilityEpoch = 0;
+let latestEpoch = -1;
 
 const listeners = new Set<(wake: Wake) => void>();
 const visibilityListeners = new Set<(visible: boolean) => void>();
@@ -68,7 +80,20 @@ function emit(): void {
   pendingHiddenMs = 0;
   if (!reason || !visible()) return;
 
-  const wake: Wake = { token: ++nextToken, reason, at: Date.now(), hiddenMs };
+  const now = Date.now();
+  if (
+    FOLDABLE.has(reason)
+    && latest !== null
+    && latestEpoch === visibilityEpoch
+    && now - latest.at < FOLD_WINDOW_MS
+    // A burst that carries the hidden spell the previous wake missed is the
+    // real return, not an echo of it.
+    && !(hiddenMs > 0 && latest.hiddenMs === 0)
+  ) {
+    return;
+  }
+  latestEpoch = visibilityEpoch;
+  const wake: Wake = { token: ++nextToken, reason, at: now, hiddenMs };
   latest = wake;
   telemetry.push({ token: wake.token, reason, at: wake.at, resources: [] });
   if (telemetry.length > LOG_LIMIT) telemetry.shift();
@@ -148,7 +173,8 @@ export function reconcile<T>(
 }
 
 /**
- * Drop a wake that is still inside its debounce window. Tests only: the
+ * Drop a wake that is still inside its debounce window, and forget the last
+ * wake so the next one is never folded into another test's. Tests only: the
  * coordinator is module state, so a wake a test noted just before it ended
  * would otherwise fire inside the next test, against surfaces that test
  * mounted (the live.test backlog flake, WI-1886).
@@ -158,6 +184,8 @@ export function cancelPendingWakeForTests(): void {
   timer = null;
   pendingReason = null;
   pendingHiddenMs = 0;
+  latest = null;
+  latestEpoch = -1;
 }
 
 /** Last fifty wakes, useful when diagnosing a resume stall from the console. */
@@ -169,6 +197,7 @@ if (typeof document !== "undefined") {
     const isVisible = document.visibilityState === "visible";
     for (const listener of visibilityListeners) listener(isVisible);
     if (!isVisible) {
+      if (hiddenSince === null) visibilityEpoch += 1;
       hiddenSince ??= Date.now();
       return;
     }

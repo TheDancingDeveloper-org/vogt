@@ -9,7 +9,8 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
 import { attachWebglRenderer } from "./terminalRenderer";
 import { createTerminalWriteCoalescer, type TerminalWriteCoalescer } from "./terminalWriteCoalesce";
-import { openAttach } from "./api";
+import { openAttach, reportAuthResponse } from "./api";
+import { recheckAuth } from "./authRecheck";
 import type { RuntimeSocket } from "./runtimeTransport";
 import { readClipboardText, writeClipboardText } from "./clipboard";
 import { decodeOsc52 } from "./terminalClipboard";
@@ -96,9 +97,12 @@ import {
 import { installTerminalSymbolFonts } from "./terminalSymbolFonts";
 import Dialog from "./Dialog";
 import {
+  classifyClose,
   formatQueuedBytes,
   formatReconnectStatus,
+  RECONNECT_GAVE_UP,
   ReconnectTracker,
+  RETURN_QUIET_MS,
 } from "./terminalReconnect";
 import { applyStickyMods } from "./terminalModifiers";
 import { isBehindLiveTail } from "./terminalScrollState";
@@ -300,8 +304,21 @@ const TerminalView: Component<Props> = (props) => {
   // The interactive reconnect overlay. Non-null only while we are between a
   // dropped socket and the next successful attach.
   const [reconnectView, setReconnectView] = createSignal<
-    { attempt: number; nextInSec: number } | null
+    { attempt: number; nextInSec: number; gaveUp?: boolean } | null
   >(null);
+  // True while the document is hidden and for RETURN_QUIET_MS after it comes
+  // back. A socket the phone killed in the background is reconnected on
+  // return; flashing the outage overlay or writing [disconnected] for it only
+  // told the reader about a drop they never saw.
+  const [outageQuiet, setOutageQuiet] = createSignal(document.visibilityState === "hidden");
+  let quietTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The socket closed while the pane was hidden or dormant. Nothing retries
+   * in the background; the next visible transition attaches again.
+   */
+  let socketDead = false;
+  /** A 4401 was already re-checked in this outage: a second one stops. */
+  let authRechecked = false;
   const [queuedBytes, setQueuedBytes] = createSignal(0);
   // Touch copy chip: on a coarse pointer there is no right-click and iOS
   // Safari fires no contextmenu on a long-press, so a live selection surfaces a
@@ -1109,12 +1126,24 @@ const TerminalView: Component<Props> = (props) => {
     });
 
     const visibilityCleanup = onPageVisibility((visible) => {
+      if (quietTimer !== null) clearTimeout(quietTimer);
+      quietTimer = null;
       if (visible) {
         if (hiddenTimer !== null) clearTimeout(hiddenTimer);
         hiddenTimer = null;
         setHiddenParked(false);
+        if (outageQuiet()) {
+          quietTimer = setTimeout(() => {
+            quietTimer = null;
+            setOutageQuiet(false);
+          }, RETURN_QUIET_MS);
+        }
+        // Not left to the debounced wake: that one can be folded, and the
+        // reader is looking at a dead pane until it runs.
+        reviveDeadSocket();
         return;
       }
+      setOutageQuiet(true);
       if (hiddenTimer === null) {
         hiddenTimer = setTimeout(() => {
           hiddenTimer = null;
@@ -1212,6 +1241,7 @@ const TerminalView: Component<Props> = (props) => {
     if (destroyed || reconnectTimer !== null) return;
     if (isSessionGone()) { markSessionGone(); return; }
     const snap = reconnect.scheduleAttempt();
+    if (snap.exhausted) { giveUp(); return; }
     const delay = overrideDelayMs ?? snap.delayMs;
     reconnectAt = Date.now() + delay;
     // The interactive overlay owns this window; hand it the attempt count and a
@@ -1230,9 +1260,65 @@ const TerminalView: Component<Props> = (props) => {
     }, delay);
   }
 
+  /** Stop retrying on our own; the overlay offers an explicit Retry. */
+  function giveUp() {
+    if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    clearCountdown();
+    setStatusText(null);
+    setReconnectView({ attempt: reconnect.attempts, nextInSec: 0, gaveUp: true });
+  }
+
+  /**
+   * 4401: the engine refused the credential. Look once with the shared
+   * re-check; a confirmed refusal goes to the sign-in gate, a kept one gets a
+   * single retry. A second refusal in the same outage stops instead of
+   * looping attach, refuse, re-check.
+   */
+  function handleAuthClose() {
+    if (authRechecked) { giveUp(); return; }
+    authRechecked = true;
+    setReconnectView(null);
+    setStatusText("Checking sign-in...");
+    void recheckAuth().then((outcome) => {
+      if (destroyed || ws !== null) return;
+      if (outcome === "confirmed") {
+        setStatusText("Signed out");
+        reportAuthResponse(401, "terminal attach refused", true);
+        return;
+      }
+      scheduleReconnect();
+    });
+  }
+
+  /** Attach again after a socket that died while hidden or dormant. */
+  function reviveDeadSocket() {
+    if (!socketDead || destroyed || !readyToConnect() || isParked()) return;
+    if (socketParked || hibernated || sessionGone) { socketDead = false; return; }
+    socketDead = false;
+    if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    clearCountdown();
+    if (socketDormant) {
+      // Draw what the socket delivered before it died, then attach from the
+      // position after it, so the delta is neither lost nor drawn twice.
+      resumeDormant();
+      const pending = replay;
+      if (pending) {
+        void pending.done.then(() => {
+          if (!destroyed && !isParked() && ws === null) connect();
+        });
+        return;
+      }
+    }
+    connect();
+  }
+
   function retryNow() {
     if (destroyed) return;
     if (isSessionGone()) { markSessionGone(); return; }
+    if (reconnectView()?.gaveUp) {
+      reconnect.restartAttempts();
+      authRechecked = false;
+    }
     if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     clearCountdown();
     connect();
@@ -1331,11 +1417,13 @@ const TerminalView: Component<Props> = (props) => {
         /* already closing */
       }
     }
+    socketDead = false;
     const socket = openAttach(props.sessionId, outputPosition);
     ws = socket;
     socket.addEventListener("open", () => {
       if (ws !== socket) return;
       reconnect.recover();
+      authRechecked = false;
       watchdog.reset();
       startWatchdog();
       sendResize();
@@ -1529,18 +1617,43 @@ const TerminalView: Component<Props> = (props) => {
         liveWrites?.push(buf);
       }
     });
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (ev: Event) => {
       if (ws !== socket) return;
       stopWatchdog();
-      if (socketParked || isParked()) return;
+      if (socketParked) return;
       if (hibernated) {
         ws = null;
         return;
       }
+      const { code = 1006, reason = "" } = ev as Partial<CloseEvent>;
+      const action = classifyClose(code, reason);
+      if (action === "gone") {
+        ws = null;
+        markSessionGone();
+        return;
+      }
+      if (action === "auth") {
+        ws = null;
+        handleAuthClose();
+        return;
+      }
+      // Hidden or dormant: the phone killed the socket in the background.
+      // Retrying now is throttled and invisible; mark it dead and attach on
+      // the next visible transition instead.
+      if (isParked() || document.visibilityState === "hidden") {
+        ws = null;
+        socketDead = true;
+        return;
+      }
+      if (action === "immediate") {
+        scheduleReconnect(0);
+        return;
+      }
       // Write the [disconnected] marker once at the start of the outage, not on
       // every retry, and never through appendToCache — it is a live hint, not
-      // part of the replayable scrollback.
-      if (!inSnapshot) {
+      // part of the replayable scrollback. A drop inside the quiet window just
+      // after a return is reconnected without one.
+      if (!inSnapshot && !outageQuiet()) {
         const { writeMarker } = reconnect.beginOutage();
         if (writeMarker) {
           liveWrites?.flush();
@@ -1692,8 +1805,11 @@ const TerminalView: Component<Props> = (props) => {
     // past its timer — buffers without rendering, and only while a dormant
     // slot is free. Past the budget it parks exactly as before.
     if (!isParked()) {
-      if (socketDormant) resumeDormant();
-      resumeSocket();
+      if (socketDead) reviveDeadSocket();
+      else {
+        if (socketDormant) resumeDormant();
+        resumeSocket();
+      }
     } else if (hiddenParked() || props.parked) {
       goDormant();
     }
@@ -1714,6 +1830,7 @@ const TerminalView: Component<Props> = (props) => {
 
   onCleanup(() => {
     destroyed = true;
+    if (quietTimer !== null) clearTimeout(quietTimer);
     exitForegroundReplay();
     replay?.cancel();
     pendingInput = [];
@@ -1822,11 +1939,13 @@ const TerminalView: Component<Props> = (props) => {
             </button>
           )}
         </Show>
-        <Show when={reconnectView()}>
+        <Show when={!outageQuiet() || reconnectView()?.gaveUp ? reconnectView() : null}>
           {(info) => (
             <div class="terminal-status-overlay terminal-reconnect-overlay" role="status">
               <span class="terminal-reconnect-line">
-                {formatReconnectStatus(info().attempt, info().nextInSec)}
+                {info().gaveUp
+                  ? RECONNECT_GAVE_UP
+                  : formatReconnectStatus(info().attempt, info().nextInSec)}
               </span>
               <Show when={queuedBytes() > 0}>
                 <span class="terminal-reconnect-queued">
@@ -1838,7 +1957,7 @@ const TerminalView: Component<Props> = (props) => {
                 class="terminal-reconnect-retry"
                 onClick={() => retryNow()}
               >
-                Retry now
+                {info().gaveUp ? "Retry" : "Retry now"}
               </button>
             </div>
           )}
