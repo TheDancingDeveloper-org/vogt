@@ -340,9 +340,16 @@ jobs:
             if docker exec voice-smoke curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
               ready=1; break
             fi
+            # A crashed sidecar (e.g. SIGILL from a wrong-CPU build) never
+            # becomes healthy: fail now with its exit status, not after 6 min.
+            [ "$(docker inspect -f '{{.State.Running}}' voice-smoke)" = true ] || break
             sleep 2
           done
-          [ -n "$ready" ] || { echo "voice sidecar never became healthy" >&2; exit 1; }
+          if [ -z "$ready" ]; then
+            echo "voice sidecar never became healthy" >&2
+            docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' voice-smoke >&2 || true
+            exit 1
+          fi
 
           # The OpenAI sidecar contract advertises both halves.
           models="$(docker exec voice-smoke curl -fsS http://127.0.0.1:8000/v1/models)"
