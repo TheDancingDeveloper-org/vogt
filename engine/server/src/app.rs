@@ -712,6 +712,10 @@ pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
             // archived to history as before.
             drain_state.sessions.hibernate_for_shutdown().await;
             drain_state.sessions.drain_to_history().await;
+            // Stop the history writer last: it flushes the economics
+            // snapshots coalesced during the drain and drains the queue,
+            // so no history write is lost to the redeploy.
+            drain_state.sessions.shutdown_history().await;
         })
         .await
 }

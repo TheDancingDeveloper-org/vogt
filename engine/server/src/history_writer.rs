@@ -27,9 +27,14 @@ use crate::history::{ArchiveRecord, END_ENGINE_RESTART};
 /// How long a coalesced economics snapshot waits before it is written.
 pub const ECONOMICS_COALESCE: Duration = Duration::from_secs(5);
 
-/// Bound on the writer queue. A full queue fails the enqueue immediately;
-/// a handler never blocks on it.
+/// Bound on the writer queue. A full queue applies backpressure: the
+/// enqueue waits for the writer to drain, up to [`ENQUEUE_TIMEOUT`].
 pub const WRITER_QUEUE: usize = 256;
+
+/// How long an enqueue waits for a full queue to drain before reporting
+/// the writer as stuck. Awaiting callers (the PTY reader, the economics
+/// tailer, request handlers) block on this; they never drop a write.
+pub const ENQUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub enum Write {
     Archive {
@@ -83,6 +88,10 @@ pub enum Write {
     FlushEconomics {
         reply: oneshot::Sender<Result<usize>>,
     },
+    /// Flush coalesced economics, drain every queued write, reply, then
+    /// stop the task. The graceful-shutdown path awaits one after
+    /// `drain_to_history` so a redeploy loses none of the last writes.
+    Shutdown { reply: oneshot::Sender<()> },
     /// Run one statement on the writer connection, then close it. The
     /// startup-reconcile test uses this to drop a column the way an older
     /// engine would have, and to make sure nothing is still writing.
@@ -95,26 +104,43 @@ pub enum Write {
 #[derive(Clone)]
 pub struct HistoryWriter {
     tx: mpsc::Sender<Write>,
+    enqueue_timeout: Duration,
 }
 
 impl HistoryWriter {
     pub fn spawn(conn: SqliteConnection, log_dir: PathBuf) -> Self {
-        let (tx, rx) = mpsc::channel(WRITER_QUEUE);
+        Self::spawn_with(conn, log_dir, WRITER_QUEUE, ENQUEUE_TIMEOUT)
+    }
+
+    fn spawn_with(
+        conn: SqliteConnection,
+        log_dir: PathBuf,
+        capacity: usize,
+        enqueue_timeout: Duration,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(capacity);
         tokio::spawn(async move {
             run(conn, log_dir, rx).await;
         });
-        Self { tx }
+        Self {
+            tx,
+            enqueue_timeout,
+        }
     }
 
-    pub fn enqueue(&self, write: Write) -> Result<()> {
-        self.tx.try_send(write).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => {
-                ApiError::Internal("history writer queue is full".into())
-            }
-            mpsc::error::TrySendError::Closed(_) => {
-                ApiError::Internal("history writer has stopped".into())
-            }
-        })
+    /// Enqueue a write. A full queue backpressures — the enqueue waits for
+    /// the writer to drain, bounded by this writer's enqueue timeout —
+    /// rather than dropping the write. A writer that has stopped answers
+    /// immediately.
+    pub async fn enqueue(&self, write: Write) -> Result<()> {
+        tokio::time::timeout(self.enqueue_timeout, self.tx.send(write))
+            .await
+            .map_err(|_| {
+                ApiError::Internal(
+                    "history writer enqueue timed out: the writer is not draining".into(),
+                )
+            })?
+            .map_err(|_| ApiError::Internal("history writer has stopped".into()))
     }
 }
 
@@ -143,6 +169,28 @@ async fn run(mut conn: SqliteConnection, log_dir: PathBuf, mut rx: mpsc::Receive
             biased;
             msg = rx.recv() => {
                 let Some(msg) = msg else { break };
+                if let Write::Shutdown { reply } = msg {
+                    flush_economics(&mut conn, &mut pending).await;
+                    // Drain every write already queued behind the Shutdown:
+                    // a handler that enqueued before the shutdown signal
+                    // must not lose its reply. `close` stops new sends so
+                    // `recv` ends once the queue is empty.
+                    rx.close();
+                    while let Some(queued) = rx.recv().await {
+                        if let Write::Shutdown { reply: later } = queued {
+                            // A second shutdown is a no-op; unblock its
+                            // waiter too.
+                            let _ = later.send(());
+                            continue;
+                        }
+                        if handle(&mut conn, &log_dir, &mut pending, queued).await {
+                            break;
+                        }
+                    }
+                    flush_economics(&mut conn, &mut pending).await;
+                    let _ = reply.send(());
+                    break;
+                }
                 if handle(&mut conn, &log_dir, &mut pending, msg).await {
                     break;
                 }
@@ -176,12 +224,15 @@ async fn handle(
             // a pending snapshot is newer than the column.
             if let Some(waiting) = pending.remove(&id) {
                 // The reply was already sent when the snapshot was queued.
-                // A failed flush is logged by the statement error path below
-                // only when this call returns Err; swallow it into the
-                // archive result so the row is still written.
+                // A failed flush is lost — the economics tailer re-sends the
+                // next snapshot — but it must not stop the archive: log the
+                // lost snapshot and still write the row.
                 if let Err(e) = apply_economics(conn, id, &waiting.economics).await {
-                    let _ = reply.send(Err(e));
-                    return false;
+                    tracing::warn!(
+                        session = %id,
+                        error = %e,
+                        "history: flushing coalesced economics before the archive failed; archiving anyway"
+                    );
                 }
             }
             let result = archive(conn, *record).await.and(match output {
@@ -250,6 +301,13 @@ async fn handle(
             let n = flush_economics(conn, pending).await;
             let _ = reply.send(Ok(n));
         }
+        Write::Shutdown { reply } => {
+            // The writer loop intercepts Shutdown before `handle` so it can
+            // drain the queue; reaching this arm means the message arrived
+            // while draining. Unblock the waiter and stop.
+            let _ = reply.send(());
+            return true;
+        }
         Write::ExecAndClose { sql, reply } => {
             let result = sqlx::query(AssertSqlSafe(sql.as_str()))
                 .execute(&mut *conn)
@@ -272,9 +330,15 @@ async fn flush_economics(
     for (id, waiting) in batch {
         // Replies were sent at enqueue. A flush error is not surfaced to a
         // caller that has already moved on; the next flush retries nothing
-        // (the snapshot was drained). Log by returning it as a lost write:
-        // the economics tailer re-sends the next snapshot.
-        let _ = apply_economics(conn, id, &waiting.economics).await;
+        // (the snapshot was drained). Log the lost write: the economics
+        // tailer re-sends the next snapshot.
+        if let Err(e) = apply_economics(conn, id, &waiting.economics).await {
+            tracing::warn!(
+                session = %id,
+                error = %e,
+                "history: coalesced economics write lost; the next snapshot replaces it"
+            );
+        }
     }
     n
 }
@@ -566,4 +630,64 @@ async fn reconcile(conn: &mut SqliteConnection, log_dir: &Path) -> Result<usize>
         closed += 1;
     }
     Ok(closed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_write(work_item: &str) -> (Write, oneshot::Receiver<Result<bool>>) {
+        let (reply, rx) = oneshot::channel();
+        (
+            Write::SetWorkItem {
+                id: Uuid::new_v4(),
+                work_item: Some(work_item.to_owned()),
+                reply,
+            },
+            rx,
+        )
+    }
+
+    /// A full queue backpressures the enqueue instead of dropping the
+    /// write: the enqueue waits (bounded by the writer's timeout) and
+    /// completes as soon as the writer drains a slot.
+    #[tokio::test]
+    async fn a_full_queue_backpressures_instead_of_dropping() {
+        // No consumer task: the queue stays full until the test drains it.
+        let (tx, mut rx) = mpsc::channel(2);
+        let writer = HistoryWriter {
+            tx,
+            enqueue_timeout: Duration::from_millis(100),
+        };
+        let (first, _first_rx) = dummy_write("WI-1");
+        let (second, _second_rx) = dummy_write("WI-2");
+        writer.enqueue(first).await.unwrap();
+        writer.enqueue(second).await.unwrap();
+
+        // The queue is full. An enqueue does not drop the write; it waits
+        // and reports the writer as stuck once the timeout elapses.
+        let (third, _third_rx) = dummy_write("WI-3");
+        let err = writer.enqueue(third).await.unwrap_err();
+        assert!(
+            err.to_string().contains("not draining"),
+            "a stuck full queue reports a timeout, got: {err}"
+        );
+
+        // Free one slot and the next enqueue lands — nothing was dropped.
+        let drained = rx.recv().await.expect("the first write is still queued");
+        assert!(matches!(drained, Write::SetWorkItem { .. }));
+        let (fourth, _fourth_rx) = dummy_write("WI-4");
+        writer.enqueue(fourth).await.unwrap();
+
+        // A closed writer answers immediately rather than hanging.
+        let (fifth, _fifth_rx) = dummy_write("WI-5");
+        rx.close();
+        while rx.recv().await.is_some() {}
+        drop(rx);
+        let err = writer.enqueue(fifth).await.unwrap_err();
+        assert!(
+            err.to_string().contains("has stopped"),
+            "a stopped writer is an immediate error, got: {err}"
+        );
+    }
 }
