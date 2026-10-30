@@ -31,6 +31,7 @@ from vogt.core.entities import (
     AuditRecord,
     AuthDecision,
     Comment,
+    CommentKind,
     DepRef,
     DriftProposal,
     Effort,
@@ -50,6 +51,8 @@ from vogt.core.entities import (
     Suppression,
     Token,
     TrustState,
+    VerdictFields,
+    VerificationFields,
     WorkItem,
     WorkKind,
 )
@@ -2145,11 +2148,16 @@ class BindBranchParams(Params):
 class CommentParams(Params):
     ref: str
     body: Name = Field(description="The comment text.")
-    kind: Literal["note", "handoff"] = Field(
+    kind: CommentKind = Field(
         default="note",
         description=(
             "`note` (default) is an ordinary remark. `handoff` is the structured "
-            "hand-off a fresh session starts from, and requires `handoff`."
+            "hand-off a fresh session starts from, and requires `handoff`. "
+            "`verdict` is a review verdict, requires `verdict`, and is posted "
+            "by a person or by a review session started by a person or "
+            "oversight on the item it reviews. `verification` records a check, "
+            "requires `verification`, and is posted by someone other than the "
+            "worker."
         ),
     )
     handoff: HandoffFields | None = Field(
@@ -2157,19 +2165,48 @@ class CommentParams(Params):
         description=(
             "The structured fields of a hand-off: branch, head_sha, base, "
             "done, remaining, touch_points, gates_run, blockers, session. "
-            "Required when kind is `handoff`, refused on a note."
+            "Required when kind is `handoff`, refused on any other kind."
+        ),
+    )
+    verdict: VerdictFields | None = Field(
+        default=None,
+        description=(
+            "The structured fields of a review verdict: head_sha, base, "
+            "verdict (no_blockers | blockers), blockers (non-empty for "
+            "`blockers`), deployment_paths_covered. reviewer_session and "
+            "reviewer_started_by are filled by Vogt; supplied values are "
+            "ignored. Required when kind is `verdict`, refused otherwise."
+        ),
+    )
+    verification: VerificationFields | None = Field(
+        default=None,
+        description=(
+            "The structured fields of a verification: head_sha, lane, what, "
+            "evidence. `by` is filled by Vogt. Required when kind is "
+            "`verification`, refused otherwise."
         ),
     )
     reason: Reason
 
     @model_validator(mode="after")
-    def _handoff_matches_kind(self) -> CommentParams:
-        if self.kind == "handoff" and self.handoff is None:
-            msg = "a hand-off comment requires handoff fields"
-            raise ValueError(msg)
-        if self.kind == "note" and self.handoff is not None:
-            msg = "handoff fields belong on a comment of kind handoff"
-            raise ValueError(msg)
+    def _fields_match_kind(self) -> CommentParams:
+        sets = {
+            "handoff": self.handoff,
+            "verdict": self.verdict,
+            "verification": self.verification,
+        }
+        named = {
+            "handoff": "hand-off",
+            "verdict": "verdict",
+            "verification": "verification",
+        }
+        for kind, fields in sets.items():
+            if self.kind == kind and fields is None:
+                msg = f"a {named[kind]} comment requires {kind} fields"
+                raise ValueError(msg)
+            if self.kind != kind and fields is not None:
+                msg = f"{kind} fields belong on a comment of kind {kind}"
+                raise ValueError(msg)
         return self
 
 

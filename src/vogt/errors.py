@@ -128,6 +128,19 @@ class ReportRefused(VogtError):
     http_status = 403
 
 
+class CommentRefused(VogtError):
+    """A verdict or verification from someone not allowed to post it
+    (WI-1319).
+
+    A verdict comes from a person, or from a review session a person or
+    oversight started for this item; a verification from anyone but the
+    worker. Judged from the acting principal, never from the parameters.
+    """
+
+    code = "comment_refused"
+    http_status = 403
+
+
 class EngineOnly(VogtError):
     """An operation only the session engine's own credential may call.
 

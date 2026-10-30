@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -38,8 +39,17 @@ from vogt.application.services._brief import (
     brief_for_work_item,
     review_brief_for_work_item,
 )
-from vogt.core.entities import AgentPolicy, HandoffFields, Project
-from vogt.errors import InvalidRequest
+from vogt.core.entities import (
+    AgentPolicy,
+    CodingSession,
+    Comment,
+    HandoffFields,
+    Project,
+    VerdictFields,
+    VerificationFields,
+)
+from vogt.core.principal import Principal
+from vogt.errors import CommentRefused, InvalidRequest
 
 from tests.conftest import native_work_item
 from tests.test_sessions import ROOT, StandInEngine
@@ -530,3 +540,194 @@ def test_review_of_refuses_a_different_item(instance: AppContext) -> None:
             StartSessionParams(review_of=first.ref, work_item=second.ref, reason=WHY),
         )
     assert engine.sent == []
+
+
+# -- verdicts and verifications (WI-1319) ------------------------------------
+
+
+def _verdict(**overrides: object) -> VerdictFields:
+    base: dict[str, object] = {"head_sha": "abc123", "verdict": "no_blockers"}
+    base.update(overrides)
+    return VerdictFields.model_validate(base)
+
+
+def _check() -> VerificationFields:
+    return VerificationFields(lane="dev", what="login works", evidence="curl 200")
+
+
+def _session(
+    ctx: AppContext,
+    item_id: str,
+    *,
+    sid: str,
+    purpose: str | None = "review",
+    started_by: Literal["person", "oversight", "worker"] | None = "oversight",
+) -> AppContext:
+    """Record a session row and return a context acting as that session."""
+    with ctx.declared.read() as view:
+        project = view.project_by_slug("vogt")
+    assert project is not None
+    with ctx.declared.write() as txn:
+        txn.insert_session(
+            CodingSession(
+                id=sid,
+                engine_session_id=f"eng-{sid}",
+                project_id=project.id,
+                work_item_id=item_id,
+                actor_id=_actor_of(ctx),
+                cwd=str(ROOT),
+                reason=WHY,
+                started_at=datetime(2026, 10, 30, tzinfo=UTC),
+                purpose=purpose,
+                started_by_kind=started_by,
+            )
+        )
+    return dataclasses.replace(
+        ctx,
+        principal=Principal(
+            identity_ref=f"agent:session:{sid}", kind="agent", display_name=sid
+        ),
+    )
+
+
+def _actor_of(ctx: AppContext) -> str:
+    with ctx.declared.read() as view:
+        actor = view.actor_by_identity(ctx.principal.identity_ref)
+    assert actor is not None
+    return actor.id
+
+
+def _item_with_worker(ctx: AppContext, title: str = "Verdicts") -> tuple[str, str]:
+    """An item whose latest hand-off names worker session `eng-ses_worker`."""
+    register_project(
+        ctx, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    item = native_work_item(ctx, title=title, project="vogt")
+    handed = comment_work(
+        ctx,
+        CommentParams(
+            ref=item.ref,
+            body="done",
+            kind="handoff",
+            handoff=_fields(session="eng-ses_worker"),
+            reason=WHY,
+        ),
+    )
+    return item.ref, handed.comment.work_item_id
+
+
+def _post_verdict(ctx: AppContext, ref: str, **fields: object) -> Comment:
+    return comment_work(
+        ctx,
+        CommentParams(
+            ref=ref,
+            body="review",
+            kind="verdict",
+            verdict=_verdict(**fields),
+            reason=WHY,
+        ),
+    ).comment
+
+
+def test_a_person_posts_a_verdict(instance: AppContext) -> None:
+    ref, _ = _item_with_worker(instance)
+    posted = _post_verdict(instance, ref)
+    assert posted.verdict is not None
+    assert posted.verdict.reviewer_started_by == "person"
+    read = get_work(instance, GetWorkParams(ref=ref)).comments
+    assert any(c.kind == "verdict" and c.verdict == posted.verdict for c in read)
+
+
+def test_an_oversight_review_session_posts_on_its_own_item(
+    instance: AppContext,
+) -> None:
+    ref, item_id = _item_with_worker(instance)
+    reviewer = _session(instance, item_id, sid="ses_rev")
+    posted = _post_verdict(
+        reviewer,
+        ref,
+        reviewer_session="forged",
+        reviewer_started_by="person",
+    )
+    assert posted.verdict is not None
+    assert posted.verdict.reviewer_session == "eng-ses_rev"
+    assert posted.verdict.reviewer_started_by == "oversight"
+
+
+def test_a_worker_started_review_session_is_refused(instance: AppContext) -> None:
+    ref, item_id = _item_with_worker(instance)
+    reviewer = _session(instance, item_id, sid="ses_rev", started_by="worker")
+    with pytest.raises(CommentRefused, match="started by worker"):
+        _post_verdict(reviewer, ref)
+
+
+def test_a_review_of_another_item_is_refused(instance: AppContext) -> None:
+    ref, _ = _item_with_worker(instance)
+    other = native_work_item(instance, title="Other", project="vogt")
+    with instance.declared.read() as view:
+        other_row = view.work_item_by_ref(other.ref)
+    assert other_row is not None
+    reviewer = _session(instance, other_row.id, sid="ses_rev")
+    with pytest.raises(CommentRefused, match="not bound to"):
+        _post_verdict(reviewer, ref)
+
+
+def test_the_worker_session_is_refused_on_both_kinds(instance: AppContext) -> None:
+    ref, item_id = _item_with_worker(instance)
+    worker = _session(instance, item_id, sid="ses_worker")
+    with pytest.raises(CommentRefused, match="the worker"):
+        _post_verdict(worker, ref)
+    with pytest.raises(CommentRefused, match="other than the worker"):
+        comment_work(
+            worker,
+            CommentParams(
+                ref=ref,
+                body="checked",
+                kind="verification",
+                verification=_check(),
+                reason=WHY,
+            ),
+        )
+
+
+def test_a_non_review_session_is_refused(instance: AppContext) -> None:
+    ref, item_id = _item_with_worker(instance)
+    plain = _session(instance, item_id, sid="ses_plain", purpose="implement")
+    with pytest.raises(CommentRefused, match="not a review"):
+        _post_verdict(plain, ref)
+
+
+def test_a_verification_from_another_session_or_a_person_stores(
+    instance: AppContext,
+) -> None:
+    ref, item_id = _item_with_worker(instance)
+    other = _session(instance, item_id, sid="ses_qa", purpose=None, started_by=None)
+    for ctx, by in ((other, "eng-ses_qa"), (instance, None)):
+        posted = comment_work(
+            ctx,
+            CommentParams(
+                ref=ref,
+                body="checked",
+                kind="verification",
+                verification=_check(),
+                reason=WHY,
+            ),
+        ).comment
+        assert posted.verification is not None
+        if by is not None:
+            assert posted.verification.by == by
+        else:
+            assert posted.verification.by == instance.principal.identity_ref
+    kinds = [c.kind for c in get_work(instance, GetWorkParams(ref=ref)).comments]
+    assert kinds.count("verification") == 2
+
+
+def test_verdict_field_rules() -> None:
+    with pytest.raises(ValidationError, match="at least one blocker"):
+        VerdictFields(head_sha="a", verdict="blockers")
+    with pytest.raises(ValidationError, match="requires verdict fields"):
+        CommentParams(ref="WI-1", body="x", kind="verdict", reason=WHY)
+    with pytest.raises(ValidationError, match="kind verification"):
+        CommentParams(
+            ref="WI-1", body="x", kind="note", verification=_check(), reason=WHY
+        )

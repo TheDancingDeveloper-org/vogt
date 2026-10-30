@@ -47,6 +47,8 @@ from vogt.core.entities import (
     SessionReportFields,
     Suppression,
     Token,
+    VerdictFields,
+    VerificationFields,
     Watch,
     WorkItem,
     WorkKind,
@@ -1837,9 +1839,7 @@ class SqliteWriteTxn(SqliteReadView):
                 comment.body,
                 to_iso(comment.created_at),
                 comment.kind,
-                None
-                if comment.handoff is None
-                else json.dumps(comment.handoff.model_dump(mode="json")),
+                _comment_data(comment),
             ),
         )
 
@@ -2715,9 +2715,22 @@ def _row_to_initiative(row: sqlite3.Row) -> Initiative:
     )
 
 
+def _comment_data(comment: Comment) -> str | None:
+    """The kind's structured fields as one JSON document, or None on a note."""
+    fields = comment.handoff or comment.verdict or comment.verification
+    return None if fields is None else json.dumps(fields.model_dump(mode="json"))
+
+
 def _row_to_comment(row: sqlite3.Row) -> Comment:
-    raw = row["data"]
-    handoff = None if raw is None else HandoffFields.model_validate_json(str(raw))
+    raw = None if row["data"] is None else str(row["data"])
+    kind = row["kind"]
+    handoff = verdict = verification = None
+    if raw is not None and kind == "handoff":
+        handoff = HandoffFields.model_validate_json(raw)
+    elif raw is not None and kind == "verdict":
+        verdict = VerdictFields.model_validate_json(raw)
+    elif raw is not None and kind == "verification":
+        verification = VerificationFields.model_validate_json(raw)
     return Comment(
         id=str(row["id"]),
         work_item_id=str(row["work_item_id"]),
@@ -2725,8 +2738,10 @@ def _row_to_comment(row: sqlite3.Row) -> Comment:
         actor_display_name=str(row["actor_display_name"]),
         body=str(row["body"]),
         created_at=from_iso(str(row["created_at"])),
-        kind=row["kind"],
+        kind=kind,
         handoff=handoff,
+        verdict=verdict,
+        verification=verification,
     )
 
 
