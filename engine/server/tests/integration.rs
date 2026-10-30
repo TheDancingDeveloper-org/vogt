@@ -13013,11 +13013,15 @@ async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {
     let log = tmp.path().join("input.log");
     let bin = tmp.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
+    // The agent shows its prompt only once the test has blocked it: a prompt
+    // up from the start races the block against `nudge_after` on a slow host.
+    let go = tmp.path().join("go");
     let opencode = bin.join("opencode");
     std::fs::write(
         &opencode,
         format!(
-            "#!/usr/bin/env bash\nprintf '  ┃\\r\\n  ╹▀▀▀▀▀▀▀▀\\r\\n'\nwhile IFS= read -r line; do echo x >> '{}'; done\n",
+            "#!/usr/bin/env bash\nwhile [ ! -e '{}' ]; do sleep 0.05; done\nprintf '  ┃\\r\\n  ╹▀▀▀▀▀▀▀▀\\r\\n'\nwhile IFS= read -r line; do echo x >> '{}'; done\n",
+            go.display(),
             log.display()
         ),
     )
@@ -13055,6 +13059,7 @@ async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {
         .unwrap()
         .status();
     assert!(status.is_success());
+    std::fs::write(&go, "").unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
         std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
