@@ -7,6 +7,8 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SearchAddon, type ISearchResultChangeEvent } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
+import { attachWebglRenderer } from "./terminalRenderer";
+import { createTerminalWriteCoalescer, type TerminalWriteCoalescer } from "./terminalWriteCoalesce";
 import { openAttach } from "./api";
 import type { RuntimeSocket } from "./runtimeTransport";
 import { readClipboardText, writeClipboardText } from "./clipboard";
@@ -217,6 +219,11 @@ const TerminalView: Component<Props> = (props) => {
   let countdownTimer: ReturnType<typeof setInterval> | null = null;
   let reconnectAt = 0;
   let fitFrame: number | null = null;
+  // Live WebSocket frames, flushed once per animation frame (WI-2694).
+  // Replay and dormancy catch-up do not use this: they stay on the replay
+  // queue so a flush cannot overtake a snapshot still parsing.
+  let liveWrites: TerminalWriteCoalescer | null = null;
+  let disposeWebgl: (() => void) | null = null;
   const reconnect = new ReconnectTracker();
   const watchdog = new SocketWatchdog();
   let watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -434,6 +441,9 @@ const TerminalView: Component<Props> = (props) => {
   // when serialization is unavailable or throws, so persistCache can fall back
   // to the raw ring.
   const trySerialize = (): string | null => {
+    // Pending live frames are already counted in outputPosition. Flush them
+    // first so the serialized screen matches that cursor.
+    liveWrites?.flush();
     if (!serializeAddon) return null;
     try {
       return serializeAddon.serialize({ scrollback: SERIALIZE_MAX_SCROLLBACK });
@@ -494,6 +504,9 @@ const TerminalView: Component<Props> = (props) => {
     const target = size.target();
     if (!term || !target) return;
     if (term.cols === target.cols && term.rows === target.rows) return;
+    // Flush first so bytes painted for the old size are parsed before the
+    // resize changes the grid they land on.
+    liveWrites?.flush();
     try {
       term.resize(target.cols, target.rows);
     } catch {
@@ -723,6 +736,22 @@ const TerminalView: Component<Props> = (props) => {
     search = new SearchAddon();
     term.loadAddon(search);
     search.onDidChangeResults((info) => props.onSearchResults?.(info));
+    liveWrites = createTerminalWriteCoalescer((chunk) => {
+      term?.write(chunk);
+    });
+    const opened = term;
+    void attachWebglRenderer(opened, {
+      onFallback: () => {
+        disposeWebgl = null;
+      },
+    }).then((dispose) => {
+      if (!dispose) return;
+      if (destroyed || term !== opened) {
+        dispose();
+        return;
+      }
+      disposeWebgl = dispose;
+    });
     // A PTY program's window title (OSC 0/2) names the tab, and its bell (BEL)
     // lights the tab's activity dot — neither reached the tabs before.
     term.onTitleChange((title) => {
@@ -1091,7 +1120,8 @@ const TerminalView: Component<Props> = (props) => {
       clearCountdown();
       setReconnectView(null);
       setStatusText("Session unavailable");
-      term?.write("\r\n\x1b[31m[session not found — server may have restarted]\x1b[0m\r\n");
+      liveWrites?.flush();
+          term?.write("\r\n\x1b[31m[session not found — server may have restarted]\x1b[0m\r\n");
     }
   }
 
@@ -1158,6 +1188,8 @@ const TerminalView: Component<Props> = (props) => {
   function restoreCache(cached: TerminalCacheEntry, onDone: () => void): void {
     setStatusText("Restoring terminal...");
     if (typeof cached.serialized === "string") {
+      // A queued live frame belongs to the screen being replaced.
+      liveWrites?.cancel();
       term?.reset();
       cacheChunks = [];
       cacheBytes = 0;
@@ -1276,6 +1308,9 @@ const TerminalView: Component<Props> = (props) => {
               { kind: "snapshot" },
             );
             if (ctrl.reset !== false) {
+              // Drop frames queued before this snapshot so they cannot land
+              // ahead of the replay (a later rAF would otherwise write them).
+              liveWrites?.cancel();
               term?.reset();
               cacheChunks = [];
               cacheBytes = 0;
@@ -1334,7 +1369,10 @@ const TerminalView: Component<Props> = (props) => {
                 if (heldForResize !== held) return;
                 heldForResize = null;
                 for (const item of held) {
-                  if (item instanceof Uint8Array) term?.write(item);
+                  if (item instanceof Uint8Array) {
+                    liveWrites?.flush();
+                    term?.write(item);
+                  }
                   else applyAnnouncedSize(item, false);
                 }
               });
@@ -1355,7 +1393,8 @@ const TerminalView: Component<Props> = (props) => {
               if (!destroyed && statusText() === notice) setStatusText(null);
             }, 4000);
           } else if (ctrl.type === "lag") {
-            term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
+            liveWrites?.flush();
+          term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
             setStatusText("Reattaching terminal...");
             // Cancel any timer so the close event below doesn't double-schedule.
             if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -1395,10 +1434,13 @@ const TerminalView: Component<Props> = (props) => {
       } else if (inSnapshot) {
         // Snapshot and immediately-following live frames share one ordered
         // queue until the snapshot parser has drained.
-        if (!replay?.enqueue(buf)) term?.write(buf);
+        if (!replay?.enqueue(buf)) {
+          liveWrites?.flush();
+          term?.write(buf);
+        }
       } else {
         scheduleCachePersist();
-        term?.write(buf);
+        liveWrites?.push(buf);
       }
     });
     socket.addEventListener("close", () => {
@@ -1415,6 +1457,7 @@ const TerminalView: Component<Props> = (props) => {
       if (!inSnapshot) {
         const { writeMarker } = reconnect.beginOutage();
         if (writeMarker) {
+          liveWrites?.flush();
           term?.write("\r\n\x1b[33m[disconnected]\x1b[0m\r\n");
         }
       }
@@ -1592,6 +1635,10 @@ const TerminalView: Component<Props> = (props) => {
       cancelAnimationFrame(fitFrame);
       fitFrame = null;
     }
+    liveWrites?.cancel();
+    liveWrites = null;
+    disposeWebgl?.();
+    disposeWebgl = null;
     wakeCleanup?.();
     wakeCleanup = null;
     if (viewportHandler) {
