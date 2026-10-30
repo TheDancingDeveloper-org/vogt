@@ -34,6 +34,7 @@ fn test_config() -> Config {
         gui_stream_url: None,
         gui_stream_verified: false,
         ws_query_token_allowed: false,
+        ws_ping_interval: std::time::Duration::from_secs(20),
         // The push tests subscribe a loopback http stand-in service.
         push_allow_insecure_endpoints: true,
         state_dir: tempfile::tempdir().unwrap().keep(),
@@ -4346,6 +4347,73 @@ async fn retained_cursor_deltas_are_byte_exact_under_load() {
     a.close(None).await.ok();
     b.close(None).await.ok();
     kill_session(&client, &base, &id).await;
+}
+
+/// WI-2704: a socket that stops answering the server's Pings is closed
+/// `4000 idle` after two missed intervals, while one that keeps reading stays
+/// open. Scaled down from the 20 s production interval (closed within 45 s)
+/// to 300 ms (closed within ~0.7 s), so the test asserts well under a second
+/// of grace either way.
+#[tokio::test]
+async fn an_attach_that_stops_answering_pings_is_closed_idle() {
+    let interval = Duration::from_millis(300);
+    let (base, _h) = boot_with_config(Config {
+        ws_ping_interval: interval,
+        ..test_config()
+    })
+    .await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_id(&client, &base, "keepalive").await;
+
+    // A reader keeps the socket alive: tungstenite answers each Ping as it
+    // reads, so after many intervals it is still open.
+    let mut live = ws_attach(&base, &id).await;
+    let deadline = tokio::time::Instant::now() + interval * 8;
+    let mut pings = 0;
+    while let Ok(next) = tokio::time::timeout_at(deadline, live.next()).await {
+        match next {
+            Some(Ok(Message::Ping(_))) => pings += 1,
+            Some(Ok(Message::Close(frame))) => panic!("a reading client was closed: {frame:?}"),
+            Some(Ok(_)) => {}
+            other => panic!("socket ended: {other:?}"),
+        }
+    }
+    assert!(pings >= 4, "the server pings on its interval (saw {pings})");
+
+    // A client that stops reading sends no Pong; the server closes it.
+    let dead = ws_attach(&base, &id).await;
+    let started = std::time::Instant::now();
+    tokio::time::sleep(interval * 2 + interval / 2 + Duration::from_millis(500)).await;
+    // Read the raw stream rather than through tungstenite: it would answer
+    // the queued Pings while reading, and that write to the closed socket
+    // fails before the close frame is reached. Nothing has been read yet, so
+    // tungstenite holds no buffered bytes.
+    let tokio_tungstenite::MaybeTlsStream::Plain(mut tcp) = dead.into_inner() else {
+        panic!("plain test socket");
+    };
+    let mut wire = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        use tokio::io::AsyncReadExt;
+        let _ = tcp.read_to_end(&mut wire).await;
+    })
+    .await
+    .expect("the idle socket must be closed");
+    // Server frames are unmasked: FIN|Close, length 6, code 4000, "idle".
+    let idle_close = [0x88, 0x06, 0x0f, 0xa0, b'i', b'd', b'l', b'e'];
+    assert!(
+        wire.windows(idle_close.len()).any(|w| w == idle_close),
+        "expected a 4000 idle close frame in {} bytes",
+        wire.len()
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let rendered = vogt_engine_server::metrics::metrics().render();
+    assert!(rendered.contains("vogt_ws_idle_close_total"));
+    assert!(rendered.contains("vogt_ws_close_total{code=\"4000\"}"));
+    assert!(rendered.contains("vogt_ws_attach_total"));
+    drop(live);
 }
 
 #[tokio::test]

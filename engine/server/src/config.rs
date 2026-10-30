@@ -241,6 +241,12 @@ pub struct Config {
     /// redeployed client working; every use is logged and the path is slated
     /// for removal.
     pub ws_query_token_allowed: bool,
+    /// How often the engine sends a WebSocket Ping to each attached socket
+    /// (WI-2704). A socket that sends nothing back — no Pong, no frame — for
+    /// two intervals is closed `4000 idle`, so a half-open phone socket is
+    /// noticed in well under a minute. `ENGINE_WS_PING_INTERVAL_MS`,
+    /// default 20 s.
+    pub ws_ping_interval: std::time::Duration,
     /// Whether a WebPush subscription may name a non-https or non-routable
     /// (loopback/RFC-1918/link-local) endpoint. Off by default: the
     /// dispatcher POSTs to the stored endpoint from inside the pod netns, so
@@ -542,6 +548,7 @@ struct FileConfig {
     gui_stream_url: Option<String>,
     gui_stream_verified: Option<bool>,
     ws_query_token_allowed: Option<bool>,
+    ws_ping_interval_ms: Option<u64>,
     push_allow_insecure_endpoints: Option<bool>,
     state_dir: Option<String>,
     fcm_service_account_json: Option<String>,
@@ -872,6 +879,12 @@ pub fn load(
             .filter(|s| !s.is_empty()),
         gui_stream_verified,
         ws_query_token_allowed,
+        ws_ping_interval: std::time::Duration::from_millis(
+            parse_u64_env("ENGINE_WS_PING_INTERVAL_MS")?
+                .or(from_file.ws_ping_interval_ms)
+                .filter(|ms| *ms > 0)
+                .unwrap_or(20_000),
+        ),
         push_allow_insecure_endpoints,
         state_dir: from_file
             .state_dir
