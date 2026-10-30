@@ -17000,3 +17000,67 @@ async fn a_session_in_a_git_tree_carries_its_workspace_record() {
             .await;
     }
 }
+
+/// WI-1340: `GET /api/workspaces` lists every session with a workspace
+/// block — a worktree and a checkout — with its size and liveness, and
+/// leaves out a session in no repo.
+#[tokio::test]
+async fn the_workspaces_route_lists_each_session_tree_with_its_size() {
+    let (tmp, cfg, stub) = hibernation_sandbox();
+    std::fs::write(&stub, "#!/bin/sh\nprintf '> '\nsleep 300\n").unwrap();
+    let repo = tmp.path().join("repo");
+    worktree_checkout(&repo);
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let command = json!([stub.to_string_lossy()]);
+    let mut ids = Vec::new();
+    for body in [
+        json!({ "name": "wl worktree", "command": command, "cwd": repo.to_string_lossy(),
+                "worktree": { "branch": "wi-1340-worker", "base_ref": "main" } }),
+        json!({ "name": "wl checkout", "command": command, "cwd": repo.to_string_lossy() }),
+        json!({ "name": "wl none", "command": command, "cwd": plain.to_string_lossy() }),
+    ] {
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+
+    let resp = client
+        .get(format!("{base}/api/workspaces"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listed: Value = resp.json().await.unwrap();
+    let rows = listed["workspaces"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{listed}");
+    for (id, kind) in [(&ids[0], "worktree"), (&ids[1], "checkout")] {
+        let row = rows
+            .iter()
+            .find(|r| r["session_id"] == id.as_str())
+            .unwrap_or_else(|| panic!("{id} missing from {listed}"));
+        assert_eq!(row["kind"], kind);
+        assert_eq!(row["alive"], true);
+        assert!(row["size_bytes"].as_u64().is_some_and(|n| n > 0), "{row}");
+        assert!(row["path"].as_str().is_some());
+    }
+
+    for id in ids {
+        let _ = client
+            .delete(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await;
+    }
+}

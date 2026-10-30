@@ -274,6 +274,8 @@ from vogt.application.models import (
     WorkListResult,
     WorkManyResult,
     WorkResult,
+    WorkspaceListParams,
+    WorkspaceListResult,
     WriteBackListParams,
     WriteBackListResult,
 )
@@ -1605,6 +1607,23 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.session_changes,
             route=HttpRoute("GET", "/sessions/changes"),
             cli=CliBinding(("session", "changes")),
+        ),
+        Operation(
+            name="workspace.list",
+            summary=(
+                "List every live or hibernated session's working tree: path, "
+                "kind (worktree|checkout), branch, base_sha, size_bytes, alive, "
+                "merged (branch tip in the default branch, per the git-local "
+                "collector; null when unobserved), work_item and session. "
+                "Filter by `project` slug and `alive`."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=WorkspaceListParams,
+            result_model=WorkspaceListResult,
+            handler=services.workspace_list,
+            route=HttpRoute("GET", "/workspaces"),
+            cli=CliBinding(("workspace", "list")),
         ),
         Operation(
             name="session.wait_any",

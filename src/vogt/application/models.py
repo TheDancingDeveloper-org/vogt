@@ -6843,3 +6843,40 @@ class ChatPromoteResult(Result):
         description="The terminal session now holding the conversation."
     )
     session_name: str
+
+
+class WorkspaceListParams(Params):
+    project: str | None = Field(
+        default=None, description="Only workspaces of this project's sessions (slug)."
+    )
+    alive: bool | None = Field(
+        default=None,
+        description="true: only running sessions; false: only stopped or hibernated.",
+    )
+
+
+class WorkspaceRow(BaseModel):
+    """One session's working tree (WI-1340)."""
+
+    path: str
+    kind: str = Field(description="`worktree` or `checkout`.")
+    branch: str
+    base_sha: str | None = None
+    size_bytes: int | None = Field(
+        default=None, description="Bytes under `path`; null until first measured."
+    )
+    alive: bool
+    merged: bool | None = Field(
+        default=None,
+        description=(
+            "The branch tip is in the project's default branch (git-local "
+            "collector); null when the collector has not observed the branch."
+        ),
+    )
+    work_item: str | None = None
+    session: str = Field(description="`ses_…` id, or the engine UUID when unlinked.")
+    project: str | None = None
+
+
+class WorkspaceListResult(Result):
+    workspaces: list[WorkspaceRow] = []

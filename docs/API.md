@@ -189,6 +189,14 @@ session keeps no transcript file: its replies are read by the engine from
 opencode's own store (`GET /api/sessions/{id}/replies`, which the store's
 credentials never leave) and redacted the same way, with `agent: "opencode"`.
 
+`workspace.list` (`read` scope; filters `project` slug and `alive`) lists
+every live or hibernated session's working tree from the engine's
+`GET /api/workspaces`: `path`, `kind` (`worktree` or `checkout`), `branch`,
+`base_sha`, `size_bytes`, `alive`, `merged`, `work_item`, `session` and
+`project`. `merged` is true when the `git-local` collector observed the
+branch with nothing ahead of the project's default branch, false when it is
+ahead, and null when the collector has no row for it.
+
 `session.wait` blocks (up to `timeout_s`, at most 600) until a session is
 ready — or needs a person, or exits — or, with `until`, until it exits or
 changes at all, and returns why with the screen: one call instead of a
