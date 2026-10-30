@@ -73,7 +73,7 @@ async function mockedFixtures(page: Page): Promise<void> {
       vogt: { configured: true },
     }),
   );
-  await page.route("**/api/sessions", (route) => route.fulfill({ json: [SESSION] }));
+  await page.route(/\/api\/sessions(\?.*)?$/, (route) => route.fulfill({ json: [SESSION] }));
   await page.route("**/api/sessions/*", (route) =>
     route.request().method() !== "GET"
       ? route.fulfill({ json: { ok: true } })

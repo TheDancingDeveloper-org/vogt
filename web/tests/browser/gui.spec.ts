@@ -295,7 +295,9 @@ async function installFixtures(
     vogt: { configured: true },
     ...config,
   } }));
-  await registerRoute("**/api/sessions", async (route) => {
+  // The list is `GET /api/sessions?view=rail` (WI-2692); a glob would miss
+  // the query and let the request through to the dev server unmocked.
+  await registerRoute(/\/api\/sessions(\?.*)?$/, async (route) => {
     if (route.request().method() === "POST") {
       createdSessions += 1;
       const body = route.request().postDataJSON() as Record<string, unknown>;
@@ -2188,7 +2190,7 @@ test("Dialog focus is contained and restored, and feedback matches its live regi
   await expect(saveLayout).toBeFocused();
   await settings.getByRole("button", { name: "Cancel" }).click();
 
-  await page.route("**/api/sessions", async (route) => {
+  await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
     if (route.request().method() === "POST") {
       return route.fulfill({ status: 503, json: { error: "session service offline" } });
     }
@@ -3251,7 +3253,7 @@ test("terminal split retries at the default cwd when the source cwd is outside t
   });
 
   const requests: Record<string, unknown>[] = [];
-  await page.route("**/api/sessions", async (route) => {
+  await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
     if (route.request().method() !== "POST") return route.fallback();
     const body = route.request().postDataJSON() as Record<string, unknown>;
     requests.push(body);
@@ -3285,7 +3287,7 @@ test("terminal split deletes the created session if its pane disappears in fligh
 
   let releaseCreate: (() => void) | null = null;
   let deletedId: string | null = null;
-  await page.route("**/api/sessions", async (route) => {
+  await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
     if (route.request().method() !== "POST") return route.fallback();
     await new Promise<void>((resolve) => { releaseCreate = resolve; });
     return route.fulfill({ json: {
@@ -3384,7 +3386,7 @@ test("Phone terminal folds pane actions into a ··· menu, keeps errors visible
   await stubTerminalAttach(page);
   // A split that fails, so the error span has something to show — the point of
   // keeping it visible on a phone.
-  await page.route("**/api/sessions", async (route) => {
+  await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
     if (route.request().method() !== "POST") return route.fallback();
     return route.fulfill({ status: 500, body: "engine refused the split" });
   });
@@ -6438,10 +6440,6 @@ test("Phone terminal reconnects once after the server drops its socket", TOUCH, 
 
 test("Phone terminal swipe to the next session opens one attach per swipe", TOUCH, async ({ page, context }) => {
   test.skip(!isPhoneProject(), "The session pager is the narrow terminal's");
-  // Known failing on main: the destination slide mounts its own Terminal
-  // while the finger is down, then the settled pane attaches again — two
-  // sockets per swipe. WI-2706 (pager hand-off) fixes it and must drop this.
-  test.fail(true, "WI-2706: two attaches per swipe until the pager hands off its terminal");
   await installFixtures(page, {}, THREE_SESSIONS);
   const attaches = await countTerminalAttaches(page);
   await page.goto("/#/t/sess-idle");
