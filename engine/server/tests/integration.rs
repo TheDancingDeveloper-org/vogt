@@ -1967,7 +1967,7 @@ async fn session_activity_becomes_idle_after_quiet_window() {
         .post(format!("{base}/api/sessions"))
         .json(&json!({
             "name": "idle-watch",
-            "command": ["/bin/sh", "-lc", "printf ready; sleep 1"],
+            "command": ["/bin/sh", "-lc", "printf ready; sleep 30"],
         }))
         .send()
         .await
@@ -1977,7 +1977,12 @@ async fn session_activity_becomes_idle_after_quiet_window() {
         .unwrap();
     let id = create["id"].as_str().unwrap().to_string();
 
-    let detail: Value = loop {
+    // Bounded: the child stays alive for 30 s, so `idle` must be sampled well
+    // inside that. Under CI load a fixed `sleep 1` could exit before the poll
+    // saw the quiet window, and the loop would hang until nextest's timeout.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut last_activity = Value::Null;
+    let detail: Option<Value> = loop {
         let detail: Value = client
             .get(format!("{base}/api/sessions/{id}"))
             .send()
@@ -1987,16 +1992,27 @@ async fn session_activity_becomes_idle_after_quiet_window() {
             .await
             .unwrap();
         if detail["summary"]["activity"] == "idle" {
-            break detail;
+            break Some(detail);
+        }
+        last_activity = detail["summary"]["activity"].clone();
+        if std::time::Instant::now() >= deadline {
+            break None;
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     };
-    assert_eq!(detail["summary"]["activity"], "idle");
 
     let _ = client
         .delete(format!("{base}/api/sessions/{id}"))
         .send()
         .await;
+
+    let detail = detail.unwrap_or_else(|| {
+        panic!(
+            "session {id} never reached activity=\"idle\" within 20 s \
+             (last activity: {last_activity})"
+        )
+    });
+    assert_eq!(detail["summary"]["activity"], "idle");
 }
 
 /// WI-1090: Klaudia's idle input box repaints its blinking cursor faster
