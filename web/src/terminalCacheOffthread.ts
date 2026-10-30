@@ -30,8 +30,8 @@ let nextId = 1;
 const pending = new Map<number, Pending>();
 
 function writeOnMainThread(entry: Pending): void {
-  const { sessionId, outputPosition, payload, stream } = entry.message;
-  void saveTerminalCache(sessionId, outputPosition, payload, stream).then(entry.resolve);
+  const { sessionId, outputPosition, payload, stream, tag } = entry.message;
+  void saveTerminalCache(sessionId, outputPosition, payload, stream, tag).then(entry.resolve);
 }
 
 function abandonWorker(reason: string): void {
@@ -74,10 +74,11 @@ export function postTerminalCacheWrite(
   spawn: () => CacheWorker | null = createWorker,
   direct = false,
   stream?: string,
+  tag?: string,
 ): Promise<TerminalCacheSaveResult> {
   return new Promise<TerminalCacheSaveResult>((resolve) => {
     const entry: Pending = {
-      message: { id: nextId++, sessionId, outputPosition, payload, ...(stream !== undefined ? { stream } : {}) },
+      message: { id: nextId++, sessionId, outputPosition, payload, ...(stream !== undefined ? { stream } : {}), ...(tag !== undefined ? { tag } : {}) },
       resolve,
     };
     // `direct` is the pagehide path: a worker can be torn down with the page

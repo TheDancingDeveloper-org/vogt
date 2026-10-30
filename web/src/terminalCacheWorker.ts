@@ -21,6 +21,8 @@ export interface TerminalCacheWrite {
   payload: TerminalCachePayload;
   /** The restarted stream's id: overwrite a record from any other stream. */
   stream?: string;
+  /** The stream this writer knows, when it is not restarting it (#1246). */
+  tag?: string;
 }
 
 export interface TerminalCacheAck {
@@ -36,6 +38,7 @@ export async function handleTerminalCacheWrite(
     message.outputPosition,
     message.payload,
     message.stream,
+    message.tag,
   );
   return { id: message.id, result };
 }

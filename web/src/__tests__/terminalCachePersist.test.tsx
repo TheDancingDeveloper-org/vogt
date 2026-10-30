@@ -56,7 +56,7 @@ vi.mock("@xterm/addon-search", () => ({
   },
 }));
 
-type Write = { sessionId: string; position: number; payload: unknown; direct: boolean; ack: (result: string) => void; stream: string | undefined };
+type Write = { sessionId: string; position: number; payload: unknown; direct: boolean; ack: (result: string) => void; stream: string | undefined; tag: string | undefined };
 const writes: Write[] = [];
 vi.mock("../terminalCacheOffthread", () => ({
   postTerminalCacheWrite: (
@@ -66,7 +66,8 @@ vi.mock("../terminalCacheOffthread", () => ({
     _spawn: unknown,
     direct = false,
     stream?: string,
-  ) => new Promise<string>((ack) => writes.push({ sessionId, position, payload, direct, ack, stream })),
+    tag?: string,
+  ) => new Promise<string>((ack) => writes.push({ sessionId, position, payload, direct, ack, stream, tag })),
 }));
 
 import Terminal from "../Terminal";
@@ -232,10 +233,11 @@ describe("terminal cache persist wiring", () => {
     expect(woken).toMatchObject({ position: 6, stream: expect.any(String) });
     woken.ack("written");
     await vi.advanceTimersByTimeAsync(0);
-    // Once replaced, later saves are ordinary ones again.
+    // Once replaced, later saves no longer replace, but stay stamped with the
+    // restarted stream's id so a writer still on the old stream cannot win (#1246).
     socket.bytes(3);
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(writes.at(-1)).toMatchObject({ position: 9, stream: undefined });
+    expect(writes.at(-1)).toMatchObject({ position: 9, stream: undefined, tag: woken.stream });
   });
 
   // Restart the stream: the engine's new process sends a snapshot ending at 6.

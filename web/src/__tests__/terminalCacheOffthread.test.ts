@@ -119,7 +119,10 @@ describe("terminal cache write ordering", () => {
     // A restarted stream replaces the record even at a lower offset.
     expect(await saveTerminalCache("o1", 3, { serialized: "woken" }, "s-a")).toBe("written");
     expect((await loadTerminalCache("o1"))?.serialized).toBe("woken");
-    expect(await saveTerminalCache("o1", 50, { serialized: "newer" })).toBe("written");
+    // An id-less write never saw that stream, so it loses whatever its offset (#1246);
+    // the restarted stream's own stamped writes keep the newest cursor.
+    expect(await saveTerminalCache("o1", 60, { serialized: "old-stream" })).toBe("stale");
+    expect(await saveTerminalCache("o1", 50, { serialized: "newer" }, undefined, "s-a")).toBe("written");
     const entry = await loadTerminalCache("o1");
     expect(entry?.serialized).toBe("newer");
     expect(entry?.outputPosition).toBe(50);
