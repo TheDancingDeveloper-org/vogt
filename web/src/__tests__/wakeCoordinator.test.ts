@@ -1,7 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { currentWake, noteForeground, onWake, reconcile, wakeLog } from "../wakeCoordinator";
+import {
+  cancelPendingWakeForTests,
+  currentWake,
+  FOLD_WINDOW_MS,
+  noteForeground,
+  onWake,
+  reconcile,
+  wakeLog,
+} from "../wakeCoordinator";
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  cancelPendingWakeForTests();
+  vi.useRealTimers();
+});
+
+function setVisibility(state: "visible" | "hidden") {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
 
 describe("foreground wake coordinator", () => {
   it("coalesces a lifecycle burst into one numbered wake", async () => {
@@ -71,5 +87,76 @@ describe("foreground wake coordinator", () => {
     expect(wakes).toHaveLength(0);
     Object.defineProperty(document, "visibilityState", { configurable: true, value: original });
     stop();
+  });
+
+  describe("folding a late lifecycle signal (Android resume → visibility → focus)", () => {
+    afterEach(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    });
+
+    it("folds a focus that lands past the debounce into the same return", async () => {
+      vi.useFakeTimers();
+      const wakes: string[] = [];
+      const stop = onWake((wake) => wakes.push(`${wake.reason}:${wake.hiddenMs > 0}`));
+      setVisibility("hidden");
+      await vi.advanceTimersByTimeAsync(10_000);
+      // Android: resume and visibilitychange together, window focus ~600 ms on.
+      noteForeground("resume");
+      setVisibility("visible");
+      await vi.advanceTimersByTimeAsync(600);
+      noteForeground("focus");
+      await vi.advanceTimersByTimeAsync(250);
+      // The resume landed while still hidden, so the edge names the burst.
+      expect(wakes).toEqual(["visibility:true"]);
+      stop();
+    });
+
+    it("lets the visibility edge through when an early resume carried no hidden spell", async () => {
+      vi.useFakeTimers();
+      const wakes: string[] = [];
+      const stop = onWake((wake) => wakes.push(wake.reason));
+      setVisibility("hidden");
+      await vi.advanceTimersByTimeAsync(5_000);
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      noteForeground("resume");
+      await vi.advanceTimersByTimeAsync(400);
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(250);
+      noteForeground("focus");
+      await vi.advanceTimersByTimeAsync(250);
+      expect(wakes).toEqual(["resume", "visibility"]);
+      stop();
+    });
+
+    it("does not fold across a hidden spell or past the window", async () => {
+      vi.useFakeTimers();
+      const wakes: string[] = [];
+      const stop = onWake((wake) => wakes.push(wake.reason));
+      noteForeground("focus");
+      await vi.advanceTimersByTimeAsync(250);
+      setVisibility("hidden");
+      setVisibility("visible");
+      await vi.advanceTimersByTimeAsync(250);
+      expect(wakes).toEqual(["focus", "visibility"]);
+      await vi.advanceTimersByTimeAsync(FOLD_WINDOW_MS);
+      noteForeground("focus");
+      await vi.advanceTimersByTimeAsync(250);
+      expect(wakes).toEqual(["focus", "visibility", "focus"]);
+      stop();
+    });
+
+    it("never folds a manual wake or a stream-loss note", async () => {
+      vi.useFakeTimers();
+      const wakes: string[] = [];
+      const stop = onWake((wake) => wakes.push(wake.reason));
+      noteForeground("focus");
+      await vi.advanceTimersByTimeAsync(250);
+      noteForeground("manual");
+      await vi.advanceTimersByTimeAsync(250);
+      noteForeground("sse-reconnect");
+      await vi.advanceTimersByTimeAsync(250);
+      expect(wakes).toEqual(["focus", "manual", "sse-reconnect"]);
+      stop();
+    });
   });
 });
