@@ -9612,11 +9612,10 @@ async fn startup_closes_out_history_rows_left_unfinished_by_a_restart() {
         std::fs::write(history.log_path(lost), b"working...\n").unwrap();
         // An engine from before `end_reason` existed: the next boot must
         // add the column to the existing table.
-        sqlx::query("ALTER TABLE sessions DROP COLUMN end_reason")
-            .execute(&history.pool)
+        history
+            .exec_and_close("ALTER TABLE sessions DROP COLUMN end_reason")
             .await
             .unwrap();
-        history.pool.close().await;
     }
 
     cfg.state_dir = state_dir.clone();

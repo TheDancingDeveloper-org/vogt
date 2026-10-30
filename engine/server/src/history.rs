@@ -4,20 +4,29 @@
 use std::{
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+};
 use sqlx::{AssertSqlSafe, FromRow, Row};
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::oneshot;
 use uuid::Uuid;
+
+use crate::history_writer::{self, HistoryWriter, Write};
 
 use crate::error::{ApiError, Result};
 
 /// Session history database manager
 pub struct SessionHistory {
-    pub pool: SqlitePool,
+    /// Read-only pool. Request paths that list or fetch a session use this
+    /// and never the writer.
+    pool: SqlitePool,
+    writer: HistoryWriter,
     db_path: PathBuf,
     log_dir: PathBuf,
 }
@@ -164,28 +173,93 @@ impl SessionHistory {
         let db_path = state_dir.join("history.db");
         let log_dir = state_dir.join("session-logs");
 
-        // Create log directory if it doesn't exist
         std::fs::create_dir_all(&log_dir)
             .map_err(|e| ApiError::Internal(format!("failed to create log dir: {}", e)))?;
 
-        let options = SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true);
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(options)
+        // One writer connection. WAL + NORMAL means a commit does not wait
+        // for a full fsync of the main database, and a reader on the other
+        // pool never blocks this connection. busy_timeout covers a lock left
+        // by a process that died mid-write; our own writers cannot contend
+        // because there is only this connection.
+        let writer_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal)
+                    .synchronous(SqliteSynchronous::Normal)
+                    .busy_timeout(Duration::from_secs(5)),
+            )
             .await
             .map_err(|e| ApiError::Internal(format!("failed to connect to history db: {}", e)))?;
+        let mut writer_conn = writer_pool
+            .acquire()
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to acquire history writer: {e}")))?
+            .detach();
+        // Dropping the pool must not close the detached connection.
+        writer_pool.close().await;
+
+        Self::apply_schema(&mut writer_conn).await?;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .read_only(true)
+                    .journal_mode(SqliteJournalMode::Wal)
+                    .busy_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to open history read pool: {}", e)))?;
 
         let history = Self {
             pool,
+            writer: HistoryWriter::spawn(writer_conn, log_dir.clone()),
             db_path,
             log_dir,
         };
-        history.init_schema().await?;
-
         Ok(history)
+    }
+
+    /// Run one statement on the writer connection and then close it. The
+    /// startup-reconcile test drops a column an older engine never had, and
+    /// must be sure the writer has stopped before the next process opens
+    /// the file.
+    pub async fn exec_and_close(&self, sql: &str) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.writer
+            .enqueue(Write::ExecAndClose {
+                sql: sql.to_owned(),
+                reply,
+            })
+            .await?;
+        history_writer::writer_reply(rx, "exec and close").await
+    }
+
+    /// Commit every coalesced economics snapshot now. Tests use this so they
+    /// do not wait out the coalesce interval.
+    pub async fn flush_economics(&self) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.writer.enqueue(Write::FlushEconomics { reply }).await?;
+        history_writer::writer_reply(rx, "flush economics").await
+    }
+
+    /// Flush coalesced economics, drain the queue and stop the writer task.
+    /// The graceful-shutdown path awaits this after `drain_to_history` so a
+    /// redeploy loses none of the last writes. A failure to stop cleanly is
+    /// logged, not returned: the process is exiting either way.
+    pub async fn shutdown(&self) {
+        let (reply, rx) = oneshot::channel();
+        if let Err(e) = self.writer.enqueue(Write::Shutdown { reply }).await {
+            tracing::warn!(error = %e, "history writer shutdown: enqueue failed");
+            return;
+        }
+        if rx.await.is_err() {
+            tracing::warn!("history writer shutdown: the writer stopped without replying");
+        }
     }
 
     /// Directory where per-session scrollback logs are persisted for replay.
@@ -211,8 +285,7 @@ impl SessionHistory {
             .map_err(|e| ApiError::Internal(format!("failed to open session log: {e}")))
     }
 
-    /// Initialize database schema
-    async fn init_schema(&self) -> Result<()> {
+    async fn apply_schema(conn: &mut sqlx::SqliteConnection) -> Result<()> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -227,7 +300,7 @@ impl SessionHistory {
             )
             "#,
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to create sessions table: {}", e)))?;
 
@@ -241,7 +314,7 @@ impl SessionHistory {
             )
             "#,
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to create fts table: {}", e)))?;
 
@@ -251,7 +324,7 @@ impl SessionHistory {
         for column in std::iter::once(&"end_reason").chain(IDENTITY_COLUMNS) {
             let present = sqlx::query("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?")
                 .bind(column)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *conn)
                 .await
                 .map_err(|e| {
                     ApiError::Internal(format!("failed to inspect sessions table: {}", e))
@@ -262,7 +335,7 @@ impl SessionHistory {
                 sqlx::query(AssertSqlSafe(format!(
                     "ALTER TABLE sessions ADD COLUMN {column} TEXT"
                 )))
-                .execute(&self.pool)
+                .execute(&mut *conn)
                 .await
                 .map_err(|e| ApiError::Internal(format!("failed to add {column}: {}", e)))?;
             }
@@ -270,132 +343,77 @@ impl SessionHistory {
 
         // Index on created_at for date-range queries
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at)")
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             .map_err(|e| ApiError::Internal(format!("failed to create index: {}", e)))?;
 
         Ok(())
     }
 
-    /// Archive a session row (metadata only).
-    ///
-    /// Used for three writes with different completeness: a provisional
-    /// row at spawn (`ended_at`/`exit_code` NULL), the finalized row on exit,
-    /// and the graceful-shutdown drain. The `ON CONFLICT` update is guarded so
-    /// these can arrive in any order without a later, less-complete write
-    /// erasing a completed one: `COALESCE` keeps an already-set `ended_at`,
-    /// `exit_code`, `cwd`, or `command` when the incoming write has NULL there
-    /// (a provisional or backfilled row), and `MAX` never shrinks the recorded
-    /// scrollback. A real finalize (non-NULL values) still overwrites the
-    /// provisional NULLs.
+    /// Archive a session row (metadata only). The commit runs on the single
+    /// writer connection; see [`history_writer`] for the conflict rules.
     pub async fn archive_session(&self, record: ArchiveRecord) -> Result<()> {
-        let identity = record.identity.unwrap_or_default();
-        let created_str = record
-            .created_at
-            .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|e| ApiError::Internal(format!("time format error: {}", e)))?;
-
-        let ended_str = record.ended_at.and_then(|t| {
-            t.format(&time::format_description::well_known::Rfc3339)
-                .ok()
-        });
-
-        sqlx::query(
-            r#"
-            INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason,
-                                  template, role, conversation_agent, conversation_id, work_item, economics)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
-                exit_code = COALESCE(excluded.exit_code, sessions.exit_code),
-                end_reason = CASE
-                    WHEN excluded.exit_code IS NOT NULL THEN excluded.end_reason
-                    ELSE COALESCE(sessions.end_reason, excluded.end_reason)
-                END,
-                cwd = COALESCE(excluded.cwd, sessions.cwd),
-                command = COALESCE(excluded.command, sessions.command),
-                scrollback_bytes = MAX(excluded.scrollback_bytes, sessions.scrollback_bytes),
-                template = COALESCE(excluded.template, sessions.template),
-                role = COALESCE(excluded.role, sessions.role),
-                conversation_agent = COALESCE(excluded.conversation_agent, sessions.conversation_agent),
-                conversation_id = COALESCE(excluded.conversation_id, sessions.conversation_id),
-                work_item = COALESCE(excluded.work_item, sessions.work_item),
-                economics = COALESCE(excluded.economics, sessions.economics)
-            "#,
-        )
-        .bind(record.id.to_string())
-        .bind(record.name)
-        .bind(created_str)
-        .bind(ended_str)
-        .bind(record.exit_code)
-        .bind(record.cwd)
-        .bind(record.command)
-        .bind(record.scrollback_bytes as i64)
-        .bind(record.end_reason)
-        .bind(identity.template)
-        .bind(identity.role)
-        .bind(identity.conversation.as_ref().map(|c| c.agent.clone()))
-        .bind(identity.conversation.map(|c| c.id))
-        .bind(identity.work_item)
-        .bind(record.economics)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to archive session: {}", e)))?;
-
-        Ok(())
+        let (reply, rx) = oneshot::channel();
+        self.writer
+            .enqueue(Write::Archive {
+                record: Box::new(record),
+                output: None,
+                reply,
+            })
+            .await?;
+        history_writer::writer_reply(rx, "archive").await
     }
 
-    /// Update a session row's identity (WI-962): its role when given, and its
-    /// conversation when given. A conversation that ends is not cleared —
-    /// the row keeps the last one, which is what a resume needs. Whether a row
-    /// was there to update: `false` while the provisional row is still on its
-    /// way, so a caller can wait and try again instead of losing the report.
+    /// Update a session row's identity (WI-962). `None` leaves the column.
     pub async fn set_identity(
         &self,
         id: Uuid,
         role: Option<&'static str>,
         conversation: Option<&vogt_engine_contract::AgentConversation>,
     ) -> Result<bool> {
-        let done = sqlx::query(
-            "UPDATE sessions SET role = COALESCE(?, role), \
-             conversation_agent = COALESCE(?, conversation_agent), \
-             conversation_id = COALESCE(?, conversation_id) WHERE id = ?",
-        )
-        .bind(role)
-        .bind(conversation.map(|c| c.agent.as_str()))
-        .bind(conversation.map(|c| c.id.as_str()))
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to update session identity: {e}")))?;
-        Ok(done.rows_affected() > 0)
+        let (reply, rx) = oneshot::channel();
+        self.writer
+            .enqueue(Write::SetIdentity {
+                id,
+                role,
+                conversation: conversation.cloned(),
+                reply,
+            })
+            .await?;
+        history_writer::writer_reply(rx, "identity").await
     }
 
-    /// Set or clear a session row's work item (WI-998). Unlike the rest of
-    /// the identity a label can be cleared — an unbind is a declaration too —
-    /// so this writes what it is given. Whether a row was there to update:
-    /// `false` while the provisional row is still on its way.
+    /// Set or clear a session row's work item (WI-998).
     pub async fn set_work_item(&self, id: Uuid, work_item: Option<&str>) -> Result<bool> {
-        let done = sqlx::query("UPDATE sessions SET work_item = ? WHERE id = ?")
-            .bind(work_item)
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("failed to update session work item: {e}")))?;
-        Ok(done.rows_affected() > 0)
+        let (reply, rx) = oneshot::channel();
+        self.writer
+            .enqueue(Write::SetWorkItem {
+                id,
+                work_item: work_item.map(str::to_owned),
+                reply,
+            })
+            .await?;
+        history_writer::writer_reply(rx, "work item").await
     }
 
-    /// Write a session's economics snapshot (WI-1245). A row that is not there
-    /// yet — the provisional archive is still on its way — reports `false`.
+    /// Queue a session's economics snapshot (WI-1245, WI-2703).
+    ///
+    /// The snapshot is coalesced on the writer: at most one `UPDATE` per
+    /// session per [`history_writer::ECONOMICS_COALESCE`], and a newer
+    /// snapshot replaces the pending one. This returns once the snapshot is
+    /// queued, not once it is committed, so the economics tailer never waits
+    /// on the history database. `true` means the snapshot was accepted. A
+    /// row that does not exist yet updates nothing when the batch commits.
     pub async fn set_economics(&self, id: Uuid, economics: &str) -> Result<bool> {
-        let done = sqlx::query("UPDATE sessions SET economics = ? WHERE id = ?")
-            .bind(economics)
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("failed to update session economics: {e}")))?;
-        Ok(done.rows_affected() > 0)
+        let (reply, rx) = oneshot::channel();
+        self.writer
+            .enqueue(Write::SetEconomics {
+                id,
+                economics: economics.to_owned(),
+                reply,
+            })
+            .await?;
+        history_writer::writer_reply(rx, "economics").await
     }
 
     /// List archived sessions
@@ -479,208 +497,67 @@ impl SessionHistory {
         Ok(search_results)
     }
 
-    /// Index session output for full-text search
+    /// Index session output for full-text search.
     pub async fn index_output(&self, session_id: Uuid, output: &str) -> Result<()> {
         self.replace_index_output(session_id, output).await
     }
 
-    /// Replace indexed output for a session. Used by the archive lifecycle so
-    /// retries do not accumulate duplicate FTS rows.
+    /// Replace indexed output for a session, on the writer connection.
     pub async fn replace_index_output(&self, session_id: Uuid, output: &str) -> Result<()> {
-        sqlx::query("DELETE FROM session_output_fts WHERE session_id = ?")
-            .bind(session_id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("failed to clear indexed output: {}", e)))?;
-
-        if output.trim().is_empty() {
-            return Ok(());
-        }
-
-        sqlx::query(
-            r#"
-            INSERT INTO session_output_fts (session_id, output_text)
-            VALUES (?, ?)
-            "#,
-        )
-        .bind(session_id.to_string())
-        .bind(output)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to index output: {}", e)))?;
-
-        Ok(())
+        let (reply, rx) = oneshot::channel();
+        self.writer
+            .enqueue(Write::ReplaceIndex {
+                id: session_id,
+                output: output.to_owned(),
+                reply,
+            })
+            .await?;
+        history_writer::writer_reply(rx, "index").await
     }
 
-    /// Archive metadata and replace the searchable output in one public call.
+    /// Archive metadata and replace the searchable output on the writer.
     pub async fn archive_session_with_output(
         &self,
         record: ArchiveRecord,
         output: &str,
     ) -> Result<()> {
-        let session_id = record.id;
-        self.archive_session(record).await?;
-        self.replace_index_output(session_id, output).await?;
-        Ok(())
+        let (reply, rx) = oneshot::channel();
+        self.writer
+            .enqueue(Write::Archive {
+                record: Box::new(record),
+                output: Some(output.to_owned()),
+                reply,
+            })
+            .await?;
+        history_writer::writer_reply(rx, "archive with output").await
     }
 
     /// One-shot startup pass: index raw session logs on disk that have no
-    /// history row yet.
-    ///
-    /// The raw transcript at `<state_dir>/session-logs/<uuid>.log` persists
-    /// across restarts, but before this the index row was only written when a
-    /// child exited while the engine was alive. A hard redeploy (SIGKILL of a
-    /// long-lived agent shell) therefore left the transcript on disk with no
-    /// row, invisible in the History tab. This recovers those: for every
-    /// `*.log` whose UUID is not already a row, it inserts a metadata row with
-    /// `ended_at`/`exit_code` NULL (the outcome is genuinely unknown) and
-    /// indexes the stripped output so search reaches it. Rows that already
-    /// exist are left untouched.
+    /// history row yet. See the writer for the row shape.
     pub async fn backfill_orphaned_logs(&self) -> Result<usize> {
         self.backfill_orphaned_logs_before(OffsetDateTime::now_utc())
             .await
     }
 
     /// [`Self::backfill_orphaned_logs`], closing out every recovered log last
-    /// written before `booted_at`: such a log belongs to a session of an
-    /// earlier process, which cannot still be running, so its row gets
-    /// `ended_at` = the log's mtime and `end_reason = engine-restart` (exit
-    /// code unknown, NULL). A log written since boot may be a live session of
-    /// this process whose provisional row has not landed yet; it stays open.
+    /// written before `booted_at`.
     pub async fn backfill_orphaned_logs_before(&self, booted_at: OffsetDateTime) -> Result<usize> {
-        let rows = sqlx::query("SELECT id FROM sessions")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("backfill: list ids failed: {e}")))?;
-        let known: std::collections::HashSet<String> =
-            rows.into_iter().map(|r| r.get::<String, _>("id")).collect();
-
-        let entries = match std::fs::read_dir(&self.log_dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => {
-                return Err(ApiError::Internal(format!(
-                    "backfill: read log dir failed: {e}"
-                )))
-            }
-        };
-
-        let mut recovered = 0usize;
-        for entry in entries {
-            let entry = entry
-                .map_err(|e| ApiError::Internal(format!("backfill: dir entry failed: {e}")))?;
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let Ok(id) = Uuid::parse_str(stem) else {
-                continue;
-            };
-            if known.contains(&id.to_string()) {
-                continue;
-            }
-            let meta = match std::fs::metadata(&path) {
-                Ok(meta) => meta,
-                Err(_) => continue,
-            };
-            let size = meta.len();
-            let modified = meta.modified().ok().map(OffsetDateTime::from);
-            let ended_str = modified.filter(|t| *t < booted_at).and_then(|t| {
-                t.format(&time::format_description::well_known::Rfc3339)
-                    .ok()
-            });
-            let end_reason = ended_str.as_ref().map(|_| END_ENGINE_RESTART);
-            let created_str = modified
-                .and_then(|t| {
-                    t.format(&time::format_description::well_known::Rfc3339)
-                        .ok()
-                })
-                .unwrap_or_else(|| {
-                    OffsetDateTime::now_utc()
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_default()
-                });
-
-            // `DO NOTHING`: another writer that raced us to this id keeps its
-            // (more complete) row. The outcome is unknown, so exit_code/ended_at
-            // stay NULL, which the `unfinished` history filter now surfaces.
-            // (`ended_at` is the log's mtime when that predates this boot.)
-            sqlx::query(
-                r#"
-                INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason)
-                VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
-                ON CONFLICT(id) DO NOTHING
-                "#,
-            )
-            .bind(id.to_string())
-            .bind(format!("recovered {}", &stem[..stem.len().min(8)]))
-            .bind(&created_str)
-            .bind(&ended_str)
-            .bind(size as i64)
-            .bind(end_reason)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("backfill: insert failed: {e}")))?;
-
-            if let Ok(bytes) = std::fs::read(&path) {
-                let visible = crate::activity::strip_ansi(&bytes);
-                let text = String::from_utf8_lossy(&visible);
-                if let Err(e) = self.replace_index_output(id, text.as_ref()).await {
-                    tracing::warn!(session = %id, error = %e, "backfill: failed to index recovered log");
-                }
-            }
-            recovered += 1;
-        }
-        Ok(recovered)
+        let (reply, rx) = oneshot::channel();
+        self.writer
+            .enqueue(Write::Backfill {
+                booted_at,
+                log_dir: self.log_dir.clone(),
+                reply,
+            })
+            .await?;
+        history_writer::writer_reply(rx, "backfill").await
     }
 
     /// Close out rows a previous engine process left unfinished.
-    ///
-    /// Sessions live in this process's memory, so at startup none of the
-    /// rows with a NULL `ended_at` can still be running: each was a session
-    /// the previous process lost — SIGKILLed by a redeploy before the drain
-    /// could archive it, or crashed. Without this they read as live in the
-    /// History tab forever. Each gets `ended_at` = the last time its raw log
-    /// was written (the best evidence of when it stopped; now if there is no
-    /// log), `end_reason = engine-restart`, and `exit_code` stays NULL because
-    /// the code is genuinely unknown.
-    ///
-    /// Must run before this process creates any session, since a new
-    /// session's provisional row also has a NULL `ended_at`.
     pub async fn reconcile_unfinished(&self) -> Result<usize> {
-        let rows = sqlx::query("SELECT id FROM sessions WHERE ended_at IS NULL")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("reconcile: list failed: {e}")))?;
-        let now = OffsetDateTime::now_utc();
-        let mut closed = 0usize;
-        for row in rows {
-            let id: String = row.get("id");
-            let ended = Uuid::parse_str(&id)
-                .ok()
-                .and_then(|uuid| std::fs::metadata(self.log_path(uuid)).ok())
-                .and_then(|meta| meta.modified().ok())
-                .map(OffsetDateTime::from)
-                .unwrap_or(now);
-            let ended = ended
-                .format(&time::format_description::well_known::Rfc3339)
-                .map_err(|e| ApiError::Internal(format!("time format error: {e}")))?;
-            sqlx::query(
-                "UPDATE sessions SET ended_at = ?, end_reason = COALESCE(end_reason, ?) \
-                 WHERE id = ? AND ended_at IS NULL",
-            )
-            .bind(&ended)
-            .bind(END_ENGINE_RESTART)
-            .bind(&id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("reconcile: update failed: {e}")))?;
-            closed += 1;
-        }
-        Ok(closed)
+        let (reply, rx) = oneshot::channel();
+        self.writer.enqueue(Write::Reconcile { reply }).await?;
+        history_writer::writer_reply(rx, "reconcile").await
     }
 
     /// Get session by ID
@@ -755,61 +632,23 @@ impl SessionHistory {
         })
     }
 
-    /// Clean up old sessions beyond retention period
+    /// Clean up old sessions beyond the retention period, on the writer.
     pub async fn cleanup_old_sessions(&self, retention_days: u32) -> Result<usize> {
-        let cutoff = OffsetDateTime::now_utc() - time::Duration::days(retention_days as i64);
-        let cutoff_str = cutoff
-            .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|e| ApiError::Internal(format!("time format error: {}", e)))?;
-
-        let ids = sqlx::query("SELECT id FROM sessions WHERE created_at < ?")
-            .bind(&cutoff_str)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("cleanup query failed: {}", e)))?;
-
-        for row in ids {
-            let id: String = row.get("id");
-            sqlx::query("DELETE FROM session_output_fts WHERE session_id = ?")
-                .bind(&id)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| ApiError::Internal(format!("cleanup fts failed: {}", e)))?;
-            if let Ok(uuid) = Uuid::parse_str(&id) {
-                remove_log_file(self.log_path(uuid))?;
-            }
-        }
-
-        let result = sqlx::query(
-            r#"
-            DELETE FROM sessions
-            WHERE created_at < ?
-            "#,
-        )
-        .bind(cutoff_str)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ApiError::Internal(format!("cleanup failed: {}", e)))?;
-
-        Ok(result.rows_affected() as usize)
+        let (reply, rx) = oneshot::channel();
+        self.writer
+            .enqueue(Write::Cleanup {
+                retention_days,
+                reply,
+            })
+            .await?;
+        history_writer::writer_reply(rx, "cleanup").await
     }
 
     /// Delete archived metadata, searchable output, and the raw log.
     pub async fn delete_session(&self, id: Uuid) -> Result<bool> {
-        sqlx::query("DELETE FROM session_output_fts WHERE session_id = ?")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("delete fts failed: {}", e)))?;
-
-        let result = sqlx::query("DELETE FROM sessions WHERE id = ?")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("delete failed: {}", e)))?;
-
-        remove_log_file(self.log_path(id))?;
-        Ok(result.rows_affected() > 0)
+        let (reply, rx) = oneshot::channel();
+        self.writer.enqueue(Write::Delete { id, reply }).await?;
+        history_writer::writer_reply(rx, "delete").await
     }
 }
 
@@ -916,7 +755,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
-fn remove_log_file(path: PathBuf) -> Result<()> {
+pub(crate) fn remove_log_file(path: PathBuf) -> Result<()> {
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1144,5 +983,191 @@ mod tests {
             Some("WI-8"),
             "a finalize keeps it"
         );
+    }
+
+    async fn read_economics(history: &SessionHistory, id: Uuid) -> Option<String> {
+        // The list/get shape does not carry economics (WI-1245 stores it for
+        // the tailer, not the session list). Read the column directly.
+        let row = sqlx::query("SELECT economics FROM sessions WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(&history.pool)
+            .await
+            .unwrap();
+        row.get("economics")
+    }
+
+    fn archive_row(id: Uuid, name: &str) -> ArchiveRecord {
+        ArchiveRecord {
+            id,
+            name: name.into(),
+            created_at: OffsetDateTime::now_utc(),
+            ended_at: None,
+            exit_code: None,
+            cwd: None,
+            command: Some("bash".into()),
+            scrollback_bytes: 0,
+            end_reason: None,
+            identity: None,
+            economics: None,
+        }
+    }
+
+    /// Concurrent archives, economics and work-item writes share one writer
+    /// connection, so a caller never sees SQLITE_BUSY from our own writers.
+    #[tokio::test]
+    async fn concurrent_writes_do_not_return_sqlite_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = std::sync::Arc::new(SessionHistory::new(dir.path()).await.unwrap());
+        let mut joins = Vec::new();
+        for n in 0..24 {
+            let history = history.clone();
+            joins.push(tokio::spawn(async move {
+                let id = Uuid::new_v4();
+                history
+                    .archive_session(archive_row(id, &format!("s{n}")))
+                    .await?;
+                history.set_economics(id, r#"{"turns":1}"#).await?;
+                history.set_work_item(id, Some("WI-2703")).await?;
+                history.set_economics(id, r#"{"turns":2}"#).await?;
+                Ok::<(), ApiError>(())
+            }));
+        }
+        for join in joins {
+            let result = join.await.unwrap();
+            if let Err(ref e) = result {
+                let err = e.to_string();
+                assert!(
+                    !err.to_lowercase().contains("locked") && !err.contains("SQLITE_BUSY"),
+                    "a caller saw a lock error: {err}"
+                );
+            }
+            result.unwrap();
+        }
+    }
+
+    /// Two economics snapshots inside the coalesce window become one write,
+    /// and a read before the flush does not show the uncommitted snapshot.
+    #[tokio::test]
+    async fn economics_snapshots_coalesce_until_flushed() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = SessionHistory::new(dir.path()).await.unwrap();
+        let id = Uuid::new_v4();
+        history
+            .archive_session(archive_row(id, "eco"))
+            .await
+            .unwrap();
+        assert!(history.set_economics(id, r#"{"turns":1}"#).await.unwrap());
+        assert!(history.set_economics(id, r#"{"turns":9}"#).await.unwrap());
+        // Nothing has been committed yet: the row still has no snapshot.
+        assert_eq!(read_economics(&history, id).await, None);
+        let wrote = history.flush_economics().await.unwrap();
+        assert_eq!(wrote, 1, "the two snapshots are one write");
+        assert_eq!(
+            read_economics(&history, id).await.as_deref(),
+            Some(r#"{"turns":9}"#)
+        );
+    }
+
+    /// A burst of writes does not stall a list: the list uses the read pool
+    /// and never waits on the writer.
+    #[tokio::test]
+    async fn list_sessions_stays_fast_under_write_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = std::sync::Arc::new(SessionHistory::new(dir.path()).await.unwrap());
+        for n in 0..8 {
+            history
+                .archive_session(archive_row(Uuid::new_v4(), &format!("seed{n}")))
+                .await
+                .unwrap();
+        }
+        let writer = history.clone();
+        let burst = tokio::spawn(async move {
+            for n in 0..40 {
+                writer
+                    .archive_session(archive_row(Uuid::new_v4(), &format!("burst{n}")))
+                    .await
+                    .unwrap();
+                writer
+                    .set_economics(Uuid::new_v4(), r#"{"turns":1}"#)
+                    .await
+                    .unwrap();
+            }
+        });
+        let started = std::time::Instant::now();
+        let listed = history.list_sessions(50, 0).await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "list took {elapsed:?} under write load"
+        );
+        assert!(!listed.is_empty());
+        burst.await.unwrap();
+    }
+
+    /// A shutdown flushes coalesced economics, drains the queue and stops
+    /// the writer — the graceful-shutdown path loses no pending snapshot.
+    #[tokio::test]
+    async fn shutdown_flushes_pending_economics() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = SessionHistory::new(dir.path()).await.unwrap();
+        let id = Uuid::new_v4();
+        history
+            .archive_session(archive_row(id, "shut"))
+            .await
+            .unwrap();
+        assert!(history.set_economics(id, r#"{"turns":3}"#).await.unwrap());
+        history.shutdown().await;
+        assert_eq!(
+            read_economics(&history, id).await.as_deref(),
+            Some(r#"{"turns":3}"#),
+            "the shutdown flushed the coalesced snapshot"
+        );
+    }
+
+    /// An economics flush that fails before an archive is logged and does
+    /// not stop the archive: the row is still written.
+    #[tokio::test]
+    async fn a_failed_economics_write_still_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = SessionHistory::new(dir.path()).await.unwrap();
+        let id = Uuid::new_v4();
+        history
+            .archive_session(archive_row(id, "econ-fail"))
+            .await
+            .unwrap();
+        assert!(history.set_economics(id, r#"{"turns":1}"#).await.unwrap());
+        // Fail every economics UPDATE while leaving INSERT alone. A trigger
+        // is the deterministic way to fail exactly that one statement; a
+        // dropped column or closed database would fail the archive too.
+        // Create it on a writable connection: the session-history read pool
+        // is read-only.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(dir.path().join("history.db"))
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_econ BEFORE UPDATE OF economics ON sessions \
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Delete the provisional row so the next archive is an INSERT, not
+        // the upsert — the upsert also touches economics and would fail.
+        history.delete_session(id).await.unwrap();
+        let mut record = archive_row(id, "econ-fail");
+        record.ended_at = Some(OffsetDateTime::now_utc());
+        history
+            .archive_session(record)
+            .await
+            .expect("the archive still lands when the coalesced economics write fails");
+        let row = history.get_session(id).await.unwrap();
+        assert_eq!(row.name, "econ-fail");
+        assert!(row.ended_at.is_some(), "the archive row was written");
     }
 }
