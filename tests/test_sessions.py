@@ -2370,6 +2370,48 @@ def test_a_project_without_a_landing_block_renders_no_landing_rule(
     assert "Landing rule" not in engine.last_spec["prompt"]
 
 
+def test_a_graft_landing_renders_graft_wording_not_push_branch(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """#1240: a graft project's brief says to land on the graft line."""
+    from vogt.core.entities import GraftLanding, LandingPolicy
+
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(
+                landing=LandingPolicy(
+                    base_branch="main",
+                    worker_lands_by="graft",
+                    graft=GraftLanding(
+                        line="backlog-1",
+                        mirror="vogt",
+                        endpoint="http://graft-dev:17888",
+                    ),
+                    merge_by="oversight",
+                    merge_mode="rebase",
+                )
+            ),
+            reason=WHY,
+        ),
+    )
+    with wired.declared.read() as view:
+        stored = view.project_by_slug("vogt")
+    assert stored is not None and stored.agent_policy.landing is not None
+    assert stored.agent_policy.landing.graft is not None
+    assert stored.agent_policy.landing.graft.line == "backlog-1"
+    item = native_work_item(wired, title="graft me", project="vogt")
+    start_session(wired, StartSessionParams(work_item=item.ref, reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert (
+        "**Lands by** land on graft line `backlog-1` with your session token "
+        "(see worker setup)"
+    ) in brief
+    assert "`http://graft-dev:17888`" in brief
+    assert "**Lands by** push_branch" not in brief
+
+
 def test_a_bad_branch_pattern_or_a_merge_commit_mode_is_refused(
     wired: AppContext,
 ) -> None:

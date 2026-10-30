@@ -164,7 +164,9 @@ deploys production (`merge_deploys_prod`, with `main_branches`; an empty list
 means `main`), `commit_identity`, `test_recipe`, `deployed_setup` and `rules`. It may
 also carry three structured blocks. `landing` names the base branch, the branch pattern
 (`{n}` is the work item number, and the brief fills it in), how a worker lands
-(`push_branch` or `open_pr`), who merges (`oversight` or `operator`) and by
+(`push_branch`, `open_pr`, or `graft` with a `graft` block naming the
+graft `line`, `mirror` service and `endpoint`, rendered as "land on graft
+line X with your session token"), who merges (`oversight` or `operator`) and by
 which mode (`fast_forward` or `rebase` — a merge commit is refused), and who
 deploys; when it is set the brief renders a "Landing rule for this repo"
 block, and when it is absent the brief says nothing about one. `review` names

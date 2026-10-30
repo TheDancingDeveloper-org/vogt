@@ -738,8 +738,10 @@ class UpdateProjectParams(Params):
             "it. `forbidden_text` entries are regexes and must compile, and so "
             "must `landing.branch_pattern` once `{n}` stands for a number; "
             "`landing.merge_mode` is `fast_forward` or `rebase` — `merge` is "
-            "refused. A pattern that does not compile is refused rather than "
-            "stored."
+            "refused. `landing.worker_lands_by` is `push_branch`, `open_pr` "
+            "or `graft`; `graft` needs `landing.graft` (`line`, `mirror`, "
+            "`endpoint`), which is refused for the other modes. A pattern "
+            "that does not compile is refused rather than stored."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
