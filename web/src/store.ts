@@ -127,6 +127,18 @@ function refreshAfterLag(): void {
   }, LAGGED_REFRESH_DEBOUNCE_MS);
 }
 
+/** The rail list is the slim view (WI-2692): it leaves out `command`,
+ *  `economics` and `conversation`. Keep what an earlier full read (create,
+ *  detail) put on the row rather than letting the merge erase it. */
+export function withKnownDetail(sess: SessionSummary, known: SessionSummary | undefined): SessionSummary {
+  if (!known) return sess;
+  return {
+    ...sess,
+    command: sess.command ?? known.command,
+    conversation: sess.conversation ?? known.conversation,
+  };
+}
+
 async function loadSessions(signal?: AbortSignal): Promise<void> {
   armStallTimer();
   try {
@@ -142,7 +154,7 @@ async function loadSessions(signal?: AbortSignal): Promise<void> {
     const next: Record<string, SessionSummary> = {};
     const ids: string[] = [];
     for (const sess of list.sessions) {
-      next[sess.id] = sess;
+      next[sess.id] = withKnownDetail(sess, store.sessions[sess.id]);
       ids.push(sess.id);
     }
     setStore("sessions", reconcileStore(next, { key: "id", merge: true }));
