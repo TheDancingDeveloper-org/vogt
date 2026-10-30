@@ -141,6 +141,8 @@ pub struct Session {
     template: Mutex<Option<String>>,
     /// The work item it serves (see `SessionSummary::work_item`, WI-998).
     work_item: Mutex<Option<String>>,
+    /// Its git tree, when it runs in one (WI-1324).
+    workspace: Mutex<Option<vogt_engine_contract::Workspace>>,
     /// The session its work was handed to (WI-1251). Kept on the live session
     /// so a later hibernation records the handoff again: the record is
     /// rewritten from the session, and a forced wake must not forget it.
@@ -572,6 +574,7 @@ impl Session {
             done_at: self.done_at(),
             role: self.role(),
             work_item: self.work_item(),
+            workspace: self.workspace(),
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
@@ -665,6 +668,14 @@ impl Session {
 
     pub fn work_item(&self) -> Option<String> {
         self.work_item.lock().clone()
+    }
+
+    pub fn set_workspace(&self, workspace: Option<vogt_engine_contract::Workspace>) {
+        *self.workspace.lock() = workspace;
+    }
+
+    pub fn workspace(&self) -> Option<vogt_engine_contract::Workspace> {
+        self.workspace.lock().clone()
     }
 
     pub fn set_superseded_by(&self, superseded_by: Option<String>) {
@@ -1348,6 +1359,7 @@ pub fn spawn(
         resources: Mutex::new(None),
         template: Mutex::new(None),
         work_item: Mutex::new(None),
+        workspace: Mutex::new(None),
         superseded_by: Mutex::new(None),
         permission_mode: Mutex::new(None),
         posture_lost_on_resume: AtomicBool::new(false),

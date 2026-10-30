@@ -10,7 +10,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use vogt_engine_contract::{
-    BranchInfo, DiffResp, GitStatus, LogEntry, SessionRole, StatusEntry, StatusKind,
+    BranchInfo, DiffResp, GitStatus, LogEntry, SessionRole, StatusEntry, StatusKind, Workspace,
+    WorkspaceKind,
 };
 
 use crate::{
@@ -250,6 +251,114 @@ pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<
         ApiError::BadRequest(format!("could not create the worktree: {error}"))
     })?;
     Ok(destination)
+}
+
+/// The workspace record of the git tree `dir` is in (WI-1324), or `None`
+/// when `dir` is in no repo or git cannot read it.
+///
+/// `base_ref` is the ref an engine-cut worktree was made from; its current
+/// sha is recorded beside it. The baseline is every path `git status
+/// --porcelain=v1 -z --untracked-files=normal` names, repo-relative, a
+/// rename's or copy's source included.
+pub fn capture_workspace(dir: &Path, base_ref: Option<&str>) -> Option<Workspace> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let path = git_output(dir, &["rev-parse", "--show-toplevel"]).ok()?;
+    let path = PathBuf::from(path.trim());
+    let absolute = |p: String| {
+        let p = PathBuf::from(p.trim());
+        let p = if p.is_absolute() { p } else { path.join(p) };
+        std::fs::canonicalize(&p).unwrap_or(p)
+    };
+    let git_dir = absolute(git_output(&path, &["rev-parse", "--git-dir"]).ok()?);
+    let common = absolute(git_output(&path, &["rev-parse", "--git-common-dir"]).ok()?);
+    let (kind, repo_root) = if git_dir == common {
+        (WorkspaceKind::Checkout, path.clone())
+    } else {
+        let root = common
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.clone());
+        (WorkspaceKind::Worktree, root)
+    };
+    let branch = git_output(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map(|b| b.trim().to_string())
+        .ok()
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "detached".to_string());
+    let base_ref = base_ref.map(str::trim).filter(|r| !r.is_empty());
+    let base_sha = base_ref.and_then(|r| {
+        let remote = r.strip_prefix("origin/").unwrap_or(r);
+        git_output(
+            &path,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("origin/{remote}^{{commit}}"),
+            ],
+        )
+        .or_else(|_| {
+            git_output(
+                &path,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{r}^{{commit}}"),
+                ],
+            )
+        })
+        .ok()
+        .map(|s| s.trim().to_string())
+    });
+    let status = git_output(
+        &path,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+    )
+    .ok()?;
+    let build_dirs = match kind {
+        WorkspaceKind::Worktree => ["target", "node_modules", ".venv"]
+            .iter()
+            .map(|d| d.to_string())
+            .collect(),
+        WorkspaceKind::Checkout => Vec::new(),
+    };
+    Some(Workspace {
+        kind,
+        path: path.to_string_lossy().into_owned(),
+        repo_root: repo_root.to_string_lossy().into_owned(),
+        branch,
+        base_ref: base_ref.map(str::to_string),
+        base_sha,
+        created_at: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
+        baseline_dirty: porcelain_paths(&status),
+        build_dirs,
+        cleaned_at: None,
+    })
+}
+
+/// The paths in `git status --porcelain=v1 -z` output: each entry's path,
+/// and for a rename or copy the source that follows it too.
+fn porcelain_paths(status: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut fields = status.split('\0');
+    while let Some(entry) = fields.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (code, path) = entry.split_at(3);
+        paths.push(path.to_string());
+        if matches!(code.as_bytes()[0], b'R' | b'C') {
+            if let Some(source) = fields.next().filter(|s| !s.is_empty()) {
+                paths.push(source.to_string());
+            }
+        }
+    }
+    paths
 }
 
 /// Undo [`create_worktree`]: remove the worktree at `path` and delete
@@ -1721,6 +1830,40 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn workspace_capture_names_the_tree_and_its_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        std::fs::write(repo.join("new.txt"), "n\n").unwrap();
+        git(&repo, &["mv", "f.txt", "g.txt"]);
+        let checkout = super::capture_workspace(&repo, None).unwrap();
+        assert_eq!(checkout.kind, WorkspaceKind::Checkout);
+        assert_eq!(checkout.repo_root, checkout.path);
+        assert_eq!(checkout.branch, "main");
+        assert_eq!(checkout.base_sha, None);
+        assert!(checkout.build_dirs.is_empty());
+        let mut dirty = checkout.baseline_dirty.clone();
+        dirty.sort();
+        assert_eq!(dirty, ["f.txt", "g.txt", "new.txt"]);
+
+        let worktree = create_worktree(&repo, "wi-1324-ws", "topic").unwrap();
+        let ws = super::capture_workspace(&worktree.join("."), Some("topic")).unwrap();
+        assert_eq!(ws.kind, WorkspaceKind::Worktree);
+        assert_eq!(ws.branch, "wi-1324-ws");
+        assert_eq!(
+            std::fs::canonicalize(&ws.repo_root).unwrap(),
+            std::fs::canonicalize(&repo).unwrap()
+        );
+        assert_eq!(ws.base_ref.as_deref(), Some("topic"));
+        let tip = super::git_output(&repo, &["rev-parse", "origin/topic"]).unwrap();
+        assert_eq!(ws.base_sha.as_deref(), Some(tip.trim()));
+        assert!(ws.baseline_dirty.is_empty());
+        assert_eq!(ws.build_dirs, ["target", "node_modules", ".venv"]);
+
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(super::capture_workspace(plain.path(), None), None);
     }
 
     /// A committed checkout whose local `topic` lags `origin/topic`,
