@@ -574,6 +574,11 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if path.starts_with("/api/sessions/") {
         return Some(TokenCapability::Sessions);
     }
+    // Every session's tree, branch and base (WI-1340): what a session read
+    // needs, not less.
+    if path == "/api/workspaces" {
+        return Some(TokenCapability::Sessions);
+    }
     // A quick chat starts an agent, and its transcript is a shared record,
     // so every chat route — reads included — needs what a session does
     // (WI-1097). The gate is not under this rule: it is outside the bearer

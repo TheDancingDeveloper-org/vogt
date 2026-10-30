@@ -184,6 +184,7 @@ from vogt.application.services.work import (
     unrelate_work,
     update_work,
 )
+from vogt.application.services.workspaces import workspace_list
 from vogt.application.services.writeback import (
     list_write_backs,
     onboard,
@@ -346,4 +347,5 @@ __all__ = [
     "whoami",
     "why",
     "withdraw_decision",
+    "workspace_list",
 ]
