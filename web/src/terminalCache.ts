@@ -133,6 +133,13 @@ export async function loadTerminalCache(
  * restarted passes that stream's id as `stream`: the record is replaced when
  * it belongs to any other stream, and offset-checked when it already belongs
  * to this one, so two writes of the restarted stream still race safely.
+ *
+ * Every other writer stamps its record with the stream it knows as `tag` (#1246):
+ * a pane that restored a stamped record, or one whose restart write was already
+ * acknowledged. A write that is not a restart and does not carry the stored
+ * record's stream id (an id-less pre-warm, another tab still on the old stream)
+ * is refused as `stale`, whatever its offset: the stored stream is one that
+ * writer never saw, so it is newer than anything the writer holds.
  */
 export type TerminalCacheSaveResult = "written" | "stale" | "failed";
 
@@ -141,6 +148,7 @@ export async function saveTerminalCache(
   outputPosition: number,
   payload: TerminalCachePayload,
   stream?: string,
+  tag?: string,
 ): Promise<TerminalCacheSaveResult> {
   if (typeof indexedDB === "undefined" || !Number.isSafeInteger(outputPosition)) {
     return "failed";
@@ -164,12 +172,15 @@ export async function saveTerminalCache(
     // restart): its offsets restart at 0, so another stream's record must not
     // win. Writes of the same stream keep the newest cursor.
     const replace = stream !== undefined && existing?.stream !== stream;
-    if (replace || !existing || !(existing.outputPosition >= outputPosition)) {
-      const tag = stream !== undefined ? { stream } : {};
+    // Not a restart: a record from a stream this writer never saw wins.
+    const own = stream ?? tag;
+    const foreign = existing?.stream !== undefined && existing.stream !== own;
+    if (replace || (!foreign && (!existing || !(existing.outputPosition >= outputPosition)))) {
+      const stamp = own !== undefined ? { stream: own } : {};
       const stored: TerminalCacheEntry =
         "serialized" in payload
-          ? { sessionId, outputPosition, ...tag, serialized: payload.serialized, updatedAt: Date.now() }
-          : { sessionId, outputPosition, ...tag, data: payload.data.slice().buffer, updatedAt: Date.now() };
+          ? { sessionId, outputPosition, ...stamp, serialized: payload.serialized, updatedAt: Date.now() }
+          : { sessionId, outputPosition, ...stamp, data: payload.data.slice().buffer, updatedAt: Date.now() };
       store.put(stored);
       result = "written";
       const entries = await requestResult(

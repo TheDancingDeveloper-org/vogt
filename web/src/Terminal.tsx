@@ -245,6 +245,10 @@ const TerminalView: Component<Props> = (props) => {
   // saves carry this stream's id until one is acknowledged, and replace a
   // record left by any other stream rather than lose to it.
   let replaceStoredCache: string | undefined;
+  // The stream this pane's records belong to: adopted from a restored record
+  // or minted on restart. Every save is stamped with it, so a writer that
+  // never saw this stream cannot overwrite its record (#1246).
+  let cacheStreamId: string | undefined;
   // Bumped on every restart. A write acknowledged under an older epoch belongs
   // to the old stream and must not move this stream's cursors.
   let cacheStreamEpoch = 0;
@@ -534,7 +538,10 @@ const TerminalView: Component<Props> = (props) => {
     // Serialize needs the live xterm, so it stays on this thread. The IndexedDB
     // put (up to 4 MiB) runs in a worker. The offset counts as persisted only
     // once the write is acknowledged.
-    void postTerminalCacheWrite(props.sessionId, position, payload, undefined, direct, stream).then((result) => {
+    void postTerminalCacheWrite(
+      props.sessionId, position, payload, undefined, direct, stream,
+      stream === undefined ? cacheStreamId : undefined,
+    ).then((result) => {
       // The stream restarted while this write was in flight: its cursor is an
       // offset of the old stream, so it says nothing about the new one.
       if (epoch !== cacheStreamEpoch) {
@@ -568,6 +575,7 @@ const TerminalView: Component<Props> = (props) => {
     persistingPosition = undefined;
     cacheStreamEpoch += 1;
     replaceStoredCache = newCacheStreamId();
+    cacheStreamId = replaceStoredCache;
   };
 
   // Page closing or backgrounded: drop the pending timer/idle slot and write
@@ -1263,6 +1271,7 @@ const TerminalView: Component<Props> = (props) => {
 
     void loadTerminalCache(props.sessionId).then((cached) => {
       if (destroyed) return;
+      if (cached?.stream !== undefined && cacheStreamId === undefined) cacheStreamId = cached.stream;
       // A live pane's initial load holds the pre-warm gate until snapshot-done.
       enterForegroundReplay();
       if (props.preview) {
