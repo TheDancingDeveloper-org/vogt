@@ -85,3 +85,55 @@ test("deep FileTree and 32-session rail record wake retained nodes", async ({ pa
   console.log(JSON.stringify({ beforeWake, afterWake, profile: STRESS_PROFILE }));
   expect(await page.locator(".places-rail-session-area .session-row").count()).toBe(STRESS_PROFILE.sessions);
 });
+
+// Phone pager swipe (WI-2706): attaches and the longest task per settled
+// swipe. A settled swipe used to mount the destination twice (the drag slide,
+// then the new tab's pane) and attach twice; the hand-off moves the slide's
+// terminal into the new pane, so it attaches once.
+// Measured 2026-10-30, phone project, 3 swipes from scale-session-20:
+//   before (main 8ac1e72a3): 2 attaches per swipe; 1-2 long tasks, longest 63-76 ms
+//   after  (WI-2706):        1 attach per swipe;  0 long tasks
+test("phone pager swipe attaches once per settled swipe", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "phone", "phone profile only");
+  await installDemo(page);
+  await page.goto(`/?demoScale=${STRESS_PROFILE.workItems}#/t/scale-session-20`);
+  const stage = page.locator(".terminal-mobile-stage");
+  await expect(stage).toBeVisible();
+  await page.waitForTimeout(500);
+  const swipes = [];
+  for (let index = 0; index < 3; index += 1) {
+    const before = await page.evaluate(() => {
+      const perf = (window as unknown as { __vogtPerf: unknown[] }).__vogtPerf;
+      perf.length = 0;
+      performance.clearMarks("vogt-demo-attach");
+      return location.hash;
+    });
+    await stage.evaluate((element) => {
+      const touch = (type: string, x: number) => {
+        const event = new Event(type, { bubbles: true, cancelable: true });
+        const touches = type === "touchend" ? [] : [{ clientX: x, clientY: 200 }];
+        Object.defineProperty(event, "touches", { value: touches });
+        element.dispatchEvent(event);
+      };
+      touch("touchstart", 300);
+      touch("touchmove", 280);
+      touch("touchmove", 150);
+      touch("touchmove", 60);
+      touch("touchend", 60);
+    });
+    await expect.poll(() => page.evaluate(() => location.hash)).not.toBe(before);
+    await page.waitForTimeout(600);
+    const result = await snapshot(page, `swipe-${index}`);
+    // Count the destination's attaches only: a destination with a saved
+    // split also attaches its other panes, which no swipe change affects.
+    result.attaches = await page.evaluate(() => {
+      const id = decodeURIComponent(location.hash.split("/t/")[1] ?? "");
+      return performance
+        .getEntriesByName("vogt-demo-attach")
+        .filter((mark) => (mark as PerformanceMark).detail === id).length;
+    });
+    swipes.push(result);
+  }
+  console.log(JSON.stringify({ swipes }));
+  for (const swipe of swipes) expect(swipe.attaches).toBe(1);
+});

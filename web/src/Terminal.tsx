@@ -145,6 +145,9 @@ interface Props {
   sessionId: string;
   /** Keep xterm mounted while parking the live socket for an inactive pane. */
   parked?: boolean;
+  /** A swipe preview (WI-2706): show the cached screen only, open no socket.
+   *  Clearing it later resumes the pane like an unparked one. */
+  preview?: boolean;
   /** This pane's workspace is the one on screen, even if another half of its
    *  split has the keyboard. A visible pane attaches on load; only a pane in a
    *  workspace the reader is not looking at is subject to the load cap. */
@@ -345,7 +348,8 @@ const TerminalView: Component<Props> = (props) => {
   let runCopyChip: () => void = () => {};
   let pasteResolve: ((v: string | null) => void) | null = null;
 
-  const isParked = () => Boolean(props.parked) || hiddenParked();
+  const isParked = () =>
+    Boolean(props.parked) || Boolean(props.preview) || hiddenParked();
 
   // Foreground-replay gate for background pre-warm. While a live
   // (non-parked) pane is loading its cache / running its first cold attach up
@@ -654,6 +658,8 @@ const TerminalView: Component<Props> = (props) => {
     }
   };
 
+  let refreshedCols = -1;
+  let refreshedRows = -1;
   const fitAndResize = () => {
     if (
       !term ||
@@ -683,11 +689,18 @@ const TerminalView: Component<Props> = (props) => {
       }
       applyTargetSize();
       sendResize();
-      // Repaint after a (re)fit. A pane opened or resumed while its host had no
-      // size buffers writes without painting; the fit restores a valid cell
-      // size and the refresh flushes the buffered rows, so an inactive split
-      // pane no longer looks frozen until it is clicked.
-      term.refresh(0, Math.max(0, term.rows - 1));
+      // Repaint after a fit that changed the grid. A pane opened or resumed
+      // while its host had no size buffers writes without painting; the fit
+      // restores a valid cell size and the refresh flushes the buffered rows,
+      // so an inactive split pane no longer looks frozen until it is clicked.
+      // A refit at the same size (keyboard scroll, layout settle) repaints
+      // nothing: a full refresh per viewport event is a long task on a phone
+      // (WI-2706).
+      if (term.cols !== refreshedCols || term.rows !== refreshedRows) {
+        refreshedCols = term.cols;
+        refreshedRows = term.rows;
+        term.refresh(0, Math.max(0, term.rows - 1));
+      }
     } catch {
       /* xterm can throw while its DOM is detaching or hidden */
     }
@@ -1156,6 +1169,22 @@ const TerminalView: Component<Props> = (props) => {
       if (destroyed) return;
       // A live pane's initial load holds the pre-warm gate until snapshot-done.
       enterForegroundReplay();
+      if (props.preview) {
+        // A swipe preview shows what is cached and attaches nothing; it counts
+        // as parked after its initial attach, so clearing `preview` resumes it.
+        initialAttachDone = true;
+        socketParked = true;
+        if (!cached) {
+          setReadyToConnect(true);
+          return;
+        }
+        outputPosition = cached.outputPosition;
+        lastPersistedPosition = cached.outputPosition;
+        restoreCache(cached, () => {
+          if (!destroyed) setReadyToConnect(true);
+        });
+        return;
+      }
       if (!cached) {
         setReadyToConnect(true);
         // A parked pane with nothing cached only attaches on load if a slot is

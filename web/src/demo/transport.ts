@@ -30,6 +30,8 @@ export class DemoTransport implements RuntimeTransport {
 
   openSocket(url: string): RuntimeSocket {
     const id = decodeURIComponent(new URL(url, window.location.origin).pathname.split("/").at(-2) ?? "");
+    // perf.spec.ts counts attaches per swipe from these marks (WI-2706).
+    performance.mark?.("vogt-demo-attach", { detail: id });
     return new DemoSocket(this.store, id);
   }
 
