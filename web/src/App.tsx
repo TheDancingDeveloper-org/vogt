@@ -154,6 +154,7 @@ import {
 } from "./sessionRail";
 import { createRailKeys, createRailRowFields } from "./railRowFields";
 import { noteRailSessions, railStarters } from "./railStarters";
+import { railSessions } from "./railSessions";
 import { setExpanded } from "./fileTreeState";
 import { demoManifest, resetDemoData } from "./runtimeTransport";
 import {
@@ -590,9 +591,9 @@ const App: Component = () => {
   // reshuffle mid-interaction slides the row (and its menu) under the pointer,
   // so a click meant for one session's Rename lands on another (#686).
   const railEntries = createMemo<RailEntry[]>((prev) => {
-    const sessions = sessionsStore.order
-      .map((id) => sessionsStore.sessions[id])
-      .filter((s): s is SessionSummary => Boolean(s));
+    // The shared, memoised order (railSessions.ts, WI-2696): it re-sorts only
+    // when a sort input changes, not on every resource or activity tick.
+    const sessions = railSessions();
     const held = openMenuId() !== null && prev.length > 0
       ? prev.flatMap((entry) => (entry.kind === "row" ? [entry.session.id] : []))
       : undefined;
