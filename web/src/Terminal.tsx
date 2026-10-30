@@ -13,7 +13,8 @@ import { openAttach } from "./api";
 import type { RuntimeSocket } from "./runtimeTransport";
 import { readClipboardText, writeClipboardText } from "./clipboard";
 import { decodeOsc52 } from "./terminalClipboard";
-import { terminalContextMenuAction } from "./terminalContextMenu";
+import { terminalContextMenuAction, terminalWordAt } from "./terminalContextMenu";
+import { TerminalCompositionGuard } from "./terminalComposition";
 import { sessionsStore } from "./store";
 import { wakeSession } from "./sessionHibernation";
 import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
@@ -96,6 +97,9 @@ import { isBehindLiveTail } from "./terminalScrollState";
 import {
   beginTerminalTouch,
   moveTerminalTouch,
+  startTerminalFling,
+  stepTerminalFling,
+  type TerminalFling,
   type TerminalTouchGesture,
 } from "./terminalTouch";
 import { onPageVisibility, onWake } from "./wakeCoordinator";
@@ -160,19 +164,18 @@ const MAX_PENDING_INPUT_BYTES = 4 * MAX_TERMINAL_INPUT_BYTES;
 
 function configureTerminalTextarea(textarea: HTMLTextAreaElement | undefined) {
   if (!textarea) return;
-  // Touch devices only: soft keyboards are unusable for prose without
-  // autocorrect/suggestions. On desktop, keep xterm's defaults (everything
-  // off) — enabling them routes hardware-keyboard input and paste through
-  // IME composition, which xterm can garble into duplicated/"corrected"
-  // characters.
+  // Touch devices only (desktop keeps xterm's defaults). Autocorrect rewrites
+  // a word after it was typed, which a PTY cannot follow — the "corrected"
+  // text arrives on top of the original — so every keyboard assist is off.
+  // What is left of IME composition is handled by TerminalCompositionGuard.
   if (!(window.matchMedia?.("(pointer: coarse)").matches ?? false)) return;
-  textarea.setAttribute("autocorrect", "on");
-  textarea.setAttribute("autocapitalize", "none");
-  textarea.setAttribute("autocomplete", "on");
+  textarea.setAttribute("autocorrect", "off");
+  textarea.setAttribute("autocapitalize", "off");
+  textarea.setAttribute("autocomplete", "off");
   textarea.setAttribute("inputmode", "text");
   textarea.setAttribute("enterkeyhint", "enter");
-  textarea.spellcheck = true;
-  textarea.setAttribute("spellcheck", "true");
+  textarea.spellcheck = false;
+  textarea.setAttribute("spellcheck", "false");
 }
 
 /**
@@ -289,6 +292,8 @@ const TerminalView: Component<Props> = (props) => {
   const isCoarsePointer =
     window.matchMedia?.("(pointer: coarse)").matches ?? false;
   const [showCopyChip, setShowCopyChip] = createSignal(false);
+  // A long-press over blank cells offers Paste; it never pastes by itself.
+  const [showPasteChip, setShowPasteChip] = createSignal(false);
   // Jump-to-bottom affordance: a long-running session that scrolled far up its
   // scrollback (or has a program still writing while the reader is up there) is
   // hard to catch up to by dragging, especially on a phone. The chip appears
@@ -305,6 +310,7 @@ const TerminalView: Component<Props> = (props) => {
     term?.focus();
   };
   let runCopyChip: () => void = () => {};
+  let runPasteChip: () => void = () => {};
   let pasteResolve: ((v: string | null) => void) | null = null;
 
   const isParked = () => Boolean(props.parked) || hiddenParked();
@@ -632,8 +638,30 @@ const TerminalView: Component<Props> = (props) => {
     const suppressXtermScroll = (event: Event) => event.stopImmediatePropagation();
     hostRef.addEventListener("-xterm-gesturechange", suppressXtermScroll, true);
     let gesture: TerminalTouchGesture | null = null;
+    let flingFrame: number | null = null;
+    const stopFling = () => {
+      if (flingFrame !== null) cancelAnimationFrame(flingFrame);
+      flingFrame = null;
+    };
+    const runFling = (start: TerminalFling) => {
+      stopFling();
+      let fling: TerminalFling | null = start;
+      let last = performance.now();
+      const tick = (now: number) => {
+        flingFrame = null;
+        if (!term || !fling || term.buffer.active.type !== "normal") return;
+        const step = stepTerminalFling(fling, Math.max(0, now - last), estimateCellHeight());
+        last = now;
+        fling = step.fling;
+        if (step.lines !== 0) term.scrollLines(step.lines);
+        if (fling) flingFrame = requestAnimationFrame(tick);
+      };
+      flingFrame = requestAnimationFrame(tick);
+    };
 
     const onTouchStart = (event: TouchEvent) => {
+      stopFling();
+      setShowPasteChip(false);
       const touch = event.touches.length === 1 ? event.touches[0] : undefined;
       gesture = touch ? beginTerminalTouch(touch.clientX, touch.clientY) : null;
     };
@@ -654,6 +682,7 @@ const TerminalView: Component<Props> = (props) => {
         estimateCellHeight(),
         term.buffer.active.type === "alternate" ? "alternate" : "normal",
         term.modes.mouseTrackingMode !== "none",
+        event.timeStamp || performance.now(),
       );
       gesture = move.gesture;
       if (move.claim && event.cancelable) event.preventDefault();
@@ -678,19 +707,31 @@ const TerminalView: Component<Props> = (props) => {
     };
 
     const onTouchEnd = (event: TouchEvent) => {
+      if (term && gesture && event.touches.length === 0) {
+        const fling = startTerminalFling(
+          gesture,
+          event.timeStamp || performance.now(),
+          estimateCellHeight(),
+          term.buffer.active.type === "alternate" ? "alternate" : "normal",
+          term.modes.mouseTrackingMode !== "none",
+        );
+        if (fling) runFling(fling);
+      }
       const touch = event.touches.length === 1 ? event.touches[0] : undefined;
       gesture = touch ? beginTerminalTouch(touch.clientX, touch.clientY) : null;
     };
 
     const onTouchCancel = () => { gesture = null; };
 
-    const listenerOptions: AddEventListenerOptions = { passive: false };
-    hostRef.addEventListener("touchstart", onTouchStart, listenerOptions);
-    hostRef.addEventListener("touchmove", onTouchMove, listenerOptions);
-    hostRef.addEventListener("touchend", onTouchEnd, listenerOptions);
-    hostRef.addEventListener("touchcancel", onTouchCancel, listenerOptions);
+    // Only touchmove ever prevents a default; the rest stay passive so the
+    // browser need not wait on them (and a long-press can start).
+    hostRef.addEventListener("touchstart", onTouchStart, { passive: true });
+    hostRef.addEventListener("touchmove", onTouchMove, { passive: false });
+    hostRef.addEventListener("touchend", onTouchEnd, { passive: true });
+    hostRef.addEventListener("touchcancel", onTouchCancel, { passive: true });
 
     return () => {
+      stopFling();
       hostRef?.removeEventListener("-xterm-gesturechange", suppressXtermScroll, true);
       hostRef?.removeEventListener("touchstart", onTouchStart);
       hostRef?.removeEventListener("touchmove", onTouchMove);
@@ -787,7 +828,22 @@ const TerminalView: Component<Props> = (props) => {
     term.onRender(() => refreshJumpToBottom());
 
     // Wire input: user keystrokes → PTY stdin.
-    term.onData((data) => dispatchInput(data));
+    // On a soft keyboard, IME composition commits are the one source of
+    // typed text (see TerminalCompositionGuard).
+    const composition = isCoarsePointer ? new TerminalCompositionGuard() : null;
+    const textarea = term.textarea;
+    if (composition && textarea) {
+      textarea.addEventListener("compositionstart", () => composition.start());
+      textarea.addEventListener("compositionupdate", () => composition.update());
+      textarea.addEventListener("compositionend", (event) => {
+        const committed = composition.end(event.data ?? "", performance.now());
+        if (committed) dispatchInput(committed);
+      });
+    }
+    term.onData((data) => {
+      const next = composition ? composition.filter(data, performance.now()) : data;
+      if (next) dispatchInput(next);
+    });
 
     // Paste MUST go through term.paste(): it emits the bracketed-paste markers
     // (\x1b[200~...\x1b[201~) only when the foreground program enabled DECSET
@@ -912,6 +968,22 @@ const TerminalView: Component<Props> = (props) => {
     };
     hostRef.addEventListener("auxclick", onAuxClick);
 
+    const selectWordAt = (x: number, y: number): boolean => {
+      if (!term) return false;
+      const screen = term.element?.querySelector(".xterm-screen") ?? term.element;
+      const rect = screen?.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+      const col = Math.floor(((x - rect.left) / rect.width) * term.cols);
+      const row = Math.floor(((y - rect.top) / rect.height) * term.rows);
+      if (row < 0 || row >= term.rows) return false;
+      const bufferRow = term.buffer.active.viewportY + row;
+      const line = term.buffer.active.getLine(bufferRow)?.translateToString(false) ?? "";
+      const word = terminalWordAt(line, col);
+      if (!word) return false;
+      term.select(word[0], bufferRow, word[1] - word[0]);
+      return true;
+    };
+
     // Right-click: if there's a selection, copy it; otherwise paste. Bypasses
     // the browser context menu — most users on mobile/desktop just want one
     // of those two actions on a terminal.
@@ -919,6 +991,7 @@ const TerminalView: Component<Props> = (props) => {
       const action = terminalContextMenuAction(
         e.shiftKey,
         term?.hasSelection() ?? false,
+        isCoarsePointer,
       );
       // Shift+right-click is the escape hatch to the browser's own menu — do
       // NOT preventDefault, and run none of the custom copy/paste path.
@@ -926,6 +999,10 @@ const TerminalView: Component<Props> = (props) => {
       e.preventDefault();
       if (action === "copy") {
         copySelection().then(notifyCopy);
+      } else if (action === "select") {
+        // A long-press: select the word under the finger, or over blank
+        // cells offer Paste as a chip — never paste without that tap.
+        if (!selectWordAt(e.clientX, e.clientY)) setShowPasteChip(true);
       } else {
         void pasteFromClipboard();
       }
@@ -944,6 +1021,7 @@ const TerminalView: Component<Props> = (props) => {
     // But a coarse pointer has neither: no right-click, and iOS Safari fires no
     // contextmenu on a long-press. So on touch we surface an explicit Copy chip
     // whenever there is a live selection — a tap copies, it does not auto-fire.
+    runPasteChip = () => void pasteFromClipboard();
     runCopyChip = () => {
       setShowCopyChip(false);
       void copySelection().then(notifyCopy);
@@ -1782,6 +1860,19 @@ const TerminalView: Component<Props> = (props) => {
             }}
           >
             Copy
+          </button>
+        </Show>
+        <Show when={showPasteChip()}>
+          <button
+            type="button"
+            class="terminal-copy-chip"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              setShowPasteChip(false);
+              runPasteChip();
+            }}
+          >
+            Paste
           </button>
         </Show>
         <Show when={showJumpToBottom()}>
