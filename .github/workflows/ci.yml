@@ -501,11 +501,12 @@ jobs:
           fi
 
       # WI-2709: the `@touch` specs (swipe, long-press, resume, reconnect) on
-      # Android Chrome (Pixel 7) and the iPhone profile. Merge queue only, not
-      # every PR push: the phone project above already gates PRs, and these
-      # exercise timing-sensitive lifecycle paths.
-      - name: touch lifecycle on Android Chrome (merge queue)
-        if: always() && !cancelled() && github.event_name == 'merge_group' && needs.changes.outputs.web == 'true'
+      # Android Chrome (Pixel 7) and the iPhone profile. Full runs only (merge
+      # queue, nightly, manual), like the rest of the full suite: a PR gets the
+      # desktop smoke above, and these timing-sensitive lifecycle paths run
+      # before anything lands.
+      - name: touch lifecycle on Android Chrome (full suite)
+        if: always() && !cancelled() && needs.changes.outputs.full == 'true' && needs.changes.outputs.web == 'true'
         working-directory: web
         env:
           CI: "true"
