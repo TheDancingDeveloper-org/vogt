@@ -127,7 +127,8 @@ export async function loadTerminalCache(
  * How a save ended. `stale` means the store already held this session at the
  * same or a later offset, so the incoming record was dropped: worker writes,
  * the pagehide flush, other tabs and pre-warm all race on one key, and the
- * newest cursor must win regardless of commit order.
+ * newest cursor must win regardless of commit order. A caller whose stream
+ * restarted passes `replace` to bypass the check.
  */
 export type TerminalCacheSaveResult = "written" | "stale" | "failed";
 
@@ -135,6 +136,7 @@ export async function saveTerminalCache(
   sessionId: string,
   outputPosition: number,
   payload: TerminalCachePayload,
+  replace = false,
 ): Promise<TerminalCacheSaveResult> {
   if (typeof indexedDB === "undefined" || !Number.isSafeInteger(outputPosition)) {
     return "failed";
@@ -154,7 +156,9 @@ export async function saveTerminalCache(
       store.get(sessionId) as IDBRequest<TerminalCacheEntry | undefined>,
     );
     let result: TerminalCacheSaveResult = "stale";
-    if (!existing || !(existing.outputPosition >= outputPosition)) {
+    // `replace` is a new stream for this session (a woken process, a server
+    // restart): its offsets restart at 0, so the old record must not win.
+    if (replace || !existing || !(existing.outputPosition >= outputPosition)) {
       const stored: TerminalCacheEntry =
         "serialized" in payload
           ? { sessionId, outputPosition, serialized: payload.serialized, updatedAt: Date.now() }

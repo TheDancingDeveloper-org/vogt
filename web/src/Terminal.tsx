@@ -225,6 +225,12 @@ const TerminalView: Component<Props> = (props) => {
   let lastPersistedPosition: number | undefined;
   // The cursor of a write posted but not yet acknowledged.
   let persistingPosition: number | undefined;
+  // The stream restarted (wake, server restart): offsets begin again at 0, so
+  // the next save must replace the stored record rather than lose to it.
+  let replaceStoredCache = false;
+  // A resume replay of dormant bytes is still being parsed, so the xterm
+  // screen lags the cursor.
+  let pendingResumeReplay: ReplayHandle | null = null;
   // Set on dormancy entry so the next persist runs without the 5 s wait.
   let persistOnDormancy = false;
   let replay: ReplayHandle | null = null;
@@ -473,24 +479,44 @@ const TerminalView: Component<Props> = (props) => {
     const position = outputPosition;
     persistingPosition = position;
     persistOnDormancy = false;
-    // A dormant pane parses nothing it receives, so the xterm screen lags the
-    // cursor. Store the raw ring, which does hold every byte up to `position`;
-    // a serialized screen paired with that cursor would drop the hidden output.
-    const serialized = socketDormant && dormantBytes > 0 ? null : trySerialize();
+    // While the xterm screen lags the cursor, store the raw ring, which holds
+    // every byte up to `position`: a dormant pane parses nothing it receives,
+    // and a snapshot or resume replay is still being parsed. A serialized
+    // screen paired with that cursor would drop the unparsed output.
+    const screenLags = (socketDormant && dormantBytes > 0) || inSnapshot || pendingResumeReplay !== null;
+    const serialized = screenLags ? null : trySerialize();
     const payload = serialized !== null ? { serialized } : { data: cachedBytes() };
+    const replace = replaceStoredCache;
     // Serialize needs the live xterm, so it stays on this thread. The IndexedDB
     // put (up to 4 MiB) runs in a worker. The offset counts as persisted only
     // once the write is acknowledged.
-    void postTerminalCacheWrite(props.sessionId, position, payload, undefined, direct).then((ok) => {
+    void postTerminalCacheWrite(props.sessionId, position, payload, undefined, direct, replace).then((result) => {
       if (persistingPosition === position) persistingPosition = undefined;
-      if (ok && (lastPersistedPosition === undefined || position > lastPersistedPosition)) {
-        lastPersistedPosition = position;
+      // `stale` means the store already holds this stream at a later cursor;
+      // a replacing write never reports it.
+      const saved = result === "written" || (result === "stale" && !replace);
+      if (result === "stale") {
+        console.debug("[vogt] terminal cache kept a newer record", { sessionId: props.sessionId, position });
+      }
+      if (saved) {
+        if (replace && result === "written") replaceStoredCache = false;
+        if (lastPersistedPosition === undefined || position > lastPersistedPosition) {
+          lastPersistedPosition = position;
+        }
       }
       // Output that arrived while this write was in flight still needs one.
       if (!destroyed && cacheNeedsPersist(outputPosition, lastPersistedPosition)) {
         scheduleCachePersist();
       }
     });
+  };
+
+  // The session's output stream restarted at 0: forget the persisted cursor
+  // and make the next save replace the stored record.
+  const restartCacheStream = () => {
+    lastPersistedPosition = undefined;
+    persistingPosition = undefined;
+    replaceStoredCache = true;
   };
 
   // Page closing or backgrounded: drop the pending timer/idle slot and write
@@ -1358,6 +1384,11 @@ const TerminalView: Component<Props> = (props) => {
               cacheBytes = 0;
             }
             if (typeof ctrl.scrollback_pos === "number") {
+              // A snapshot ending before the cursor we already saved is a new
+              // stream (server restart), not an older view of this one.
+              if (lastPersistedPosition !== undefined && ctrl.scrollback_pos < lastPersistedPosition) {
+                restartCacheStream();
+              }
               snapshotEndPosition = ctrl.scrollback_pos;
               // Re-anchor to the start of the payload we are about to replay.
               // On a reset:true that followed a resume_from (F1's aged-out or
@@ -1577,6 +1608,11 @@ const TerminalView: Component<Props> = (props) => {
     );
     replay.enqueue(plan.data);
     replay.finish();
+    const resumeReplay = replay;
+    pendingResumeReplay = resumeReplay;
+    void resumeReplay.done.then(() => {
+      if (pendingResumeReplay === resumeReplay) pendingResumeReplay = null;
+    });
   }
 
   function parkSocket() {
@@ -1660,6 +1696,7 @@ const TerminalView: Component<Props> = (props) => {
     hibernated = false;
     setHibernatedView(null);
     outputPosition = undefined;
+    restartCacheStream();
     setStatusText("Loading terminal...");
     if (!destroyed && !isParked()) connect();
   });

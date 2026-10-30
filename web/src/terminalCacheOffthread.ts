@@ -4,8 +4,9 @@
  * fails (module load error, messageerror): pending writes are replayed on the
  * main thread and every later write goes there too.
  *
- * The returned promise resolves true once the record is stored, or the store
- * already held a newer one; false when the write failed.
+ * The returned promise resolves with the save result: `written`, `stale` (the
+ * store already held this or a later offset of the same stream) or `failed`.
+ * Whether `stale` counts as saved is the caller's call.
  */
 
 import { saveTerminalCache, type TerminalCachePayload, type TerminalCacheSaveResult } from "./terminalCache";
@@ -21,18 +22,16 @@ export type CacheWorker = {
 
 interface Pending {
   message: TerminalCacheWrite;
-  resolve: (ok: boolean) => void;
+  resolve: (result: TerminalCacheSaveResult) => void;
 }
 
 let worker: CacheWorker | null | undefined;
 let nextId = 1;
 const pending = new Map<number, Pending>();
 
-const settled = (result: TerminalCacheSaveResult) => result !== "failed";
-
 function writeOnMainThread(entry: Pending): void {
-  const { sessionId, outputPosition, payload } = entry.message;
-  void saveTerminalCache(sessionId, outputPosition, payload).then((r) => entry.resolve(settled(r)));
+  const { sessionId, outputPosition, payload, replace } = entry.message;
+  void saveTerminalCache(sessionId, outputPosition, payload, replace === true).then(entry.resolve);
 }
 
 function abandonWorker(reason: string): void {
@@ -50,7 +49,7 @@ function wire(w: CacheWorker): CacheWorker {
     const entry = pending.get(ev.data?.id);
     if (!entry) return;
     pending.delete(ev.data.id);
-    entry.resolve(settled(ev.data.result));
+    entry.resolve(ev.data.result);
   };
   w.onerror = () => abandonWorker("error");
   w.onmessageerror = () => abandonWorker("messageerror");
@@ -74,10 +73,11 @@ export function postTerminalCacheWrite(
   payload: TerminalCachePayload,
   spawn: () => CacheWorker | null = createWorker,
   direct = false,
-): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
+  replace = false,
+): Promise<TerminalCacheSaveResult> {
+  return new Promise<TerminalCacheSaveResult>((resolve) => {
     const entry: Pending = {
-      message: { id: nextId++, sessionId, outputPosition, payload },
+      message: { id: nextId++, sessionId, outputPosition, payload, ...(replace ? { replace } : {}) },
       resolve,
     };
     // `direct` is the pagehide path: a worker can be torn down with the page
