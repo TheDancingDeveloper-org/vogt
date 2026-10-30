@@ -46,7 +46,7 @@ async function mockedFixtures(page: Page): Promise<void> {
       vogt: { configured: true },
     }),
   );
-  await page.route("**/api/sessions", (route) => route.fulfill({ json: [SESSION] }));
+  await page.route(/\/api\/sessions(\?.*)?$/, (route) => route.fulfill({ json: [SESSION] }));
   await page.route("**/api/sessions/*", (route) => {
     if (route.request().method() !== "GET") return route.fulfill({ json: { ok: true } });
     return route.fulfill({ json: { ...SESSION, scrollback_base64: "" } });
