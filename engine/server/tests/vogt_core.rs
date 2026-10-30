@@ -146,6 +146,13 @@ async fn core_handler(
             })),
         )
             .into_response(),
+        // A core that names its route template, as the real one does.
+        "/api/templated/abc123" => (
+            AxumStatus::OK,
+            [("x-vogt-route", "/api/templated/{id}")],
+            Json(json!({"seen": uri.path()})),
+        )
+            .into_response(),
         _ => (AxumStatus::OK, Json(json!({"seen": uri.path()}))).into_response(),
     }
 }
@@ -309,6 +316,27 @@ async fn a_vogt_read_reaches_the_core_under_its_own_prefix() {
     let seen = log.lock().unwrap().last().cloned().unwrap();
     assert_eq!(seen.path, "/api/status");
     assert_eq!(seen.method, "GET");
+}
+
+#[tokio::test]
+async fn the_proxy_hop_is_timed_under_the_cores_route_template() {
+    let (base, _log) = front_door().await;
+    let res = client()
+        .get(format!("{base}/api/vogt/templated/abc123"))
+        .headers(bearer(TEST_TOKEN))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let scraped = vogt_engine_server::metrics::metrics().render();
+    assert!(
+        scraped.contains(
+            "vogt_engine_http_request_seconds_count{route=\"/api/vogt/templated/{id}\",method=\"GET\",status=\"200\"}"
+        ),
+        "{scraped}"
+    );
+    // The id never becomes a label value.
+    assert!(!scraped.contains("abc123"), "{scraped}");
 }
 
 #[tokio::test]
