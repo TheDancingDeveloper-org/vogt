@@ -99,6 +99,8 @@ pub struct AppState {
     /// Quick chats (WI-1097), or `None` when they are off or no Klaudia
     /// launch is configured; their routes then 404.
     pub chats: Option<Arc<ChatRuntime>>,
+    /// Cached workspace tree sizes for `GET /api/workspaces` (WI-1340).
+    pub workspace_sizes: Arc<crate::workspaces::WorkspaceSizes>,
 }
 
 pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
@@ -251,6 +253,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         core_identities: Arc::new(CoreIdentityCache::default()),
         agent_clis: Arc::new(agent_clis::AgentCliRuntime::new(agent_clis_paths)),
         chats,
+        workspace_sizes: Arc::new(crate::workspaces::WorkspaceSizes::from_env()),
     });
 
     // Background task: fan out a push notification whenever a session enters
@@ -321,6 +324,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         // Literal paths before `/{id}`, or axum captures "changes" and
         // "wait-any" as session ids.
         .route("/api/sessions/changes", get(api::session_changes))
+        .route("/api/workspaces", get(crate::workspaces::list_workspaces))
         .route("/api/sessions/wait-any", get(api::session_wait_any))
         .route(
             "/api/sessions/{id}",

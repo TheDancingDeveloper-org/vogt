@@ -600,6 +600,34 @@ class EngineChanges:
 
 
 @dataclass(frozen=True)
+class EngineWorkspace:
+    """One session's workspace block from `GET /api/workspaces` (WI-1340)."""
+
+    session_id: str
+    alive: bool
+    size_bytes: int | None
+    kind: str
+    path: str
+    repo_root: str
+    branch: str
+    base_sha: str | None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineWorkspace:
+        base_sha = payload.get("base_sha")
+        return cls(
+            session_id=str(payload.get("session_id", "")),
+            alive=bool(payload.get("alive", False)),
+            size_bytes=_optional_int(payload.get("size_bytes")),
+            kind=str(payload.get("kind", "")),
+            path=str(payload.get("path", "")),
+            repo_root=str(payload.get("repo_root", "")),
+            branch=str(payload.get("branch", "")),
+            base_sha=base_sha if isinstance(base_sha, str) else None,
+        )
+
+
+@dataclass(frozen=True)
 class EngineWaitAny:
     """Why `GET /api/sessions/wait-any` returned."""
 
@@ -1193,6 +1221,19 @@ class EngineClient:
         if not isinstance(payload, dict):
             return None
         return EngineChanges.from_payload(payload)
+
+    def list_workspaces(self) -> list[EngineWorkspace] | None:
+        """Every session's workspace block, with size and liveness.
+
+        `None` on a 404 (an engine without the route).
+        """
+        payload = self._call("/api/workspaces", allow_missing=True)
+        if not isinstance(payload, dict):
+            return None
+        rows = payload.get("workspaces")
+        if not isinstance(rows, list):
+            return []
+        return [EngineWorkspace.from_payload(r) for r in rows if isinstance(r, dict)]
 
     def wait_any(
         self,

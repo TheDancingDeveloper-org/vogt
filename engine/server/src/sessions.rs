@@ -2115,6 +2115,28 @@ impl SessionRegistry {
         }
     }
 
+    /// Every live or hibernated session that has a workspace block, with
+    /// whether its process is running (WI-1340). Hidden sessions are
+    /// included: a stale worktree is exactly what a cleanup wants to see.
+    pub fn workspaces(&self) -> Vec<(Uuid, bool, vogt_engine_contract::Workspace)> {
+        let mut out = Vec::new();
+        for kv in self.sessions.iter() {
+            if let Some(ws) = kv.value().workspace() {
+                out.push((*kv.key(), kv.value().is_alive(), ws));
+            }
+        }
+        for kv in self.records.iter() {
+            if kv.hibernation.is_none() || self.sessions.contains_key(kv.key()) {
+                continue;
+            }
+            if let Some(ws) = kv.workspace.clone() {
+                out.push((*kv.key(), false, ws));
+            }
+        }
+        out.sort_by_key(|(id, _, _)| *id);
+        out
+    }
+
     /// A configured session template matched by name (case-insensitive) or,
     /// failing that, by tag — so a caller can say `claude` and reach the
     /// template tagged `claude`. When a tag matches more than one template an

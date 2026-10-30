@@ -807,6 +807,14 @@ than these routes.
   and `done` (an autopilot agent declared itself done, WI-1518); the default
   `until` is `ready`, `blocked`, `approval`, `exited`, `errored` and `done`.
   Requires `sessions`.
+- `GET /api/workspaces` -> `{workspaces: [...]}` — one row per live or
+  hibernated session that has a workspace block (WI-1324, WI-1340): the block
+  flattened, plus `session_id`, `alive` and `size_bytes` (every regular file
+  under `path`, symlinks not followed, nothing excluded). The size walk never
+  runs on the request path: each path is rescanned on a blocking thread at
+  most once per `ENGINE_WORKSPACE_SIZE_TTL` seconds (default 60), and a
+  request waits at most 2 s for a stale one; until the first walk finishes
+  `size_bytes` is `null`. Requires `sessions`.
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
   only when asked) with the last N (default 8, at most 40) non-blank lines
