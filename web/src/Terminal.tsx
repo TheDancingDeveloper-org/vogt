@@ -277,6 +277,9 @@ const TerminalView: Component<Props> = (props) => {
   let pendingInput: Uint8Array<ArrayBuffer>[] = [];
   let pendingInputBytes = 0;
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
+  // Soft-keyboard IME guard; reset on re-attach so a lost compositionend
+  // can't outlive the socket (WI-2707).
+  let composition: TerminalCompositionGuard | null = null;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
   const [statusText, setStatusText] = createSignal<string | null>("Connecting...");
   // The interactive reconnect overlay. Non-null only while we are between a
@@ -830,18 +833,32 @@ const TerminalView: Component<Props> = (props) => {
     // Wire input: user keystrokes → PTY stdin.
     // On a soft keyboard, IME composition commits are the one source of
     // typed text (see TerminalCompositionGuard).
-    const composition = isCoarsePointer ? new TerminalCompositionGuard() : null;
+    const guard = isCoarsePointer ? new TerminalCompositionGuard() : null;
+    composition = guard;
     const textarea = term.textarea;
-    if (composition && textarea) {
-      textarea.addEventListener("compositionstart", () => composition.start());
-      textarea.addEventListener("compositionupdate", () => composition.update());
+    if (guard && textarea) {
+      textarea.addEventListener("compositionstart", () => guard.start());
+      textarea.addEventListener("compositionupdate", () => guard.update());
       textarea.addEventListener("compositionend", (event) => {
-        const committed = composition.end(event.data ?? "", performance.now());
+        const committed = guard.end(event.data ?? "", performance.now());
         if (committed) dispatchInput(committed);
       });
+      // Android can drop compositionend; never let a stale composition
+      // swallow input past a blur, page hide or paste.
+      textarea.addEventListener("blur", () => guard.reset());
+      textarea.addEventListener("paste", () => guard.reset(), { capture: true });
+      // keyCode 229 is the IME's own keydown inside a composition.
+      textarea.addEventListener("keydown", (event) => {
+        if (!event.isComposing && event.keyCode !== 229) guard.keydown();
+      }, { capture: true });
+      const onVisibility = () => {
+        if (document.visibilityState === "hidden") guard.reset();
+      };
+      document.addEventListener("visibilitychange", onVisibility);
+      onCleanup(() => document.removeEventListener("visibilitychange", onVisibility));
     }
     term.onData((data) => {
-      const next = composition ? composition.filter(data, performance.now()) : data;
+      const next = guard ? guard.filter(data, performance.now()) : data;
       if (next) dispatchInput(next);
     });
 
@@ -898,6 +915,7 @@ const TerminalView: Component<Props> = (props) => {
         if (v == null) return;
         text = v;
       }
+      composition?.reset();
       if (text) term?.paste(text);
     };
 
@@ -1309,6 +1327,7 @@ const TerminalView: Component<Props> = (props) => {
     if (isParked() && initialAttachDone) return;
     if (isSessionGone()) { markSessionGone(); return; }
     replay?.cancel();
+    composition?.reset();
     inSnapshot = true;
     // We are actively attaching now, not waiting to retry — retire the overlay.
     clearCountdown();

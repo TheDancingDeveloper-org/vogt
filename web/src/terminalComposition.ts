@@ -33,6 +33,26 @@ export class TerminalCompositionGuard {
     this.composing = true;
   }
 
+  /**
+   * Abandon any composition and echo. Android can drop `compositionend`
+   * (keyboard switch, app switch, page hide); without this every later
+   * keystroke would be swallowed until a reload. Called on textarea blur,
+   * page hide, re-attach and paste.
+   */
+  reset(): void {
+    this.composing = false;
+    this.echo = "";
+    this.echoDeadline = 0;
+  }
+
+  /**
+   * A real keystroke after a commit: what follows is new input, not xterm's
+   * echo, so a fast identical keystroke inside the echo window still lands.
+   */
+  keydown(): void {
+    this.echo = "";
+  }
+
   /** Returns the committed text to send to the PTY (possibly empty). */
   end(committed: string, now: number): string {
     this.composing = false;

@@ -65,4 +65,42 @@ describe("terminal IME composition guard", () => {
     expect(guard.filter("\r", 0)).toBe("\r");
     expect(guard.filter("\x1b[A", 1)).toBe("\x1b[A");
   });
+
+  // Android drops compositionend on a keyboard/app switch or page hide; the
+  // Terminal resets the guard on textarea blur, visibilitychange→hidden and
+  // re-attach. Each path calls reset(); after it input flows again.
+  for (const trigger of ["textarea blur", "visibilitychange hidden", "re-attach"]) {
+    it(`a lost compositionend no longer swallows input after ${trigger}`, () => {
+      const guard = new TerminalCompositionGuard();
+      guard.start();
+      expect(guard.filter("a", 0)).toBeNull();
+      guard.reset();
+      expect(guard.isComposing).toBe(false);
+      expect(guard.filter("\r", 1)).toBe("\r");
+      expect(guard.filter("\x03", 2)).toBe("\x03");
+    });
+  }
+
+  it("a paste arriving mid-composition is not dropped", () => {
+    const guard = new TerminalCompositionGuard();
+    guard.start();
+    guard.reset(); // paste event / programmatic paste path
+    expect(guard.filter("\x1b[200~hi\x1b[201~", 0)).toBe("\x1b[200~hi\x1b[201~");
+  });
+
+  it("a fast identical keystroke after a commit is not swallowed as echo", () => {
+    const guard = new TerminalCompositionGuard();
+    guard.start();
+    guard.end("a", 0);
+    guard.keydown();
+    expect(guard.filter("a", 10)).toBe("a");
+  });
+
+  it("reset clears a pending echo too", () => {
+    const guard = new TerminalCompositionGuard();
+    guard.start();
+    guard.end("ls", 0);
+    guard.reset();
+    expect(guard.filter("ls", 1)).toBe("ls");
+  });
 });
