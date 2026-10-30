@@ -2,8 +2,9 @@
 // hidden panes keep persisting, and persist the raw ring (their xterm screen
 // lags the cursor while dormant); a pagehide flushes the pending write on the
 // main thread; an offset counts as persisted only once its write is acked; a
-// woken session's restarted stream replaces the stored record; a save while a
-// replay is still parsing stores the raw ring.
+// woken session's restarted stream replaces the stored record, and an old
+// stream's late ack cannot move the new stream's cursor (#1244); a save while
+// a replay is still parsing stores the raw ring.
 import { cleanup, render } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -55,7 +56,7 @@ vi.mock("@xterm/addon-search", () => ({
   },
 }));
 
-type Write = { sessionId: string; position: number; payload: unknown; direct: boolean; ack: (result: string) => void; replace: boolean };
+type Write = { sessionId: string; position: number; payload: unknown; direct: boolean; ack: (result: string) => void; stream: string | undefined };
 const writes: Write[] = [];
 vi.mock("../terminalCacheOffthread", () => ({
   postTerminalCacheWrite: (
@@ -64,8 +65,8 @@ vi.mock("../terminalCacheOffthread", () => ({
     payload: unknown,
     _spawn: unknown,
     direct = false,
-    replace = false,
-  ) => new Promise<string>((ack) => writes.push({ sessionId, position, payload, direct, ack, replace })),
+    stream?: string,
+  ) => new Promise<string>((ack) => writes.push({ sessionId, position, payload, direct, ack, stream })),
 }));
 
 import Terminal from "../Terminal";
@@ -101,6 +102,11 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  // Drain the shared replay queue while fake timers are still installed. Its
+  // pump re-arms one fake setTimeout per turn; a timer left pending when the
+  // clock goes real never fires, and every later test's replay stalls behind
+  // it. A second covers the turns a cancelled mid-snapshot pane leaves.
+  if (vi.isFakeTimers()) vi.advanceTimersByTime(1000);
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -122,6 +128,21 @@ async function mountAttached() {
 }
 
 describe("terminal cache persist wiring", () => {
+  it("a save while the snapshot is still replaying stores the raw ring", async () => {
+    fakeVogt();
+    vi.useFakeTimers();
+    render(() => <Terminal sessionId="t2" />);
+    await vi.advanceTimersByTimeAsync(50);
+    const socket = sockets.at(-1)!;
+    socket.text({ type: "snapshot-start", scrollback_pos: 8, scrollback_bytes: 8 });
+    socket.bytes(8);
+    // No snapshot-done yet: the page closes mid-replay.
+    window.dispatchEvent(new Event("pagehide"));
+    const mid = writes.at(-1)!;
+    expect(mid.position).toBe(8);
+    expect(mid.payload).toHaveProperty("data");
+  });
+
   it("a hidden pane keeps persisting, as raw bytes at the advanced cursor", async () => {
     const { socket, setParked } = await mountAttached();
     // The snapshot-done persist: serialized screen at 10.
@@ -185,7 +206,7 @@ describe("terminal cache persist wiring", () => {
     await vi.advanceTimersByTimeAsync(0);
     socket.bytes(2);
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(writes.at(-1)).toMatchObject({ position: 12, replace: false });
+    expect(writes.at(-1)).toMatchObject({ position: 12, stream: undefined });
     const count = writes.length;
     writes.at(-1)!.ack("stale");
     await vi.advanceTimersByTimeAsync(10_000);
@@ -208,13 +229,80 @@ describe("terminal cache persist wiring", () => {
     socket.text({ type: "snapshot-done" });
     await vi.advanceTimersByTimeAsync(50);
     const woken = writes.at(-1)!;
-    expect(woken).toMatchObject({ position: 6, replace: true });
+    expect(woken).toMatchObject({ position: 6, stream: expect.any(String) });
     woken.ack("written");
     await vi.advanceTimersByTimeAsync(0);
     // Once replaced, later saves are ordinary ones again.
     socket.bytes(3);
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(writes.at(-1)).toMatchObject({ position: 9, replace: false });
+    expect(writes.at(-1)).toMatchObject({ position: 9, stream: undefined });
+  });
+
+  // Restart the stream: the engine's new process sends a snapshot ending at 6.
+  async function restartAt6(socket: FakeSocket) {
+    socket.text({ type: "snapshot-start", scrollback_pos: 6, scrollback_bytes: 6 });
+    socket.bytes(6);
+    socket.text({ type: "snapshot-done" });
+    await vi.advanceTimersByTimeAsync(50);
+  }
+
+  it("an old-stream write acked after a restart does not reset the new stream's cursor", async () => {
+    const { socket } = await mountAttached();
+    writes.at(-1)!.ack("written"); // stored at 10
+    await vi.advanceTimersByTimeAsync(0);
+    socket.bytes(40);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const old = writes.at(-1)!;
+    expect(old).toMatchObject({ position: 50, stream: undefined });
+
+    await restartAt6(socket);
+    const woken = writes.at(-1)!;
+    expect(woken).toMatchObject({ position: 6, stream: expect.any(String) });
+    woken.ack("written");
+    await vi.advanceTimersByTimeAsync(0);
+    // The old stream's write resolves last, at a higher offset.
+    old.ack("written");
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The new stream's next bytes still persist at its own offsets.
+    socket.bytes(3);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(writes.at(-1)).toMatchObject({ position: 9, stream: undefined });
+  });
+
+  it("a restart is detected while the first write after attach is still in flight", async () => {
+    const { socket } = await mountAttached();
+    // The write at 10 is posted but not acknowledged.
+    expect(writes.at(-1)).toMatchObject({ position: 10 });
+    await restartAt6(socket);
+    expect(writes.at(-1)).toMatchObject({ position: 6, stream: expect.any(String) });
+  });
+
+  it("writes racing while a replace is pending all carry the restarted stream's id", async () => {
+    const { socket } = await mountAttached();
+    writes.at(-1)!.ack("written");
+    await vi.advanceTimersByTimeAsync(0);
+    await restartAt6(socket);
+    const replacing = writes.at(-1)!;
+    expect(replacing.stream).toEqual(expect.any(String));
+
+    // While the replacing write is in flight, more output arrives and the page
+    // hides: the pagehide flush is offset-checked against the same stream, so
+    // the store keeps whichever of the two is newer, in any commit order.
+    socket.bytes(3);
+    window.dispatchEvent(new Event("pagehide"));
+    const flush = writes.at(-1)!;
+    expect(flush).toMatchObject({ position: 9, direct: true, stream: replacing.stream });
+
+    // The flush commits first; the older replacing write then reports stale,
+    // which still counts as this stream being stored.
+    flush.ack("written");
+    await vi.advanceTimersByTimeAsync(0);
+    replacing.ack("stale");
+    await vi.advanceTimersByTimeAsync(0);
+    socket.bytes(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(writes.at(-1)).toMatchObject({ position: 11, stream: undefined });
   });
 
   it("a save while the resume replay is still parsing stores the raw ring", async () => {
@@ -233,21 +321,5 @@ describe("terminal cache persist wiring", () => {
     expect(closing.payload).toHaveProperty("data");
   });
 
-  // Kept last: unmounting a pane mid-snapshot leaves shared replay state that
-  // stalls the next test's resume replay (pre-existing, outside WI-2695).
-  it("a save while the snapshot is still replaying stores the raw ring", async () => {
-    fakeVogt();
-    vi.useFakeTimers();
-    render(() => <Terminal sessionId="t2" />);
-    await vi.advanceTimersByTimeAsync(50);
-    const socket = sockets.at(-1)!;
-    socket.text({ type: "snapshot-start", scrollback_pos: 8, scrollback_bytes: 8 });
-    socket.bytes(8);
-    // No snapshot-done yet: the page closes mid-replay.
-    window.dispatchEvent(new Event("pagehide"));
-    const mid = writes.at(-1)!;
-    expect(mid.position).toBe(8);
-    expect(mid.payload).toHaveProperty("data");
-  });
 
 });

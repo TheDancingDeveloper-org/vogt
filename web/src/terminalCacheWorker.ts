@@ -19,8 +19,8 @@ export interface TerminalCacheWrite {
   sessionId: string;
   outputPosition: number;
   payload: TerminalCachePayload;
-  /** The session's stream restarted: overwrite whatever offset is stored. */
-  replace?: boolean;
+  /** The restarted stream's id: overwrite a record from any other stream. */
+  stream?: string;
 }
 
 export interface TerminalCacheAck {
@@ -35,7 +35,7 @@ export async function handleTerminalCacheWrite(
     message.sessionId,
     message.outputPosition,
     message.payload,
-    message.replace === true,
+    message.stream,
   );
   return { id: message.id, result };
 }
