@@ -291,7 +291,7 @@ jobs:
           on="$(COMPOSE_PROFILES=voice docker compose --env-file deploy/stack.env.example \
             -f deploy/stack.compose.yml config --services | sort | tr '\n' ' ' | xargs)"
           [ "$on" = "vogt voice" ] || { echo "::error::voice on rendered '$on', expected 'vogt voice'" >&2; exit 1; }
-          off="$(COMPOSE_PROFILES= docker compose --env-file deploy/stack.env.example \
+          off="$(COMPOSE_PROFILES='' docker compose --env-file deploy/stack.env.example \
             -f deploy/stack.compose.yml config --services | sort | tr '\n' ' ' | xargs)"
           [ "$off" = "vogt" ] || { echo "::error::voice off rendered '$off', expected 'vogt'" >&2; exit 1; }
           echo "voice on -> vogt+voice; voice off -> vogt only"

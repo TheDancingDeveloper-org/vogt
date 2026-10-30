@@ -600,11 +600,11 @@ jobs:
           # *test* dependencies, not merely runtime ones. The engine's
           # pipeline apt-installed them into its Rust container for exactly
           # this reason; the self-hosted image makes no promise about either.
-          missing=""
-          command -v git >/dev/null || missing="$missing git"
-          command -v rg >/dev/null || missing="$missing ripgrep"
-          if [ -n "$missing" ]; then
-            echo "installing:$missing"
+          missing=()
+          command -v git >/dev/null || missing+=(git)
+          command -v rg >/dev/null || missing+=(ripgrep)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "installing: ${missing[*]}"
             # Runners differ: some execute as root with no sudoers entry
             # (where `sudo apt-get` fails with "root is not in the sudoers
             # file"), others as an unprivileged user that may or may not
@@ -612,12 +612,12 @@ jobs:
             # otherwise, and fail clearly when neither is available.
             if [ "$(id -u)" = "0" ]; then
               apt-get update
-              apt-get install -y --no-install-recommends $missing
+              apt-get install -y --no-install-recommends "${missing[@]}"
             elif command -v sudo >/dev/null; then
               sudo apt-get update
-              sudo apt-get install -y --no-install-recommends $missing
+              sudo apt-get install -y --no-install-recommends "${missing[@]}"
             else
-              echo "cannot install$missing: not root and no sudo." >&2
+              echo "cannot install ${missing[*]}: not root and no sudo." >&2
               echo "The engine's tests shell out to both; a runner image" >&2
               echo "without them cannot run this job." >&2
               exit 1
@@ -687,13 +687,13 @@ jobs:
             && ldconfig -p 2>/dev/null | grep -q libclang; then
             exit 0
           fi
-          missing="clang cmake libclang-dev libopus-dev libssl-dev pkg-config"
+          missing=(clang cmake libclang-dev libopus-dev libssl-dev pkg-config)
           if [ "$(id -u)" = "0" ]; then
             apt-get update
-            apt-get install -y --no-install-recommends $missing
+            apt-get install -y --no-install-recommends "${missing[@]}"
           elif command -v sudo >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends $missing
+            sudo apt-get install -y --no-install-recommends "${missing[@]}"
           else
             echo "clang, cmake, libclang-dev, libopus-dev, libssl-dev, and pkg-config are required to build the voice sidecar" >&2
             exit 1

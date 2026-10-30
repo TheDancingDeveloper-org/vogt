@@ -58,7 +58,7 @@ jobs:
           # fail to start — a run with no jobs, no logs and a red X, which is
           # how the first version of this gate was dead on arrival without
           # anybody's dry run noticing.
-          expr_open='${'"{"
+          expr_open="\$"'{{'
           while IFS=: read -r file number line; do
             case "$line" in
               *self-hosted*) ;;
