@@ -37,6 +37,7 @@ pub mod hibernate_policy;
 pub mod hibernation;
 pub mod history;
 pub mod history_api;
+pub mod history_writer;
 pub mod launch;
 pub mod metrics;
 pub mod observability;
