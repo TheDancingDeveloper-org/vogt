@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,6 +17,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import register_project, start_session, workspace_list
 from vogt.errors import NotFound
+from vogt.storage.observed_types import PendingObservation
 
 from tests.test_session_drive import ROOT, WHY, Engine
 
@@ -44,18 +44,27 @@ class WorkspaceEngine(Engine):
         return super().__call__(url, headers, body, method)
 
 
-class Observed:
-    def __init__(self, branches: dict[str, int | None]) -> None:
-        self.branches = branches
-
-    def has_evidence_tables(self) -> bool:
-        return True
-
-    def latest(self, **_: Any) -> list[SimpleNamespace]:
-        return [
-            SimpleNamespace(payload={"name": name, "ahead": ahead})
-            for name, ahead in self.branches.items()
-        ]
+def _seed_branch(ctx: AppContext, project_id: str, name: str, ahead: int) -> None:
+    """A `git.branch` observation, as the branch collector writes it."""
+    now = ctx.clock()
+    sweep = ctx.observed.begin_sweep(collector="test", scope=[project_id], at=now)
+    ctx.observed.append(
+        sweep.id,
+        [
+            PendingObservation(
+                kind="git.branch",
+                subject_key=f"branch:{project_id}:{name}",
+                payload={"name": name, "ahead": ahead},
+                content_digest=f"branch-{name}-{ahead}",
+                project_id=project_id,
+            )
+        ],
+        at=now,
+    )
+    ctx.observed.finish_sweep(
+        sweep.id, outcome="ok", stats={"projects": 1, "new": 1, "unchanged": 0}, at=now
+    )
+    ctx.observed.rebuild_latest()
 
 
 def _row(session_id: str, branch: str, *, alive: bool = True) -> dict[str, Any]:
@@ -84,11 +93,15 @@ def wired(instance: AppContext, engine: WorkspaceEngine) -> AppContext:
     ctx = dataclasses.replace(
         instance,
         engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
-        observed=Observed({"wi-1-landed": 0, "wi-2-open": 3}),
     )
     register_project(
         ctx, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
     )
+    with ctx.declared.read() as view:
+        project = view.project_by_slug("vogt")
+    assert project is not None
+    _seed_branch(ctx, project.id, "wi-1-landed", ahead=0)
+    _seed_branch(ctx, project.id, "wi-2-open", ahead=3)
     return ctx
 
 
