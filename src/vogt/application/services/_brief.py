@@ -195,12 +195,20 @@ def _landing_section(project: Project, item: WorkItem | None) -> list[str]:
     if item is not None and "-" in item.ref:
         number = item.ref.split("-", 1)[1]
     pattern = landing.branch_pattern.replace("{n}", number or "{n}")
+    lands_by = landing.worker_lands_by
+    if landing.graft is not None:
+        graft = landing.graft
+        lands_by = (
+            f"land on graft line `{graft.line}` with your session token "
+            f"(see worker setup) — mirror `{graft.mirror}`, endpoint "
+            f"`{graft.endpoint}`. No git push, no PR."
+        )
     return [
         "## Landing rule for this repo",
         "",
         f"- **Base** `{landing.base_branch}`",
         f"- **Branch pattern** `{pattern}`",
-        f"- **Lands by** {landing.worker_lands_by}",
+        f"- **Lands by** {lands_by}",
         f"- **Merge by** {landing.merge_by} ({landing.merge_mode})",
         f"- **Deploy by** {landing.deploy_by}",
         "",

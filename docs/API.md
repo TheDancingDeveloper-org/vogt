@@ -767,7 +767,8 @@ fits in context.
   replaces the whole policy. Besides `forbidden_text`, `merge_deploys_prod`,
   `main_branches`, `commit_identity`, `test_recipe` and `rules`, it may carry
   `landing` (`base_branch`, `branch_pattern` with `{n}` for the work item
-  number, `worker_lands_by` of `push_branch` or `open_pr`, `merge_by` of
+  number, `worker_lands_by` of `push_branch`, `open_pr` or `graft` (which needs
+  `graft`: `line`, `mirror`, `endpoint`, and is refused for the other modes), `merge_by` of
   `oversight` or `operator`, `merge_mode` of `fast_forward` or `rebase`,
   `linear_history`, `deploy_by`, `initiative_bases`, `long_lived_branches`),
   `review` (`template`, `model`, `effort`,

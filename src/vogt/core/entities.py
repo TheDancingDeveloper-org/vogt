@@ -11,7 +11,14 @@ import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from vogt.core.principal import ActorKind
 
@@ -86,6 +93,17 @@ class Actor(Entity):
 _BRANCH_NUMBER = "{n}"
 
 
+class GraftLanding(Entity):
+    """Where a worker lands when the project lands through graft (#1240)."""
+
+    #: The graft line workers land on, for example `backlog-1`.
+    line: str = Field(min_length=1)
+    #: The graft mirror service that carries the line, for example `vogt`.
+    mirror: str = Field(min_length=1)
+    #: The graft endpoint, for example `http://graft-dev:17888`.
+    endpoint: str = Field(min_length=1)
+
+
 class LandingPolicy(Entity):
     """How a worker's branch is cut and landed on this project.
 
@@ -98,7 +116,9 @@ class LandingPolicy(Entity):
     #: `{n}` is the work item number. Validated by compiling it with `{n}`
     #: replaced by `\d+`, so a pattern that could never match is refused.
     branch_pattern: str = r"^wi-{n}-[a-z0-9-]+$"
-    worker_lands_by: Literal["push_branch", "open_pr"]
+    worker_lands_by: Literal["push_branch", "open_pr", "graft"]
+    #: Set exactly when `worker_lands_by` is `graft` (#1240).
+    graft: GraftLanding | None = None
     merge_by: Literal["oversight", "operator"]
     #: A merge commit is refused outright: landing is a fast-forward or a rebase.
     merge_mode: Literal["fast_forward", "rebase"]
@@ -134,6 +154,16 @@ class LandingPolicy(Entity):
                 f"replaced with a number: {exc}"
             ) from exc
         return pattern
+
+    @model_validator(mode="after")
+    def _graft_matches_mode(self) -> LandingPolicy:
+        if self.worker_lands_by == "graft" and self.graft is None:
+            msg = "worker_lands_by graft needs graft (line, mirror, endpoint)"
+            raise ValueError(msg)
+        if self.worker_lands_by != "graft" and self.graft is not None:
+            msg = "graft is set only when worker_lands_by is graft"
+            raise ValueError(msg)
+        return self
 
 
 class ReviewPolicy(Entity):

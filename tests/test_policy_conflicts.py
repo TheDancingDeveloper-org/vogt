@@ -96,3 +96,41 @@ def test_a_known_long_lived_base_is_named_not_contradicted() -> None:
 def test_a_caller_that_merges_is_not_told_not_to_merge() -> None:
     lines = task_policy_conflicts("Then merge it.", _landing(), caller_merges=True)
     assert not any("do not merge" in line for line in lines)
+
+
+_GRAFT = {
+    "worker_lands_by": "graft",
+    "graft": {
+        "line": "backlog-1",
+        "mirror": "vogt",
+        "endpoint": "http://graft-dev:17888",
+    },
+}
+
+
+def test_graft_landing_needs_its_block_and_only_with_graft() -> None:
+    """#1240: `graft` names line, mirror and endpoint; other modes refuse it."""
+    landing = LandingPolicy.model_validate(
+        {"base_branch": "main", "merge_by": "oversight", "merge_mode": "rebase"}
+        | _GRAFT
+    )
+    assert landing.graft is not None and landing.graft.line == "backlog-1"
+    with pytest.raises(ValueError, match="needs graft"):
+        _landing(worker_lands_by="graft")
+    with pytest.raises(ValueError, match="only when worker_lands_by is graft"):
+        LandingPolicy.model_validate(
+            {"base_branch": "main", "merge_by": "oversight", "merge_mode": "rebase"}
+            | _GRAFT
+            | {"worker_lands_by": "push_branch"}
+        )
+
+
+@pytest.mark.parametrize("task", ["Open a PR against main.", "Push the branch only."])
+def test_graft_overrides_a_task_asking_for_push_or_pr(task: str) -> None:
+    landing = LandingPolicy.model_validate(
+        {"base_branch": "main", "merge_by": "oversight", "merge_mode": "rebase"}
+        | _GRAFT
+    )
+    lines = task_policy_conflicts(task, landing)
+    assert any("land through graft" in line and "backlog-1" in line for line in lines)
+    assert task_policy_conflicts("Land it; open NO PR.", landing) == []

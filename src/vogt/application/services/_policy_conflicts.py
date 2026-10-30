@@ -35,6 +35,7 @@ _PUSH_ONLY = re.compile(
     r"|\bno\s+(?:PR|pull[\s-]request)\b",
     re.IGNORECASE,
 )
+_PUSH_BRANCH = re.compile(r"\bpush(?:\s+the)?(?:\s+branch)?\s+only\b", re.IGNORECASE)
 _MERGE = re.compile(
     r"\bgh\s+pr\s+merge\b"
     r"|\bmerge\s+(?:it|this|the\s+(?:PR|pull[\s-]request|branch|change))\b"
@@ -112,6 +113,14 @@ def task_policy_conflicts(
         lines.append(
             "Policy overrides task: open a PR. The task says push only; this "
             f"project lands by opening a pull request against `{base}`."
+        )
+    if landing.graft is not None and (
+        _asserted(_OPEN_PR, task) or _PUSH_BRANCH.search(task)
+    ):
+        lines.append(
+            "Policy overrides task: land through graft. The task asks for a "
+            "push or a pull request; this project lands on graft line "
+            f"`{landing.graft.line}`. No git push, no PR."
         )
     if not caller_merges and _asserted(_MERGE, task):
         lines.append(
