@@ -29,7 +29,17 @@ pub struct SessionHistory {
     writer: HistoryWriter,
     db_path: PathBuf,
     log_dir: PathBuf,
+    /// Last on-disk footprint (db bytes, log file count, log bytes) and when
+    /// it was taken. `/api/status` is polled; walking the log dir on every
+    /// call is what it is not allowed to do (WI-2700).
+    disk_stats: parking_lot::Mutex<Option<(std::time::Instant, DiskStats)>>,
 }
+
+/// db bytes, log file count, log bytes.
+type DiskStats = (u64, u64, u64);
+
+/// How long `/api/status` may report a cached on-disk footprint.
+pub const STORAGE_STATS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryStorageStats {
@@ -220,6 +230,7 @@ impl SessionHistory {
             writer: HistoryWriter::spawn(writer_conn, log_dir.clone()),
             db_path,
             log_dir,
+            disk_stats: parking_lot::Mutex::new(None),
         };
         Ok(history)
     }
@@ -441,16 +452,36 @@ impl SessionHistory {
 
     pub async fn storage_stats(&self) -> Result<HistoryStorageStats> {
         let archived_session_count = self.count_sessions().await?;
-        let db_bytes = std::fs::metadata(&self.db_path)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
-        let (log_file_count, log_bytes) = summarize_regular_files(&self.log_dir)?;
+        let (db_bytes, log_file_count, log_bytes) = self.disk_stats().await?;
         Ok(HistoryStorageStats {
             archived_session_count,
-            log_file_count: log_file_count as u64,
+            log_file_count,
             log_bytes,
             db_bytes,
         })
+    }
+
+    /// The db and log-dir footprint, rescanned off the runtime at most once
+    /// per [`STORAGE_STATS_TTL`].
+    async fn disk_stats(&self) -> Result<DiskStats> {
+        if let Some((at, stats)) = *self.disk_stats.lock() {
+            if at.elapsed() < STORAGE_STATS_TTL {
+                return Ok(stats);
+            }
+        }
+        let db_path = self.db_path.clone();
+        let log_dir = self.log_dir.clone();
+        let stats = tokio::task::spawn_blocking(move || -> Result<DiskStats> {
+            let db_bytes = std::fs::metadata(&db_path)
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            let (log_file_count, log_bytes) = summarize_regular_files(&log_dir)?;
+            Ok((db_bytes, log_file_count as u64, log_bytes))
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("history storage scan panicked: {e}")))??;
+        *self.disk_stats.lock() = Some((std::time::Instant::now(), stats));
+        Ok(stats)
     }
 
     /// Search session output

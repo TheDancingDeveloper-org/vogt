@@ -1437,7 +1437,14 @@ pub async fn operational_status(
         Some(history) => Some(history.storage_stats().await?),
         None => None,
     };
-    let task_artifacts = state.agent_tasks.prompt_artifact_stats()?;
+    // Cached for a short TTL; a miss walks the prompt dir, so keep it off
+    // the runtime threads (WI-2700).
+    let agent_tasks = Arc::clone(&state.agent_tasks);
+    let task_artifacts = tokio::task::spawn_blocking(move || agent_tasks.prompt_artifact_stats())
+        .await
+        .map_err(|e| {
+            crate::error::ApiError::Internal(format!("prompt artifact scan panicked: {e}"))
+        })??;
     let (degraded_sessions, last_degraded) =
         crate::launch::degraded_summary(&state.sessions.live_sessions());
 

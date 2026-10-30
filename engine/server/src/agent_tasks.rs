@@ -812,7 +812,14 @@ pub struct AgentTaskRegistry {
     /// Live run controls, keyed by run id. An entry exists only while the
     /// orchestrator for that run is running; it removes its own on exit.
     runs: Mutex<HashMap<Uuid, Arc<RunControl>>>,
+    /// Last prompt-artifact scan and when it was taken. `/api/status` reads
+    /// this instead of walking the prompt dir per call (WI-2700); anything
+    /// that removes artifacts clears it.
+    artifact_stats: Mutex<Option<(std::time::Instant, PromptArtifactStats)>>,
 }
+
+/// How long `/api/status` may report cached prompt-artifact stats.
+pub const PROMPT_ARTIFACT_STATS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl AgentTaskRegistry {
     pub fn new(
@@ -835,6 +842,7 @@ impl AgentTaskRegistry {
             tasks: Mutex::new(tasks),
             executing: Mutex::new(HashSet::new()),
             runs: Mutex::new(HashMap::new()),
+            artifact_stats: Mutex::new(None),
         };
         registry.reconcile_run_history()?;
         registry.normalize_startup_schedule()?;
@@ -1146,6 +1154,7 @@ impl AgentTaskRegistry {
             return Err(ApiError::NotFound);
         }
         self.save_locked(&tasks)?;
+        self.invalidate_prompt_artifact_stats();
         remove_path_recursive(
             &self.task_prompt_dir(id),
             &mut PromptArtifactRemovalTally::default(),
@@ -1153,7 +1162,24 @@ impl AgentTaskRegistry {
         Ok(true)
     }
 
+    /// Prompt-artifact stats, rescanned at most once per
+    /// [`PROMPT_ARTIFACT_STATS_TTL`].
     pub fn prompt_artifact_stats(&self) -> Result<PromptArtifactStats> {
+        if let Some((at, stats)) = self.artifact_stats.lock().as_ref() {
+            if at.elapsed() < PROMPT_ARTIFACT_STATS_TTL {
+                return Ok(stats.clone());
+            }
+        }
+        let stats = self.scan_prompt_artifact_stats()?;
+        *self.artifact_stats.lock() = Some((std::time::Instant::now(), stats.clone()));
+        Ok(stats)
+    }
+
+    fn invalidate_prompt_artifact_stats(&self) {
+        *self.artifact_stats.lock() = None;
+    }
+
+    fn scan_prompt_artifact_stats(&self) -> Result<PromptArtifactStats> {
         let tasks = self.tasks.lock().clone();
         let task_ids: HashSet<Uuid> = tasks.iter().map(|task| task.id).collect();
         let mut stats = PromptArtifactStats {
@@ -1205,6 +1231,7 @@ impl AgentTaskRegistry {
         &self,
         keep_latest_runs_per_task: usize,
     ) -> Result<PromptArtifactCleanup> {
+        self.invalidate_prompt_artifact_stats();
         let tasks = self.tasks.lock().clone();
         let task_ids: HashSet<Uuid> = tasks.iter().map(|task| task.id).collect();
         let mut tally = PromptArtifactRemovalTally::default();
@@ -5219,6 +5246,30 @@ mod tests {
             economics_tick: std::time::Duration::ZERO,
             economics_home: None,
         }
+    }
+
+    /// `/api/status` must not walk the prompt dir per call (WI-2700): a file
+    /// written after a scan is not seen until the cache is cleared, and a
+    /// cleanup clears it.
+    #[test]
+    fn prompt_artifact_stats_are_cached_until_invalidated() {
+        let registry = test_registry();
+        let first = registry.prompt_artifact_stats().unwrap();
+        let task_dir = registry.prompt_dir.join(Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("run.md"), "brief").unwrap();
+
+        let cached = registry.prompt_artifact_stats().unwrap();
+        assert_eq!(cached.task_dir_count, first.task_dir_count);
+
+        registry.invalidate_prompt_artifact_stats();
+        let fresh = registry.prompt_artifact_stats().unwrap();
+        assert_eq!(fresh.task_dir_count, first.task_dir_count + 1);
+        assert_eq!(fresh.orphan_task_dir_count, first.orphan_task_dir_count + 1);
+
+        registry.cleanup_prompt_artifacts(1).unwrap();
+        let after = registry.prompt_artifact_stats().unwrap();
+        assert_eq!(after.orphan_task_dir_count, first.orphan_task_dir_count);
     }
 
     fn test_registry() -> Arc<AgentTaskRegistry> {
