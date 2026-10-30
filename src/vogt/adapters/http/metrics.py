@@ -13,7 +13,13 @@ scraper already knows, so they are not renamed. What tells the core from the
 engine is a ``component="core"`` label on every series, not the scrape target:
 a panel that sums both processes can still split them.
 
-Request, database and MCP latency are later slices of the same endpoint.
+Request latency (WI-2697) is ``vogt_core_http_request_seconds``, labelled by
+the route *template* the request matched (``/api/work/{id}``, never an id),
+method and status, so its series count is bounded by the route table.
+:class:`RequestMetricsMiddleware` records it and echoes the template back in
+``X-Vogt-Route``, which is how the engine labels its ``/api/vogt`` proxy hop by
+core route without knowing the core's routes. Database and MCP latency are
+later slices of the same endpoint.
 """
 
 from __future__ import annotations
@@ -22,17 +28,21 @@ import os
 import threading
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from time import perf_counter
+from typing import Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from prometheus_client import (
     CollectorRegistry,
     GCCollector,
+    Histogram,
     PlatformCollector,
     ProcessCollector,
     make_wsgi_app,
 )
 from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vogt.errors import InvalidRequest
 from vogt.observability import logger
@@ -49,6 +59,28 @@ METRICS_ENV = "VOGT_METRICS_ADDR"
 #: Suggested bind. 9464 is the engine's; 9466 is the voice sidecar's. The core
 #: takes the one between them so the three can be scraped side by side.
 DEFAULT_ADDR = "0.0.0.0:9465"
+
+#: Response header carrying the matched route template, read by the engine.
+ROUTE_HEADER = "x-vogt-route"
+
+#: The label for a request no route claimed: one series, not one per path.
+UNMATCHED = "unmatched"
+
+#: Prometheus' default buckets, 5 ms to 10 s.
+REQUEST_BUCKETS = (
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+)  # fmt: skip
+
+#: Process-wide, like the requests it counts. Not on the default registry, so
+#: :func:`registry` decides what is served.
+REQUEST_SECONDS = Histogram(
+    "vogt_core_http_request_seconds",
+    "Time the core took to start answering a request, by route template, "
+    "method and status.",
+    ("route", "method", "status"),
+    buckets=REQUEST_BUCKETS,
+    registry=None,
+)
 
 _server: WSGIServer | None = None
 _thread: threading.Thread | None = None
@@ -99,7 +131,62 @@ def registry() -> CollectorRegistry:
         GCCollector(registry=discarded),
     ):
         reg.register(_Labelled(collector, COMPONENT_LABEL, COMPONENT))
+    reg.register(REQUEST_SECONDS)
     return reg
+
+
+def route_template(scope: Scope) -> str:
+    """The template of the route that matched, or :data:`UNMATCHED`.
+
+    FastAPI's router puts the matched route on the scope it was handed, which
+    is this middleware's own scope dict, so it is readable once routing ran.
+    """
+    route = scope.get("route")
+    path = getattr(route, "path", None)
+    return path if isinstance(path, str) and path else UNMATCHED
+
+
+class RequestMetricsMiddleware:
+    """Time each HTTP request to its response start, by route template.
+
+    Raw ASGI for the same reason as the access log: ``/mcp`` streams, and the
+    number that says an endpoint is slow is time to the first byte, not how
+    long a client kept a stream open.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = perf_counter()
+        state: dict[str, Any] = {"recorded": False}
+
+        def record(status: int) -> None:
+            if state["recorded"]:
+                return
+            state["recorded"] = True
+            REQUEST_SECONDS.labels(
+                route=route_template(scope),
+                method=str(scope.get("method", "")),
+                status=str(status),
+            ).observe(perf_counter() - started)
+
+        async def send_wrapper(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                headers.append((ROUTE_HEADER.encode(), route_template(scope).encode()))
+                message["headers"] = headers
+                record(int(message["status"]))
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception:
+            record(500)
+            raise
 
 
 def parse_addr(value: str) -> tuple[str, int]:

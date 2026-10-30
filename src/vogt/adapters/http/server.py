@@ -25,6 +25,7 @@ from vogt.adapters.http.app import API_PREFIX, build_app
 from vogt.adapters.http.auth import add_auth_routes
 from vogt.adapters.http.health import ServerInfo, add_health_routes
 from vogt.adapters.http.install import add_install_routes
+from vogt.adapters.http.metrics import RequestMetricsMiddleware
 from vogt.adapters.http.scheduler import CollectorSchedule, WatchSchedule
 from vogt.adapters.mcp.http import MCP_PATH, add_mcp_route
 from vogt.application.context import AppContext, build_context
@@ -207,6 +208,9 @@ def build_server(
     # surface is — it exists for a caller who holds no credential yet.
     add_auth_routes(app, context_factory=context)
     add_mcp_route(app, registry=active_registry, resolve=resolve, path=MCP_PATH)
+    # Inside the access log, so its id header is on every response too, and
+    # outside the error handlers, so a refused or failed request is timed.
+    app.add_middleware(RequestMetricsMiddleware)
     # Outermost, so the line it writes covers everything inside it — routing,
     # authentication, the error handlers, and the requests that never reach a
     # route at all. A 404 that took four seconds is a fact worth having.
