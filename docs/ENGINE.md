@@ -3979,6 +3979,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `agent_cli.list` | Voice-readable | Available: Report the pod's agent CLIs: active, baked and upstream versions. |
 | `agent_cli.update` | Operator-only | Unavailable: Installs executable tooling on the host. |
 | `session.history_list` | Voice-readable | Available: List archived sessions (history), newest first. |
+| `workspace.list` | Voice-readable | Available: List live and hibernated sessions' working trees (path, branch, size, merged state), read-only. |
 | `agent_activity.search` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
 | `agent_activity.summary` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
 | `session.search_output` | Voice-readable | Available: Search session output (live sessions included). |

@@ -82,6 +82,7 @@ pub const CURATED_READS: &[&str] = &[
     "session.list",
     "agent_cli.list",
     "session.history_list",
+    "workspace.list",
     "session.search_output",
     "session.log_tail",
     // Voice roster and the per-session reads the raw tail cannot stand in
