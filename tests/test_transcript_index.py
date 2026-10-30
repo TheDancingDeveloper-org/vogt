@@ -60,6 +60,20 @@ def test_many_lookups_scan_the_root_once(
     assert scans["n"] <= 2
 
 
+def test_a_vanished_file_is_not_returned(tmp_path: Path) -> None:
+    """A cached path is dropped as soon as the file is gone (WI-2693).
+
+    The index itself is not rebuilt until the TTL, but a lookup must not
+    hand back a path that no longer exists.
+    """
+    root = _claude_root(tmp_path, sessions=1, decoys=1)
+    transcripts._indexes.clear()
+    found = transcripts._by_id("claude", root, "conv-00000")
+    assert found is not None
+    found.unlink()
+    assert transcripts._by_id("claude", root, "conv-00000") is None
+
+
 def test_a_new_file_is_found_once_the_index_expires(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

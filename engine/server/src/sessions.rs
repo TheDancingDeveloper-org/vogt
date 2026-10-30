@@ -976,6 +976,16 @@ impl SessionRegistry {
         }
     }
 
+    /// Shut the history writer down after `drain_to_history`: flush the
+    /// last coalesced economics and drain the queue, so a redeploy loses
+    /// no history writes. Called once from the graceful-shutdown path.
+    pub async fn shutdown_history(&self) {
+        let Some(history) = self.history.as_ref() else {
+            return;
+        };
+        history.shutdown().await;
+    }
+
     /// A live (or exited, still listed) session. A hibernated one is a
     /// `409` naming the way to wake it, so every route that needs a process
     /// — input, wait, resize, blocked — says why it cannot act rather than

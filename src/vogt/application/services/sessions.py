@@ -1079,15 +1079,23 @@ def _rows(
         # sessions were asked for, as a linked one Vogt stopped would be.
         unfiltered = project_id is None and work_item_id is None and starter is None
         if unfiltered:
-            for engine_session in live.values():
-                # A hibernated session is asleep, not stopped: listed always.
-                if (
-                    not engine_session.alive
-                    and not engine_session.hibernated
-                    and not params.include_stopped
-                ):
-                    continue
-                if view.session_by_engine_id(engine_session.id) is None:
+            # One query for every engine id, not one per unlinked session
+            # (WI-2693). A hit means the session is already in `summaries`.
+            candidates = [
+                engine_session
+                for engine_session in live.values()
+                if engine_session.alive
+                or engine_session.hibernated
+                or params.include_stopped
+            ]
+            linked_ids = {
+                session.engine_session_id
+                for session in view.sessions_by_engine_ids(
+                    [engine_session.id for engine_session in candidates]
+                ).values()
+            }
+            for engine_session in candidates:
+                if engine_session.id not in linked_ids:
                     summaries.append(_summarize_engine_only(engine_session, view))
 
         templates = {
