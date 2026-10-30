@@ -179,6 +179,7 @@ fn base_config() -> Config {
         gui_stream_url: None,
         gui_stream_verified: false,
         ws_query_token_allowed: false,
+        ws_ping_interval: std::time::Duration::from_secs(20),
         push_allow_insecure_endpoints: false,
         state_dir: tempfile::tempdir().unwrap().keep(),
         fcm_service_account_json: None,
@@ -622,6 +623,44 @@ async fn a_core_outage_is_503_not_401() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+/// The terminal attach says the same thing a request does: a core outage
+/// closes `4503` (retry), never the `4401` that sends a client to sign in
+/// again (WI-2704).
+#[tokio::test]
+async fn a_core_outage_closes_an_attach_4503_not_4401() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let mut cfg = base_config();
+    cfg.vogt_core_url = Some("http://127.0.0.1:1".to_string());
+    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    let base = boot(cfg).await;
+    let url = format!(
+        "{}/api/sessions/{}/attach",
+        base.replace("http://", "ws://"),
+        uuid::Uuid::new_v4()
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    ws.send(Message::Text(
+        json!({"type": "auth", "token": ADA_SESSION})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let close = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(msg) = ws.next().await {
+            if let Ok(Message::Close(frame)) = msg {
+                return frame;
+            }
+        }
+        None
+    })
+    .await
+    .expect("the attach must be closed promptly")
+    .expect("with a close frame");
+    assert_eq!(u16::from(close.code), 4503);
 }
 
 /// The stack secret is the core's own identity here: it may start sessions
