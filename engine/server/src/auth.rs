@@ -546,11 +546,16 @@ pub async fn record_ws_auth_failure(reason: &'static str) {
 /// Who a WebSocket attach bearer is, when it may attach at all (it holds
 /// `sessions`). The attach keeps the identity: its keystrokes are answered
 /// for by it (WI-983).
-pub async fn ws_session_identity(state: &AppState, candidate: &str) -> Option<AuthorizedIdentity> {
-    authorize(state, candidate)
-        .await
-        .ok()
-        .filter(|access| access.allows(TokenCapability::Sessions))
+pub async fn ws_session_identity(
+    state: &AppState,
+    candidate: &str,
+) -> Result<AuthorizedIdentity, AuthRefusal> {
+    let access = authorize(state, candidate).await?;
+    if access.allows(TokenCapability::Sessions) {
+        Ok(access)
+    } else {
+        Err(AuthRefusal::Unauthorized)
+    }
 }
 
 fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {

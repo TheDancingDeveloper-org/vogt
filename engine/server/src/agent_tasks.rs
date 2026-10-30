@@ -5187,6 +5187,7 @@ mod tests {
             gui_stream_url: None,
             gui_stream_verified: false,
             ws_query_token_allowed: false,
+            ws_ping_interval: std::time::Duration::from_secs(20),
             push_allow_insecure_endpoints: false,
             state_dir,
             fcm_service_account_json: None,

@@ -2407,8 +2407,29 @@ this never applies to the other half of a split.
 
 A text frame that does not parse as a control message is treated as raw input,
 because some tools send keystrokes as text. Snapshot chunks are capped at
-64 KiB each. Close codes a client should recognize: `4408` no auth frame
-within five seconds, `4401` bad or missing auth frame, `4404` no such session.
+64 KiB each.
+
+The server keeps every attached socket alive with WebSocket-level Ping frames,
+one every `ENGINE_WS_PING_INTERVAL_MS` (default 20 s). Any frame from the
+client — the Pong a WebSocket stack sends on its own, input, a resize, a
+`ping` control frame — counts as an answer. A socket that has sent nothing for
+two intervals is closed `4000 idle`, so a half-open phone socket is closed
+within about 45 s at the default, and its server-side tasks (and broadcast
+receiver) are dropped with it. Counters on the metrics listener:
+`vogt_ws_attach_total`, `vogt_ws_close_total{code}` (`none` when the client
+closed first or the transport failed) and `vogt_ws_idle_close_total`.
+
+Close codes a client should recognize:
+
+- `1000` the session is hibernated (after its kept screen is replayed).
+- `4000` idle: no frame from the client for two keepalive intervals.
+  Reattach.
+- `4401` bad or missing auth frame. Counted and slowed as an auth failure.
+- `4404` no such session.
+- `4408` no auth frame within five seconds.
+- `4503` the core could not be reached to check the credential. Not an auth
+  failure and not counted as one: retry after a short wait, and do not sign
+  out.
 
 ### Events and status
 
