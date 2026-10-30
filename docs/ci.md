@@ -87,7 +87,13 @@ outline: one branch ruleset on `main` with a `merge_queue` rule
 (`ci`, `runner-policy`, `dependency review`).
 
 Once the queue is on, `push` to `main` re-runs the full suite on a commit the
-queue has already tested. It is kept deliberately for now: `build.yml` and
-`e2e.yml` key off it, and it is the full check for anything that reaches `main`
+queue has already tested. It is kept deliberately for now: `build.yml` keys
+off it, and it is the full check for anything that reaches `main`
 without the queue. Dropping `ci.yml`'s `push` trigger is a follow-up once the
-queue has proved itself.
+queue has proved itself. `e2e.yml` no longer runs on `push`: it runs in the
+merge queue, nightly, manually, and on pull requests that touch the workflow or
+the scripts and images it runs.
+
+The PWA's demo Playwright suite is split the same way. A pull request runs a
+smoke (the desktop project, no screenshot comparisons); the merge queue,
+nightly and manual `ci` runs run every project and every screenshot.
