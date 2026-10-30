@@ -926,7 +926,8 @@ export interface AgentTaskUpsertRequest {
 
 export const api = {
   listSessions: async (signal?: AbortSignal, includeHidden = false): Promise<SessionList> => {
-    const path = includeHidden ? "/api/sessions?include=hidden" : "/api/sessions";
+    // The rail's slim view (WI-2692): no command, economics or conversation.
+    const path = includeHidden ? "/api/sessions?view=rail&include=hidden" : "/api/sessions?view=rail";
     const body = await req<SessionList | SessionSummary[]>("GET", path, undefined, signal);
     if (Array.isArray(body)) return { sessions: body, hidden_count: 0 };
     const count = body.hidden_count;
