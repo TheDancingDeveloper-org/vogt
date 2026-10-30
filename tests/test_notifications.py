@@ -389,3 +389,31 @@ def test_inbox_cursor_freezes_each_source_before_later_facts_arrive(
     titles = {entry.title for entry in continuation.entries}
     assert "A fact that arrived after page one" not in titles
     assert "ci workflow run failed" in titles
+
+
+def test_a_snooze_that_runs_out_reappears_without_a_write(
+    instance: AppContext, forge: Forge
+) -> None:
+    """WI-2691: the shared stored half carries triage, so it must expire with
+    the first snooze in it, not wait for the next store write."""
+    from dataclasses import replace
+    from datetime import timedelta
+
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
+    entry_key = list_inbox(instance, InboxListParams()).entries[0].entry_key
+    now = instance.clock()
+    snooze_inbox(
+        instance,
+        InboxSnoozeParams(
+            entry_key=entry_key, until=now + timedelta(hours=1), reason=WHY
+        ),
+    )
+    before = list_inbox(instance, InboxListParams(triage_states=["snoozed"]))
+    assert [entry.entry_key for entry in before.entries] == [entry_key]
+
+    later = replace(instance, clock=lambda: now + timedelta(hours=2))
+    after = list_inbox(later, InboxListParams())
+    assert after.counts["snoozed"] == 0
+    assert entry_key in {
+        entry.entry_key for entry in after.entries if entry.triage_state == "active"
+    }

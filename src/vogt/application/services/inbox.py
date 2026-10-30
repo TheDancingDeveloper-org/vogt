@@ -321,7 +321,9 @@ def inbox_badge(ctx: AppContext, saved: InboxSavedFilter | None) -> InboxBadge:
     collect time), so no forge call can happen here. A snooze that runs out
     is judged at count time, so a shared projection cannot keep it hidden.
     """
-    stored = _stored_memo.get(ctx, lambda: _stored_triaged(ctx))
+    stored = _stored_memo.get(
+        ctx, lambda: _stored_triaged(ctx), expires=_next_snooze_end
+    )
     with ctx.declared.read() as view:
         live_sessions, _error = _read_engine_sessions(ctx)
         live = _triaged(
@@ -347,6 +349,19 @@ def inbox_badge(ctx: AppContext, saved: InboxSavedFilter | None) -> InboxBadge:
 def clear_badge_cache() -> None:
     """Drop the shared badge projection (tests, and a restore)."""
     _stored_memo.clear()
+
+
+def _next_snooze_end(stored: _StoredInbox) -> datetime | None:
+    """When the first snooze in the stored half runs out. The triaged
+    entries carry their snooze state, so the memo must not outlive it."""
+    return min(
+        (
+            entry.snooze_until
+            for entry in stored.entries
+            if entry.triage_state == "snoozed" and entry.snooze_until is not None
+        ),
+        default=None,
+    )
 
 
 def _stored_triaged(ctx: AppContext) -> _StoredInbox:
@@ -375,7 +390,9 @@ def _inbox_parts(
 ) -> tuple[_StoredInbox, list[InboxEntry], EngineUnavailable | None]:
     """The stored half (shared while the stores have not moved) plus one
     live read of the engine, reused for the reachability line."""
-    stored = _stored_memo.get(ctx, lambda: _stored_triaged(ctx))
+    stored = _stored_memo.get(
+        ctx, lambda: _stored_triaged(ctx), expires=_next_snooze_end
+    )
     live, error = _read_engine_sessions(ctx)
     entries = _collect_live(ctx, view, stored.projects, live)
     return stored, entries, error

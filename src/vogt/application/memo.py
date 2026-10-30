@@ -37,6 +37,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Generic, TypeVar
 
 from vogt.application.context import AppContext
@@ -87,6 +88,9 @@ class _Answer(Generic[T]):
     #: `time.monotonic()` just before `state` was read.
     read_at: float
     value: T
+    #: The `ctx.clock()` moment the answer stops being true with no write at
+    #: all (a snooze running out), or `None` if only a write can stale it.
+    expires_at: datetime | None = None
 
 
 class StoreMemo(Generic[T]):
@@ -110,12 +114,17 @@ class StoreMemo(Generic[T]):
         *,
         variant: str = "",
         keep: Callable[[T], bool] = lambda _: True,
+        expires: Callable[[T], datetime | None] = lambda _: None,
     ) -> T:
         """The remembered answer if the stores have not moved, else a new one.
 
         `keep` decides whether a fresh answer may be remembered; an answer
         built while part of it was unavailable should be asked for again
         rather than served until the next write.
+
+        `expires` names when a fresh answer goes stale on the clock alone,
+        such as the next snooze to run out. Past that moment the answer is
+        computed again even though no store has moved.
         """
         arrived = time.monotonic()
         stores = _stores_of(ctx)
@@ -125,6 +134,11 @@ class StoreMemo(Generic[T]):
         with flight:
             with self._lock:
                 remembered = self._answers.get(slot)
+            if remembered is not None and (
+                remembered.expires_at is not None
+                and remembered.expires_at <= ctx.clock()
+            ):
+                remembered = None
             if (
                 remembered is not None
                 and remembered.read_at >= arrived
@@ -140,7 +154,9 @@ class StoreMemo(Generic[T]):
             answer = compute()
             if keep(answer):
                 with self._lock:
-                    self._answers[slot] = _Answer(state, read_at, answer)
+                    self._answers[slot] = _Answer(
+                        state, read_at, answer, expires(answer)
+                    )
                     self._answers.move_to_end(slot)
                     while len(self._answers) > MEMO_STORES_MAX:
                         dropped, _ = self._answers.popitem(last=False)
