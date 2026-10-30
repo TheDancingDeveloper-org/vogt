@@ -271,6 +271,17 @@ and base, the brief says there is no diff to review and the reviewer reports
 that and stops. A reviewer reads the diff and that brief, never the worker's
 screen or transcript.
 
+A reviewer records its verdict as `work.comment --kind verdict` with a
+`verdict` object: `head_sha`, `base`, `verdict` (`no_blockers` or `blockers`,
+which needs a non-empty `blockers` list) and `deployment_paths_covered`. Vogt
+accepts it only from a person, or from a `purpose=review` session that a person
+or oversight started, bound to this item, and not the session named in the
+latest hand-off; it fills `reviewer_session` and `reviewer_started_by` from the
+session's record and ignores supplied values. A review session a worker
+started cannot post one. A check run on a deployed lane is
+`work.comment --kind verification` (`head_sha`, `lane`, `what`, `evidence`);
+anyone but the worker may post it, and Vogt fills `by`.
+
 A worker brief pastes only the remarks made since the latest hand-off; the
 thread before it — old root causes, old verdicts — is superseded by it.
 

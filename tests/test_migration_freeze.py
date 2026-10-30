@@ -51,6 +51,7 @@ FROZEN: dict[str, str] = {
     "declared/0026_watches": "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df",
     "declared/0027_session_reports": "cd0c625480c5ffa4d0b07287e8e8ab19e71f72a27ab5f6e56d21d1fee0f8d01a",
     "declared/0028_session_cold_wake": "8a6b44c9d25f06e23605b47f667d11b312511b37ba25759a040f95cb985b4a1a",
+    "declared/0029_comment_verdict": "09c5df020a9d1d8b679a01bbb29eb634e505f3447542cd10ab3e82afce49e26e",
     "observed/0001_foundation": "c050f9e4dba983119f045b8fb4ccbe8b1ee97473170eead7d28279e99468de4b",
     "observed/0002_evidence": "9cdc9c9179740af96606bab0b557c7b35639eaabc78faf16630c7705f1d368f5",
     "observed/0003_inherited_dep_refs": "8bf0b8533774a156762fddc2e56bbb9656ba3b6bf0e38ec85a66c9dc9c325ed1",

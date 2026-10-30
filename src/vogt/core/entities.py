@@ -350,7 +350,7 @@ class Relation(Entity):
     related_state: str
 
 
-CommentKind = Literal["note", "handoff"]
+CommentKind = Literal["note", "handoff", "verdict", "verification"]
 
 
 class HandoffFields(BaseModel):
@@ -374,12 +374,55 @@ class HandoffFields(BaseModel):
     session: str | None = None
 
 
+class VerdictFields(BaseModel):
+    """The structured half of a review verdict (WI-1319, design §2.2).
+
+    `verdict="blockers"` names at least one blocker. `reviewer_session` and
+    `reviewer_started_by` are filled by the core from the acting session's
+    record; values a caller supplies are ignored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    head_sha: str
+    base: str | None = None
+    verdict: Literal["no_blockers", "blockers"]
+    blockers: list[str] = []
+    deployment_paths_covered: list[str] = []
+    reviewer_session: str | None = None
+    reviewer_started_by: Literal["person", "oversight"] | None = None
+
+    @model_validator(mode="after")
+    def _blockers_named(self) -> VerdictFields:
+        if self.verdict == "blockers" and not self.blockers:
+            msg = "a blockers verdict names at least one blocker"
+            raise ValueError(msg)
+        return self
+
+
+class VerificationFields(BaseModel):
+    """The structured half of a verification (WI-1319, design §2.2).
+
+    `by` is filled by the core from the acting actor; a supplied value is
+    ignored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    head_sha: str | None = None
+    lane: str
+    what: str
+    evidence: str
+    by: str | None = None
+
+
 class Comment(Entity):
     """A remark on a work item, attributed to an actor.
 
-    `kind` is `note` for an ordinary remark and `handoff` for the structured
-    hand-off a fresh session starts from (design C11). `handoff` is present
-    only on a hand-off comment.
+    `kind` is `note` for an ordinary remark, `handoff` for the structured
+    hand-off a fresh session starts from (design C11), `verdict` for a
+    review verdict and `verification` for a check someone other than the
+    worker ran. Each structured field set is present only on its own kind.
     """
 
     id: str
@@ -390,6 +433,8 @@ class Comment(Entity):
     created_at: datetime
     kind: CommentKind = "note"
     handoff: HandoffFields | None = None
+    verdict: VerdictFields | None = None
+    verification: VerificationFields | None = None
 
 
 class WorkItem(Entity):

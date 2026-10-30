@@ -62,8 +62,11 @@ from vogt.core.branches import default_branch_name
 from vogt.core.entities import (
     DECLARABLE_RELATION_KINDS,
     Actor,
+    CodingSession,
     Comment,
     Project,
+    VerdictFields,
+    VerificationFields,
     WorkItem,
     WorkOverlay,
     WriteBackRecord,
@@ -73,6 +76,7 @@ from vogt.core.workflow import (
     check_completion_allowed,
 )
 from vogt.errors import (
+    CommentRefused,
     Conflict,
     InvalidRequest,
     NotFound,
@@ -1444,11 +1448,11 @@ def comment_work(ctx: AppContext, params: CommentParams) -> CommentResult:
         )
     if not native:
         assert project is not None  # an upstream item always has its project
-        if params.kind == "handoff":
+        if params.kind != "note":
             # The forge thread has no kind: posting a hand-off there would
             # flatten it to free text and the next session could not find it.
             msg = (
-                f"{item.ref} is an upstream item; a hand-off comment is a "
+                f"{item.ref} is an upstream item; a {params.kind} comment is a "
                 "local record and cannot be posted to the forge"
             )
             raise InvalidRequest(msg)
@@ -1458,9 +1462,93 @@ def comment_work(ctx: AppContext, params: CommentParams) -> CommentResult:
     return _comment_native(ctx, params)
 
 
+_VERDICT_RULE = (
+    "a verdict is posted by a person, or by a review session started by a "
+    "person or oversight, on the item it reviews"
+)
+_VERIFICATION_RULE = "a verification is posted by someone other than the worker"
+
+
+def _acting_session(view: ReadView, engine_id: str | None) -> CodingSession | None:
+    """The session record of the caller, from its verified identity."""
+    return None if engine_id is None else view.session_by_engine_id(engine_id)
+
+
+def _is_worker(view: ReadView, item: WorkItem, ids: set[str]) -> bool:
+    """Whether any of `ids` is the session named by the item's latest hand-off."""
+    for prior in view.comments_for(item.id, limit=500, order="newest"):
+        if prior.kind == "handoff" and prior.handoff is not None:
+            return prior.handoff.session is not None and prior.handoff.session in ids
+    return False
+
+
+def _authorize_structured(
+    ctx: AppContext,
+    view: ReadView,
+    params: CommentParams,
+    item: WorkItem,
+    engine_id: str | None,
+) -> tuple[VerdictFields | None, VerificationFields | None]:
+    """Who may post a verdict or verification (WI-1319), and the filled fields.
+
+    Every fact comes from the acting principal and the session store; the
+    reviewer and `by` fields a caller supplies are overwritten.
+    """
+    if params.kind == "verdict":
+        assert params.verdict is not None
+        if ctx.principal.kind != "agent":
+            return params.verdict.model_copy(
+                update={"reviewer_session": None, "reviewer_started_by": "person"}
+            ), None
+        session = _acting_session(view, engine_id)
+        if session is None:
+            raise CommentRefused(f"{_VERDICT_RULE}: this caller is not a session")
+        if session.purpose != "review":
+            raise CommentRefused(f"{_VERDICT_RULE}: this session is not a review")
+        started_by = session.started_by_kind
+        if started_by not in ("person", "oversight"):
+            raise CommentRefused(
+                f"{_VERDICT_RULE}: this review was started by "
+                f"{started_by or 'an unknown starter'}"
+            )
+        if session.work_item_id != item.id:
+            raise CommentRefused(
+                f"{_VERDICT_RULE}: this review is not bound to {item.ref}"
+            )
+        if _is_worker(view, item, {session.id, session.engine_session_id}):
+            raise CommentRefused(f"{_VERDICT_RULE}: this session is the worker")
+        return params.verdict.model_copy(
+            update={
+                "reviewer_session": session.engine_session_id,
+                "reviewer_started_by": started_by,
+            }
+        ), None
+    if params.kind == "verification":
+        assert params.verification is not None
+        session = _acting_session(view, engine_id)
+        if session is not None and _is_worker(
+            view, item, {session.id, session.engine_session_id}
+        ):
+            raise CommentRefused(_VERIFICATION_RULE)
+        by = (
+            ctx.principal.identity_ref if session is None else session.engine_session_id
+        )
+        return None, params.verification.model_copy(update={"by": by})
+    return None, None
+
+
 def _comment_native(ctx: AppContext, params: CommentParams) -> CommentResult:
+    # Resolved before the write: the caller's own session row, read from its
+    # token, never from the parameters.
+    engine_id = (
+        _caller_engine_session_id(ctx)
+        if ctx.principal.kind == "agent" and params.kind in ("verdict", "verification")
+        else None
+    )
+
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[CommentResult]:
         item = _resolve.work_item(txn, params.ref)
+        verdict, verification = _authorize_structured(ctx, txn, params, item, engine_id)
         comment = Comment(
             id=ctx.id_factory("cmt"),
             work_item_id=item.id,
@@ -1470,6 +1558,8 @@ def _comment_native(ctx: AppContext, params: CommentParams) -> CommentResult:
             created_at=ctx.clock(),
             kind=params.kind,
             handoff=params.handoff,
+            verdict=verdict,
+            verification=verification,
         )
         txn.insert_comment(comment)
 
