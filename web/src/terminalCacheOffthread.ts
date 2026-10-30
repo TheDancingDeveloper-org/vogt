@@ -29,7 +29,14 @@ export function postTerminalCacheWrite(
   outputPosition: number,
   payload: TerminalCachePayload,
   spawn: () => CacheWorker | null = createWorker,
+  direct = false,
 ): void {
+  // `direct` is the pagehide path: a worker can be torn down with the page
+  // before its put commits, so the write starts on this thread instead.
+  if (direct) {
+    void saveTerminalCache(sessionId, outputPosition, payload);
+    return;
+  }
   if (worker === undefined) worker = spawn();
   const message: TerminalCacheWrite = { sessionId, outputPosition, payload };
   if (worker) {

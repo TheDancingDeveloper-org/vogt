@@ -48,4 +48,14 @@ describe("terminal cache worker write", () => {
     const entry = await loadTerminalCache("s3");
     expect(new TextDecoder().decode(entry!.data)).toBe("raw\n");
   });
+
+  it("a direct write skips the worker and lands on the main thread", async () => {
+    const postMessage = vi.fn();
+    resetTerminalCacheWorker({ postMessage });
+    postTerminalCacheWrite("s9", 5, { serialized: "closing" }, () => null, true);
+    expect(postMessage).not.toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      expect((await loadTerminalCache("s9"))?.serialized).toBe("closing");
+    });
+  });
 });

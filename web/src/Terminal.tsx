@@ -32,6 +32,7 @@ import {
   CACHE_PERSIST_IDLE_TIMEOUT_MS,
   CACHE_PERSIST_INTERVAL_MS,
   cacheNeedsPersist,
+  installCacheFlushOnPageHide,
   scheduleOnIdle,
   shouldScheduleCachePersist,
   type IdleHandle,
@@ -222,7 +223,7 @@ const TerminalView: Component<Props> = (props) => {
   // The outputPosition at the last scheduled persist, so an unchanged ring is
   // not re-copied and re-written to IndexedDB.
   let lastPersistedPosition: number | undefined;
-  // Set on dormancy entry so a hidden pane persists once, then stops.
+  // Set on dormancy entry so the next persist runs without the 5 s wait.
   let persistOnDormancy = false;
   let replay: ReplayHandle | null = null;
   const [readyToConnect, setReadyToConnect] = createSignal(false);
@@ -235,6 +236,7 @@ const TerminalView: Component<Props> = (props) => {
   // queue so a flush cannot overtake a snapshot still parsing.
   let liveWrites: TerminalWriteCoalescer | null = null;
   let disposeWebgl: (() => void) | null = null;
+  let pageHideCleanup: (() => void) | null = null;
   const reconnect = new ReconnectTracker();
   const watchdog = new SocketWatchdog();
   let watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -460,7 +462,7 @@ const TerminalView: Component<Props> = (props) => {
     }
   };
 
-  const persistCache = () => {
+  const persistCache = (direct = false) => {
     if (!cacheNeedsPersist(outputPosition, lastPersistedPosition)) return;
     const position = outputPosition;
     lastPersistedPosition = position;
@@ -469,7 +471,16 @@ const TerminalView: Component<Props> = (props) => {
     const payload = serialized !== null ? { serialized } : { data: cachedBytes() };
     // Serialize needs the live xterm, so it stays on this thread. The IndexedDB
     // put (up to 4 MiB) runs in a worker.
-    postTerminalCacheWrite(props.sessionId, position, payload);
+    postTerminalCacheWrite(props.sessionId, position, payload, undefined, direct);
+  };
+
+  // Page closing or backgrounded: drop the pending timer/idle slot and write
+  // now, on this thread, so the pending scrollback is not lost.
+  const flushCacheNow = () => {
+    if (cacheTimer !== null) { clearTimeout(cacheTimer); cacheTimer = null; }
+    cacheIdle?.cancel();
+    cacheIdle = null;
+    persistCache(true);
   };
 
   const flushCacheSoon = () => {
@@ -481,15 +492,13 @@ const TerminalView: Component<Props> = (props) => {
   };
 
   const scheduleCachePersist = () => {
-    const hidden = socketDormant || document.visibilityState === "hidden";
     if (!shouldScheduleCachePersist({
       outputPosition,
       lastPersistedPosition,
-      hidden: hidden && !persistOnDormancy,
       alreadyScheduled: cacheTimer !== null || cacheIdle !== null,
     })) return;
-    // Visible panes wait the 5 s cadence, then idle. A pane that just went
-    // dormant persists once on the next idle slice, not on every later chunk.
+    // Panes wait the 5 s cadence, then idle. A pane that just went dormant
+    // persists on the next idle slice.
     const delay = persistOnDormancy ? 0 : CACHE_PERSIST_INTERVAL_MS;
     cacheTimer = setTimeout(() => {
       cacheTimer = null;
@@ -756,6 +765,8 @@ const TerminalView: Component<Props> = (props) => {
     liveWrites = createTerminalWriteCoalescer((chunk) => {
       term?.write(chunk);
     });
+    pageHideCleanup?.();
+    pageHideCleanup = installCacheFlushOnPageHide(flushCacheNow, window, document);
     const opened = term;
     void attachWebglRenderer(opened, {
       onFallback: () => {
@@ -1437,8 +1448,9 @@ const TerminalView: Component<Props> = (props) => {
       // Resume writes this delta, or a bounded tail if it outgrows the budget.
       if (socketDormant) {
         dormantBytes += buf.byteLength;
-        // Dormancy entry already scheduled the one persist. Later chunks stay
-        // in the ring until the pane is visible again.
+        // Hidden panes keep persisting on the same cadence: their cache is
+        // what a reload restores.
+        scheduleCachePersist();
         return;
       }
       if (heldForResize) {
@@ -1656,6 +1668,8 @@ const TerminalView: Component<Props> = (props) => {
     liveWrites = null;
     disposeWebgl?.();
     disposeWebgl = null;
+    pageHideCleanup?.();
+    pageHideCleanup = null;
     wakeCleanup?.();
     wakeCleanup = null;
     if (viewportHandler) {

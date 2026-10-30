@@ -4,6 +4,7 @@ import {
   CACHE_PERSIST_IDLE_TIMEOUT_MS,
   CACHE_PERSIST_INTERVAL_MS,
   cacheNeedsPersist,
+  installCacheFlushOnPageHide,
   scheduleOnIdle,
   shouldScheduleCachePersist,
 } from "../terminalCacheSchedule";
@@ -16,26 +17,29 @@ describe("terminal cache dirty check", () => {
     expect(cacheNeedsPersist(11, 10)).toBe(true);
   });
 
-  it("does not reschedule a hidden pane that is already persisted", () => {
+  it("keeps persisting a hidden pane whose cursor moved", () => {
+    // No visibility input at all: hidden panes persist like visible ones.
     expect(shouldScheduleCachePersist({
       outputPosition: 20,
       lastPersistedPosition: 20,
-      hidden: true,
       alreadyScheduled: false,
     })).toBe(false);
     expect(shouldScheduleCachePersist({
       outputPosition: 21,
       lastPersistedPosition: 20,
-      hidden: true,
       alreadyScheduled: false,
-    })).toBe(false);
+    })).toBe(true);
+    expect(shouldScheduleCachePersist({
+      outputPosition: 40,
+      lastPersistedPosition: 21,
+      alreadyScheduled: false,
+    })).toBe(true);
   });
 
   it("still schedules a visible pane whose cursor moved", () => {
     expect(shouldScheduleCachePersist({
       outputPosition: 21,
       lastPersistedPosition: 20,
-      hidden: false,
       alreadyScheduled: false,
     })).toBe(true);
   });
@@ -44,7 +48,6 @@ describe("terminal cache dirty check", () => {
     expect(shouldScheduleCachePersist({
       outputPosition: 21,
       lastPersistedPosition: 20,
-      hidden: false,
       alreadyScheduled: true,
     })).toBe(false);
   });
@@ -105,5 +108,55 @@ describe("terminal cache idle scheduling", () => {
     expect(cancelIdleCallback).toHaveBeenCalledWith(4);
     expect(clearTimeout).toHaveBeenCalled();
     expect(work).not.toHaveBeenCalled();
+  });
+});
+
+describe("terminal cache flush on page hide", () => {
+  function target(visibilityState = "visible") {
+    const listeners = new Map<string, Set<() => void>>();
+    return {
+      visibilityState,
+      addEventListener: (type: string, cb: () => void) => {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type)!.add(cb);
+      },
+      removeEventListener: (type: string, cb: () => void) => {
+        listeners.get(type)?.delete(cb);
+      },
+      fire: (type: string) => {
+        for (const cb of listeners.get(type) ?? []) cb();
+      },
+    };
+  }
+
+  it("flushes on pagehide", () => {
+    const flush = vi.fn();
+    const win = target();
+    const doc = target();
+    installCacheFlushOnPageHide(flush, win, doc);
+    win.fire("pagehide");
+    expect(flush).toHaveBeenCalledTimes(1);
+  });
+
+  it("flushes on visibilitychange to hidden, not to visible", () => {
+    const flush = vi.fn();
+    const doc = target();
+    installCacheFlushOnPageHide(flush, target(), doc);
+    doc.fire("visibilitychange");
+    expect(flush).not.toHaveBeenCalled();
+    doc.visibilityState = "hidden";
+    doc.fire("visibilitychange");
+    expect(flush).toHaveBeenCalledTimes(1);
+  });
+
+  it("uninstall removes both listeners", () => {
+    const flush = vi.fn();
+    const win = target();
+    const doc = target("hidden");
+    const uninstall = installCacheFlushOnPageHide(flush, win, doc);
+    uninstall();
+    win.fire("pagehide");
+    doc.fire("visibilitychange");
+    expect(flush).not.toHaveBeenCalled();
   });
 });

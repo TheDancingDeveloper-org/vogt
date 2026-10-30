@@ -2,10 +2,12 @@
  * When the terminal cache is allowed to hit IndexedDB (WI-2695).
  *
  * The live ring still appends per frame. A persist is scheduled only when the
- * byte cursor moved, and only for the visible pane on the 5 s cadence. A hidden
- * pane persists once, on the way into dormancy, not on every later chunk.
- * The write itself is deferred to idle time so serialize + the IDB put are not
- * a long task on the frame that received the bytes.
+ * byte cursor moved, on the 5 s cadence, for visible and hidden panes alike: a
+ * hidden pane still receives output, and its cache is what a reload restores.
+ * Entering dormancy persists at once. The write itself is deferred to idle time
+ * so serialize + the IDB put are not a long task on the frame that received the
+ * bytes. A pending write is flushed on pagehide / visibilitychange so closing
+ * the page does not drop it.
  */
 
 export const CACHE_PERSIST_INTERVAL_MS = 5_000;
@@ -18,21 +20,41 @@ export function cacheNeedsPersist(
   return outputPosition !== undefined && outputPosition !== lastPersistedPosition;
 }
 
-/**
- * A hidden pane that has already been persisted at this cursor should not
- * re-schedule. The visible pane keeps the 5 s cadence so a reconnect still
- * sees recent scrollback.
- */
+/** Schedule when the cursor moved and no persist is already pending. */
 export function shouldScheduleCachePersist(input: {
   outputPosition: number | undefined;
   lastPersistedPosition: number | undefined;
-  hidden: boolean;
   alreadyScheduled: boolean;
 }): boolean {
   if (input.alreadyScheduled) return false;
-  if (!cacheNeedsPersist(input.outputPosition, input.lastPersistedPosition)) return false;
-  if (input.hidden && input.lastPersistedPosition !== undefined) return false;
-  return true;
+  return cacheNeedsPersist(input.outputPosition, input.lastPersistedPosition);
+}
+
+export interface PageHideTarget {
+  addEventListener: (type: string, cb: () => void) => void;
+  removeEventListener: (type: string, cb: () => void) => void;
+}
+
+/**
+ * Call `flush` when the page is hidden or unloaded. `pagehide` covers close
+ * and bfcache; `visibilitychange` to hidden is the last reliable event on
+ * mobile, where pagehide may never fire. Returns the uninstaller.
+ */
+export function installCacheFlushOnPageHide(
+  flush: () => void,
+  windowLike: PageHideTarget,
+  documentLike: PageHideTarget & { visibilityState: string },
+): () => void {
+  const onPageHide = () => flush();
+  const onVisibility = () => {
+    if (documentLike.visibilityState === "hidden") flush();
+  };
+  windowLike.addEventListener("pagehide", onPageHide);
+  documentLike.addEventListener("visibilitychange", onVisibility);
+  return () => {
+    windowLike.removeEventListener("pagehide", onPageHide);
+    documentLike.removeEventListener("visibilitychange", onVisibility);
+  };
 }
 
 export interface IdleWindow {
