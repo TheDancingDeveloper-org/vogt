@@ -1,24 +1,68 @@
 /**
  * Post a terminal-cache write to a worker. Falls back to the same put on the
- * main thread when workers are unavailable (jsdom, old WebViews).
+ * main thread when workers are unavailable (jsdom, old WebViews) or the worker
+ * fails (module load error, messageerror): pending writes are replayed on the
+ * main thread and every later write goes there too.
+ *
+ * The returned promise resolves true once the record is stored, or the store
+ * already held a newer one; false when the write failed.
  */
 
-import { saveTerminalCache, type TerminalCachePayload } from "./terminalCache";
-import type { TerminalCacheWrite } from "./terminalCacheWorker";
+import { saveTerminalCache, type TerminalCachePayload, type TerminalCacheSaveResult } from "./terminalCache";
+import type { TerminalCacheAck, TerminalCacheWrite } from "./terminalCacheWorker";
 
-type CacheWorker = {
+export type CacheWorker = {
   postMessage: (message: TerminalCacheWrite) => void;
   terminate?: () => void;
+  onmessage: ((ev: MessageEvent<TerminalCacheAck>) => void) | null;
+  onerror: ((ev: Event) => void) | null;
+  onmessageerror: ((ev: MessageEvent) => void) | null;
 };
 
+interface Pending {
+  message: TerminalCacheWrite;
+  resolve: (ok: boolean) => void;
+}
+
 let worker: CacheWorker | null | undefined;
+let nextId = 1;
+const pending = new Map<number, Pending>();
+
+const settled = (result: TerminalCacheSaveResult) => result !== "failed";
+
+function writeOnMainThread(entry: Pending): void {
+  const { sessionId, outputPosition, payload } = entry.message;
+  void saveTerminalCache(sessionId, outputPosition, payload).then((r) => entry.resolve(settled(r)));
+}
+
+function abandonWorker(reason: string): void {
+  if (!worker) return;
+  console.warn("[vogt] terminal cache worker failed; writing on the main thread", { reason });
+  worker.terminate?.();
+  worker = null;
+  const replay = [...pending.values()];
+  pending.clear();
+  for (const entry of replay) writeOnMainThread(entry);
+}
+
+function wire(w: CacheWorker): CacheWorker {
+  w.onmessage = (ev) => {
+    const entry = pending.get(ev.data?.id);
+    if (!entry) return;
+    pending.delete(ev.data.id);
+    entry.resolve(settled(ev.data.result));
+  };
+  w.onerror = () => abandonWorker("error");
+  w.onmessageerror = () => abandonWorker("messageerror");
+  return w;
+}
 
 function createWorker(): CacheWorker | null {
   if (typeof Worker === "undefined") return null;
   try {
     return new Worker(new URL("./terminalCache.worker.ts", import.meta.url), {
       type: "module",
-    });
+    }) as unknown as CacheWorker;
   } catch {
     return null;
   }
@@ -30,24 +74,34 @@ export function postTerminalCacheWrite(
   payload: TerminalCachePayload,
   spawn: () => CacheWorker | null = createWorker,
   direct = false,
-): void {
-  // `direct` is the pagehide path: a worker can be torn down with the page
-  // before its put commits, so the write starts on this thread instead.
-  if (direct) {
-    void saveTerminalCache(sessionId, outputPosition, payload);
-    return;
-  }
-  if (worker === undefined) worker = spawn();
-  const message: TerminalCacheWrite = { sessionId, outputPosition, payload };
-  if (worker) {
-    try {
-      worker.postMessage(message);
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const entry: Pending = {
+      message: { id: nextId++, sessionId, outputPosition, payload },
+      resolve,
+    };
+    // `direct` is the pagehide path: a worker can be torn down with the page
+    // before its put commits, so the write starts on this thread instead.
+    if (direct) {
+      writeOnMainThread(entry);
       return;
-    } catch {
-      worker = null;
     }
-  }
-  void saveTerminalCache(sessionId, outputPosition, payload);
+    if (worker === undefined) {
+      const spawned = spawn();
+      worker = spawned ? wire(spawned) : null;
+    }
+    if (worker) {
+      try {
+        pending.set(entry.message.id, entry);
+        worker.postMessage(entry.message);
+        return;
+      } catch {
+        pending.delete(entry.message.id);
+        abandonWorker("postMessage threw");
+      }
+    }
+    writeOnMainThread(entry);
+  });
 }
 
 const UNSET = Symbol("unset");
@@ -55,5 +109,6 @@ const UNSET = Symbol("unset");
 /** Tests replace or drop the singleton. Omit `next` to force a fresh spawn. */
 export function resetTerminalCacheWorker(next: CacheWorker | null | typeof UNSET = UNSET): void {
   worker?.terminate?.();
-  worker = next === UNSET ? undefined : next;
+  pending.clear();
+  worker = next === UNSET ? undefined : next ? wire(next) : null;
 }

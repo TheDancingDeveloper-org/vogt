@@ -223,6 +223,8 @@ const TerminalView: Component<Props> = (props) => {
   // The outputPosition at the last scheduled persist, so an unchanged ring is
   // not re-copied and re-written to IndexedDB.
   let lastPersistedPosition: number | undefined;
+  // The cursor of a write posted but not yet acknowledged.
+  let persistingPosition: number | undefined;
   // Set on dormancy entry so the next persist runs without the 5 s wait.
   let persistOnDormancy = false;
   let replay: ReplayHandle | null = null;
@@ -463,15 +465,32 @@ const TerminalView: Component<Props> = (props) => {
   };
 
   const persistCache = (direct = false) => {
-    if (!cacheNeedsPersist(outputPosition, lastPersistedPosition)) return;
+    // Compare against an in-flight write too, so the same cursor is not
+    // posted twice while the first is still unacknowledged.
+    // The pagehide flush ignores it: the page may die before that write lands.
+    const floor = direct ? lastPersistedPosition : persistingPosition ?? lastPersistedPosition;
+    if (!cacheNeedsPersist(outputPosition, floor)) return;
     const position = outputPosition;
-    lastPersistedPosition = position;
+    persistingPosition = position;
     persistOnDormancy = false;
-    const serialized = trySerialize();
+    // A dormant pane parses nothing it receives, so the xterm screen lags the
+    // cursor. Store the raw ring, which does hold every byte up to `position`;
+    // a serialized screen paired with that cursor would drop the hidden output.
+    const serialized = socketDormant && dormantBytes > 0 ? null : trySerialize();
     const payload = serialized !== null ? { serialized } : { data: cachedBytes() };
     // Serialize needs the live xterm, so it stays on this thread. The IndexedDB
-    // put (up to 4 MiB) runs in a worker.
-    postTerminalCacheWrite(props.sessionId, position, payload, undefined, direct);
+    // put (up to 4 MiB) runs in a worker. The offset counts as persisted only
+    // once the write is acknowledged.
+    void postTerminalCacheWrite(props.sessionId, position, payload, undefined, direct).then((ok) => {
+      if (persistingPosition === position) persistingPosition = undefined;
+      if (ok && (lastPersistedPosition === undefined || position > lastPersistedPosition)) {
+        lastPersistedPosition = position;
+      }
+      // Output that arrived while this write was in flight still needs one.
+      if (!destroyed && cacheNeedsPersist(outputPosition, lastPersistedPosition)) {
+        scheduleCachePersist();
+      }
+    });
   };
 
   // Page closing or backgrounded: drop the pending timer/idle slot and write
@@ -494,7 +513,7 @@ const TerminalView: Component<Props> = (props) => {
   const scheduleCachePersist = () => {
     if (!shouldScheduleCachePersist({
       outputPosition,
-      lastPersistedPosition,
+      lastPersistedPosition: persistingPosition ?? lastPersistedPosition,
       alreadyScheduled: cacheTimer !== null || cacheIdle !== null,
     })) return;
     // Panes wait the 5 s cadence, then idle. A pane that just went dormant
@@ -1149,7 +1168,7 @@ const TerminalView: Component<Props> = (props) => {
       setReconnectView(null);
       setStatusText("Session unavailable");
       liveWrites?.flush();
-          term?.write("\r\n\x1b[31m[session not found — server may have restarted]\x1b[0m\r\n");
+      term?.write("\r\n\x1b[31m[session not found — server may have restarted]\x1b[0m\r\n");
     }
   }
 
@@ -1417,7 +1436,7 @@ const TerminalView: Component<Props> = (props) => {
             }, 4000);
           } else if (ctrl.type === "lag") {
             liveWrites?.flush();
-          term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
+            term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
             setStatusText("Reattaching terminal...");
             // Cancel any timer so the close event below doesn't double-schedule.
             if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
