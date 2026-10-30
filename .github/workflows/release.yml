@@ -642,11 +642,11 @@ jobs:
           notes="$(mktemp)"
           trap 'rm -f "$notes"' EXIT
           {
-            echo 'Release metadata (machine-readable copy is attached as `vogt-release-manifest.json`):'
+            echo "Release metadata (machine-readable copy is attached as \`vogt-release-manifest.json\`):"
             echo
-            echo '```json'
+            echo "\`\`\`json"
             cat release-assets/release-notes.json
-            echo '```'
+            echo "\`\`\`"
             echo
             echo "Publishing does not deploy production; deployment is a separate, operator-approved step."
           } > "$notes"

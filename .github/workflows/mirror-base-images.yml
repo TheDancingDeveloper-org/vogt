@@ -148,7 +148,7 @@ jobs:
               esac
               # Resolved from an ARG, which is checked on its own line.
               case "$ref" in
-                '${'*) continue ;;
+                "\${"*) continue ;;
               esac
               case "$ref" in
                 ghcr.io/*) ;;
@@ -318,7 +318,7 @@ jobs:
             echo
             grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile engine/Dockerfile.pod voice/Dockerfile \
               | sort -u \
-              | sed 's/^/- `/; s/$/`/'
+              | sed "s/^/- \`/; s/\$/\`/"
             echo
             echo "Builds pull these instead of Docker Hub."
           } >> "$GITHUB_STEP_SUMMARY"
