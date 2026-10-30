@@ -481,6 +481,18 @@ jobs:
         # was doing; the `list` reporter makes per-test progress legible.
         run: timeout --signal=SIGINT 420 pnpm exec playwright test tests/browser/demo.spec.ts --project=desktop --project=phone --reporter=list
 
+      # WI-2709: the `@touch` specs (swipe, long-press, resume, reconnect) on
+      # Android Chrome (Pixel 7) and the iPhone profile. Merge queue only, not
+      # every PR push: the phone project above already gates PRs, and these
+      # exercise timing-sensitive lifecycle paths.
+      - name: touch lifecycle on Android Chrome (merge queue)
+        if: always() && !cancelled() && github.event_name == 'merge_group' && needs.changes.outputs.web == 'true'
+        working-directory: web
+        env:
+          CI: "true"
+          PLAYWRIGHT_PORT: "4176"
+        run: timeout --signal=SIGINT 420 pnpm exec playwright test tests/browser/gui.spec.ts --project=phone-android --project=phone --grep @touch --reporter=list
+
       # A screenshot that disagrees with its baseline is undiagnosable from
       # the log alone, and a baseline can only be refreshed from the renderer
       # that took it — this one. Keep the actual/expected/diff images so the

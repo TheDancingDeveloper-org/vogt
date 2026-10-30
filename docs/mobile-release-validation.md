@@ -56,6 +56,44 @@ for the version being shipped.
       (The deterministic native half — clean re-registration, no stale service —
       is covered by `VoiceServiceProcessReclaimTest`.)
 
+### Terminal resume and swipe smoke (device, WI-2709)
+
+The mocked counterpart is the `@touch` set in `web/tests/browser/gui.spec.ts`,
+run on the `phone-android` (Pixel 7) and `phone` Playwright projects in the
+merge queue. This checks the same contract on a real Android browser or
+WebView, where backgrounding really freezes the page and the network may drop.
+
+Where: the Windows box emulator (desktop-tlk1gff, see the
+`remote-android-emulator` skill) or the operator's phone over USB debugging.
+Needs `adb` and a desktop Chrome for `chrome://inspect`.
+
+1. Open the PWA (or the dev shell app) signed in, with at least two live
+   sessions, on `#/t/<session>`.
+2. Attach DevTools: `adb forward tcp:9222 localabstract:chrome_devtools_remote`
+   (for the app's WebView: `localabstract:webview_devtools_remote_<pid>`), then
+   open `chrome://inspect` and inspect the page. In **Network**, filter `attach`
+   and select **WS**, then clear the list.
+3. **Resume:** `adb shell input keyevent KEYCODE_HOME`, wait 60 s,
+   then bring the browser back (`adb shell monkey -p com.android.chrome 1`, or
+   the app package). Pass when:
+   - [ ] at most **one** new `…/attach` socket appears for the session
+         (none if the old one survived), and
+   - [ ] the terminal never shows the `Reconnecting (try N, …)` overlay or the
+         event-stream "Trying to reconnect" banner. Watch the screen, or run
+         `adb shell screenrecord /sdcard/resume.mp4` across the resume.
+4. **Swipe:** clear the Network list, then swipe the session bar left
+   (`adb shell input swipe 900 <bar-y> 150 <bar-y> 250`, with `<bar-y>` the
+   session header's y in device pixels), then right. Pass when:
+   - [ ] each swipe lands on the neighbouring session, and
+   - [ ] each swipe adds **exactly one** `…/attach` socket, for the
+         destination session.
+5. Record the device, browser or app version, and the socket counts in the
+   release checklist. If a check fails once and passes on retry, record it as
+   flaky and raise a Vogt item. Don't drop the check.
+
+Until WI-2706 (pager hand-off) lands, step 4 is expected to show two attaches
+per swipe. The mocked spec marks this as an expected failure (`test.fail`).
+
 ### Dev app identity (side-by-side with prod)
 
 The dev shell is a separate Play record and a separate app on the device, so
