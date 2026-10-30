@@ -12,7 +12,6 @@ import {
 import { useLocation, useNavigate } from "@solidjs/router";
 import { api, type AssistantPendingAction, type SessionTemplate } from "./api";
 import { sessionsStore, sessionsError, isConnected } from "./store";
-import type { SessionSummary } from "./api";
 import type { SessionTool } from "./routeModel";
 import { pendingAction, setPendingAction } from "./pendingAction";
 import { isDemoMode } from "./runtimeTransport";
@@ -24,7 +23,7 @@ import {
 import SurfaceHeader from "./SurfaceHeader";
 import WaitingSessionCard from "./WaitingSession";
 import SessionList from "./SessionList";
-import { sortSessionsOversightFirst } from "./sessionRowModel";
+import { oversightFirstSessions } from "./railSessions";
 import { createNarrow } from "./narrow";
 
 interface Props {
@@ -71,11 +70,7 @@ const Sessions: Component<Props> = (props) => {
     const pendingSession = currentPending?.kind === "send_input"
       ? currentPending.session_id
       : null;
-    return sortSessionsOversightFirst(
-      sessionsStore.order
-        .map((id) => sessionsStore.sessions[id])
-        .filter((session): session is SessionSummary => Boolean(session)),
-    ).sort((left, right) =>
+    return [...oversightFirstSessions()].sort((left, right) =>
       Number(right.id === pendingSession) - Number(left.id === pendingSession),
     );
   });
