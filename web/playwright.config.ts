@@ -42,6 +42,11 @@ export default defineConfig({
   projects: [
     { name: "desktop", use: { ...devices["Desktop Chrome"] } },
     { name: "phone", use: { ...devices["iPhone 13"] } },
+    // WI-2709: Android Chrome on a Pixel 7 profile (Chromium, touch, mobile
+    // viewport). It runs only the `@touch` specs — swipe, long-press, resume
+    // and reconnect — because the rest of the suite branches on the
+    // project name `phone` for its narrow layout.
+    { name: "phone-android", use: { ...devices["Pixel 7"] }, grep: /@touch/ },
     // Registered only when a live stack is named, so a bare `playwright test`
     // (PR CI, local runs) can neither list nor run it against nothing.
     ...(liveBaseURL
