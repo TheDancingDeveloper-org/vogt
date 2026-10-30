@@ -26,6 +26,10 @@ on:
   # the fast, path-scoped subset below and the queue is where the full suite
   # runs before anything lands. See docs/ci.md.
   merge_group:
+  # Nightly: the full browser and screenshot suites, which pull requests
+  # only smoke, also run on `main` without waiting for a queue entry.
+  schedule:
+    - cron: "30 3 * * *"
   # Manual runs.
   workflow_dispatch:
 
@@ -471,15 +475,30 @@ jobs:
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled() && needs.changes.outputs.web == 'true'
         working-directory: web
-        env:
-          CI: "true"
-          PLAYWRIGHT_PORT: "4175"
         # Safety net for #737: the real fix is the webServer `gracefulShutdown`
         # in playwright.config.ts, but keep a hard external cap so any future
         # native-layer wedge fails in minutes with a diagnosis instead of
         # hanging the runner for 90+ min. SIGINT lets Playwright name what it
         # was doing; the `list` reporter makes per-test progress legible.
-        run: timeout --signal=SIGINT 420 pnpm exec playwright test tests/browser/demo.spec.ts --project=desktop --project=phone --reporter=list
+        #
+        # A pull request runs a fast smoke: the desktop project without the
+        # screenshot comparisons. The merge queue, nightly and manual runs
+        # (`full`) run every project and every screenshot, so a PR's required
+        # check stays inside its 10-15 minute budget and nothing lands
+        # unchecked by the full suite.
+        env:
+          CI: "true"
+          PLAYWRIGHT_PORT: "4175"
+          FULL: ${{ needs.changes.outputs.full }}
+        run: |
+          set -euo pipefail
+          if [ "$FULL" = "true" ]; then
+            timeout --signal=SIGINT 420 pnpm exec playwright test tests/browser/demo.spec.ts \
+              --project=desktop --project=phone --reporter=list
+          else
+            timeout --signal=SIGINT 240 pnpm exec playwright test tests/browser/demo.spec.ts \
+              --project=desktop --grep-invert "visually stable|mobile demo website" --reporter=list
+          fi
 
       # WI-2709: the `@touch` specs (swipe, long-press, resume, reconnect) on
       # Android Chrome (Pixel 7) and the iPhone profile. Merge queue only, not
