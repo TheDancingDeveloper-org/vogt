@@ -24,6 +24,8 @@ export interface TerminalCacheEntry {
   sessionId: string;
   outputPosition: number;
   updatedAt: number;
+  /** The restarted stream that wrote this record, if any (see `saveTerminalCache`). */
+  stream?: string;
   serialized?: string;
   data?: ArrayBuffer;
 }
@@ -128,7 +130,9 @@ export async function loadTerminalCache(
  * same or a later offset, so the incoming record was dropped: worker writes,
  * the pagehide flush, other tabs and pre-warm all race on one key, and the
  * newest cursor must win regardless of commit order. A caller whose stream
- * restarted passes `replace` to bypass the check.
+ * restarted passes that stream's id as `stream`: the record is replaced when
+ * it belongs to any other stream, and offset-checked when it already belongs
+ * to this one, so two writes of the restarted stream still race safely.
  */
 export type TerminalCacheSaveResult = "written" | "stale" | "failed";
 
@@ -136,7 +140,7 @@ export async function saveTerminalCache(
   sessionId: string,
   outputPosition: number,
   payload: TerminalCachePayload,
-  replace = false,
+  stream?: string,
 ): Promise<TerminalCacheSaveResult> {
   if (typeof indexedDB === "undefined" || !Number.isSafeInteger(outputPosition)) {
     return "failed";
@@ -156,13 +160,16 @@ export async function saveTerminalCache(
       store.get(sessionId) as IDBRequest<TerminalCacheEntry | undefined>,
     );
     let result: TerminalCacheSaveResult = "stale";
-    // `replace` is a new stream for this session (a woken process, a server
-    // restart): its offsets restart at 0, so the old record must not win.
+    // `stream` is a new stream for this session (a woken process, a server
+    // restart): its offsets restart at 0, so another stream's record must not
+    // win. Writes of the same stream keep the newest cursor.
+    const replace = stream !== undefined && existing?.stream !== stream;
     if (replace || !existing || !(existing.outputPosition >= outputPosition)) {
+      const tag = stream !== undefined ? { stream } : {};
       const stored: TerminalCacheEntry =
         "serialized" in payload
-          ? { sessionId, outputPosition, serialized: payload.serialized, updatedAt: Date.now() }
-          : { sessionId, outputPosition, data: payload.data.slice().buffer, updatedAt: Date.now() };
+          ? { sessionId, outputPosition, ...tag, serialized: payload.serialized, updatedAt: Date.now() }
+          : { sessionId, outputPosition, ...tag, data: payload.data.slice().buffer, updatedAt: Date.now() };
       store.put(stored);
       result = "written";
       const entries = await requestResult(
