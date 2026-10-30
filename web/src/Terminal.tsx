@@ -86,6 +86,12 @@ export function workItemLinks(): ReturnType<typeof listSessions> {
 // entry and the one-write restore bounded while still filling the viewport and
 // a deep scroll on reload (WI-129).
 const SERIALIZE_MAX_SCROLLBACK = 2000;
+
+// Ids for restarted output streams, unique across panes and tabs, so a cache
+// record can tell which stream wrote it.
+let cacheStreamCounter = 0;
+const newCacheStreamId = (): string =>
+  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${(cacheStreamCounter++).toString(36)}`;
 import { beginForegroundReplay } from "./terminalPrewarm";
 import { TerminalSizeTracker, type TermSize } from "./terminalSize";
 import {
@@ -236,8 +242,12 @@ const TerminalView: Component<Props> = (props) => {
   // The cursor of a write posted but not yet acknowledged.
   let persistingPosition: number | undefined;
   // The stream restarted (wake, server restart): offsets begin again at 0, so
-  // the next save must replace the stored record rather than lose to it.
-  let replaceStoredCache = false;
+  // saves carry this stream's id until one is acknowledged, and replace a
+  // record left by any other stream rather than lose to it.
+  let replaceStoredCache: string | undefined;
+  // Bumped on every restart. A write acknowledged under an older epoch belongs
+  // to the old stream and must not move this stream's cursors.
+  let cacheStreamEpoch = 0;
   // A resume replay of dormant bytes is still being parsed, so the xterm
   // screen lags the cursor.
   let pendingResumeReplay: ReplayHandle | null = null;
@@ -519,20 +529,27 @@ const TerminalView: Component<Props> = (props) => {
     const screenLags = (socketDormant && dormantBytes > 0) || inSnapshot || pendingResumeReplay !== null;
     const serialized = screenLags ? null : trySerialize();
     const payload = serialized !== null ? { serialized } : { data: cachedBytes() };
-    const replace = replaceStoredCache;
+    const stream = replaceStoredCache;
+    const epoch = cacheStreamEpoch;
     // Serialize needs the live xterm, so it stays on this thread. The IndexedDB
     // put (up to 4 MiB) runs in a worker. The offset counts as persisted only
     // once the write is acknowledged.
-    void postTerminalCacheWrite(props.sessionId, position, payload, undefined, direct, replace).then((result) => {
+    void postTerminalCacheWrite(props.sessionId, position, payload, undefined, direct, stream).then((result) => {
+      // The stream restarted while this write was in flight: its cursor is an
+      // offset of the old stream, so it says nothing about the new one.
+      if (epoch !== cacheStreamEpoch) {
+        if (!destroyed && cacheNeedsPersist(outputPosition, lastPersistedPosition)) scheduleCachePersist();
+        return;
+      }
       if (persistingPosition === position) persistingPosition = undefined;
-      // `stale` means the store already holds this stream at a later cursor;
-      // a replacing write never reports it.
-      const saved = result === "written" || (result === "stale" && !replace);
+      // `stale` means the store already holds this stream at a later cursor,
+      // whether or not this write carried a stream id.
+      const saved = result === "written" || result === "stale";
       if (result === "stale") {
         console.debug("[vogt] terminal cache kept a newer record", { sessionId: props.sessionId, position });
       }
       if (saved) {
-        if (replace && result === "written") replaceStoredCache = false;
+        if (stream !== undefined && replaceStoredCache === stream) replaceStoredCache = undefined;
         if (lastPersistedPosition === undefined || position > lastPersistedPosition) {
           lastPersistedPosition = position;
         }
@@ -549,7 +566,8 @@ const TerminalView: Component<Props> = (props) => {
   const restartCacheStream = () => {
     lastPersistedPosition = undefined;
     persistingPosition = undefined;
-    replaceStoredCache = true;
+    cacheStreamEpoch += 1;
+    replaceStoredCache = newCacheStreamId();
   };
 
   // Page closing or backgrounded: drop the pending timer/idle slot and write
@@ -1593,7 +1611,10 @@ const TerminalView: Component<Props> = (props) => {
             if (typeof ctrl.scrollback_pos === "number") {
               // A snapshot ending before the cursor we already saved is a new
               // stream (server restart), not an older view of this one.
-              if (lastPersistedPosition !== undefined && ctrl.scrollback_pos < lastPersistedPosition) {
+              // Compare against an in-flight write too: the first save after
+              // attach may not be acknowledged yet.
+              const savedThrough = Math.max(lastPersistedPosition ?? -1, persistingPosition ?? -1);
+              if (savedThrough >= 0 && ctrl.scrollback_pos < savedThrough) {
                 restartCacheStream();
               }
               snapshotEndPosition = ctrl.scrollback_pos;

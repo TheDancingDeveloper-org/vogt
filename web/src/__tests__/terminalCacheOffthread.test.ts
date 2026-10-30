@@ -117,12 +117,26 @@ describe("terminal cache write ordering", () => {
     expect(await saveTerminalCache("o1", 20, { serialized: "older" })).toBe("stale");
     expect(await saveTerminalCache("o1", 50, { serialized: "same" })).toBe("stale");
     // A restarted stream replaces the record even at a lower offset.
-    expect(await saveTerminalCache("o1", 3, { serialized: "woken" }, true)).toBe("written");
+    expect(await saveTerminalCache("o1", 3, { serialized: "woken" }, "s-a")).toBe("written");
     expect((await loadTerminalCache("o1"))?.serialized).toBe("woken");
     expect(await saveTerminalCache("o1", 50, { serialized: "newer" })).toBe("written");
     const entry = await loadTerminalCache("o1");
     expect(entry?.serialized).toBe("newer");
     expect(entry?.outputPosition).toBe(50);
+  });
+
+  it("two writes of one restarted stream keep the newer, in either commit order", async () => {
+    expect(await saveTerminalCache("o3", 80, { serialized: "old stream" })).toBe("written");
+    // The pagehide flush (9) commits before the worker's replacing write (6).
+    expect(await saveTerminalCache("o3", 9, { serialized: "flush" }, "s-b")).toBe("written");
+    expect(await saveTerminalCache("o3", 6, { serialized: "worker" }, "s-b")).toBe("stale");
+    let entry = await loadTerminalCache("o3");
+    expect(entry?.serialized).toBe("flush");
+    expect(entry?.stream).toBe("s-b");
+    // A later restart is a different stream and replaces it again.
+    expect(await saveTerminalCache("o3", 2, { serialized: "next" }, "s-c")).toBe("written");
+    entry = await loadTerminalCache("o3");
+    expect(entry?.serialized).toBe("next");
   });
 
   it("a late worker ack after a newer pagehide flush does not regress the record", async () => {
