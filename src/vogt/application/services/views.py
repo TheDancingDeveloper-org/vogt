@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import NamedTuple
 
 from vogt.application.context import AppContext
+from vogt.application.memo import StoreMemo
 from vogt.application.models import (
     BacklogParams,
     BacklogResult,
@@ -641,6 +642,21 @@ def project_rows(rows: list[RankedItem], mode: ListMode) -> list[RankedItem]:
     return [row.model_copy(update={"item": None}) for row in rows]
 
 
+def _backlog_variant(params: BacklogParams) -> str:
+    """The part of a backlog ask that changes the ranked set, not the page."""
+    return params.model_dump_json(exclude={"limit", "offset", "mode"})
+
+
+# WI-2691. Same seed as the inbox note: cold 34.1 ms, warm median 0.33 ms.
+# Prod before this memo was about 0.9 s (WI-2690).
+_backlog_memo: StoreMemo[_Gathered] = StoreMemo()
+
+
+def clear_backlog_cache() -> None:
+    """Drop remembered backlogs (tests)."""
+    _backlog_memo.clear()
+
+
 def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
     """The ranked backlog, globally or for one project.
 
@@ -658,16 +674,21 @@ def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
         unlinked = _unlinked_scope(ctx, params.project)
         if unlinked is not None:
             return unlinked
-    gathered = _gather(
+    variant = _backlog_variant(params)
+    gathered = _backlog_memo.get(
         ctx,
-        project=params.project,
-        kinds=params.kinds,
-        priorities=params.priorities,
-        assignee=params.assignee,
-        initiative=params.initiative,
-        label=params.label,
-        trust_states=params.trust_states,
-        include_prs=params.include_prs,
+        lambda: _gather(
+            ctx,
+            project=params.project,
+            kinds=params.kinds,
+            priorities=params.priorities,
+            assignee=params.assignee,
+            initiative=params.initiative,
+            label=params.label,
+            trust_states=params.trust_states,
+            include_prs=params.include_prs,
+        ),
+        variant=variant,
     )
     page = gathered.ranked[params.offset : params.offset + params.limit]
     following = params.offset + len(page)

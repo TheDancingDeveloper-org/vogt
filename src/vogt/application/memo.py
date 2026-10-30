@@ -37,7 +37,8 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from datetime import datetime
+from typing import Any, Generic, TypeVar
 
 from vogt.application.context import AppContext
 
@@ -87,36 +88,57 @@ class _Answer(Generic[T]):
     #: `time.monotonic()` just before `state` was read.
     read_at: float
     value: T
+    #: The `ctx.clock()` moment the answer stops being true with no write at
+    #: all (a snooze running out), or `None` if only a write can stale it.
+    expires_at: datetime | None = None
 
 
 class StoreMemo(Generic[T]):
-    """One remembered answer per pair of stores, valid for one `StoreState`."""
+    """One remembered answer per pair of stores, valid for one `StoreState`.
+
+    `variant` (default `""`) splits one pair of stores into several answers
+    — a filtered backlog next to the unfiltered one — without a second memo.
+    The flight lock stays per pair of stores, so two variants of one pair
+    still never compute at the same time.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._flights: dict[tuple[str, str], threading.Lock] = {}
-        self._answers: OrderedDict[tuple[str, str], _Answer[T]] = OrderedDict()
+        self._answers: OrderedDict[tuple[Any, ...], _Answer[T]] = OrderedDict()
 
     def get(
         self,
         ctx: AppContext,
         compute: Callable[[], T],
         *,
+        variant: str = "",
         keep: Callable[[T], bool] = lambda _: True,
+        expires: Callable[[T], datetime | None] = lambda _: None,
     ) -> T:
         """The remembered answer if the stores have not moved, else a new one.
 
         `keep` decides whether a fresh answer may be remembered; an answer
         built while part of it was unavailable should be asked for again
         rather than served until the next write.
+
+        `expires` names when a fresh answer goes stale on the clock alone,
+        such as the next snooze to run out. Past that moment the answer is
+        computed again even though no store has moved.
         """
         arrived = time.monotonic()
         stores = _stores_of(ctx)
+        slot: tuple[Any, ...] = (*stores, variant)
         with self._lock:
             flight = self._flights.setdefault(stores, threading.Lock())
         with flight:
             with self._lock:
-                remembered = self._answers.get(stores)
+                remembered = self._answers.get(slot)
+            if remembered is not None and (
+                remembered.expires_at is not None
+                and remembered.expires_at <= ctx.clock()
+            ):
+                remembered = None
             if (
                 remembered is not None
                 and remembered.read_at >= arrived
@@ -132,11 +154,13 @@ class StoreMemo(Generic[T]):
             answer = compute()
             if keep(answer):
                 with self._lock:
-                    self._answers[stores] = _Answer(state, read_at, answer)
-                    self._answers.move_to_end(stores)
+                    self._answers[slot] = _Answer(
+                        state, read_at, answer, expires(answer)
+                    )
+                    self._answers.move_to_end(slot)
                     while len(self._answers) > MEMO_STORES_MAX:
                         dropped, _ = self._answers.popitem(last=False)
-                        self._flights.pop(dropped, None)
+                        self._flights.pop(dropped[:2], None)
             return answer
 
     def clear(self) -> None:
