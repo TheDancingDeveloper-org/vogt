@@ -54,7 +54,7 @@ on:
   workflow_call:
     inputs:
       variant:
-        description: lean (no Flutter — main and releases) or full (dev)
+        description: lean (no Flutter), full (Flutter), or workbench (full plus the public session tools)
         required: true
         type: string
     outputs:
@@ -69,7 +69,7 @@ on:
         required: false
         default: both
         type: choice
-        options: [both, lean, full]
+        options: [both, lean, full, workbench]
 
   # Deliberately no `push` trigger. `build.yml` calls this workflow on every
   # push to main and dev, so a push trigger would start a second run computing
@@ -122,9 +122,13 @@ jobs:
           case "${WANTED:-both}" in
             lean) variants='["lean"]' ;;
             full) variants='["full"]' ;;
+            workbench) variants='["workbench"]' ;;
+            # `both` stays lean+full: the weekly rebuild of the two variants
+            # every image already consumes. `workbench` is built when a caller
+            # asks for it (build.yml's stack-workbench-image job does).
             both) variants='["lean","full"]' ;;
             *)
-              echo "unknown variant '${WANTED}'; expected lean, full or both" >&2
+              echo "unknown variant '${WANTED}'; expected lean, full, workbench or both" >&2
               exit 1
               ;;
           esac
@@ -220,7 +224,10 @@ jobs:
           push: true
           tags: ${{ steps.tag.outputs.ref }}
           build-args: |
-            INSTALL_FLUTTER=${{ matrix.variant == 'full' }}
+            INSTALL_FLUTTER=${{ matrix.variant == 'full' || matrix.variant == 'workbench' }}
+          # `workbench` is its own stage. `lean` and `full` build the default
+          # stage, so neither inherits the workbench ENV or layers.
+          target: ${{ matrix.variant == 'workbench' && 'workbench' || 'toolchain' }}
           # Layer cache on the operator's LAN registry, keyed per
           # variant so `lean` and `full` do not evict each other. Not GHCR:
           # see the header — this cache stays beside the runners.

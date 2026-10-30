@@ -8,9 +8,12 @@
 //! Not every bus event is a change. Activity states an overseer acts on
 //! (`waiting-for-input`, `awaiting-approval`, `exited`, `stopped`, `errored`)
 //! become `ready`, `approval`, `exited` and `errored`; `running`, `idle` and
-//! `hibernated` do not, because hibernation has its own events. `budget` is
-//! emitted from the budget watcher (WI-1245 / C7). `reply` and `commit` are
-//! reserved kinds and are not emitted here.
+//! `hibernated` do not, because hibernation has its own events and a session
+//! that went quiet is not necessarily at its prompt. A session that did come
+//! to rest at a prompt publishes `SessionReady` (WI-1519), which is the other
+//! way a `ready` change arrives. `budget` is emitted from the budget watcher
+//! (WI-1245 / C7). `reply` and `commit` are reserved kinds and are not emitted
+//! here.
 
 use std::{collections::HashSet, time::Duration};
 
@@ -40,10 +43,11 @@ const KINDS: &[&str] = &[
     "hibernated",
     "woken",
     "budget",
+    "done",
 ];
 
 /// What an overseer waits for when it does not say.
-const DEFAULT_UNTIL: &[&str] = &["ready", "blocked", "approval", "exited", "errored"];
+const DEFAULT_UNTIL: &[&str] = &["ready", "blocked", "approval", "exited", "errored", "done"];
 
 fn clip(text: &str) -> String {
     let mut out: String = text.chars().take(120).collect();
@@ -69,6 +73,13 @@ pub fn change_of(sequenced: &Sequenced) -> Option<SessionChange> {
             };
             (*id, kind, format!("activity {kind}"))
         }
+        // An agent that finished its turn and rests at its prompt: `idle` is
+        // not itself a change (a quiet mid-turn is not ready), so readiness is
+        // its own event (WI-1519).
+        ServerEvent::SessionReady { id } => (*id, "ready", "ready".to_string()),
+        // An autopilot agent declared itself done (WI-1518): the change an
+        // overseer waits for when a worker finishes its backlog.
+        ServerEvent::SessionDone { id, .. } => (*id, "done", "done".to_string()),
         ServerEvent::SessionBlocked { id, blocked } => match blocked {
             Some(report) => (*id, "blocked", format!("blocked: {}", report.reason)),
             None => (*id, "unblocked", "unblocked".to_string()),
@@ -294,7 +305,7 @@ pub fn replay_then_live(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vogt_engine_contract::BlockedReport;
+    use vogt_engine_contract::{BlockedReport, DoneSource};
 
     fn activity(state: ActivityState) -> ServerEvent {
         ServerEvent::Activity {
@@ -365,6 +376,23 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_done_is_a_done_change_and_an_overseer_waits_for_it_by_default() {
+        let bus = EventBus::new(16);
+        let id = Uuid::from_u128(9);
+        bus.publish(ServerEvent::SessionDone {
+            id,
+            at: "2026-10-17T00:00:00Z".into(),
+            source: DoneSource::Marker,
+        });
+        let got = changes(&bus, 0, None, None).unwrap();
+        assert_eq!(got.changes.len(), 1);
+        assert_eq!(got.changes[0].kind, "done");
+        assert_eq!(got.changes[0].session, id);
+        assert!(parse_until(None).unwrap().contains("done"));
+        assert!(parse_until(Some("done")).unwrap().contains("done"));
+    }
+
+    #[test]
     fn ids_filter_and_limit_and_an_empty_read_advances_to_the_head() {
         let bus = EventBus::new(16);
         let mine = Uuid::from_u128(1);
@@ -419,5 +447,19 @@ mod tests {
 
         let too_long = wait_any(&bus, None, &until, 0, Duration::from_secs(601)).await;
         assert!(too_long.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_cursor_at_the_head_does_not_replay_what_is_already_there() {
+        let bus = EventBus::new(16);
+        bus.publish(activity(ActivityState::AwaitingApproval));
+        let until = all_kinds();
+        let head = bus.head();
+        let timed = wait_any(&bus, None, &until, head, Duration::from_millis(30))
+            .await
+            .unwrap();
+        assert_eq!(timed.outcome, "timeout");
+        assert!(timed.change.is_none());
+        assert_eq!(timed.next_cursor, head);
     }
 }

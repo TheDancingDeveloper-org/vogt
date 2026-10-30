@@ -767,13 +767,93 @@ pub fn public_status(state: &AppState) -> serde_json::Value {
 /// without it being a lie.
 const EVENT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// The most events one poll will republish.
-///
-/// A burst larger than this is a sweep or an import, and a client that has
-/// been told a hundred times that something changed learns nothing it did
-/// not learn on the first. The cursor still advances past all of them, so
-/// nothing is replayed later.
+/// The page size one `events.list` read asks for.
 const EVENT_POLL_LIMIT: u32 = 50;
+
+/// The most pages one poll drains before it waits for the next tick.
+///
+/// A poll reads page after page until the core has nothing newer, so the
+/// follower keeps up however fast the core writes. Before WI-2328 it read one
+/// page of 50 per 5 s tick, a ceiling of 10 events/s. A busy estate's sweeps
+/// alone run past that, so the follower fell behind and stayed behind,
+/// re-delivering hours-old changes to every browser at exactly 10/s, and
+/// each one made every open board and badge read again. This cap only bounds
+/// one tick's work after a long outage; the next tick carries on from the
+/// cursor, so nothing is skipped.
+const EVENT_POLL_MAX_PAGES: usize = 40;
+
+/// The seq of the newest event in the core's feed, or 0 when it is empty.
+///
+/// The feed has no "latest" read: `events.list` pages forward from a cursor,
+/// and `next_cursor` is the seq of the last row returned. This used to ask
+/// for one event after 0 and keep that cursor, which is the *oldest* event,
+/// so every engine start replayed the core's whole history onto the stream
+/// (81,000 events on prod, 2026-10-24; at the old 10/s ceiling a replay
+/// outlasted the time between restarts, which is why prod ran permanently
+/// behind). "Are there events after x?" is true below the head and false at
+/// or above it, so a doubling search then a bisection finds it in about
+/// 2·log2(head) one-event reads.
+async fn find_head<F, Fut>(mut fetch: F) -> std::result::Result<u64, String>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<(Vec<serde_json::Value>, u64), String>>,
+{
+    let mut has_after = async |after: u64| -> std::result::Result<bool, String> {
+        Ok(!fetch(after).await?.0.is_empty())
+    };
+    if !has_after(0).await? {
+        return Ok(0);
+    }
+    // Invariant: events exist after `lo`, none after `hi`.
+    let (mut lo, mut hi) = (0u64, 1u64);
+    while has_after(hi).await? {
+        lo = hi;
+        hi = hi.saturating_mul(2);
+    }
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if has_after(mid).await? {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(hi)
+}
+
+/// Read everything after `cursor`, page by page, up to `max_pages` pages.
+///
+/// Returns the events in order and the cursor after the last one read. A
+/// page shorter than `limit` means the core has nothing newer. A failed read
+/// returns what was read before it, with the cursor after that, so the next
+/// tick retries from there.
+async fn drain_events<F, Fut>(
+    mut cursor: u64,
+    limit: u32,
+    max_pages: usize,
+    mut fetch: F,
+) -> (Vec<serde_json::Value>, u64)
+where
+    F: FnMut(u64, u32) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<(Vec<serde_json::Value>, u64), String>>,
+{
+    let mut out = Vec::new();
+    for _ in 0..max_pages {
+        let Ok((events, next)) = fetch(cursor, limit).await else {
+            break;
+        };
+        let short = events.len() < limit as usize;
+        out.extend(events);
+        // A core that answers with no progress has nothing newer, whatever
+        // the page length says; stop rather than spin on the same cursor.
+        let stalled = next <= cursor;
+        cursor = next.max(cursor);
+        if short || stalled {
+            break;
+        }
+    }
+    (out, cursor)
+}
 
 /// Follow vogt-core's event feed and republish onto the engine's bus.
 ///
@@ -795,12 +875,16 @@ pub fn spawn_event_follower(state: Arc<AppState>) {
         return;
     }
     tokio::spawn(async move {
-        // Start at the head: ask for a page of one and keep only the cursor.
-        let mut cursor = match core.events_after(0, 1).await {
-            Ok((_, next)) => next,
-            Err(detail) => {
-                tracing::info!(%detail, "vogt event follower: following from 0");
-                0
+        // Start at the head. Retried rather than falling back to 0: the core
+        // usually restarts with the engine, and a cursor of 0 replays its
+        // whole history onto every open client (WI-2328).
+        let mut cursor = loop {
+            match find_head(|after| core.events_after(after, 1)).await {
+                Ok(head) => break head,
+                Err(detail) => {
+                    tracing::info!(%detail, "vogt event follower: head not readable yet, retrying");
+                    tokio::time::sleep(EVENT_POLL_INTERVAL).await;
+                }
             }
         };
         loop {
@@ -808,9 +892,13 @@ pub fn spawn_event_follower(state: Arc<AppState>) {
             // A core that is down is not an error here: the surfaces report
             // their own outage, and the cursor is kept so the first
             // successful poll after it returns catches up.
-            let Ok((events, next)) = core.events_after(cursor, EVENT_POLL_LIMIT).await else {
-                continue;
-            };
+            let (events, next) = drain_events(
+                cursor,
+                EVENT_POLL_LIMIT,
+                EVENT_POLL_MAX_PAGES,
+                |after, limit| core.events_after(after, limit),
+            )
+            .await;
             for event in events {
                 let Some(kind) = event.get("kind").and_then(|v| v.as_str()) else {
                     continue;
@@ -844,6 +932,139 @@ pub fn spawn_event_follower(state: Arc<AppState>) {
             cursor = next;
         }
     });
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::drain_events;
+    use serde_json::json;
+    use std::cell::RefCell;
+
+    type Page = std::future::Ready<Result<(Vec<serde_json::Value>, u64), String>>;
+
+    /// A fake core holding `total` events with seqs 1..=total.
+    fn core(total: u64) -> impl Fn(u64, u32) -> Page {
+        move |after, limit| {
+            let end = (after + u64::from(limit)).min(total);
+            let events = (after + 1..=end)
+                .map(|seq| json!({ "kind": "sweep.completed", "seq": seq }))
+                .collect();
+            std::future::ready(Ok((events, end.max(after))))
+        }
+    }
+
+    /// A core whose feed holds seqs 1..=head, answering one-event reads.
+    fn one_after(head: u64, calls: &RefCell<u32>) -> impl FnMut(u64) -> Page + '_ {
+        move |after| {
+            *calls.borrow_mut() += 1;
+            let events = if after < head {
+                vec![json!({ "seq": after + 1 })]
+            } else {
+                vec![]
+            };
+            std::future::ready(Ok((events, after.max(after.min(head)))))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_head_is_the_newest_event_not_the_oldest() {
+        // The old start read one event after 0 and kept seq 1, so every
+        // engine start replayed 81,264 events on prod (WI-2328).
+        for head in [1, 2, 3, 7, 64, 65, 81_264] {
+            let calls = RefCell::new(0);
+            assert_eq!(
+                super::find_head(one_after(head, &calls)).await,
+                Ok(head),
+                "head {head}"
+            );
+            assert!(
+                *calls.borrow() <= 2 * (64 - head.leading_zeros()) + 2,
+                "head {head}: {} reads",
+                calls.borrow()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_feed_starts_at_zero() {
+        let calls = RefCell::new(0);
+        assert_eq!(super::find_head(one_after(0, &calls)).await, Ok(0));
+        assert_eq!(*calls.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_core_that_is_not_up_is_an_error_not_zero() {
+        let result = super::find_head(|_| {
+            std::future::ready(Err::<(Vec<serde_json::Value>, u64), _>(
+                "core away".to_string(),
+            ))
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_backlog_is_drained_in_one_poll() {
+        // 1,700 events behind: the old one-page poll took 34 ticks (170 s)
+        // and never caught up with a core writing faster than 10/s.
+        let (events, cursor) = drain_events(0, 50, 40, core(1_700)).await;
+        assert_eq!(events.len(), 1_700);
+        assert_eq!(cursor, 1_700);
+    }
+
+    #[tokio::test]
+    async fn an_idle_core_costs_one_read() {
+        let calls = RefCell::new(0);
+        let fake = core(10);
+        let (events, cursor) = drain_events(10, 50, 40, |a, l| {
+            *calls.borrow_mut() += 1;
+            fake(a, l)
+        })
+        .await;
+        assert!(events.is_empty());
+        assert_eq!(cursor, 10);
+        assert_eq!(*calls.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_page_cap_bounds_one_tick_and_the_cursor_resumes() {
+        let (events, cursor) = drain_events(0, 50, 3, core(1_000)).await;
+        assert_eq!(events.len(), 150);
+        assert_eq!(cursor, 150);
+        let (rest, cursor) = drain_events(cursor, 50, 40, core(1_000)).await;
+        assert_eq!(rest.len(), 850);
+        assert_eq!(cursor, 1_000);
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_keeps_what_was_read() {
+        let calls = RefCell::new(0);
+        let fake = core(500);
+        let (events, cursor) = drain_events(0, 50, 40, |a, l| {
+            *calls.borrow_mut() += 1;
+            if *calls.borrow() == 3 {
+                return std::future::ready(Err("core away".to_string()));
+            }
+            fake(a, l)
+        })
+        .await;
+        assert_eq!(events.len(), 100);
+        assert_eq!(cursor, 100);
+    }
+
+    #[tokio::test]
+    async fn a_core_that_makes_no_progress_does_not_spin() {
+        let calls = RefCell::new(0);
+        let (events, cursor) = drain_events(7, 50, 40, |a, _| {
+            *calls.borrow_mut() += 1;
+            let full: Vec<_> = (0..50).map(|i| json!({ "kind": "x", "seq": i })).collect();
+            std::future::ready(Ok((full, a)))
+        })
+        .await;
+        assert_eq!(events.len(), 50);
+        assert_eq!(cursor, 7);
+        assert_eq!(*calls.borrow(), 1);
+    }
 }
 
 #[cfg(test)]

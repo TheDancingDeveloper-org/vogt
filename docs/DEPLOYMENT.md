@@ -42,7 +42,7 @@ sidecar, released as a pair and run by one Compose file,
   on by default (`COMPOSE_PROFILES=voice`).
 
 The engine is not optional: it is the only way in. The core image,
-`ghcr.io/thedancingdeveloper-org/vogt:0.7.15`, is also published at every
+`ghcr.io/thedancingdeveloper-org/vogt:0.7.22`, is also published at every
 release because the stack image is built from it by digest and the release
 manifest records both — it is a build input, not a deployment target.
 `deploy/vogt.compose.yml` and `deploy/engine.overlay.yml` run a core and an
@@ -136,8 +136,8 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `ENGINE_BIND` | no | `127.0.0.1` | Host interface the port is published on. Loopback until you mean to expose it. |
 | `ENGINE_PORT` | no | `8910` | Host port the container's 8910 is published on. |
 | `ENGINE_PUBLIC_URL` | no | — | The URL clients reach the stack at. Set it once there is a stable one (§4). |
-| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.15` | The image to run. Pin a digest (§6). |
-| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.15` | The sidecar. Pin the same release as the stack. |
+| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.22` | The image to run. Pin a digest (§6). |
+| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.22` | The sidecar. Pin the same release as the stack. |
 | `COMPOSE_PROFILES` | no | `voice` | Clear it to run without the sidecar; the voice controls stay present but inert. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | no | `agent:engine` | Who the adopted stack secret acts as — and therefore whom a break-glass token's Vogt calls are attributed to. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | no | `read,work.write,project.write` | What it may do. Everything in the pod can read the file, so this is the blast radius. |
@@ -149,9 +149,14 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `VOGT_METRICS_ADDR` | no | off | The same for the core: `GET /metrics` on its own listener, never the API port, serving the core process's resident memory, CPU time, open file descriptors and GC collections, every series labelled `component="core"`. `0.0.0.0:9465` inside the container — 9464 is the engine's and 9466 the voice sidecar's, so the three sit side by side. Publish or route it only where your scraper sits. Unset, nothing listens. |
 | `VOGT_VOICE_METRICS_ADDR` | no | off | Same for the voice sidecar: `GET /metrics` on its own listener (`process_resident_memory_bytes`, `process_cpu_seconds_total`, `process_threads`, `vogt_voice_model_bytes`). `0.0.0.0:9465` inside the container; publish or route the port only where your scraper sits. The sidecar's API port stays unpublished. |
 | `ENGINE_AGENT_OPENCODE_CONFIG` | no | the image's policy | The opencode half of the driven-session policy: an opencode config with a `permission` block, given to every engine-launched opencode session as `OPENCODE_CONFIG_CONTENT` (the user's own config is not edited). Allow `gh pr merge` here where agents may merge their own PRs. `off` turns it off ([`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture)). |
-| `ENGINE_AGENT_CODEX_POLICY` | no | the image file, else `/etc/codex/requirements.toml` | The Codex half. Codex itself reads `/etc/codex/requirements.toml` and no other path; the engine checks that file, and a named one too, is readable and wires the gitguard hook (`[[hooks.SessionStart]]` + `[[hooks.PreToolUse]]` running `/usr/local/bin/klaudia hook gitguard` with `failClosed = true`, plus the `[features] hooks = true` pin that stops a session switching hooks off) before a Codex launch. `/etc/codex/requirements.toml` and its directory must also be root-owned and not group- or world-writable, and `/usr/local/bin/klaudia` a root-owned regular file the same way; the hook always runs that image build, never a runtime `VOGT_KLAUDIA_VERSION` copy (WI-1146). This is an accident guard, not a sandbox: the session user's passwordless sudo can defeat it. Empty checks `/etc/codex/requirements.toml`; the image's reference copy at `/usr/local/share/vogt/driven-session-codex-requirements.toml` without it is a refusal. `off` is the only way a deployment that has the file skips the check. A path that is missing, empty, unreadable or without that hook refuses the Codex launch (400) and does not fall through to bypass; Claude and opencode are not blocked. The shipped file wires the hook for the Codex fork (WI-1356) ([`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture)). |
+| `ENGINE_AGENT_CODEX_POLICY` | no | the image file, else `/etc/codex/requirements.toml` | The Codex half. Codex itself reads `/etc/codex/requirements.toml` and no other path; the engine checks that file, and a named one too, is readable and wires the gitguard hook (`[[hooks.SessionStart]]` + `[[hooks.PreToolUse]]` running `/usr/local/bin/klaudia hook gitguard` with `failClosed = true`, plus the `[features] hooks = true` pin that stops a session switching hooks off) before a Codex launch. `/etc/codex/requirements.toml` and its directory must also be root-owned and not group- or world-writable, and `/usr/local/bin/klaudia` a root-owned regular file the same way; the hook always runs that image build, never a runtime `VOGT_KLAUDIA_VERSION` copy, so a gitguard fix ships only with an image rebuild (WI-1146). This is an accident guard, not a sandbox: the session user's passwordless sudo can defeat it. Empty checks `/etc/codex/requirements.toml`; the image's reference copy at `/usr/local/share/vogt/driven-session-codex-requirements.toml` without it is a refusal. `off` is the only way a deployment that has the file skips the check. A path that is missing, empty, unreadable or without that hook refuses the Codex launch (400) and does not fall through to bypass; Claude and opencode are not blocked. The shipped file wires the hook for the Codex fork (WI-1356) ([`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture)). |
 | `ENGINE_SESSION_RSS_WARN` | no | off | Flag any session whose process tree's resident memory reaches this (`8GiB`). Usage is shown either way; this only marks the heavy ones. |
-| `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` | no | off | When a session is hibernated or stopped and its directory is a linked git worktree, remove regenerable build output there (`target` beside a `Cargo.toml`, `node_modules`, `.venv`). A repo's main checkout is never touched, and a tracked file is never deleted ([`ENGINE.md`, "Worktree build output"](ENGINE.md#worktree-build-output)). |
+| `ENGINE_WORKTREE_GITHUB_TOKEN` | no | unset | GitHub token the engine uses when `session.start` fetches the worktree base from a GitHub `origin` (WI-1666). Set it to the same token sessions receive as `GH_TOKEN` (the manifest entry named by `ENGINE_AGENT_AUTH_GH_TOKEN_FROM`). A file is not used: the engine reads the variable and passes it to `GIT_ASKPASS` for that one fetch, and redacts it from errors. Unset, an `https://github.com` origin refuses the worktree start instead of failing as `Repository not found`. SSH GitHub origins and non-GitHub origins do not need it and keep the engine user's own git credentials. |
+| `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` | no | stop only | When a session is stopped or removed and its directory is a linked git worktree, remove regenerable build output there; on by default (WI-1750). `true` also cleans on hibernation (a hibernated session is woken to carry on, and every engine shutdown hibernates every live session, so this costs a full rebuild after each restart); `0` or `false` keeps build output. (`target` beside a `Cargo.toml`, `node_modules`, `.venv`). A repo's main checkout is never touched, and a tracked file is never deleted ([`ENGINE.md`, "Worktree build output"](ENGINE.md#worktree-build-output)). |
+| `ENGINE_SCRATCH_PRUNE_GB` | no | `2` | With cleanup on, a hibernation removes Cargo `target` dirs from the session's Claude scratchpad and any top-level entry there over this many GiB; a stop or remove deletes the scratchpad ([`ENGINE.md`](ENGINE.md#session-scratch-background-processes-and-free-space), WI-1810). |
+| `ENGINE_MIN_FREE_PERCENT` | no | `10` | Refuse new sessions (507) while the workspace or temp volume has less free space than this percent. `0` turns the guard off. |
+| `ENGINE_SHARED_CARGO_TARGET_DIR` | no | `<tmp>/claude-<uid>/cargo-target` | Shared Cargo target root for builds inside session scratch directories (one per repository, via a scratch-only `.cargo/config.toml`); `off` disables. Sessions' own worktrees are unaffected. |
+| `ENGINE_SHARED_CARGO_TARGET_MAX_GB` | no | `40` | A repository's shared scratch target over this is removed when a session stops. |
 | `ENGINE_DISK_WARN_PERCENT` | no | `85` | Flag the workspace volume on `sweep`, `status` and `engine.status` once this percent of it is used. A whole percent from 1 to 100; anything else fails the boot. |
 | `ENGINE_ECONOMICS_TICK_SECS` | no | `15` | How often the engine reads each live session's transcript to meter its turns, context and compactions, reported on the session summary and as histograms on `GET /metrics` ([`ENGINE.md`, "Session economics"](ENGINE.md#session-economics)). `0` disables it. |
 | `ENGINE_HIBERNATE_IDLE_AFTER` | no | off | Hibernate an agent session quiet this long (`2h`, `30m`): its processes stop, it stays listed, and a wake resumes its conversation ([`ENGINE.md`, "Hibernation"](ENGINE.md#hibernation)). Sessions running a turn, at a permission dialog, blocked on a person, running a tool shell, pinned awake or on autopilot are exempt (autopilot only from this idle trigger). |
@@ -162,7 +167,7 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `ENGINE_AGENT_POLICY_HOOK` | no | `1` | Whether the entrypoint installs the project-policy hook (`vogt-policy-hook`) into Claude Code's settings and Klaudia's config, so a `git` or `gh` command an agent is about to run is refused when it breaks the project's policy; `0` skips it ([`ENGINE.md`, "Project policy enforcement"](ENGINE.md#project-policy-enforcement)). |
 | `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` | no | off | While the pod's available memory is below this (`2GiB`), hibernate the quietest eligible session, one a minute, with the same exemptions. |
 | `ENGINE_ASSISTANT_STT_*`, `ENGINE_ASSISTANT_TTS_*` | no | the sidecar | Repoint speech at any OpenAI-compatible audio endpoint; a cloud provider wants `ENGINE_ASSISTANT_TTS_FORMAT=mp3`. |
-| `VOGT_CLAUDE_CODE_VERSION`, `VOGT_CODEX_VERSION`, `VOGT_CODEX_ACP_VERSION`, `VOGT_OPENCODE_VERSION`, `VOGT_GO_VERSION`, `VOGT_KLAUDIA_VERSION` | no | the baked version | An exact version is installed at start into `engine-agent-clis` and preferred over the image's copy. `latest`/`stable` are refused unless `VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1`. `VOGT_CODEX_ACP_VERSION` (`2.2.2`) is `@agentclientprotocol/codex-acp`, the ACP adapter; the entrypoint points it at the baked fork binary with `CODEX_PATH` (a runtime whose prefix has no fork source line is refused by the Codex wrapper, WI-1146). `VOGT_GO_VERSION` (`1.27.1`) is a Go release from go.dev, checked against the sha256 its release index gives; `latest` there is the newest stable Go. `VOGT_KLAUDIA_VERSION` is a full commit id, built from source at start (a minute or so the first time; the module cache stays on the volume). `VOGT_CODEX_SHA` is a full commit of the Codex fork; `VOGT_CODEX_VERSION` (stock npm Codex) is refused at start, because stock Codex runs no managed hooks and gitguard would not guard its sessions (WI-1146). |
+| `VOGT_CLAUDE_CODE_VERSION`, `VOGT_CODEX_VERSION`, `VOGT_CODEX_ACP_VERSION`, `VOGT_OPENCODE_VERSION`, `VOGT_GO_VERSION`, `VOGT_KLAUDIA_VERSION` | no | the baked version | An exact version is installed at start into `engine-agent-clis` and preferred over the image's copy. `latest`/`stable` are refused unless `VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1`. `VOGT_CODEX_ACP_VERSION` (`2.2.2`) is `@agentclientprotocol/codex-acp`, the ACP adapter; the entrypoint points it at the baked fork binary with `CODEX_PATH` (a runtime whose prefix has no fork source line is refused by the Codex wrapper, WI-1146). `VOGT_GO_VERSION` (`1.27.1`) is a Go release from go.dev, checked against the sha256 its release index gives; `latest` there is the newest stable Go. `VOGT_KLAUDIA_VERSION` is a full commit id, built from source at start (a minute or so the first time; the module cache stays on the volume) and preferred as the `klaudia` a session runs; it never replaces the gitguard hook, which stays the image's `/usr/local/bin/klaudia`, so a gitguard fix ships only with an image rebuild. `VOGT_CODEX_SHA` is a full commit of the Codex fork; `VOGT_CODEX_VERSION` (stock npm Codex) is refused at start, because stock Codex runs no managed hooks and gitguard would not guard its sessions (WI-1146). |
 
 Two prefixes, two processes. **`VOGT_*`** is read by the core; every setting
 is in [`CONFIG.md`](CONFIG.md), and precedence is command line, then
@@ -595,28 +600,17 @@ a deployment are separate acts, and the digest line is what moves one.
 Resolve the digests of a release:
 
 ```console
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.15 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.22 \
   | grep -m 1 Digest
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.15 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.22 \
   | grep -m 1 Digest
 ```
 
-Verify the keyless signatures before starting Compose. Every release image is
-signed by the release workflow's own OIDC identity, so the check constrains
-both the workflow and the issuer, and performs an anonymous registry read.
-(The same digest also carries the signature `build.yml` made when it built it
-on `main` — a release promotes that build rather than rebuilding, §9 — but
-the release identity is the one that says "this is version X".)
-
-```console
-cosign verify \
-  --certificate-identity-regexp '^https://github.com/TheDancingDeveloper-org/vogt/.github/workflows/release.yml@refs/tags/v[0-9].*$' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>
-```
-
-The same command applies to `vogt-voice@sha256:<digest>` unchanged. Then, in
-`deploy/.env`:
+Images are not signed (signing was dropped), so there is no signature to
+verify. Pin the digest
+itself, which a registry tag cannot silently move. Check that the digest
+matches the release manifest (`vogt-release-manifest.json`) and the dev
+receipt it was promoted from (§9). Then, in `deploy/.env`:
 
 ```dotenv
 VOGT_STACK_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>
@@ -690,8 +684,8 @@ docker build -f engine/Dockerfile --target demo-runtime \
   --build-arg VOGT_SOURCE_SHA="$(git rev-parse HEAD)" .
 ```
 
-The demo image is published by builds on `main` (§9), scanned and signed;
-verify it with the `build.yml` workflow identity rather than the release one.
+The demo image is published by builds on `main` (§9) and scanned; pin it by
+the digest that `build.yml` reports.
 
 ## 9. Releases
 
@@ -702,8 +696,8 @@ from it. A release publishes, for each of the core image (`vogt`), the stack
 - tags `X.Y.Z`, `X.Y` and `latest` — `latest` moves on a release and on
   nothing else (a pre-release tag such as `v1.0.0-rc.1` gets only its exact
   version);
-- a keyless **cosign signature** over the digest, bound to
-  `release.yml@refs/tags/v*` (§6);
+- no image signature (signing was dropped); the digest is the pin, and the
+  SBOM and provenance attestations are the record of what was built;
 - an **SBOM** and **provenance** attestation attached to the digest.
 
 ### Release process: build once, promote by digest
@@ -718,8 +712,7 @@ existed:
 2. **Build once.** `build.yml` builds the three images for that commit, runs
    each before pushing it — the stack must start both halves and both agent
    CLIs, the sidecar must synthesise and transcribe with its baked models —
-   then publishes them as `sha-<7-char commit>` with SBOM and provenance and
-   signs each digest under `build.yml@refs/heads/main`.
+   then publishes them as `sha-<7-char commit>` with SBOM and provenance.
 3. **Validate.** A development deployment pins those digests and runs its
    smoke test against them.
 4. **Tag** `vX.Y.Z` on that same commit. `release.yml` then:
@@ -729,15 +722,12 @@ existed:
    - finds a `build.yml` run for the exact commit on `main` whose three
      image jobs succeeded (the demo image's job is not required), resolves
      each `sha-<commit>` tag to its digest, and verifies that digest carries
-     `build.yml`'s signature **for that commit** (the certificate's
-     workflow-sha) plus its SBOM and provenance attestations;
+     its SBOM and provenance attestations;
    - retags each digest `X.Y.Z`, `X.Y` and `latest` with
      `docker buildx imagetools create --prefer-index=false <repo>@<digest>` —
      a registry-side copy of the original manifest, no pull and no rebuild —
      and asserts every new tag resolves to exactly the source digest;
-   - signs those same digests with cosign under its own identity, so both a
-     build signature and a release signature sit on one digest;
-   - builds and signs the Android APK (the app is not a container image, so
+   - builds and signs the Android APK (Android app signing, not cosign; the app is not a container image, so
      it is still built at tag time; `release-mobile.yml` builds the Play AAB
      the same way) and writes a GitHub Release carrying the APK and
      `vogt-release-manifest.json`.
@@ -757,12 +747,11 @@ refuse anything else.
 | `build.yml never ran for <sha> on main` | the tagged commit only touched docs (`build.yml` ignores `docs/**` and `*.md`), or a newer push cancelled its build before it started | tag the commit `build.yml` built (normally the bump), or dispatch `build.yml` on `main` while that commit is its head; then re-run the release |
 | `did not publish every image` | an image job of that `build.yml` run failed or was cancelled | `gh run rerun <id> --failed`, then re-run the failed release jobs |
 | `<repo>:sha-<short> is not in the registry` | the tag was never pushed or has been pruned | as above |
-| `carries no build.yml signature for <sha>` | the `sha-` tag now names a digest some other commit's build pushed (a 7-character collision), or the image is unsigned | investigate before releasing; never re-sign by hand |
 | `has no SBOM / Provenance attestation` | the digest was not pushed by `build.yml` | as above |
 | `<repo>:<tag> resolves to <x>, not the promoted <y>` | the retag did not preserve the digest | do not deploy the tag; pin `@<digest>` from the manifest |
 
 The tag-time `release.yml` run is idempotent: re-running it re-resolves the
-same digests, re-points the same tags and adds another release signature.
+same digests and re-points the same tags.
 
 The shell is a remote WebView onto whichever deployed stack the user picks
 on-device at first launch, so a server or PWA release reaches installed
@@ -777,7 +766,7 @@ deployment already running the `sha-` build of the tagged commit is already
 running the release; only its pin's spelling changes.
 
 Pushes to `main` are **builds, not releases**. `build.yml` publishes the same
-three images tagged `sha-<commit>` (signed, with SBOM and provenance) and the
+three images tagged `sha-<commit>` (with SBOM and provenance) and the
 demo image as `main` and `main-<commit>`. No semver tag is created and
 `latest` does not move, so "which build is that?" stays answerable. Pin the
 release family for a deployment; a `sha-` image is a way to run a specific

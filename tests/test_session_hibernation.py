@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,12 +20,15 @@ import pytest
 from vogt.adapters.engine import EngineClient
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    CommentParams,
+    CreateWorkParams,
     HibernateSessionParams,
     KeepSessionAwakeParams,
     ListAuditParams,
     ListEventsParams,
     ListSessionsParams,
     RegisterProjectParams,
+    ReportBlockedParams,
     SessionInputParams,
     SessionScreenParams,
     SessionWaitParams,
@@ -33,12 +37,15 @@ from vogt.application.models import (
     WakeSessionParams,
 )
 from vogt.application.services import (
+    comment_work,
+    create_work,
     hibernate_session,
     keep_session_awake,
     list_audit,
     list_events,
     list_sessions,
     register_project,
+    report_blocked,
     session_input,
     session_screen,
     session_wait,
@@ -47,6 +54,7 @@ from vogt.application.services import (
     wake_session,
 )
 from vogt.core.auth import hash_token
+from vogt.core.entities import HandoffFields
 from vogt.core.principal import Principal
 from vogt.errors import Conflict, RoleRefused
 
@@ -54,6 +62,13 @@ WHY = "hibernation test"
 ROOT = "/srv/estate/vogt"
 UNLINKED = "0b0e5f0c-1111-4222-8333-944455556666"
 HIBERNATED_SCREEN = ["> what next?", ""]
+#: Codex screens captured live on 2026-10-16 (WI-1669); see each file.
+CODEX = {
+    path.stem: json.loads(path.read_text())
+    for path in (Path(__file__).parent / "fixtures" / "codex_screens").glob("*.json")
+}
+#: The text the live captures hold in the composer.
+CODEX_TEXT = "reply with the single word two"
 
 
 class Engine:
@@ -69,6 +84,26 @@ class Engine:
         self.counter = 0
         #: The outcome a wait answers with for a live session.
         self.wait_outcome = "ready"
+        #: The agent a session reports, keyed by engine id. Default claude.
+        self.agent: dict[str, str] = {}
+        #: Screen reads after a wake answer `idle` this many times before
+        #: `running`, so a submit that did not start a turn is visible
+        #: (WI-1669).
+        self.idle_reads_after_wake = 0
+        self._idle_reads_left = 0
+        #: A Codex fake (WI-1669): after a wake its first `swallow_enters`
+        #: Enters leave the text in the composer, as a resumed Codex did
+        #: live; `dialog` draws an approval dialog instead of the composer.
+        self.swallow_enters = 0
+        self._swallow_left = 0
+        self.composer = "empty"
+        self.dialog = False
+        #: A Claude fake (WI-2025): its screen draws the input box, holding
+        #: the last text typed until an Enter takes it; `resume_turn` reads
+        #: as running even while the box still holds it, as the resume's own
+        #: turn did live.
+        self.typed = ""
+        self.resume_turn = False
         #: When set, a hibernate is refused (409) with this reason.
         self.refuse_hibernate: str | None = None
         #: When set, a wake is refused (409) with this reason and the session
@@ -76,6 +111,11 @@ class Engine:
         self.refuse_wake: str | None = None
         #: The successor recorded by the last hibernate that named one.
         self.superseded_by: dict[str, str] = {}
+        self.blocked: dict[str, dict[str, Any]] = {}
+        #: When a hibernated session went to sleep, and its last economics
+        #: reading (WI-2037), keyed by engine id.
+        self.hibernated_at = "2026-10-05T01:00:00Z"
+        self.economics: dict[str, dict[str, Any]] = {}
 
     def summary(self, engine_id: str) -> dict[str, Any]:
         asleep = engine_id in self.hibernated
@@ -86,13 +126,22 @@ class Engine:
             "alive": not asleep,
             "cwd": ROOT,
             "created_at": "2026-10-05T00:00:00Z",
-            "conversation": {"agent": "claude", "id": engine_id},
+            "blocked": self.blocked.get(engine_id),
+            "conversation": {
+                "agent": self.agent.get(engine_id, "claude"),
+                "id": engine_id,
+            },
             "keep_awake": engine_id in self.keep_awake,
+            **(
+                {"economics": self.economics[engine_id]}
+                if engine_id in self.economics
+                else {}
+            ),
             **({"role": "oversight"} if engine_id in self.oversight else {}),
             **(
                 {
                     "hibernation": {
-                        "at": "2026-10-05T01:00:00Z",
+                        "at": self.hibernated_at,
                         "trigger": "manual",
                         "reason": "idle",
                         "resumable": True,
@@ -154,6 +203,19 @@ class Engine:
                 return 409, json.dumps({"error": self.refuse_wake}).encode()
             self.hibernated.discard(engine_id)
             self.live.add(engine_id)
+            self._idle_reads_left = self.idle_reads_after_wake
+            self._swallow_left = self.swallow_enters
+            self.composer = "empty"
+            return 200, json.dumps(self.summary(engine_id)).encode()
+        if method == "POST" and verb == "blocked":
+            if payload.get("blocked"):
+                self.blocked[engine_id] = {
+                    "reason": payload["reason"],
+                    "items": payload.get("items", []),
+                    "since": "2026-10-18T09:00:00Z",
+                }
+            else:
+                self.blocked.pop(engine_id, None)
             return 200, json.dumps(self.summary(engine_id)).encode()
         if method == "POST" and verb == "keep-awake":
             if payload.get("keep_awake"):
@@ -173,16 +235,46 @@ class Engine:
         if method == "POST" and verb == "input":
             if asleep:
                 return conflict[0], conflict[1].encode()
+            if payload.get("text"):
+                self.composer = "held"
+                self.typed = payload["text"]
+            if payload.get("submit") and self.composer == "held" and not self.dialog:
+                if self._swallow_left > 0:
+                    self._swallow_left -= 1
+                else:
+                    self.composer = "taken"
             return 200, b'{"ok":true}'
         if method == "GET" and verb == "screen":
+            if not asleep and self._idle_reads_left > 0:
+                self._idle_reads_left -= 1
+                activity = "idle"
+            elif asleep:
+                activity = "hibernated"
+            else:
+                activity = "running"
+            lines = HIBERNATED_SCREEN if asleep else ["> ", ""]
+            if not asleep and self.agent.get(engine_id) == "codex":
+                if self.dialog:
+                    shot = CODEX["approval_dialog"]
+                elif self.composer == "held":
+                    shot = CODEX["resumed_stuck_ready"]
+                else:
+                    shot = CODEX["resumed_cleared"]
+                activity, lines = shot["activity"], shot["lines"]
+            elif not asleep and self.agent.get(engine_id) == "claude":
+                held = self.composer == "held"
+                rule = "\u2500" * 40
+                lines = [rule, "\u276f " + (self.typed if held else ""), rule]
+                if held and not self.resume_turn:
+                    activity = "idle"
             return 200, json.dumps(
                 {
                     "id": engine_id,
                     "cols": 80,
                     "rows": 2,
-                    "lines": HIBERNATED_SCREEN if asleep else ["> ", ""],
+                    "lines": lines,
                     "cursor": {"row": 0, "col": 2},
-                    "activity": "hibernated" if asleep else "idle",
+                    "activity": activity,
                     "alive": not asleep,
                     "ready": not asleep,
                 }
@@ -326,6 +418,28 @@ def test_waking_a_live_session_changes_nothing(
     assert result.session.alive is True
 
 
+def test_waking_clears_the_blocked_report_it_slept_with(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1834: whoever wakes a session is acting on it; the report goes, and
+    the audit keeps it."""
+    ses_id, engine_id = _started(wired)
+    report_blocked(
+        wired, ReportBlockedParams(id=ses_id, blocker="waiting on go-ahead", reason=WHY)
+    )
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+
+    result = wake_session(wired, WakeSessionParams(id=ses_id, reason=WHY))
+
+    assert engine_id not in engine.blocked
+    assert result.session.alive is True
+    assert result.session.blocked is None
+    cleared = list_audit(
+        wired, ListAuditParams(entity_id=ses_id, operation="session.report_unblocked")
+    ).records
+    assert [row.reason for row in cleared] == [f"cleared by wake: {WHY}"]
+
+
 def test_typing_into_a_hibernated_session_wakes_it_first(
     wired: AppContext, engine: Engine
 ) -> None:
@@ -353,6 +467,217 @@ def test_typing_into_a_hibernated_session_wakes_it_first(
     ]
 
 
+def _submits(engine: Engine) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in engine.sent
+        if row["path"].endswith("/input") and row["body"].get("submit")
+    ]
+
+
+def test_a_delivered_submit_is_not_pressed_again(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry exists for a swallowed Enter, not for one that landed."""
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    engine.agent[engine_id] = "codex"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.idle_reads_after_wake = 0
+    engine.sent.clear()
+
+    result = session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+    assert len(_submits(engine)) == 1
+    assert result.delivery == "delivered"
+    assert result.woke is True
+
+
+def _send_to_woken_claude(
+    wired: AppContext,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    swallow: int = 0,
+    resume_turn: bool = False,
+    wake_first: bool = False,
+) -> Any:
+    """Hibernate a Claude session, then type into it with Enter (WI-2025)."""
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    engine.agent[engine_id] = "claude"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.swallow_enters = swallow
+    engine.resume_turn = resume_turn
+    if wake_first:
+        wake_session(wired, WakeSessionParams(id=ses_id, reason=WHY))
+    engine.sent.clear()
+    return session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+
+def test_text_and_enter_go_as_separate_checked_steps(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Typed in one burst, a just-woken Claude read the Enter as a newline
+    (WI-2025): the Enter goes only after the text shows in the box."""
+    result = _send_to_woken_claude(wired, engine, monkeypatch, wake_first=True)
+    inputs = [r for r in engine.sent if r["path"].endswith("/input")]
+    assert [(r["body"]["text"], r["body"]["submit"]) for r in inputs] == [
+        ("go on", False),
+        ("", True),
+    ]
+    between = engine.sent.index(inputs[0]) + 1
+    assert engine.sent[between]["path"].endswith("/screen"), "echo checked first"
+    assert result.delivery == "delivered"
+    assert result.woke is False
+
+
+def test_an_enter_a_woken_claude_left_in_its_box_is_pressed_again(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seen three times on 2026-10-20 (WI-2025): reported delivered, the
+    text still under the prompt."""
+    result = _send_to_woken_claude(
+        wired, engine, monkeypatch, swallow=1, wake_first=True
+    )
+    assert len(_submits(engine)) == 2
+    assert result.delivery == "delivered"
+
+
+def test_the_resume_turn_is_not_taken_for_the_inputs_turn(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn running while the box still holds the text is the resume's,
+    not the input's: never "delivered" (WI-2025)."""
+    result = _send_to_woken_claude(
+        wired, engine, monkeypatch, swallow=10, resume_turn=True, wake_first=True
+    )
+    assert result.delivery != "delivered"
+    assert "input box" in result.delivery_evidence or "composer" in (
+        result.delivery_evidence
+    )
+
+
+def test_a_claude_box_that_never_clears_is_reported_stuck(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _send_to_woken_claude(wired, engine, monkeypatch, swallow=10)
+    assert len(_submits(engine)) == 3
+    assert result.delivery == "stuck"
+    assert result.woke is True
+
+
+def test_a_session_with_no_readable_box_gets_one_enter(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """opencode and Klaudia draw no box Vogt can read: a second Enter there
+    could accept a dialog the screen parser missed."""
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    engine.agent[engine_id] = "opencode"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.idle_reads_after_wake = 2
+    engine.sent.clear()
+
+    result = session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+    assert len(_submits(engine)) == 1
+    assert result.delivery == "unconfirmed"
+    assert result.woke is True
+
+
+def _send_to_resumed_codex(
+    wired: AppContext,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    swallow: int = 0,
+    dialog: bool = False,
+) -> Any:
+    """Hibernate a Codex session, then type into it with Enter (WI-1669)."""
+    import vogt.application.services.sessions as sessions
+
+    monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)
+    monkeypatch.setattr(sessions, "_CONFIRM_PAUSE_S", 0)
+    ses_id, engine_id = _started(wired)
+    engine.agent[engine_id] = "codex"
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    engine.swallow_enters = swallow
+    engine.dialog = dialog
+    engine.sent.clear()
+    return session_input(
+        wired,
+        SessionInputParams(
+            id=ses_id, text=CODEX_TEXT, submit=True, confirm=True, reason=WHY
+        ),
+    )
+
+
+def test_a_swallowed_enter_is_pressed_again_until_the_turn_starts(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed Codex swallowed the Enter and read as working (WI-1669).
+
+    Captured live: the text stayed in the composer until a later Enter.
+    """
+    result = _send_to_resumed_codex(wired, engine, monkeypatch, swallow=1)
+    assert len(_submits(engine)) == 2
+    assert result.delivery == "delivered"
+    assert result.woke is True
+
+
+def test_the_enters_stop_as_soon_as_the_composer_clears(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _send_to_resumed_codex(wired, engine, monkeypatch, swallow=2)
+    assert len(_submits(engine)) == 3
+    assert result.delivery == "delivered"
+
+
+def test_the_enters_are_bounded(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A composer that never clears gets three Enters in all, not more."""
+    result = _send_to_resumed_codex(wired, engine, monkeypatch, swallow=10)
+    assert len(_submits(engine)) == 3
+    assert result.delivery == "stuck"
+    assert "input box" in result.delivery_evidence
+
+
+def test_no_enter_is_pressed_again_on_a_dialog(
+    wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An approval dialog's highlighted choice starts with the composer's
+    glyph; another Enter there would accept it."""
+    result = _send_to_resumed_codex(wired, engine, monkeypatch, dialog=True)
+    assert len(_submits(engine)) == 1
+    assert result.delivery == "delivered", "the agent is asking for approval"
+
+
 def test_a_woken_session_that_is_not_ready_is_not_typed_into(
     wired: AppContext, engine: Engine
 ) -> None:
@@ -364,7 +689,7 @@ def test_a_woken_session_that_is_not_ready_is_not_typed_into(
     with pytest.raises(Conflict, match="not ready for input"):
         session_input(wired, SessionInputParams(id=ses_id, text="go", reason=WHY))
 
-    assert engine.calls(engine_id).count("POST input") == 1, "only the refused one"
+    assert "POST input" not in engine.calls(engine_id), "nothing typed"
     assert engine_id in engine.live, "it was woken; only the typing was held back"
 
 
@@ -700,3 +1025,160 @@ def test_set_role_nominates_any_session_and_is_audited(
     )
     assert back.session.role == "worker"
     assert back.session.keep_awake is False, "removing oversight lifts its pin"
+
+
+# -- cold-wake compaction (WI-2037) -----------------------------------------
+
+#: An hour before the test clock's start: past the 5-minute Anthropic TTL.
+COLD = "2026-08-12T04:00:00Z"
+
+
+def _compacting(ctx: AppContext, **update: Any) -> AppContext:
+    config = ctx.config.model_copy(update={"cold_wake_compaction": True, **update})
+    return dataclasses.replace(ctx, config=config)
+
+
+def _cold_wake_session(
+    ctx: AppContext, engine: Engine, **start: Any
+) -> tuple[str, str]:
+    item = create_work(
+        ctx,
+        CreateWorkParams(
+            kind="feature",
+            title="Cache-aware compaction",
+            project="vogt",
+            local_only=True,
+            reason=WHY,
+        ),
+    ).item
+    comment_work(
+        ctx,
+        CommentParams(
+            ref=item.ref,
+            body="Engine half pushed; core half next.",
+            kind="handoff",
+            handoff=HandoffFields(
+                branch="wi-2037-cold-wake-compaction",
+                remaining=["wire the core wake path"],
+            ),
+            reason=WHY,
+        ),
+    )
+    result = start_session(
+        ctx,
+        StartSessionParams(
+            work_item=item.ref,
+            template="claude",
+            reason=WHY,
+            **start,
+        ),
+    )
+    engine.hibernated_at = COLD
+    engine.economics[result.session.engine_session_id] = {"context_tokens": 180_000}
+    return result.session.id, result.session.engine_session_id
+
+
+def _last_wake(engine: Engine) -> dict[str, Any]:
+    wakes = [r for r in engine.sent if r["path"].endswith("/wake")]
+    body: dict[str, Any] = wakes[-1]["body"]
+    return body
+
+
+def _woken_summary(ctx: AppContext) -> dict[str, Any]:
+    woken = [
+        e
+        for e in list_events(ctx, ListEventsParams()).events
+        if e.kind == "session.woken"
+    ]
+    return woken[-1].summary
+
+
+def test_a_cold_wake_of_a_large_session_starts_from_a_summary(
+    wired: AppContext, engine: Engine
+) -> None:
+    ctx = _compacting(wired)
+    ses_id, _ = _cold_wake_session(ctx, engine)
+    hibernate_session(ctx, HibernateSessionParams(id=ses_id, reason=WHY))
+
+    wake_session(ctx, WakeSessionParams(id=ses_id, reason=WHY))
+
+    prompt = _last_wake(engine)["fresh_prompt"]
+    assert prompt.startswith("# Resumed from a summary (cold wake)")
+    assert "Cache-aware compaction" in prompt
+    assert "Engine half pushed; core half next." in prompt
+    assert "branch: wi-2037-cold-wake-compaction" in prompt
+    assert "- wire the core wake path" in prompt
+    audit = _woken_summary(ctx)["cold_wake"]
+    assert audit["outcome"] == "compact"
+    assert audit["provider"] == "anthropic"
+    assert audit["ttl_seconds"] == 300
+    assert audit["context_tokens"] == 180_000
+    # The measured saving: the first turn re-reads the summary, not 180k tokens.
+    assert len(prompt) // 4 < 180_000 // 50
+
+
+def test_compaction_is_off_unless_configured(wired: AppContext, engine: Engine) -> None:
+    ses_id, _ = _cold_wake_session(wired, engine)
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+
+    wake_session(wired, WakeSessionParams(id=ses_id, reason=WHY))
+
+    assert "fresh_prompt" not in _last_wake(engine)
+    assert _woken_summary(wired)["cold_wake"]["outcome"] == "disabled"
+
+
+def test_a_session_opted_out_resumes_its_transcript(
+    wired: AppContext, engine: Engine
+) -> None:
+    ctx = _compacting(wired)
+    ses_id, _ = _cold_wake_session(ctx, engine, cold_wake_opt_out=True)
+    hibernate_session(ctx, HibernateSessionParams(id=ses_id, reason=WHY))
+
+    wake_session(ctx, WakeSessionParams(id=ses_id, reason=WHY))
+
+    assert "fresh_prompt" not in _last_wake(engine)
+    assert _woken_summary(ctx)["cold_wake"]["outcome"] == "opted-out"
+
+
+def test_hibernate_changes_the_opt_out(wired: AppContext, engine: Engine) -> None:
+    ctx = _compacting(wired)
+    ses_id, _ = _cold_wake_session(ctx, engine)
+    hibernate_session(
+        ctx, HibernateSessionParams(id=ses_id, cold_wake_opt_out=True, reason=WHY)
+    )
+    wake_session(ctx, WakeSessionParams(id=ses_id, reason=WHY))
+    assert _woken_summary(ctx)["cold_wake"]["outcome"] == "opted-out"
+
+    hibernate_session(
+        ctx, HibernateSessionParams(id=ses_id, cold_wake_opt_out=False, reason=WHY)
+    )
+    wake_session(ctx, WakeSessionParams(id=ses_id, reason=WHY))
+    assert _woken_summary(ctx)["cold_wake"]["outcome"] == "compact"
+
+
+def test_a_warm_or_small_session_is_resumed(wired: AppContext, engine: Engine) -> None:
+    ctx = _compacting(wired, cold_wake_ttl_seconds={"anthropic": 3600 * 24 * 365})
+    ses_id, engine_id = _cold_wake_session(ctx, engine)
+    hibernate_session(ctx, HibernateSessionParams(id=ses_id, reason=WHY))
+    wake_session(ctx, WakeSessionParams(id=ses_id, reason=WHY))
+    assert "fresh_prompt" not in _last_wake(engine)
+    assert _woken_summary(ctx)["cold_wake"]["outcome"] == "warm"
+
+    small = _compacting(wired)
+    engine.economics[engine_id] = {"context_tokens": 20_000}
+    hibernate_session(small, HibernateSessionParams(id=ses_id, reason=WHY))
+    wake_session(small, WakeSessionParams(id=ses_id, reason=WHY))
+    assert "fresh_prompt" not in _last_wake(engine)
+    assert _woken_summary(small)["cold_wake"]["outcome"] == "small"
+
+
+def test_typing_into_a_cold_session_wakes_it_compacted(
+    wired: AppContext, engine: Engine
+) -> None:
+    ctx = _compacting(wired)
+    ses_id, _ = _cold_wake_session(ctx, engine)
+    hibernate_session(ctx, HibernateSessionParams(id=ses_id, reason=WHY))
+
+    session_input(ctx, SessionInputParams(id=ses_id, text="carry on", reason=WHY))
+
+    assert "fresh_prompt" in _last_wake(engine)

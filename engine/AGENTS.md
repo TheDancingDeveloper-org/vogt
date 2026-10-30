@@ -38,7 +38,7 @@ Before changing files here:
 | Type | Rust (Axum) + Solid/Vite PWA (embedded via `rust-embed`) + Capacitor Android wrap |
 | Repo | `github.com/TheDancingDeveloper-org/vogt`, subtree `engine/` |
 | Cargo workspace root | `engine/` (`engine/Cargo.toml`, members `server` and `contract`). The repository root is a Python project, not a Rust workspace. |
-| CI pipeline | `.github/workflows/ci.yml` (fmt/clippy/test, PWA typecheck and tests, Android shell) and `.github/workflows/build.yml` (the merged image, cosign-signed, to GHCR). |
+| CI pipeline | `.github/workflows/ci.yml` (fmt/clippy/test, PWA typecheck and tests, Android shell) and `.github/workflows/build.yml` (the merged image, to GHCR). |
 | Image | built from `engine/Dockerfile` with the repository root as context; `engine/Dockerfile.pod` is the toolchain base it starts from (`docs/ENGINE.md` §3) |
 | Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port; `/api/vogt` and `/mcp` proxied to the core) |
 | DB / state | No database. Live sessions in memory, each with a hibernation record (`state_dir/sessions/<id>.json`, no secrets) that lets it be hibernated and survive a restart (`docs/ENGINE.md`, Hibernation); agent tasks, push subscriptions and the assistant log persisted under `state_dir` (JSON and SQLite). |

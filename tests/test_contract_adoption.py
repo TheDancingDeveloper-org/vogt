@@ -282,6 +282,34 @@ def test_a_criterion_declared_inapplicable_is_reported_and_not_failed(
     )
 
 
+def test_an_inapplicable_criterion_reports_applicable_false(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """WI-1070: the view kept the default `applicable=True` for every row."""
+    slug = _handed(instance, tmp_path, name="Workspace")
+    contract_adopt(instance, ContractAdoptParams(project=slug, reason=WHY))
+    contract_inapplicable(
+        instance,
+        ContractInapplicableParams(
+            project=slug,
+            rule="required_dir",
+            target="src",
+            reason="a Cargo workspace has no root src/",
+        ),
+    )
+
+    checked = contract_check(instance, ContractCheckParams(project=slug, reason=WHY))
+
+    by_target = {c.target: c for c in checked.inapplicable}
+    assert by_target["src"].applicable is False
+    listed = [c for c in checked.criteria if c.target == "src"]
+    assert listed, "the inapplicable criterion is still listed"
+    assert all(c.applicable is False for c in listed)
+    assert all(c.applicable for c in checked.criteria if c.target != "src"), (
+        "every other criterion still applies"
+    )
+
+
 def test_an_inapplicability_declaration_carries_an_author_and_a_reason(
     instance: AppContext, tmp_path: Path
 ) -> None:

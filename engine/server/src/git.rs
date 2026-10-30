@@ -101,12 +101,21 @@ async fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
 /// A ref name safe to hand git as one argument: no whitespace, no control
 /// characters, and none of the characters git treats as starting an option or
 /// a path. The caller is asking for a branch and a base, not a command.
+///
+/// Slashes are allowed (`integrate/vogt-next`) but each component is checked
+/// the way `git check-ref-format` checks one: none may be empty, `.`, end in
+/// `.lock`, or start or end with `.`. `..` and `@{` are already refused above.
 fn clean_ref_name(what: &str, name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         return Err(ApiError::BadRequest(format!("{what} must not be empty")));
     }
-    if name.starts_with('-') || name.contains("..") {
+    if name.starts_with('-')
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || name.contains("//")
+        || name.contains("..")
+    {
         return Err(ApiError::BadRequest(format!(
             "{what} {name:?} is not a ref name"
         )));
@@ -115,6 +124,17 @@ fn clean_ref_name(what: &str, name: &str) -> Result<String> {
         c.is_whitespace()
             || c.is_control()
             || matches!(c, '~' | '^' | ':' | '\\' | '?' | '*' | '[' | '@' | '{')
+    }) {
+        return Err(ApiError::BadRequest(format!(
+            "{what} {name:?} is not a ref name"
+        )));
+    }
+    if name.split('/').any(|part| {
+        part.is_empty()
+            || part == "."
+            || part.ends_with(".lock")
+            || part.starts_with('.')
+            || part.ends_with('.')
     }) {
         return Err(ApiError::BadRequest(format!(
             "{what} {name:?} is not a ref name"
@@ -157,14 +177,22 @@ pub fn worktree_destination(checkout: &Path, branch: &str) -> Result<PathBuf> {
 /// tree is left exactly as it was, because the new branch comes from
 /// `base_ref` rather than from the working tree.
 ///
-/// `base_ref` is resolved in the checkout as it stands: it is never fetched,
-/// so a local branch that is behind its remote is cut where it is. A caller
-/// that wants the remote's tip names `origin/<branch>`.
+/// The base is fetched from `origin` first and the new branch is cut from
+/// `origin/<branch>`, not from the checkout's local ref of the same name
+/// (WI-1630). The shared checkout's local branch is often far behind the
+/// remote, and cutting from it silently starts the session on stale code. A
+/// fetch that fails refuses the start: falling back to the local ref is the
+/// bug this closes. A `base_ref` that already names the remote
+/// (`origin/main`, `origin/integrate/vogt-next`) has that one prefix stripped
+/// and is fetched the same way. The fetch runs as the engine process (its
+/// uid and credentials), not as the session user: the session does not exist
+/// yet.
 ///
 /// Refuses before running git when the checkout is not a git tree, when
 /// either name is not a ref name, when the branch already exists, or when the
-/// destination already exists. When git itself refuses part way, neither the
-/// directory nor the branch is left behind.
+/// destination already exists. A fetch that fails, or a remote ref that is
+/// still absent after it, refuses before the worktree is cut. When git itself
+/// refuses part way, neither the directory nor the branch is left behind.
 pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<PathBuf> {
     let destination = worktree_destination(checkout, branch)?;
     let branch = clean_ref_name("branch", branch)?;
@@ -199,15 +227,10 @@ pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<
             checkout.display()
         )));
     }
-    // The base must already be in the checkout. Fetching it here would reach
-    // the network and could move a remote-tracking ref the caller did not ask
-    // to move; an unknown base is a plain refusal.
-    if git_output(checkout, &["rev-parse", "--verify", "--quiet", &base_ref]).is_err() {
-        return Err(ApiError::BadRequest(format!(
-            "base ref {base_ref:?} is not in {}",
-            checkout.display()
-        )));
-    }
+    // Cut from the remote's tip. The local ref of the same name is the shared
+    // checkout's, and it lags the remote (WI-1630). A fetch failure refuses
+    // rather than silently cutting from that stale ref.
+    let remote_ref = fetch_base_ref(checkout, &base_ref)?;
     git_output(
         checkout,
         &[
@@ -217,7 +240,7 @@ pub fn create_worktree(checkout: &Path, branch: &str, base_ref: &str) -> Result<
             "-b",
             &branch,
             &destination.display().to_string(),
-            &base_ref,
+            &remote_ref,
         ],
     )
     .map_err(|error| {
@@ -254,20 +277,143 @@ pub fn remove_worktree(checkout: &Path, path: &Path, branch: &str) {
     }
 }
 
+/// Fetch `base_ref` from `origin` and return the remote-tracking ref to cut
+/// from: always `origin/<branch>`, where `<branch>` is `base_ref` with one
+/// leading `origin/` stripped when the caller already wrote the remote form.
+///
+/// A slash in the branch name is a branch (`integrate/vogt-next`), not a
+/// reason to refuse. `origin/integrate/vogt-next` and `integrate/vogt-next`
+/// fetch the same ref. Refuses when the name left after that strip is not a
+/// branch name, when the fetch fails, or when the remote ref is not there
+/// afterwards. The local ref is deliberately never a fallback — a start on a
+/// base the remote could not confirm is worse than no start (WI-1630). The
+/// fetch moves only the one remote-tracking ref, never a local branch.
+///
+/// The fetch runs as the engine process. `create_worktree` is called before
+/// the session process exists, so a private origin is reached with a GitHub
+/// token the engine holds, not a token the session process would later
+/// receive (WI-1666). That token is the same one agent-auth aliases to
+/// `GH_TOKEN` for sessions: `ENGINE_WORKTREE_GITHUB_TOKEN`, or `GH_TOKEN`
+/// when the engine process itself already has it. It is handed to git only
+/// through `GIT_ASKPASS` for this one fetch, never written to a ref, a
+/// remote URL, argv, or a log line.
+///
+/// A GitHub `origin` with no such token refuses before git runs, naming the
+/// missing credential. A non-GitHub origin (a local bare, a forge that does
+/// not speak this token) is fetched with the engine user's own git
+/// credentials, as before.
+fn fetch_base_ref(checkout: &Path, base_ref: &str) -> Result<String> {
+    // One prefix only. `origin/origin/main` is a branch literally named that,
+    // which the remote will not have, and the fetch then refuses.
+    let source = base_ref.strip_prefix("origin/").unwrap_or(base_ref);
+    if source.is_empty()
+        || source.starts_with('/')
+        || source.ends_with('/')
+        || source.contains("//")
+        || clean_ref_name("base ref", source).is_err()
+    {
+        return Err(ApiError::BadRequest(format!(
+            "base ref {base_ref:?} is not a branch on origin"
+        )));
+    }
+    let remote_ref = format!("origin/{source}");
+    // An explicit refspec. `git fetch origin <branch>` with a matching local
+    // branch updates that local branch, not `refs/remotes/origin/<branch>`,
+    // and the local branch is exactly the stale ref this must not follow.
+    let spec = format!("+refs/heads/{source}:refs/remotes/origin/{source}");
+    let github_https = origin_is_github_https(checkout);
+    let token = worktree_github_token();
+    if github_https && token.is_none() {
+        return Err(ApiError::BadRequest(
+            "could not fetch base ref from origin: this origin is https GitHub and the engine has no GitHub token for the worktree fetch (set ENGINE_WORKTREE_GITHUB_TOKEN to the same token sessions get as GH_TOKEN, or export GH_TOKEN on the engine process)".into(),
+        ));
+    }
+    // Only an https GitHub origin uses the session token. A local path, another
+    // forge, or git@github.com SSH keeps the engine user's own credentials.
+    let fetch_token = token.as_deref().filter(|_| github_https);
+    git_fetch(checkout, &spec, fetch_token).map_err(|error| {
+        let detail = redact_token(error.to_string(), fetch_token);
+        if github_https {
+            ApiError::BadRequest(format!(
+                "could not fetch base ref {base_ref:?} from origin using the engine GitHub token (ENGINE_WORKTREE_GITHUB_TOKEN, or GH_TOKEN on the engine process). The token may not be able to read this private repository: {detail}"
+            ))
+        } else {
+            ApiError::BadRequest(format!(
+                "could not fetch base ref {base_ref:?} from origin: {detail}"
+            ))
+        }
+    })?;
+    if git_output(checkout, &["rev-parse", "--verify", "--quiet", &remote_ref]).is_err() {
+        return Err(ApiError::BadRequest(format!(
+            "base ref {base_ref:?} is not on origin"
+        )));
+    }
+    Ok(remote_ref)
+}
+
 /// git, synchronously, with its stdout on success and its stderr in the error.
 ///
 /// The session start that calls [`create_worktree`] is itself synchronous, and
 /// the worktree has to exist before the session's cwd is resolved, so this
 /// cannot wait on the async runtime.
 fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git")
+    git_command(repo, args, None)
+}
+
+/// `git fetch` of one refspec. When `token` is set it is the only credential
+/// git may use for this command: askpass answers GitHub with
+/// `x-access-token` / the token, and the checkout's credential helper is
+/// blanked so it cannot supply a different one. `insteadOf` rewrites in the
+/// repo config still apply. The token is an environment value, never an
+/// argument.
+fn git_fetch(repo: &Path, spec: &str, token: Option<&str>) -> Result<String> {
+    git_command(repo, &["fetch", "--quiet", "origin", spec], token)
+}
+
+fn git_command(repo: &Path, args: &[&str], token: Option<&str>) -> Result<String> {
+    let mut command = std::process::Command::new("git");
+    command
         .args(args)
         .current_dir(repo)
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(token) = token {
+        // This fetch's only credential. Askpass answers GitHub with the
+        // token; inherited token variables are removed so a different
+        // GH_TOKEN in the engine environment cannot win, and the checkout's
+        // credential helper is blanked via the environment config (which git
+        // applies on top of the repo config). The token is not an argument.
+        // `env_clear` is required: `Command` keeps an inherited GIT_ASKPASS
+        // even after `env_remove` + `env`, and git then uses that one.
+        let mut kept: Vec<(String, String)> = std::env::vars()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "GH_TOKEN"
+                        | "GITHUB_TOKEN"
+                        | "GIT_AUTH_TOKEN"
+                        | "GIT_ASKPASS"
+                        | "ENGINE_WORKTREE_FETCH_TOKEN"
+                )
+            })
+            .collect();
+        kept.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+        kept.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+        kept.push(("GIT_ASKPASS".into(), worktree_askpass_path()));
+        kept.push(("GIT_ASKPASS_REQUIRE".into(), "force".into()));
+        kept.push(("GIT_CONFIG_COUNT".into(), "1".into()));
+        kept.push(("GIT_CONFIG_KEY_0".into(), "credential.helper".into()));
+        kept.push(("GIT_CONFIG_VALUE_0".into(), String::new()));
+        kept.push(("ENGINE_WORKTREE_FETCH_TOKEN".into(), token.to_string()));
+        command.env_clear();
+        command.envs(kept);
+    }
+    let output = command
         .output()
         .map_err(|e| ApiError::Internal(format!("spawn git: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let stderr = redact_token(stderr, token);
         return Err(ApiError::Internal(format!(
             "git {}: {}",
             args.join(" "),
@@ -275,6 +421,71 @@ fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn origin_is_github_https(repo: &Path) -> bool {
+    let Ok(url) = git_output(repo, &["remote", "get-url", "origin"]) else {
+        return false;
+    };
+    origin_url_is_github_https(url.trim())
+}
+
+fn origin_url_is_github_https(url: &str) -> bool {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("HTTPS://"))
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("HTTP://"));
+    let Some(rest) = rest else {
+        return false;
+    };
+    let host = rest
+        .rsplit_once('@')
+        .map(|(_, hostpath)| hostpath)
+        .unwrap_or(rest)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    host.eq_ignore_ascii_case("github.com")
+}
+
+/// The GitHub token the worktree fetch may use. `ENGINE_WORKTREE_GITHUB_TOKEN`
+/// is the deployment's explicit copy of the token sessions receive as
+/// `GH_TOKEN`. `GH_TOKEN` on the engine process is the same name, used when
+/// the engine was started with it directly. Empty values are absent.
+/// The value is never logged.
+fn worktree_github_token() -> Option<String> {
+    for key in ["ENGINE_WORKTREE_GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn worktree_askpass_path() -> String {
+    std::env::var("ENGINE_WORKTREE_ASKPASS")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| "/usr/local/bin/vogt-git-askpass".to_string())
+}
+
+/// Drop a token that git echoed back (a URL, an askpass trace) before the
+/// text can reach an error or a log line.
+fn redact_token(text: String, token: Option<&str>) -> String {
+    match token {
+        Some(token) if !token.is_empty() && text.contains(token) => {
+            text.replace(token, "[redacted]")
+        }
+        _ => text,
+    }
 }
 
 fn clean_repo_rel(path: &str) -> Result<String> {
@@ -1237,6 +1448,72 @@ pub async fn operate(
 mod tests {
     use super::*;
 
+    /// Process environment is process-global. Worktree-token tests take this
+    /// lock so they do not clobber each other or a caller's token.
+    struct EnvLock;
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    impl EnvLock {
+        fn acquire() -> std::sync::MutexGuard<'static, ()> {
+            ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+        }
+    }
+
+    /// Saves and restores the token variables a test touches.
+    struct TokenEnv {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl TokenEnv {
+        fn apply(pairs: &[(&'static str, Option<&str>)]) -> Self {
+            let saved = pairs
+                .iter()
+                .map(|(key, _)| (*key, std::env::var(key).ok()))
+                .collect();
+            for (key, value) in pairs {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { saved }
+        }
+
+        fn set(pairs: &[(&'static str, &str)]) -> Self {
+            let owned: Vec<(&'static str, Option<&str>)> = pairs
+                .iter()
+                .map(|(key, value)| (*key, Some(*value)))
+                .collect();
+            Self::apply(&owned)
+        }
+
+        fn clear() -> Self {
+            Self::apply(&[
+                ("ENGINE_WORKTREE_GITHUB_TOKEN", None),
+                ("GH_TOKEN", None),
+                ("GITHUB_TOKEN", None),
+                ("GIT_AUTH_TOKEN", None),
+                ("ENGINE_WORKTREE_ASKPASS", None),
+            ])
+        }
+    }
+
+    impl Drop for TokenEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn repo_askpass() -> std::path::PathBuf {
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("../deploy/git-askpass.sh");
+        path
+    }
+
     #[test]
     fn classify_basics() {
         assert_eq!(classify_status("?", "?"), StatusKind::Untracked);
@@ -1446,34 +1723,87 @@ mod tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
-    /// A committed repo with one uncommitted edit, the state the shared
-    /// checkout is in when a worker must not touch it (WI-1298).
+    /// A committed checkout whose local `topic` lags `origin/topic`,
+    /// plus one uncommitted edit (WI-1298, WI-1630). The bare origin is a
+    /// sibling, so the fetch stays on disk.
     fn dirty_checkout(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        let origin = tmp.path().join("origin.git");
+        git(
+            tmp.path(),
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "main",
+                &origin.display().to_string(),
+            ],
+        );
         let repo = tmp.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        git(&repo, &["init", "-b", "main"]);
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "--quiet",
+                &origin.display().to_string(),
+                &repo.display().to_string(),
+            ],
+        );
         git(&repo, &["config", "user.email", "t@example"]);
         git(&repo, &["config", "user.name", "t"]);
         std::fs::write(repo.join("f.txt"), "base\n").unwrap();
         git(&repo, &["add", "f.txt"]);
         git(&repo, &["commit", "-m", "base"]);
-        git(&repo, &["branch", "integrate"]);
+        git(&repo, &["branch", "topic"]);
+        git(&repo, &["push", "--quiet", "origin", "main", "topic"]);
+        // A slashed base, the shape of `integrate/vogt-next`. Its first component
+        // is not itself a branch: git refuses a ref that would be both a file
+        // and a directory. Local lags origin.
+        git(&repo, &["branch", "lines/codex-next"]);
+        git(&repo, &["push", "--quiet", "origin", "lines/codex-next"]);
+        // The remote moves on; the local ref of the base is left behind.
+        std::fs::write(repo.join("f.txt"), "remote\n").unwrap();
+        git(&repo, &["add", "f.txt"]);
+        git(&repo, &["commit", "-m", "remote"]);
+        git(&repo, &["push", "--quiet", "origin", "main"]);
+        git(&repo, &["branch", "-f", "topic", "HEAD"]);
+        git(&repo, &["branch", "-f", "lines/codex-next", "HEAD"]);
+        git(
+            &repo,
+            &["push", "--quiet", "origin", "topic", "lines/codex-next"],
+        );
+        let remote_tip = super::git_output(&repo, &["rev-parse", "HEAD"]).expect("remote tip");
+        git(&repo, &["reset", "--hard", "HEAD~1"]);
+        git(&repo, &["branch", "-f", "topic", "HEAD"]);
+        git(&repo, &["branch", "-f", "lines/codex-next", "HEAD"]);
+        // `reset --hard` on a branch that tracks origin moves the
+        // remote-tracking ref with it. Put those back at the pushed tip, so
+        // the checkout looks like one whose local base lags origin.
+        let remote_tip = remote_tip.trim();
+        for tracking in [
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/topic",
+            "refs/remotes/origin/lines/codex-next",
+        ] {
+            git(&repo, &["update-ref", tracking, remote_tip]);
+        }
         std::fs::write(repo.join("f.txt"), "dirty\n").unwrap();
         repo
     }
 
     #[test]
     fn a_worktree_is_cut_from_the_base_and_leaves_the_dirty_checkout_alone() {
+        let _guard = EnvLock::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let repo = dirty_checkout(&tmp);
         let before = std::fs::read_to_string(repo.join("f.txt")).unwrap();
 
-        let worktree = create_worktree(&repo, "wi-1298-worker", "integrate").unwrap();
+        let worktree = create_worktree(&repo, "wi-1298-worker", "topic").unwrap();
 
         assert_eq!(worktree, tmp.path().join("wi-1298-worker"));
         assert_eq!(
             std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
-            "base\n"
+            "remote\n",
+            "the worktree is cut from origin, not the stale local ref"
         );
         // The checkout the worktree was cut from is byte-for-byte as it was.
         assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), before);
@@ -1483,21 +1813,22 @@ mod tests {
 
     #[test]
     fn a_worktree_is_refused_for_a_bad_name_an_unknown_base_or_a_taken_path() {
+        let _guard = EnvLock::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let repo = dirty_checkout(&tmp);
 
-        let bad_name = create_worktree(&repo, "has space", "integrate").unwrap_err();
+        let bad_name = create_worktree(&repo, "has space", "topic").unwrap_err();
         assert!(
             bad_name.to_string().contains("not a ref name"),
             "{bad_name}"
         );
-        let option = create_worktree(&repo, "--upload-pack=evil", "integrate").unwrap_err();
+        let option = create_worktree(&repo, "--upload-pack=evil", "topic").unwrap_err();
         assert!(option.to_string().contains("not a ref name"), "{option}");
         let unknown = create_worktree(&repo, "wi-1", "no-such-ref").unwrap_err();
-        assert!(unknown.to_string().contains("not in"), "{unknown}");
+        assert!(unknown.to_string().contains("could not fetch"), "{unknown}");
 
         std::fs::create_dir(tmp.path().join("taken")).unwrap();
-        let taken = create_worktree(&repo, "taken", "integrate").unwrap_err();
+        let taken = create_worktree(&repo, "taken", "topic").unwrap_err();
         assert!(taken.to_string().contains("already exists"), "{taken}");
         // None of the refusals created a branch or a directory.
         assert!(git_output(&repo, &["rev-parse", "--verify", "wi-1"]).is_err());
@@ -1508,23 +1839,25 @@ mod tests {
     fn an_existing_branch_is_refused_and_a_removed_worktree_takes_its_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = dirty_checkout(&tmp);
-        let taken = create_worktree(&repo, "integrate", "main").unwrap_err();
+        let taken = create_worktree(&repo, "topic", "main").unwrap_err();
         assert!(taken.to_string().contains("already exists"), "{taken}");
-        assert!(!tmp.path().join("integrate").exists());
+        assert!(!tmp.path().join("topic").exists());
 
-        let worktree = create_worktree(&repo, "wi-2-gone", "integrate").unwrap();
+        let worktree = create_worktree(&repo, "wi-2-gone", "topic").unwrap();
         remove_worktree(&repo, &worktree, "wi-2-gone");
         assert!(!worktree.exists());
         assert!(git_output(&repo, &["rev-parse", "--verify", "refs/heads/wi-2-gone"]).is_err());
         // The branch it was cut from is not touched.
-        assert!(git_output(&repo, &["rev-parse", "--verify", "refs/heads/integrate"]).is_ok());
+        assert!(git_output(&repo, &["rev-parse", "--verify", "refs/heads/topic"]).is_ok());
     }
 
     #[test]
     fn a_worktree_can_be_cut_from_a_worktree() {
+        let _guard = EnvLock::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let repo = dirty_checkout(&tmp);
-        let first = create_worktree(&repo, "first", "integrate").unwrap();
+        let first = create_worktree(&repo, "first", "topic").unwrap();
+        git(&first, &["push", "--quiet", "-u", "origin", "first"]);
         let second = create_worktree(&first, "second", "first").unwrap();
         assert_eq!(second, tmp.path().join("second"));
         assert_eq!(
@@ -1533,5 +1866,376 @@ mod tests {
                 .trim(),
             "second"
         );
+    }
+
+    #[test]
+    fn a_fetch_failure_refuses_the_worktree_instead_of_cutting_from_the_stale_local_ref() {
+        let _guard = EnvLock::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let local = git_output(&repo, &["rev-parse", "topic"]).unwrap();
+        // The remote goes away. The local ref is still there and behind.
+        std::fs::remove_dir_all(tmp.path().join("origin.git")).unwrap();
+
+        let failed = create_worktree(&repo, "wi-1630-worker", "topic").unwrap_err();
+
+        assert!(failed.to_string().contains("could not fetch"), "{failed}");
+        assert!(!tmp.path().join("wi-1630-worker").exists());
+        assert!(git_output(
+            &repo,
+            &["rev-parse", "--verify", "refs/heads/wi-1630-worker"]
+        )
+        .is_err());
+        // The stale local ref is untouched, and was not what got cut.
+        assert_eq!(git_output(&repo, &["rev-parse", "topic"]).unwrap(), local);
+    }
+
+    #[test]
+    fn github_https_is_the_host_not_a_substring() {
+        assert!(origin_url_is_github_https(
+            "https://github.com/TheDancingDeveloper-org/example.git"
+        ));
+        assert!(origin_url_is_github_https(
+            "https://x-access-token:secret@github.com/org/example.git"
+        ));
+        assert!(!origin_url_is_github_https(
+            "https://github.com.example.net/org/example.git"
+        ));
+        assert!(!origin_url_is_github_https(
+            "https://notgithub.com/org/example.git"
+        ));
+        assert!(!origin_url_is_github_https(
+            "git@github.com:TheDancingDeveloper-org/example.git"
+        ));
+        assert!(!origin_url_is_github_https("/tmp/origin.git"));
+    }
+
+    #[test]
+    fn a_github_origin_without_a_token_names_the_missing_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/TheDancingDeveloper-org/example.git",
+            ],
+        );
+        let _guard = EnvLock::acquire();
+        let _env = TokenEnv::clear();
+
+        let failed = create_worktree(&repo, "wi-1666-worker", "topic").unwrap_err();
+
+        let message = failed.to_string();
+        assert!(message.contains("no GitHub token"), "{message}");
+        assert!(
+            message.contains("ENGINE_WORKTREE_GITHUB_TOKEN"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("  "),
+            "no collapsed-line padding: {message}"
+        );
+        assert!(!tmp.path().join("wi-1666-worker").exists());
+    }
+
+    #[test]
+    fn a_github_fetch_uses_askpass_and_strips_other_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let origin = tmp.path().join("origin.git");
+        let trace = tmp.path().join("fetch-env");
+        let real = "/usr/bin/git";
+        let wrapper = tmp.path().join("git");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n\
+real='{real}'\n\
+origin='{origin}'\n\
+trace='{trace}'\n\
+if [ \"$1\" = fetch ]; then\n\
+  {{\n\
+    echo \"askpass=${{GIT_ASKPASS:-}}\"\n\
+    echo \"gh=${{GH_TOKEN-unset}}\"\n\
+    echo \"ght=${{GITHUB_TOKEN-unset}}\"\n\
+    echo \"gat=${{GIT_AUTH_TOKEN-unset}}\"\n\
+    echo \"fetch=${{ENGINE_WORKTREE_FETCH_TOKEN:-}}\"\n\
+    echo \"helper=$(\"$real\" -C \"$PWD\" config --get credential.helper || true)\"\n\
+  }} > \"$trace\"\n\
+  token=$(\"$GIT_ASKPASS\" \"Password for 'https://github.com':\") || exit 7\n\
+  echo \"printed=$token\" >> \"$trace\"\n\
+  [ \"$token\" = worktree-token-secret ] || exit 8\n\
+  exit 9\n\
+fi\n\
+exec \"$real\" \"$@\"\n",
+                real = real,
+                origin = origin.display(),
+                trace = trace.display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&wrapper).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&wrapper, perms).unwrap();
+        }
+        git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/TheDancingDeveloper-org/example.git",
+            ],
+        );
+        git(
+            &repo,
+            &[
+                "config",
+                "credential.helper",
+                "!echo password=helper-token-must-not-win",
+            ],
+        );
+
+        let _guard = EnvLock::acquire();
+        let askpass = repo_askpass().canonicalize().expect("askpass");
+        let askpass_s = askpass.display().to_string();
+        let _env = TokenEnv::set(&[
+            ("ENGINE_WORKTREE_GITHUB_TOKEN", "worktree-token-secret"),
+            ("GH_TOKEN", "session-token-should-not-be-used"),
+            ("GITHUB_TOKEN", "github-token-should-not-be-used"),
+            ("GIT_AUTH_TOKEN", "git-auth-should-not-be-used"),
+            ("ENGINE_WORKTREE_ASKPASS", &askpass_s),
+        ]);
+        let original = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{original}", tmp.path().display()));
+
+        let failed = create_worktree(&repo, "wi-1666-wired", "topic");
+        std::env::set_var("PATH", &original);
+        let recorded = std::fs::read_to_string(&trace).unwrap_or_default();
+        let message = failed
+            .expect_err("the wrapper stops after recording the fetch environment")
+            .to_string();
+        assert!(message.contains("could not fetch"), "{message}\n{recorded}");
+        assert!(
+            !message.contains("worktree-token-secret"),
+            "token leaked into the error: {message}"
+        );
+        let askpass = recorded
+            .lines()
+            .find_map(|line| line.strip_prefix("askpass="))
+            .unwrap_or("");
+        let expected = repo_askpass().canonicalize().unwrap().display().to_string();
+        assert_eq!(
+            askpass, expected,
+            "GIT_ASKPASS must be the shipped askpass: {recorded}"
+        );
+        assert!(
+            recorded.contains("gh=unset\n") || recorded.contains("gh=\n"),
+            "{recorded}"
+        );
+        assert!(recorded.contains("ght=unset"), "{recorded}");
+        assert!(recorded.contains("gat=unset"), "{recorded}");
+        assert!(
+            recorded.contains("printed=worktree-token-secret"),
+            "{recorded}"
+        );
+        assert!(
+            recorded.lines().any(|line| line == "helper="),
+            "credential.helper must be blanked: {recorded}"
+        );
+    }
+
+    #[test]
+    fn a_non_github_origin_keeps_its_own_credentials_when_gh_token_is_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let trace = tmp.path().join("fetch-env");
+        let real = "/usr/bin/git";
+        let wrapper = tmp.path().join("git");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n\
+real='{real}'\n\
+trace='{trace}'\n\
+if [ \"$1\" = fetch ]; then\n\
+  {{\n\
+    echo \"askpass=${{GIT_ASKPASS-unset}}\"\n\
+    echo \"fetch=${{ENGINE_WORKTREE_FETCH_TOKEN-unset}}\"\n\
+    echo \"gh=${{GH_TOKEN-unset}}\"\n\
+    echo \"helper=$(\"$real\" -C \"$PWD\" config --get credential.helper || true)\"\n\
+  }} > \"$trace\"\n\
+fi\n\
+exec \"$real\" \"$@\"\n",
+                real = real,
+                trace = trace.display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&wrapper).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&wrapper, perms).unwrap();
+        }
+
+        let _guard = EnvLock::acquire();
+        let inherited_askpass = std::env::var("GIT_ASKPASS").ok();
+        std::env::remove_var("GIT_ASKPASS");
+        let _env = TokenEnv::set(&[("GH_TOKEN", "session-token-should-not-be-used")]);
+        let original = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{original}", tmp.path().display()));
+
+        let worktree = create_worktree(&repo, "wi-1666-local", "topic");
+        std::env::set_var("PATH", &original);
+        match inherited_askpass {
+            Some(value) => std::env::set_var("GIT_ASKPASS", value),
+            None => std::env::remove_var("GIT_ASKPASS"),
+        }
+        let recorded = std::fs::read_to_string(&trace).unwrap_or_default();
+        let worktree = worktree.unwrap_or_else(|error| {
+            panic!("local fetch failed: {error}\ntrace:\n{recorded}");
+        });
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
+            "remote\n"
+        );
+        assert!(
+            recorded.contains("askpass=unset"),
+            "a non-GitHub fetch must not set GIT_ASKPASS: {recorded}"
+        );
+        assert!(
+            recorded.contains("fetch=unset"),
+            "a non-GitHub fetch must not receive the token: {recorded}"
+        );
+        assert!(
+            recorded.contains("session-token-should-not-be-used"),
+            "the engine user's GH_TOKEN stays for a non-GitHub origin: {recorded}"
+        );
+    }
+
+    #[test]
+    fn an_ssh_github_origin_does_not_require_the_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.invalid:TheDancingDeveloper-org/example.git",
+            ],
+        );
+        let _guard = EnvLock::acquire();
+        let _env = TokenEnv::clear();
+
+        let failed = create_worktree(&repo, "wi-1666-ssh", "topic").unwrap_err();
+        let message = failed.to_string();
+        assert!(
+            !message.contains("no GitHub token"),
+            "ssh must not demand the https token: {message}"
+        );
+        assert!(message.contains("could not fetch"), "{message}");
+    }
+
+    #[test]
+    fn the_shipped_askpass_prints_the_worktree_token_for_github_only() {
+        let askpass = repo_askpass();
+        let run = |prompt: &str, extra: &[(&str, &str)]| -> String {
+            let mut cmd = std::process::Command::new(&askpass);
+            cmd.env_clear();
+            cmd.env("PATH", "/usr/bin:/bin");
+            cmd.arg(prompt)
+                .env("ENGINE_WORKTREE_FETCH_TOKEN", "worktree-token-secret")
+                .env("GH_TOKEN", "session-token-should-not-be-used")
+                .env("GIT_AUTH_TOKEN", "git-auth-token");
+            for (k, v) in extra {
+                cmd.env(k, v);
+            }
+            let out = cmd.output().expect("askpass");
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        let password = run("Password for 'https://github.com':", &[]);
+        assert_eq!(
+            password.trim(),
+            "worktree-token-secret",
+            "askpass did not return the worktree token"
+        );
+        let user = run("Username for 'https://github.com':", &[]);
+        assert_eq!(user.trim(), "x-access-token");
+        let lookalike = run("Password for 'https://github.com.evil.test':", &[]);
+        assert_eq!(lookalike.trim(), "git-auth-token");
+        let not_github = run("Password for 'https://notgithub.com':", &[]);
+        assert_eq!(not_github.trim(), "git-auth-token");
+    }
+
+    #[test]
+    fn github_https_matches_the_host_exactly() {
+        // Host matching is exact. A checkout whose origin merely contains the
+        // substring github.com is not given the token and is not refused for
+        // lacking one.
+        assert!(!origin_url_is_github_https(
+            "https://github.com.example.net/org/repo.git"
+        ));
+        assert!(origin_url_is_github_https(
+            "https://user:token@github.com/org/repo.git"
+        ));
+    }
+
+    #[test]
+    fn a_slashed_base_is_cut_from_origin_bare_or_origin_prefixed() {
+        let _guard = EnvLock::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        let local_before = git_output(&repo, &["rev-parse", "lines/codex-next"]).unwrap();
+
+        for (branch, base) in [
+            ("wi-bare", "lines/codex-next"),
+            ("wi-prefixed", "origin/lines/codex-next"),
+        ] {
+            let worktree = create_worktree(&repo, branch, base).unwrap();
+            let remote = git_output(&repo, &["rev-parse", "origin/lines/codex-next"]).unwrap();
+            assert_ne!(
+                local_before, remote,
+                "the fixture's local slashed base lags origin"
+            );
+            assert_eq!(
+                std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
+                "remote\n",
+                "{base} cuts from origin, not the stale local ref"
+            );
+            assert_eq!(
+                git_output(&worktree, &["rev-parse", "HEAD"]).unwrap(),
+                remote,
+                "{base}"
+            );
+            // The fetch moved the remote-tracking ref only.
+            assert_eq!(
+                git_output(&repo, &["rev-parse", "lines/codex-next"]).unwrap(),
+                local_before,
+                "{base} left the local branch where it was"
+            );
+        }
+
+        // A slash is a branch component, not a refusal — except a name that is
+        // not a ref (`origin/` alone, an empty component). Both are refused
+        // before any fetch, and neither leaves a branch or a directory.
+        let bare = create_worktree(&repo, "wi-bad", "origin/").unwrap_err();
+        assert!(bare.to_string().contains("not a ref name"), "{bare}");
+        let empty = create_worktree(&repo, "wi-bad", "topic//next").unwrap_err();
+        assert!(empty.to_string().contains("not a ref name"), "{empty}");
+        assert!(!tmp.path().join("wi-bad").exists());
     }
 }

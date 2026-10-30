@@ -60,6 +60,20 @@ def test_many_lookups_scan_the_root_once(
     assert scans["n"] <= 2
 
 
+def test_a_vanished_file_is_not_returned(tmp_path: Path) -> None:
+    """A cached path is dropped as soon as the file is gone (WI-2693).
+
+    The index itself is not rebuilt until the TTL, but a lookup must not
+    hand back a path that no longer exists.
+    """
+    root = _claude_root(tmp_path, sessions=1, decoys=1)
+    transcripts._indexes.clear()
+    found = transcripts._by_id("claude", root, "conv-00000")
+    assert found is not None
+    found.unlink()
+    assert transcripts._by_id("claude", root, "conv-00000") is None
+
+
 def test_a_new_file_is_found_once_the_index_expires(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -67,6 +81,12 @@ def test_a_new_file_is_found_once_the_index_expires(
     transcripts._indexes.clear()
     assert transcripts._by_id("claude", root, "conv-00000") is not None
     (root / "dir-keep" / "conv-new.jsonl").write_text("{}\n")
+    # Move the directory's mtime on explicitly. The filesystem's mtime is
+    # coarse, so a file written in the same tick as the first scan leaves the
+    # stamp unchanged and the old index would stand (WI-2242).
+    keep = root / "dir-keep"
+    later = keep.stat().st_mtime + 10
+    os.utime(keep, (later, later))
     # Still inside the TTL: the index stands and the new file is invisible.
     assert transcripts._by_id("claude", root, "conv-new") is None
     monkeypatch.setattr(transcripts, "_clock", lambda: time.monotonic() + 100)
@@ -126,6 +146,10 @@ def test_a_new_codex_file_in_todays_directory_is_found_after_the_ttl(
     # Written into the same day directory: no new month or year appears.
     second = "11111111-2222-4333-8444-555555555555"
     (day / f"rollout-2026-10-14T01-00-00-{second}.jsonl").write_text("{}\n")
+    # Coarse filesystem mtime: move the day directory's stamp on explicitly so
+    # the expired index sees the change (WI-2242).
+    later = day.stat().st_mtime + 10
+    os.utime(day, (later, later))
     assert transcripts._by_id("codex", root, second) is None
     monkeypatch.setattr(transcripts, "_clock", lambda: time.monotonic() + 100)
     found = transcripts._by_id("codex", root, second)

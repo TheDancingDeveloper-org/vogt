@@ -71,6 +71,42 @@ def default_data_dir() -> Path:
     return base / "vogt"
 
 
+class UsageAccount(BaseModel):
+    """One provider account the usage board reads (`usage_accounts`, WI-2040).
+
+    `agent` names the transcript shape: a Claude Code config directory (its
+    `projects/` holds the transcripts) or a Codex home (its `sessions/`).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, description="The account's name, e.g. `acct2`.")
+    agent: Literal["claude", "codex"]
+    dir: Path = Field(
+        description="The account's config directory (`CLAUDE_CONFIG_DIR` or "
+        "`CODEX_HOME`)."
+    )
+
+
+class UsageKey(BaseModel):
+    """One LiteLLM virtual key whose spend the usage board reads."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, description="The key's name, e.g. `deepseek`.")
+    key_env: str = Field(
+        min_length=1,
+        description="Environment variable holding the key. Its value is sent "
+        "to LiteLLM's `/key/info` and never stored or returned.",
+    )
+    daily_alert_usd: float | None = Field(
+        default=None,
+        ge=0,
+        description="Alert when the key's day spend reaches this; overrides "
+        "`usage_daily_spend_alert_usd`.",
+    )
+
+
 class DeployLane(BaseModel):
     """One deployment lane whose deployed revision Vogt reads (`deploy_lanes`).
 
@@ -352,6 +388,17 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    autopilot_done_requires_result_report: bool = Field(
+        default=False,
+        description=(
+            "When true, the session sweep treats an `AUTOPILOT: DONE` as done "
+            "only if the session posted a `result` report (`session.report`) "
+            "since its turn began; otherwise the row reads `waiting` with the "
+            "reason `done without a result report`, so oversight asks for one "
+            "instead of trusting the line. Off by default."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     deploy_lanes: tuple[DeployLane, ...] = Field(
         default=(),
         description=(
@@ -365,6 +412,43 @@ class VogtConfig(BaseSettings):
             "versions are reported as not configured. A receipt whose "
             "status says the deploy or its smoke test failed raises an "
             "Inbox alert."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_accounts: tuple[UsageAccount, ...] = Field(
+        default=(),
+        description=(
+            "Provider accounts `usage.board` reports on, each a table with "
+            "`name`, `agent` (`claude` or `codex`) and `dir` (that account's "
+            "config directory). Read on request only: the newest limit and "
+            "reset the account's own transcripts recorded. Empty, no account "
+            "is reported."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_litellm_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL of a LiteLLM proxy whose keys' spend `usage.board` "
+            "reads through `/key/info`. Unset, no key spend is read."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_litellm_keys: tuple[UsageKey, ...] = Field(
+        default=(),
+        description=(
+            "LiteLLM keys `usage.board` reports spend for: `name`, `key_env` "
+            "(the environment variable holding the key) and an optional "
+            "`daily_alert_usd`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_daily_spend_alert_usd: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Default day-spend alert threshold, in USD, for every LiteLLM key "
+            "without its own `daily_alert_usd`. Unset, no alert is raised."
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
@@ -440,6 +524,53 @@ class VogtConfig(BaseSettings):
             "are 'not collected' rather than absent. A file rather than an "
             "environment variable or an argument, so the token never appears "
             "in a process listing."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_app_id: str | None = Field(
+        default=None,
+        description=(
+            "The ID or the client ID of a GitHub App for the forge adapter "
+            "to authenticate as; GitHub accepts either as the JWT issuer. "
+            "With `github_app_private_key_file` also set, GitHub reads and "
+            "writes use short-lived installation tokens, which have their own "
+            "rate limit, instead of `github_token_file`. The notifications "
+            "collector stays on `github_token_file`, because notifications "
+            "belong to a user and an App cannot read them. Not a secret, so "
+            "plain config is fine. Setup, including the permissions the App "
+            "needs, is in docs/GITHUB_APP.md."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_app_installation_id: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Pin every GitHub request to one installation of "
+            "`github_app_id`. Unset, the installation is discovered per "
+            "repository owner (`GET /repos/{owner}/{repo}/installation`, "
+            "then `/orgs/{owner}/installation` or "
+            "`/users/{owner}/installation`) and remembered, so one App "
+            "installed on several accounts or organisations covers them all; "
+            "an owner without the App is read with `github_token_file`. "
+            "Publishing a new repository needs an owner to create it under: "
+            "this installation's account or, unset, the App's only "
+            "installation. An App with several installations must set this "
+            "to publish."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_app_private_key_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to the GitHub App's PEM private key, which signs the "
+            "short-lived JWT exchanged for installation tokens. A file for "
+            "the same reason as `github_token_file`: the key never appears "
+            "in the environment or a process listing. When this and "
+            "`github_app_id` are set, the App takes precedence over "
+            "`github_token_file` for every GitHub read and write except "
+            "notifications. Unset, or unreadable, the personal token is used "
+            "as before."
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
@@ -731,6 +862,77 @@ class VogtConfig(BaseSettings):
             "never looks is the failure this product exists to prevent: "
             "stale evidence and no evidence are indistinguishable from the "
             "outside, so the safe default is to keep looking."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    watch_interval_seconds: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "How often `serve` evaluates armed watches (WI-2036) and wakes the "
+            "sessions whose trigger fired. Zero disables the loop: watches are "
+            "stored but nothing wakes. Vogt-side triggers (a work item's "
+            "state, a session ending) fire within this interval; forge "
+            "triggers read what the sweep observed, so they also wait on "
+            "`sweep_interval_seconds`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    cold_wake_compaction: bool = Field(
+        default=False,
+        description=(
+            "Cache-aware compaction on a cold wake (WI-2037). When on, waking "
+            "a hibernated session whose provider prompt cache has expired "
+            "(hibernated longer than its `cold_wake_ttl_seconds`) and whose "
+            "context is at least `cold_wake_threshold_tokens` starts a fresh "
+            "conversation seeded with a structured summary — task, state, "
+            "decisions, files, branch, next step — instead of resuming the "
+            "transcript at full uncached price. Off by default; a session "
+            "opts out with `cold_wake_opt_out` at start or hibernate."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    cold_wake_threshold_tokens: int = Field(
+        default=100_000,
+        ge=0,
+        description=(
+            "The context size, in tokens, at or above which a cold wake is "
+            "compacted (WI-2037). A smaller conversation is cheap enough to "
+            "re-read and is resumed as it is."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    cold_wake_ttl_seconds: dict[str, int] = Field(
+        default={"anthropic": 300, "deepseek": 300},
+        description=(
+            "Prompt-cache lifetime per provider, in seconds (WI-2037): a "
+            "session hibernated longer than this is treated as cold. Keys are "
+            "`anthropic`, `openai`, `deepseek`, `google`, … A provider with no "
+            "entry is never compacted, because its cache cannot be judged. "
+            "Anthropic's 1-hour cache tier is `anthropic = 3600`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    forge_posture_interval_seconds: int = Field(
+        default=86400,
+        ge=0,
+        description=(
+            "How often the forge posture collector re-reads a repository's "
+            "update-automation settings (version-update config, vulnerability "
+            "alerts, automated security fixes). Posture changes rarely and "
+            "cost several API calls per repository, so the default is daily; "
+            "sweeps in between skip it. Zero reads it on every sweep."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_rate_limit_floor: int = Field(
+        default=500,
+        ge=0,
+        description=(
+            "When GitHub reports fewer core API requests than this left in "
+            "the hour, forge reads stop until the limit resets instead of "
+            "spending the rest. The limit is per GitHub user and shared with "
+            "every other tool on that account. Zero never pauses early."
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )

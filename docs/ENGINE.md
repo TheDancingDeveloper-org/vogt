@@ -116,7 +116,12 @@ it with a digest), and the runtime. The runtime stage starts `FROM` a
 `ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean-*`): an Ubuntu image
 carrying the toolchains an agent working *inside* a session is likely to want
 — Node, Rust, Java/Gradle, the Android SDK; its `INSTALL_FLUTTER` build
-argument adds Flutter for a pod that builds the Android app. It is a
+argument adds Flutter for a pod that builds the Android app. A third variant,
+`workbench`, is `full` plus the public session tools (Chrome and `chrome-ci`,
+Python 3.12, Terraform, sshpass, pingcli, actionlint, and the Tailscale
+client, which the image never joins). `build.yml` publishes the merged image
+built on it as `vogt-stack-workbench`; nothing in this repository deploys
+that image. It is a
 development pod rather than a hardened service image — it runs as a named
 user with `sudo`, with a writable home — which is why the core image at the
 repository root is a separate build rather than a stage of this one: it is
@@ -456,6 +461,27 @@ higher cap is not lowered, and a server nobody registered is not created. The
 rewrite is the same flock and atomic rename, and a config that does not parse
 is left alone.
 
+A driven Codex on a stack that sets `ENGINE_CODEX_APPROVAL_POLICY=on-request`
+(the default is `never` since WI-2028) would have every MCP tool call
+stop at a permission prompt only a person may answer (WI-1634). The bundle
+therefore gives the estate's trusted servers `default_tools_approval_mode =
+"approve"`, the fork's per-server key that skips the prompt for that server
+only: `vogt`, `cadastre`, `codex-subagent`, `browser`, `github-ro`,
+`forgejo-ro` and `grafana-ro` (operator-approved 2026-10-15). This mirrors
+what the Claude driven-session policy lets a Claude session call without a
+person. `komodo` is deliberately not on the list, since its `deploy_stack` and
+`write_stack_file` change running stacks, and neither is any other server:
+those keep the person gate. A table that already names a mode keeps it, and a
+server nobody registered is not created. The read-only, browser and sub-agent
+writers emit the same row in the tables they own, so a restart does not
+rewrite them, and they carry over a mode an operator already set there. The
+key lives in the session's own `~/.codex/config.toml`, which the session can
+edit, so it is a convenience for autonomous work and not a security boundary;
+the engine's person gate (WI-1355) is the boundary.
+`/etc/codex/requirements.toml` cannot carry the setting (its
+`[mcp_servers]` is an identity allowlist), and it is unchanged: gitguard
+stays pinned and the bypass posture stays person-only.
+
 Any further MCP server an agent should reach is registered by hand inside the
 session, the way the Rust LSP entry above shows.
 
@@ -761,7 +787,26 @@ than these routes.
   a label matches several options. Requires `sessions` (WI-917). A
   permission prompt (`kind` `permission` or `read-outside-cwd`) is answered
   only by a person: anyone else gets `403 person required` and nothing is
-  typed (WI-983, below).
+  typed (WI-983, below). One exception (WI-1831, widened by WI-2028,
+  `oversight_answer`): vogt-core may name an `overseer` (the engine id of the
+  oversight session it relays) on `/answer` and on `/input`. The engine
+  checks that session's role itself (role `oversight`, live, not the target)
+  and then lets it answer a `permission` prompt with any option or keys; a
+  `read-outside-cwd` prompt stays a person's. `overseer` is read only from
+  vogt-core's own credential. Answers and refusals are both audited
+  (`vogt::audit`, `event=session.permission_answer`, `via=answer|input`,
+  with the overseer, question and command excerpt).
+- `GET /api/sessions/changes[?since=N&ids=&limit=]` and
+  `GET /api/sessions/wait-any[?ids=&until=&cursor=&timeout_s=]` — the overseer
+  delta (WI-1246, WI-1672). `cursor` is a sequence number, or `now` to skip
+  every event already in the ring and wait only for one published after the
+  call starts. A timeout then returns that head as `next_cursor`. A numeric
+  cursor past the head is treated as the start of the ring (the sequence
+  restarts when the engine does). The change kinds are `ready`, `approval`,
+  `exited`, `errored`, `blocked`, `unblocked`, `hibernated`, `woken`, `budget`
+  and `done` (an autopilot agent declared itself done, WI-1518); the default
+  `until` is `ready`, `blocked`, `approval`, `exited`, `errored` and `done`.
+  Requires `sessions`.
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
   only when asked) with the last N (default 8, at most 40) non-blank lines
@@ -812,17 +857,50 @@ than these routes.
   a dirty shared checkout cannot leak into the session. Refused (`400`) when
   `cwd` is not a git checkout or is outside the workspace, when the worktree
   itself would land outside the workspace (a checkout at the workspace root),
-  when `base_ref` is not already in it, when `branch` is not a single ref name
+  when `base_ref` is not a branch on `origin`, when `branch` is not a single ref name
   or already exists, when the sibling directory already exists, or together
   with `resume` (a resumed conversation would move `cwd` off the checkout).
-  `base_ref` is resolved locally and never fetched, so a local branch behind
-  its remote is cut where it stands; name `origin/<branch>` for the remote's
-  tip. Every other refusal (codex policy, agent launch) is checked before the
+  Before the cut the engine fetches `base_ref` from `origin` and cuts from
+  `origin/<base>` (WI-1630): the checkout's own local ref of that name is
+  the shared checkout's and lags the remote, so cutting from it starts the
+  session on stale code. A slash in the name is a branch
+  (`integrate/vogt-next`), not a refusal. A `base_ref` that already names the
+  remote (`origin/main`, `origin/integrate/vogt-next`) has that one `origin/`
+  prefix stripped and is fetched the same way, so both forms cut from the
+  same remote-tracking ref. A name that is not a branch ref after that strip
+  (`origin/`, `integrate//next`) is refused as not a ref name. A fetch that
+  fails, or a base the remote does not have, refuses the start (`400`) rather
+  than falling back to the local ref. The fetch moves only that one
+  remote-tracking ref, never a local branch. The fetch runs as the engine
+  process, before the session process exists (WI-1666). An `https://github.com`
+  origin (host exactly `github.com`) is fetched with
+  `ENGINE_WORKTREE_GITHUB_TOKEN`, falling back to `GH_TOKEN` on the engine
+  process — the same token agent-auth aliases to `GH_TOKEN` inside a session.
+  The value is given to git only through `GIT_ASKPASS` (`vogt-git-askpass`,
+  reading `ENGINE_WORKTREE_FETCH_TOKEN` for that one command) and is never put
+  on an argument list or into an error. An https GitHub origin with neither
+  variable set refuses the start (`400`) and names
+  `ENGINE_WORKTREE_GITHUB_TOKEN`. SSH (`git@github.com:...`), a host that only
+  contains the substring `github.com`, and every non-GitHub origin keep the
+  engine user's own git credentials and are not given the token. Every other refusal (codex policy, agent launch) is checked before the
   cut, and a start that fails after it (prompt file, PTY spawn) removes the
   worktree and its branch again, so a refused start leaves neither behind.
   Absent means the session opens in `cwd`, byte-identical to a request from
   before the field existed. A wake returns to the worktree already cut and
   does not cut another.
+  `session.start`'s `cwd` (WI-1671) is the other way in: the caller names an
+  existing worktree and vogt-core sends it as this `cwd`, with no
+  `SessionSpec.worktree`. It must be an absolute path that exists, sit under
+  the workspace `Active/` directory (the parent of the project's registered
+  checkout, not any path component named `Active`), and be a git worktree of
+  the same repository as that checkout (the same git `commondir`). The
+  checkout, and any subdirectory of it, is refused: its git toplevel is
+  the checkout, so a worker cannot start inside the shared tree. A linked
+  worktree nested under the checkout has its own toplevel and is accepted. A symlink is accepted as the directory it resolves to.
+  Combining it with an explicit `worktree: true` is refused before the
+  engine is asked. A purpose whose profile would have set `worktree` (the
+  `implement` profile does) does not: `cwd` means the checkout already
+  exists, so the profile's worktree is left out.
 - `POST /api/sessions/:id/conversation` `{"agent", "id", "ended"?}` ->
   `SessionSummary` (WI-962). Links the agent conversation running in the
   session, or with `ended` unlinks it while it is still the session's. See
@@ -864,7 +942,7 @@ engine turns them into that CLI's own flags (`agent_cli.rs`):
 | `claude` | `--model <id>` | `--effort <level>` |
 | `codex` | `-m <id>` | `-c model_reasoning_effort=<level>` |
 
-**Codex's default model is the estate LiteLLM router** (WI-1147). The estate Codex fork speaks the Chat Completions wire as well as Responses (WI-1286), and grok returns tool calls only over chat, so `vogt-mcp-bootstrap` writes `[model_providers.litellm]` into `~/.codex/config.toml` (`${CODEX_HOME}` when set) with `base_url = "http://100.92.54.45:4000/v1"`, `wire_api = "chat"` and `env_key = "HOMELAB_LITELLM_SESSION_KEY"`. The key is that environment variable, exported by the agent-auth manifest (§9); the config never contains it. When `model` and `model_provider` are absent, or already name this bundle (`litellm`, or `theclawbay` with model `grok` / `grok-4.7`), bootstrap sets `model_provider = "litellm"` and `model = "grok"` — the router's `grok` group, not a pinned model id. grok has no entry in Codex's bundled model catalog, whose fallback metadata offers no apply_patch tool, so bootstrap also writes `vogt-model-catalog.json` beside the config — one entry per LiteLLM group that answers a chat completion with the session key (WI-1592): `grok`, `code`, `small`, `reasoning`, `vision`, `or-deepseek-flash`, `or-gemini-flash`, `or-glm-5-3`, `qwen3-coder`, `qwen3-8-27b`, `gpt-oss-120b`, and the DLab models whose plan serves them (`dlab-deepseek-v4-pro`, `dlab-deepseek-v4-1-flash`, `dlab-grok-4-5`, `dlab-grok-4-6`, `dlab-grok-4-7`, `dlab-gemini-3-8-flash`, `dlab-glm-5-3`, `dlab-glm-5-3-flash`, `dlab-glm-5-3-flashx`, `dlab-kimi-k3`), plus `premium` hidden from the picker. Each entry has `apply_patch_tool_type` `freeform` and omits `tool_mode` so code mode stays off. Priority is that order, so the fork's ascending sort keeps `grok` as the default. Not listed, because a completion does not succeed: `or-deepseek` (blocked on OpenRouter), Bedrock (the router has no bedrock model — it needs a LiteLLM provider entry before Codex can offer it, and no credentials are added here), `dlab-gemini-3-1-pro-preview` and `dlab-gemini-3-6-flash` (not on the DLab plan), `dlab-claude-haiku-4-5` (unavailable), and the `gpt-6-*-free` aliases (auth error). Bootstrap sets `model_catalog_json` to that file. That key is set only when absent or when it already names this file; a catalog an operator chose is left alone, and so is the file. A session that passes `-m <id>` still overrides `model` for that process. `[model_providers.theclawbay]` is written as a fallback profile with no bearer token; a profile an operator already wrote under that name (one carrying `experimental_bearer_token`) is left untouched, as is any other provider and model an operator set. The rewrite uses the same flock and atomic rename as the read-only server tables, and a config that does not parse is left alone. The manifest line that exports `HOMELAB_LITELLM_SESSION_KEY` is an ops overlay change (Forgejo `indexarr/ops` pull 52), not part of this repository.
+**Codex's default model is the estate LiteLLM router** (WI-1147). The estate Codex fork speaks the Chat Completions wire as well as Responses (WI-1286), and grok returns tool calls only over chat, so `vogt-mcp-bootstrap` writes `[model_providers.litellm]` into `~/.codex/config.toml` (`${CODEX_HOME}` when set) with `base_url = "http://100.92.54.45:4000/v1"`, `wire_api = "chat"` and `env_key = "HOMELAB_LITELLM_SESSION_KEY"`. The key is that environment variable, exported by the agent-auth manifest (§9); the config never contains it. When `model` and `model_provider` are absent, or already name this bundle (`litellm`, or `theclawbay` with model `grok` / `grok-4.7`), bootstrap sets `model_provider = "litellm"` and `model = "grok"` — the router's `grok` group, not a pinned model id. grok has no entry in Codex's bundled model catalog, whose fallback metadata offers no apply_patch tool, so bootstrap also writes `vogt-model-catalog.json` beside the config — one entry per LiteLLM group that answers a chat completion with the session key (WI-1592): `grok`, `code`, `small`, `reasoning`, `vision`, `or-deepseek-flash`, `or-gemini-flash`, `or-glm-5-3`, and the DLab models whose plan serves them (`dlab-deepseek-v4-pro`, `dlab-deepseek-v4-1-flash`, `dlab-grok-4-5`, `dlab-grok-4-6`, `dlab-grok-4-7`, `dlab-gemini-3-8-flash`, `dlab-glm-5-3`, `dlab-glm-5-3-flash`, `dlab-glm-5-3-flashx`, `dlab-kimi-k3`), plus `premium` hidden from the picker. Each entry has `apply_patch_tool_type` `freeform` and omits `tool_mode` so code mode stays off. Priority is that order, so the fork's ascending sort keeps `grok` as the default. Not listed, because a completion does not succeed: `or-deepseek` (blocked on OpenRouter), `qwen3-coder`, `qwen3-8-27b` and `gpt-oss-120b` (they fail inside LiteLLM — a 408 or a hang; re-adding them is WI-1631), Bedrock (the router has no bedrock model — it needs a LiteLLM provider entry before Codex can offer it, and no credentials are added here), `dlab-gemini-3-1-pro-preview` and `dlab-gemini-3-6-flash` (not on the DLab plan), `dlab-claude-haiku-4-5` (unavailable), and the `gpt-6-*-free` aliases (auth error). Bootstrap sets `model_catalog_json` to that file. That key is set only when absent or when it already names this file; a catalog an operator chose is left alone, and so is the file. A session that passes `-m <id>` still overrides `model` for that process. `[model_providers.theclawbay]` is written as a fallback profile with no bearer token; a profile an operator already wrote under that name (one carrying `experimental_bearer_token`) is left untouched, as is any other provider and model an operator set. The rewrite uses the same flock and atomic rename as the read-only server tables, and a config that does not parse is left alone. The manifest line that exports `HOMELAB_LITELLM_SESSION_KEY` is an ops overlay change (Forgejo `indexarr/ops` pull 52), not part of this repository.
 | `opencode` | `--model <provider/id>` | *refused — it has no effort control* |
 | `klaudia` | `--model <id>` | *refused — it has no effort control* |
 
@@ -1025,11 +1103,26 @@ its own. `DELETE /api/sessions/:id` removes the guide with the brief, and the
 prompt sweep keeps a guide while its session is known, live or hibernated,
 exactly as it keeps the brief.
 
-**Project policy.** A project's `agent_policy` reaches a session only as
-text in its brief, which vogt-core composes. The engine writes no
-per-session hooks and enforces none of it yet: refusing `forbidden_text` and
-an agent's merge onto a production branch is a follow-up, and Klaudia has
-no per-session settings flag to carry such a hook.
+**Charters.** When the start request carries a non-empty `charter` (the
+`## Charters` section of the brief, WI-2038) and the command is Codex, the
+engine appends it to the `developer_instructions` override after the workspace
+guidance, or adds one when there is none (`agent_cli::with_codex_charter`).
+That body rides on every Codex request, so a charter over 4 KiB is replaced
+there by a pointer to the brief's `## Charters`. An override that does not
+parse, or a result over 120 KiB, is left alone with a warning in the engine
+log; the brief still carries the charter. Other agent
+CLIs ignore the field: the brief is how they get it.
+
+**Project policy.** A project's `agent_policy` reaches a session as text in
+its brief, which vogt-core composes, and the engine writes no per-session
+hooks. One part of it is enforced before a session exists at all:
+`agent_policy.review.never_models` is checked in vogt-core when a session
+starts (WI-1590), against the model the start will actually run — the
+purpose's dispatch profile, or the model the caller named — and a start on a
+forbidden model is refused with `policy_refused` rather than spawned. The
+rest stays unenforced: refusing `forbidden_text` and an agent's merge onto a
+production branch is still a follow-up, and Klaudia has no per-session
+settings flag to carry such a hook.
 
 **Quiet defaults for Claude Code.** Engine sessions are often driven by
 another agent through `POST /api/sessions/:id/input`, and Claude Code's
@@ -1536,17 +1629,35 @@ checks decide what it can finish on its own (WI-926; the design is
   not the pod's brokered token, which is bound to a person. A plain shell
   keeps the pod's token. An agent a person starts by hand inside such a
   shell inherits the shell's token: the person started it.
+- **A wake replays only the start's posture** (WI-2252). A posture granted
+  after the start (Shift+Tab in Claude Code, or `claude
+  --dangerously-skip-permissions` typed into a plain shell) is not in the
+  record, and is never replayed: the engine cannot tell a person's grant
+  from an agent's. At hibernation the engine reads Claude Code's footer
+  into `observed_permission_mode` on the record. When that was `bypass` and
+  the woken session has no bypass grant, its summary carries
+  `posture_lost_on_resume: true` (and the core's `session_sweep` row says so)
+  until a later hibernation sees the bypass back on the screen; the operator
+  re-grants it in the terminal. The record keeps only the `--settings` file
+  the first launch actually carried: a worker with none falls back to the
+  deployment's, an oversight session with none (or one that began as a
+  plain shell) is woken without the worker driven-session policy.
 - **Codex** (WI-1143) does not take Claude's `--settings` or
   `--permission-mode`. The engine maps the same three postures onto Codex
   flags, and unknown values are `400`:
-  - **default** (and a missing posture): `-a on-request -s danger-full-access`.
-    A `codex exec` launch omits `-a` (that subcommand rejects it) and keeps
-    the sandbox.
-  - **accept-edits** (`accept-edits` or `accept_edits`): `-a on-request -c
-    approvals_reviewer="auto_review" -s danger-full-access`. The `-a` pin is
-    what stops a user's `~/.codex/config.toml` `approval_policy = "never"`
-    from turning approvals off while the sandbox is `danger-full-access`;
-    the reviewer then answers the asks that pin produces. A `codex exec`
+  - **default** (and a missing posture): `-a <policy> -s danger-full-access`,
+    where `<policy>` is `ENGINE_CODEX_APPROVAL_POLICY` (config key
+    `codex_approval_policy`; one of `untrusted`, `on-failure`, `on-request`,
+    `never`; default **`never`**, WI-2028). With `never` a driven Codex
+    worker runs its commands without prompting, as the bypassed Claude Code
+    workers do; a stack sets `on-request` to restore per-command prompts
+    (which an oversight session may then answer). Any other value fails
+    engine startup. A `codex exec` launch omits `-a` (that subcommand
+    rejects it) and keeps the sandbox.
+  - **accept-edits** (`accept-edits` or `accept_edits`): `-a <policy> -c
+    approvals_reviewer="auto_review" -s danger-full-access`. The `-a` pin
+    stops a user's `~/.codex/config.toml` from choosing the approval policy;
+    under `on-request` the reviewer answers the asks that pin produces. A `codex exec`
     launch omits `-a` (that subcommand rejects it) and keeps the reviewer
     and the sandbox.
   - **bypass**: `--dangerously-bypass-approvals-and-sandbox` and nothing
@@ -1699,7 +1810,16 @@ warning and the rest are kept.
   then `projects/` in the engine's own `CLAUDE_CONFIG_DIR` and in every listed
   account, so a session on another login is still found.
 - Folder-trust pre-acceptance writes to the session's own config directory
-  (above). Create a profile with `claude-profile prepare <name>`: it makes the
+  (above). Codex is pre-trusted the same way (WI-1667): before a Codex
+  session starts, the engine records `trust_level = "trusted"` for that
+  session's cwd under `[projects."<cwd>"]` in `$CODEX_HOME/config.toml`
+  (`~/.codex/config.toml` when `CODEX_HOME` is unset). The rewrite holds the
+  same lock the MCP bootstrap uses, leaves a config that does not parse
+  untouched, and does not overwrite a `trust_level` an operator already
+  set. `ENGINE_AGENT_QUIET_ONBOARDING=0` skips it, as it skips Claude's.
+  Codex's "Trust this folder?" screen is also a startup gate
+  (`approval.kind` `folder-trust`), so a session that still reaches it can
+  be answered with `session_answer`. Create a profile with `claude-profile prepare <name>`: it makes the
   directory, links the main account's settings, skills and agents in, sets the
   auto-mode flag, and registers the MCP servers there by running
   `vogt-mcp-bootstrap` with `CLAUDE_CONFIG_DIR` set. Then log in once with
@@ -1758,6 +1878,21 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   credentials: vogt-core's `session.wake` mints a new `VOGT_HTTP_TOKEN`. The
   engine mints a new broker grant. The history row and log continue.
   Waking a live session returns it unchanged.
+- **Cold-wake compaction (WI-2037).** A wake with `fresh_prompt` (at most
+  64 KiB) does not resume. The agent starts a new conversation, pinned to a
+  new conversation id so it does not collide with the old one. Its first
+  prompt is the summary, then the git facts of the session directory, then
+  the original brief (capped at 32 KiB), all written to the brief file.
+  After that, the record resumes the new conversation. vogt-core decides
+  when to send it: `cold_wake_compaction` is on (it is off by default), the
+  session has not set `cold_wake_opt_out`, its agent is Claude, Klaudia or
+  Codex, the session was hibernated longer than its provider's
+  `cold_wake_ttl_seconds`, and the last `economics.context_tokens` reading
+  is at least `cold_wake_threshold_tokens`. vogt-core builds the summary
+  from the last reply and the work item's newest hand-off, without a model
+  call. Every `session.wake` audit record carries the decision under
+  `cold_wake`. A hibernated session's summary carries its last
+  `economics` reading so that vogt-core can make this check.
 - **Restarts.** On `SIGTERM` the engine hibernates every session it can
   (`trigger: "shutdown"`) before the history drain, and an oversight session
   even when it is a plain shell. At boot, every record without a process
@@ -1842,6 +1977,14 @@ agent may stop to announce its next step. So the engine re-drives it
 The summary's `autopilot` reads `false` once it is off. A nudge is input, so
 it restarts the quiet clock and nudges cannot stack up.
 
+Declaring itself done is a change an overseer reads (WI-1518). The first time
+the marker is seen in a turn, the engine publishes a `session-done` event
+(`source`: `marker`), which `GET /api/sessions/changes` and `wait-any` report
+as kind `done`, and the summary carries `done_at` (RFC 3339). A screen that
+still shows the marker does not declare it again; `done_at` is cleared when
+the next turn starts, and kept across a hibernation and a wake through the
+hibernation record.
+
 **When opencode is `ready`.** opencode draws no prompt glyph, so `ready`
 recognises its composer separately: the `┃` bar closed by a `╹▀` footer near
 the bottom of the screen, with no `esc interrupt` (which it shows only while a
@@ -1866,8 +2009,10 @@ nothing) and acts at two levels:
 - **soft**, once, at `ENGINE_BUDGET_SOFT_PCT` (default 80) of a turn, context
   or whole-session clock limit: a `budget` change, and — only while the session is at its prompt — one
   typed line: `[vogt] budget: {what} ({n} of {limit}). Commit your work in
-  progress on your branch, write a hand-off comment (work_comment
-  kind=handoff), then stop.` Mid-turn, the line waits for the next tick that
+  progress on your branch and push it, write a hand-off comment (work_comment
+  kind=handoff: branch, head_sha, done, remaining, gates_run, blockers), then
+  stop.` A session that stops without one gets a minimal hand-off from the
+  core, built from its git state (WI-1833). Mid-turn, the line waits for the next tick that
   finds it ready. The prompt is read the way autopilot reads it: the session
   must not be blocked, its agent must be one the engine re-drives, and the
   prompt must have been quiet for the nudge settle time. A turn or context
@@ -1943,9 +2088,14 @@ sets `resources.over_threshold` on any session at or over it. The core's
 #### Worktree build output
 
 A finished worker's build output is what fills the host disk: `target/`,
-`node_modules` and `.venv` in a worktree nobody is using. With
-`ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` set, hibernating or stopping a session
-whose directory is a linked git worktree removes those directories. A repo's
+`node_modules` and `.venv` in a worktree nobody is using. Stopping or
+removing a session whose directory is a linked git worktree removes those
+directories, and so does removing a hibernated one. This is on by default
+(WI-1750); set `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE=0` to keep them. A
+hibernation keeps them unless the variable is `true`: a hibernated session is
+woken to carry on, and every engine shutdown hibernates every live session. A
+session that exits on its own, without a stop, is not cleaned until it is
+removed. A repo's
 main checkout is never touched — only a directory `git worktree add` created —
 and neither is a symlink or a file git tracks. A `target` directory counts only
 when a `Cargo.toml` sits beside it, so a directory of notes named `target` is
@@ -1967,6 +2117,43 @@ what is free, the percent used, and `needs_attention` once that passes
 `ENGINE_DISK_WARN_PERCENT` (`85`). A deployment with no engine reports no row,
 which is a different fact from a volume that is fine.
 
+
+#### Session scratch, background processes and free space
+
+Claude Code keeps each session's scratchpad at
+`<tmp>/claude-<uid>/<cwd slug>/<session id>/`, outside the worktree, and
+nothing used to delete it: on 2026-10-18 scratch worktrees with their own Cargo
+`target` (10–16 GB each) and load-test downloads held 292 GB and filled the
+host (WI-1810). Unless `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` is false:
+
+- stopping or removing a session deletes its scratch directories;
+- hibernating one keeps them but removes every Cargo `target` there (beside a
+  `Cargo.toml`, or holding `CACHEDIR.TAG`) and any top-level entry larger
+  than `ENGINE_SCRATCH_PRUNE_GB` (2).
+
+On hibernate, stop and remove the engine also `SIGKILL`s every process of its
+user still carrying the session's `VOGT_ENGINE_SESSION_ID` — a `setsid` or
+`nohup` job that left the process tree.
+
+A new session is refused with `507 Insufficient Storage` while the workspace
+or temp volume has less than `ENGINE_MIN_FREE_PERCENT` (10) free; `0` turns
+the guard off. A wake is let through.
+
+Cargo builds inside a session's scratch directory share one target per
+repository: at start the engine writes
+`<tmp>/claude-<uid>/<cwd slug>/.cargo/config.toml` with `build.target-dir =
+<ENGINE_SHARED_CARGO_TARGET_DIR>/<repo>` (default
+`<tmp>/claude-<uid>/cargo-target`; `off` disables). Cargo reads that file only
+for builds under the scratch directory, so a session's own worktree keeps its
+own target and workers never queue on one lock; concurrent scratch builds of
+one repository do share its lock, which is the price of not building a fresh
+10–16 GB target each time. A repository's own `.cargo/config.toml` or a
+`CARGO_TARGET_DIR` wins. A repository's shared target over
+`ENGINE_SHARED_CARGO_TARGET_MAX_GB` (40) is removed when a session stops.
+Deleting a scratch directory also runs `git worktree prune` in the main
+repository of each scratch worktree it held. Hibernation pruning weighs the
+entries inside `scratchpad/` one by one, never `scratchpad/` as a whole.
+
 #### Launch timing, logs and metrics
 
 A session's launch explains itself in the engine log and on `/metrics`
@@ -1980,7 +2167,7 @@ fields are logged quoted: `event="launch.report"`).
 | `launch.first_output` | info, or warn at 10 s or more | the session's first byte of output | `session_id`, `name`, `launcher`, `first_output_ms` |
 | `launch.stage` | info | each stage the launch wrapper reports | `session_id`, `stage` (`login`, `secrets`, `bootstrap`), `ms`, `outcome`, and for `secrets` the `project` and `mode` |
 | `launch.secrets` | info (audit) | each secret project the launch read | `session_id`, `project`, `mode`, `ms`, `count`, `missing`, `secrets` (`VAR=SECRET_NAME` pairs, never a value) |
-| `launch.report` | info, or warn when failed or 10 s or more | the wrapper hands over, or fails | `session_id`, `name`, `command`, `outcome`, `total_ms`, `error` |
+| `launch.report` | info, or warn when degraded, failed or 10 s or more | the wrapper hands over, or fails | `session_id`, `name`, `command`, `outcome` (`ok`, `degraded`, `failed`), `total_ms`, `error` |
 
 `launcher` is `agent-auth` when the launch wrapper runs first, and `direct`
 otherwise. The wrapper (`vogt-agent-auth run`/`shell`) times its own stages
@@ -3758,6 +3945,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.wait_any` | Operator-only | Unavailable: Blocks for up to ten minutes; a voice turn cannot wait that long. For agents over MCP/CLI/REST. |
 | `session.report_blocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
 | `session.report_unblocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
+| `session.report` | Operator-only | Unavailable: An agent's typed report about its own session (progress, result, question, blocker); for agents over MCP/CLI/REST. |
 | `session.answer` | Operator-only | Unavailable: The assistant answers permission dialogs through its own approval flow; for drivers over MCP/CLI/REST. |
 | `session.token` | Operator-only | Unavailable: the session engine's own HTTP call to mint and revoke engine-started agent sessions' credentials; not a voice action. |
 | `session.sweep` | Voice-readable | Available: The voice roster — one digest line per session, the attention filter, a short screen. Accepts either id. This, not `session.list`, answers "what's going on". |
@@ -3775,8 +3963,13 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.grant_list` | Operator-only | Unavailable: Lists grants to sessions; for the GUI and for agents over MCP/CLI/REST. |
 | `decision.ask` | Operator-only | Unavailable: An agent's question for a person; for agents over MCP/CLI/REST. |
 | `decision.answer` | Operator-only | Unavailable: A person's answer, made deliberately in the Inbox, never by voice. |
+| `charter.get` | Operator-only | Unavailable: Standing instructions for agent sessions; for the GUI and agents over MCP/CLI/REST. |
+| `charter.set` | Operator-only | Unavailable: Changes what every session brief on a scope carries; set it from the GUI or MCP, not by voice. |
 | `decision.list` | Operator-only | Unavailable: Lists decisions; for the GUI and for agents over MCP/CLI/REST. |
 | `decision.withdraw` | Operator-only | Unavailable: Withdrawing a decision; for the GUI and for agents over MCP/CLI/REST. |
+| `watch.create` | Operator-only | Unavailable: A session arming its own wake trigger; for agents over MCP/CLI/REST. |
+| `watch.list` | Operator-only | Unavailable: Lists armed and fired watches; for agents over MCP/CLI/REST. |
+| `watch.cancel` | Operator-only | Unavailable: Disarming a watch; for agents over MCP/CLI/REST. |
 | `token.issue` | Operator-only | Unavailable: Issues credentials that must never enter model context. |
 | `token.list` | Operator-only | Unavailable: Admin credential inventory. |
 | `token.revoke` | Operator-only | Unavailable: Admin credential revocation. |
@@ -3805,6 +3998,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `events.list` | Voice-readable | Available: Read the cursor-based event feed. |
 | `notifications` | Operator-only | Unavailable: GitHub-only view; voice uses inbox.list for complete attention coverage. |
 | `deployed.versions` | Operator-only | Unavailable: Not yet in the curated voice set; deploy-lane failures already reach voice through inbox.list. |
+| `usage.board` | Operator-only | Unavailable: Not yet in the curated voice set; account limits and key spend are an operator view. |
 | `inbox.list` | Voice-readable | Available: List the normalized attention Inbox with coverage. |
 | `inbox.archive` | Confirmation-gated | Available after approval: Archive one normalized Inbox occurrence. |
 | `inbox.snooze` | Confirmation-gated | Available after approval: Snooze one normalized Inbox occurrence until a deadline. |
@@ -4173,6 +4367,46 @@ such a deployment the manifest is cost without a boundary. **Default is
 off**: the brokered model stays the norm, and a deployment opts in per stack.
 Enabling it is an operator decision, not the engine's default.
 
+**The engine does not depend on the secrets manager (WI-1812).** Agent auth is
+never on the engine's start path. The engine binds its port and passes
+`/readyz` whether or not the secrets manager (or anything behind it) is
+reachable; what the engine itself needs — `ENGINE_TOKEN`, the stack secret,
+the database location, the assistant keys — comes from the stack environment
+or a mounted file, never from a live secrets-manager call. Credentials are
+resolved per session, when the launch wrapper runs:
+
+- Each secrets-manager call in a launch (the login, each project read) is
+  bounded by `ENGINE_AGENT_AUTH_TIMEOUT` (seconds, default 10) and tried
+  once, and all of a launch's calls share `ENGINE_AGENT_AUTH_LAUNCH_BUDGET`
+  (seconds, default 20). A project read that times out or cannot connect is
+  not retried one secret at a time; the per-secret CLI fallback is only for a
+  read the API answered with an error. There is no retry loop.
+- If the secrets manager cannot be reached — no identity, the login failed or
+  timed out, a required secret could not be read — the session **still
+  starts**, without the credentials it could not get. It prints an
+  "agent auth unavailable" warning in the terminal, exports the reason as
+  `AGENT_AUTH_UNAVAILABLE` (unset on a full launch), and `AGENT_AUTH_GRANTED`
+  names only what it actually holds. The identity is still dropped.
+- The launch reports `outcome=degraded` (a `launch.report` warn line and the
+  launch metric). The engine keeps that on the session: `GET /api/status`
+  counts the live degraded sessions in `auth_broker.degraded_session_count`
+  and names the latest under `auth_broker.degraded` (`session_id`, `at`,
+  `reason`). Settings shows it on the auth-broker card. A degraded session
+  stops counting when it exits.
+- Nothing is cached between launches, so once the secrets manager recovers
+  the next session gets its credentials with no engine restart. A degraded
+  session gets them by being restarted.
+- Only a malformed manifest still fails a launch. `check`, `get` and `set`
+  keep failing loudly: they are explicit requests.
+- `ENGINE_AGENT_AUTH_REQUIRED=1` no longer stops the container. The
+  entrypoint runs a bounded check in the background
+  (`ENGINE_AGENT_AUTH_BOOT_CHECK_TIMEOUT`, default 60 s) and logs
+  `agent service auth check passed` or `... FAILED`; the engine starts either
+  way.
+- Deployment hooks: `vogt-lifecycle` starts the engine before it runs
+  `post-start.d`, so a hook that calls `vogt-agent-auth run` cannot hold the
+  engine back, and that call is itself bounded and degrades as above.
+
 **Getting a secret after launch: the on-demand broker.** The one
 sanctioned late path is a *manifest-constrained fetch*, and it keeps the
 contract above intact: the identity never leaves the engine. A manifest line
@@ -4222,6 +4456,11 @@ is audited** on `vogt::audit` by session id, variable and secret name and
 byte length — never value. `writable` widens blast radius only to the entries an
 operator pre-authorised, and every overwrite is in the audit log. The same
 honest caveat applies.
+
+**Approved actions (WI-2331, design only).** A proposed extension of the
+grant pattern from credentials to engine-executed, person-approved
+infrastructure actions (`vogt-agent-auth request`). Nothing is implemented;
+see [`design/approved-actions.md`](design/approved-actions.md).
 
 **Approved grants: one secret, one session, until a time (WI-973).** The
 manifest is fixed at deploy time, and changing it cycles the pod. A grant is

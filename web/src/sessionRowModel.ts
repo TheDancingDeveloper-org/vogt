@@ -96,6 +96,14 @@ export function permissionPostureLabel(mode: string | null | undefined): string 
   return mode === "bypass" ? "no permission checks" : mode;
 }
 
+/** Whether a session is waiting on a person to choose from an option list
+ *  (WI-1736): an approval-state wait whose prompt is a picker. */
+export function pickerWaiting(s: Pick<SessionSummary, "activity" | "approval" | "exit_code">): boolean {
+  return s.exit_code === null
+    && s.activity === "awaiting-approval"
+    && s.approval?.kind === "picker";
+}
+
 /** The row's state word beside the dot: "waiting for input · 40s",
  *  "running · 6m". Colour is never the only signal, so this line exists
  *  whether or not the age is known. */
@@ -109,7 +117,9 @@ export function sessionStateWord(
   const label =
     s.blocked && s.exit_code === null
       ? "blocked on you"
-      : activityLabel(s.activity, s.exit_code);
+      : pickerWaiting(s)
+        ? "waiting for a choice"
+        : activityLabel(s.activity, s.exit_code);
   if (staleAt) {
     const stamp = new Date(staleAt);
     if (!Number.isNaN(stamp.getTime())) {

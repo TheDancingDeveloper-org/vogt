@@ -215,6 +215,35 @@ def test_the_token_is_sent_as_a_bearer_header() -> None:
     assert transport.calls[0]["headers"]["Authorization"] == "Bearer vogt_abc"
 
 
+def test_the_engine_session_it_runs_in_is_sent_as_a_header() -> None:
+    """WI-1852: lets the core attribute a resumed oversight's starts."""
+    transport = _remote()
+    bridge = Bridge(
+        REMOTE,
+        token="vogt_abc",
+        engine_session=" 0cc46582-ed57-4327-9a28-624a7ae2474a ",
+        stdin=io.StringIO(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        transport=transport,
+    )
+    bridge.serve()
+    sent = transport.calls[0]["headers"]["X-Vogt-Engine-Session"]
+    assert sent == "0cc46582-ed57-4327-9a28-624a7ae2474a"
+    transport = _remote()
+    _run(transport, {"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert "X-Vogt-Engine-Session" not in transport.calls[0]["headers"]
+
+
+def test_only_a_well_formed_engine_session_claim_is_kept() -> None:
+    from vogt.application.identity import claimed_engine_session
+
+    good = "0CC46582-ED57-4327-9A28-624A7AE2474A"
+    assert claimed_engine_session({"x-vogt-engine-session": good}) == good.lower()
+    assert claimed_engine_session({"x-vogt-engine-session": "ses_1; drop"}) is None
+    assert claimed_engine_session({}) is None
+
+
 def test_version_skew_warns_and_never_blocks() -> None:
     """DEPLOYMENT.md: one stderr line, and startup proceeds."""
     transport = _remote(version="9.9.9")

@@ -192,18 +192,30 @@ if [[ -z "$agent_auth_helper" \
       && -n "${INFISICAL_CLIENT_ID:-}" && -n "${INFISICAL_CLIENT_SECRET:-}" ]]; then
     agent_auth_helper="vogt-agent-auth"
 fi
+#
+# The engine never waits on the secrets manager (WI-1812): an Infisical outage
+# once kept 8910 closed until /readyz failed and the container restarted in a
+# loop. ENGINE_AGENT_AUTH_REQUIRED now only asks for a check that runs in the
+# background, bounded by `timeout`, and logs its verdict; the engine starts
+# either way. Each session launch resolves credentials itself and, if the
+# secrets manager is down, starts without them and says so.
 if [[ -n "$agent_auth_helper" ]]; then
     echo "agent service auth available via ${agent_auth_helper##*/}"
     if [[ "$agent_auth_required" == "1" || "$agent_auth_required" == "true" ]]; then
-        echo "validating required agent service auth"
-        if ! "$agent_auth_helper" run -- true; then
-            echo "agent service auth validation failed" >&2
-            exit 1
-        fi
+        echo "checking agent service auth in the background; the engine does not wait for it"
+        (
+            # shellcheck disable=SC2016 # expanded by the launched sh
+            if timeout --kill-after=5 "${ENGINE_AGENT_AUTH_BOOT_CHECK_TIMEOUT:-60}" \
+                    "$agent_auth_helper" run -- sh -c 'test -z "${AGENT_AUTH_UNAVAILABLE:-}"' \
+                    >/dev/null 2>&1; then
+                echo "agent service auth check passed"
+            else
+                echo "agent service auth check FAILED: sessions will start without brokered credentials until the secrets manager is reachable" >&2
+            fi
+        ) </dev/null &
     fi
 elif [[ "$agent_auth_required" == "1" || "$agent_auth_required" == "true" ]]; then
-    echo "agent service auth required but no ENGINE_AGENT_AUTH_HELPER is configured" >&2
-    exit 1
+    echo "agent service auth required but no ENGINE_AGENT_AUTH_HELPER is configured; sessions start without brokered credentials" >&2
 else
     echo "agent auth not configured; skipping"
 fi
@@ -356,4 +368,4 @@ fi
 
 # `exec` so the server becomes the container's foreground process from here;
 # SIGTERM from `docker stop` reaches it cleanly. Pass through any args.
-exec /usr/local/bin/vogt-engine "$@"
+exec "${VOGT_ENGINE_BIN:-/usr/local/bin/vogt-engine}" "$@"

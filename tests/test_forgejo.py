@@ -322,6 +322,28 @@ def test_pulls_filter_by_since_locally_and_yield_ascending() -> None:
     assert pulls[0].draft is True and pulls[0].head == "abc" and pulls[0].base == "main"
 
 
+def test_a_merged_pull_says_when_and_by_whom() -> None:
+    """WI-1835: the claim check reports who merged a PR and when."""
+    provider = _provider(
+        {
+            "/pulls": [
+                {
+                    "number": 193,
+                    "title": "done",
+                    "state": "closed",
+                    "merged": True,
+                    "merged_at": "2026-10-17T09:00:00Z",
+                    "merged_by": {"login": "sprooty"},
+                    "updated_at": "2026-10-17T09:00:00Z",
+                }
+            ]
+        }
+    )
+    (pull,) = provider.pulls_updated_since(_ref(), since=None)
+    assert pull.merged and pull.merged_at == "2026-10-17T09:00:00Z"
+    assert pull.merged_by == "sprooty"
+
+
 def test_releases_and_labels_normalise() -> None:
     provider = _provider(
         {

@@ -504,9 +504,12 @@ def test_review_of_opens_a_session_on_the_review_brief(instance: AppContext) -> 
     prompt = engine.last_spec["prompt"]
     assert "# Review " in prompt
     assert "## The diff" in prompt
-    assert "## Task" not in prompt
-    assert "## Also asked" in prompt
-    assert "watch the migration" in prompt
+    # The launch prompt waits without a Task section, so the review has one;
+    # the caller's own task stays under "Also asked" (WI-1854).
+    task = prompt.index("## Task")
+    assert "Review the branch" in prompt[task:]
+    assert "watch the migration" not in prompt[task : prompt.index("## Also asked")]
+    assert "watch the migration" in prompt[prompt.index("## Also asked") :]
 
 
 def test_review_of_refuses_a_different_item(instance: AppContext) -> None:

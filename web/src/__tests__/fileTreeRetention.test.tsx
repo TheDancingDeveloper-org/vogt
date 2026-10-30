@@ -93,4 +93,5 @@ describe("FileTree state retention", () => {
     );
     expect(treeCalls.filter((p) => p === "").length).toBe(rootCallsBefore);
   });
+
 });

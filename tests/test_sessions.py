@@ -54,9 +54,17 @@ from vogt.application.services import (
     stop_session,
     update_project,
 )
+from vogt.application.services.sessions import IMPLEMENT_FOOTER
 from vogt.core.auth import hash_token
-from vogt.core.entities import AgentPolicy
-from vogt.errors import Conflict, InvalidRequest, MissingReason, NotFound, RoleRefused
+from vogt.core.entities import AgentPolicy, ReviewPolicy
+from vogt.errors import (
+    Conflict,
+    InvalidRequest,
+    MissingReason,
+    NotFound,
+    PolicyRefused,
+    RoleRefused,
+)
 from vogt.storage.interface import ProjectUpdate
 
 from tests.conftest import native_work_item
@@ -344,6 +352,50 @@ def test_a_task_is_folded_into_the_session_brief(
     assert brief.index("# vogt") < brief.index("## Task")
 
 
+def test_an_agent_start_takes_its_task_from_the_reason(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1854: an agent launched with no Task section summarises and idles."""
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1",
+            template="claude",
+            reason="Task: fix the flaky sweep test and push",
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    task = brief.index("## Task")
+    assert "fix the flaky sweep test and push" in brief[task:]
+    assert "Task: fix" not in brief
+
+
+def test_an_explicit_task_wins_over_the_reason(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", template="claude", task="do this", reason="Task: not that"
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    assert "do this" in brief
+    assert "not that" not in brief
+
+
+def test_a_review_purpose_gets_a_default_review_task(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="review", reason=WHY)
+    )
+    brief = engine.last_spec["prompt"]
+    task = brief[brief.index("## Task") :]
+    assert "Review the pull request or branch bound to WI-1" in task
+    assert "report blockers" in task
+
+
 def test_no_task_leaves_the_brief_untouched(
     wired: AppContext, engine: StandInEngine
 ) -> None:
@@ -509,6 +561,134 @@ def test_a_worktree_session_is_cut_from_the_integration_branch(
     # The default leaves the request exactly as it was.
     start_session(wired, StartSessionParams(project="vogt", reason=WHY))
     assert "worktree" not in engine.last_spec
+
+
+def test_a_cwd_opens_in_an_existing_worktree(
+    wired: AppContext,
+    engine: StandInEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WI-1671: name a worktree that already exists and start in it.
+
+    The engine is handed that directory as cwd and is not asked to cut one.
+    The Active/ check is the parent of the project's checkout, so a directory
+    that merely has an `Active` component elsewhere is refused, and so is the
+    shared checkout itself. A relative path, a stranger repository, a missing
+    directory, and an explicit worktree=true are refused before any session
+    is started. A symlink is accepted as the directory it points at.
+    """
+    active_root = tmp_path / "Active"
+    checkout = active_root / "vogt"
+    checkout.mkdir(parents=True)
+    worktree = active_root / "vogt-wi-7"
+    worktree.mkdir()
+    linked = active_root / "vogt-link"
+    linked.symlink_to(worktree, target_is_directory=True)
+    stranger = active_root / "other"
+    stranger.mkdir()
+    decoy = tmp_path / "decoy" / "Active" / "evil"
+    decoy.mkdir(parents=True)
+    common = tmp_path / "common.git"
+    other = tmp_path / "other.git"
+    seen: list[Path] = []
+
+    nested = checkout / "src"
+    nested.mkdir()
+
+    def fake_git(root: Path, flag: str) -> str:
+        seen.append(root)
+        if flag == "--show-toplevel":
+            # A subdirectory of the checkout reports the checkout. A linked
+            # worktree reports itself.
+            if root.resolve() in {worktree.resolve(), linked.resolve()}:
+                return str(worktree.resolve())
+            return str(checkout.resolve())
+        if root.resolve() in {worktree.resolve(), checkout.resolve(), nested.resolve()}:
+            return str(common)
+        return str(other)
+
+    monkeypatch.setattr("vogt.application.services.sessions._git_probe", fake_git)
+    register_project(
+        wired,
+        RegisterProjectParams(name="Checkout", root_path=str(checkout), reason=WHY),
+    )
+
+    result = start_session(
+        wired,
+        StartSessionParams(project="checkout", cwd=str(worktree), reason=WHY),
+    )
+    assert engine.last_spec["cwd"] == str(worktree.resolve())
+    assert "worktree" not in engine.last_spec
+    assert result.session.cwd == str(worktree.resolve())
+
+    linked_result = start_session(
+        wired,
+        StartSessionParams(project="checkout", cwd=str(linked), reason=WHY),
+    )
+    assert linked_result.session.cwd == str(worktree.resolve())
+
+    with pytest.raises(InvalidRequest, match="absolute"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd="Active/vogt-wi-7", reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="shared checkout"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(checkout), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="shared checkout"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(nested), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="not under the workspace Active"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(decoy), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="not a git worktree"):
+        start_session(
+            wired,
+            StartSessionParams(project="checkout", cwd=str(stranger), reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="does not exist"):
+        start_session(
+            wired,
+            StartSessionParams(
+                project="checkout",
+                cwd=str(active_root / "missing"),
+                reason=WHY,
+            ),
+        )
+    with pytest.raises(InvalidRequest, match="cannot be combined"):
+        start_session(
+            wired,
+            StartSessionParams(
+                project="checkout",
+                cwd=str(worktree),
+                worktree=True,
+                reason=WHY,
+            ),
+        )
+    # The implement profile sets worktree itself. A cwd still wins, and the
+    # engine is not asked to cut one.
+    purpose = start_session(
+        wired,
+        StartSessionParams(
+            project="checkout",
+            cwd=str(worktree),
+            purpose="implement",
+            reason=WHY,
+        ),
+    )
+    assert purpose.session.cwd == str(worktree.resolve())
+    assert "worktree" not in engine.last_spec
+    # The refusals never reached the engine: two accepted starts, then the
+    # purpose start.
+    assert engine.counter == 3
+    assert decoy.resolve() not in seen
 
 
 def test_the_whole_session_clock_is_unset_unless_the_project_sets_it(
@@ -2386,6 +2566,259 @@ def test_purpose_implement_resolves_the_implement_profile(
     assert summary["repo_map"] is True
     assert summary["overrides"] == []
     assert result.session.purpose == "implement"
+    assert IMPLEMENT_FOOTER in spec["prompt"]
+
+
+def test_only_an_implement_start_gets_the_stop_at_push_footer(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(wired, StartSessionParams(work_item="WI-1", task="look", reason=WHY))
+    assert IMPLEMENT_FOOTER not in engine.last_spec["prompt"]
+
+
+def test_a_purpose_whose_model_the_project_forbids_is_refused(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1590: the review policy is a rule, not text in the brief. The
+    implement profile runs grok-4.7, and a project that forbids it gets no
+    session and no engine call."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(review=ReviewPolicy(never_models=["grok-4.7"])),
+            reason=WHY,
+        ),
+    )
+    with pytest.raises(PolicyRefused, match=r"grok-4\.7"):
+        start_session(
+            wired,
+            StartSessionParams(
+                work_item="WI-1", purpose="implement", task="fix it", reason=WHY
+            ),
+        )
+    assert engine.sent == []
+
+
+def test_naming_a_forbidden_model_is_refused_too(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The caller naming the model is the same start, so the same rule."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(review=ReviewPolicy(never_models=["grok-4.7"])),
+            reason=WHY,
+        ),
+    )
+    with pytest.raises(PolicyRefused, match="never_models"):
+        start_session(
+            wired,
+            StartSessionParams(project="vogt", model="grok-4.7", reason=WHY),
+        )
+    assert engine.sent == []
+
+
+def test_forbidden_text_refuses_a_model_never_models_does_not_list(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1590: `(?i)grok` is the project's rule even when never_models is
+    empty, and it applies to the model the purpose filled in."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(forbidden_text=["(?i)grok"]),
+            reason=WHY,
+        ),
+    )
+    with pytest.raises(PolicyRefused, match="forbidden_text"):
+        start_session(
+            wired,
+            StartSessionParams(
+                work_item="WI-1", purpose="implement", task="fix it", reason=WHY
+            ),
+        )
+    assert engine.sent == []
+
+
+def test_forbidden_text_refuses_a_model_the_caller_names(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Purpose plus an explicit model is the same check: naming grok-4.8
+    over the profile still matches `(?i)grok`."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(
+                forbidden_text=["(?i)grok"],
+                review=ReviewPolicy(never_models=["something-else"]),
+            ),
+            reason=WHY,
+        ),
+    )
+    with pytest.raises(PolicyRefused, match="forbidden_text"):
+        start_session(
+            wired,
+            StartSessionParams(
+                work_item="WI-1",
+                purpose="implement",
+                model="grok-4.8",
+                reason=WHY,
+            ),
+        )
+    assert engine.sent == []
+
+
+def test_claude_refuses_a_model_it_does_not_speak(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """`template=claude` with a non-Anthropic model id would launch
+    `claude --model grok-4.7`. The template's own name resolves the same way
+    the engine resolves a tag."""
+    with pytest.raises(PolicyRefused, match="Claude Code"):
+        start_session(
+            wired,
+            StartSessionParams(
+                project="vogt", template="claude", model="grok-4.7", reason=WHY
+            ),
+        )
+    with pytest.raises(PolicyRefused, match="Claude Code"):
+        start_session(
+            wired,
+            StartSessionParams(
+                project="vogt",
+                template="Claude Code (protected)",
+                model="grok-4.7",
+                reason=WHY,
+            ),
+        )
+    assert engine.sent == []
+
+
+def test_claude_accepts_an_anthropic_model(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """A claude model id, and the aliases Claude Code resolves itself, start."""
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", template="claude", model="claude-opus-4-5", reason=WHY
+        ),
+    )
+    assert engine.last_spec["model"] == "claude-opus-4-5"
+    start_session(
+        wired,
+        StartSessionParams(project="vogt", template="claude", model="opus", reason=WHY),
+    )
+    assert engine.last_spec["model"] == "opus"
+
+
+def test_klaudia_may_run_a_model_claude_refuses(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The refusal is about Claude Code, not about the model. The implement
+    profile's own pairing — klaudia with grok-4.7 — keeps starting."""
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="implement", task="fix it", reason=WHY
+        ),
+    )
+    assert engine.last_spec["template"] == "klaudia"
+    assert engine.last_spec["model"] == "grok-4.7"
+
+
+def test_a_claude_model_on_the_implement_profile_runs_claude_code(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1852: `purpose=implement, model=opus` kept the profile's klaudia
+    template, and klaudia answered 400 "Invalid model name" on every turn.
+    The caller named a Claude model, so the agent follows it."""
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1",
+            purpose="implement",
+            model="opus",
+            task="fix it",
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["template"] == "claude"
+    assert engine.last_spec["model"] == "opus"
+    assert result.session.template == "claude"
+    # The caller's template still wins when it names one Claude Code is.
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1",
+            purpose="implement",
+            model="claude-opus-5-5",
+            task="fix it",
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["template"] == "claude"
+
+
+def test_a_claude_alias_on_another_agent_template_is_refused(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1852: a bare alias only Claude Code resolves is refused up front
+    on klaudia, codex or opencode, rather than failing every turn."""
+    for template in ("klaudia", "codex", "opencode"):
+        with pytest.raises(PolicyRefused, match="does not resolve"):
+            start_session(
+                wired,
+                StartSessionParams(
+                    project="vogt", template=template, model="opus", reason=WHY
+                ),
+            )
+    with pytest.raises(PolicyRefused, match="does not resolve"):
+        start_session(
+            wired,
+            StartSessionParams(
+                work_item="WI-1",
+                purpose="implement",
+                template="klaudia",
+                model="sonnet",
+                reason=WHY,
+            ),
+        )
+    assert engine.sent == []
+
+
+def test_a_model_the_project_does_not_forbid_still_starts(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(review=ReviewPolicy(never_models=["grok-4.7"])),
+            reason=WHY,
+        ),
+    )
+    start_session(
+        wired,
+        StartSessionParams(work_item="WI-1", purpose="review", reason=WHY),
+    )
+    assert engine.last_spec["model"] == "opus"
+
+
+def test_a_project_with_no_review_policy_refuses_nothing(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="implement", task="fix it", reason=WHY
+        ),
+    )
+    assert engine.last_spec["model"] == "grok-4.7"
 
 
 def test_purpose_review_resolves_opus_low_forty_turns_read_only(
@@ -2526,6 +2959,56 @@ def test_a_session_start_records_the_starters_engine_role(
     assert summary["started_by_session"] == ENGINE_SESSION
 
 
+def test_a_resumed_oversight_on_the_pod_token_keeps_its_starts(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1852: oversight resumed by hand runs on the pod token, so its
+    starts had no starter and its ownership filter lost them. The bridge's
+    claimed engine session counts once the engine vouches it is oversight."""
+    pod = dataclasses.replace(
+        _as(wired, "agent:pod:vogt-prod"), claimed_engine_session=ENGINE_SESSION
+    )
+    engine.roles[ENGINE_SESSION] = "oversight"
+    result = start_session(pod, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert result.session.started_by_session == ENGINE_SESSION
+    assert result.session.started_by_kind == "oversight"
+    owned = list_sessions(
+        wired, ListSessionsParams(mode="full", started_by_session=ENGINE_SESSION)
+    ).sessions
+    assert [row.id for row in owned] == [result.session.id]
+
+
+@pytest.mark.parametrize(
+    ("actor", "role"),
+    [
+        # A worker's claim is not oversight's.
+        ("agent:pod:vogt-prod", "worker"),
+        # Only the pod token may claim; any other agent has its own identity
+        # or none, and naming a session does not lend it one.
+        ("agent:someone-else", "oversight"),
+    ],
+)
+def test_a_claimed_engine_session_is_ignored_unless_vouched_for(
+    wired: AppContext, engine: StandInEngine, actor: str, role: str
+) -> None:
+    engine.roles[ENGINE_SESSION] = role
+    ctx = dataclasses.replace(_as(wired, actor), claimed_engine_session=ENGINE_SESSION)
+    result = start_session(ctx, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert result.session.started_by_session is None
+    assert result.session.started_by_kind is None
+
+
+def test_an_unknown_claimed_engine_session_is_ignored(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    ctx = dataclasses.replace(
+        _as(wired, "agent:pod:vogt-prod"),
+        claimed_engine_session="11111111-2222-4333-8444-555555555555",
+    )
+    result = start_session(ctx, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert result.session.started_by_session is None
+
+
 def test_a_vogt_started_session_is_named_by_its_engine_id(
     wired: AppContext, engine: StandInEngine
 ) -> None:
@@ -2538,6 +3021,233 @@ def test_a_vogt_started_session_is_named_by_its_engine_id(
     assert child.session.started_by_kind == "worker"
 
 
+def test_session_list_filters_by_who_started_it(wired: AppContext) -> None:
+    parent = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    child = start_session(
+        _as(wired, f"agent:session:{parent.session.id}"),
+        StartSessionParams(work_item="WI-1", reason=WHY),
+    )
+    other = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    by_engine = list_sessions(
+        wired,
+        ListSessionsParams(
+            mode="full", started_by_session=parent.session.engine_session_id
+        ),
+    )
+    by_vogt = list_sessions(
+        wired, ListSessionsParams(mode="full", started_by_session=parent.session.id)
+    )
+    assert [row.id for row in by_engine.sessions] == [child.session.id]
+    assert [row.id for row in by_vogt.sessions] == [child.session.id]
+    assert other.session.id not in {row.id for row in by_engine.sessions}
+
+
+def test_session_list_fields_accept_a_comma_separated_string() -> None:
+    params = ListSessionsParams(fields="account,model")  # type: ignore[arg-type]
+    assert params.fields == ["account", "model"]
+
+
 def test_a_purpose_outside_the_six_is_refused() -> None:
     with pytest.raises(ValidationError):
         StartSessionParams(work_item="WI-1", purpose="anything", reason=WHY)  # type: ignore[arg-type]
+
+
+def _push_only_landing() -> AgentPolicy:
+    from vogt.core.entities import LandingPolicy
+
+    return AgentPolicy(
+        landing=LandingPolicy(
+            base_branch="main",
+            worker_lands_by="push_branch",
+            merge_by="oversight",
+            merge_mode="rebase",
+        )
+    )
+
+
+def test_a_task_asking_for_a_pr_on_a_push_only_project_is_overridden(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1832: the policy wins, the brief says so, the start result shows it."""
+    update_project(
+        wired,
+        UpdateProjectParams(slug="vogt", agent_policy=_push_only_landing(), reason=WHY),
+    )
+    item = native_work_item(wired, title="land me", project="vogt")
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item=item.ref,
+            reason=WHY,
+            task="Fix it, then open a PR against main.",
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    assert "## Policy overrides task" in brief
+    assert "Policy overrides task: push only." in brief
+    assert brief.index("## Policy overrides task") < brief.index("## Task")
+    policy = result.effective_policy
+    assert policy is not None
+    assert policy.lands_by == "push_branch"
+    assert policy.base_branch == "main"
+    assert len(policy.overrides) == 1
+    assert policy.overrides[0].startswith("Policy overrides task: push only.")
+
+
+def test_a_task_that_agrees_with_the_policy_adds_no_override(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    update_project(
+        wired,
+        UpdateProjectParams(slug="vogt", agent_policy=_push_only_landing(), reason=WHY),
+    )
+    item = native_work_item(wired, title="land me", project="vogt")
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item=item.ref,
+            reason=WHY,
+            task="Open NO PR, push the branch only. Never merge or deploy.",
+        ),
+    )
+    assert "Policy overrides task" not in engine.last_spec["prompt"]
+    assert result.effective_policy is not None
+    assert result.effective_policy.overrides == []
+
+
+def _rust_core_landing(**landing: Any) -> AgentPolicy:
+    from vogt.core.entities import LandingPolicy
+
+    return AgentPolicy(
+        base_branch="main",
+        landing=LandingPolicy(
+            base_branch="main",
+            worker_lands_by="push_branch",
+            merge_by="oversight",
+            merge_mode="rebase",
+            **landing,
+        ),
+    )
+
+
+def test_an_initiative_base_replaces_the_project_base(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1841: the Rust port's items cut from and land onto `rust-core`."""
+    from vogt.application.models import CreateInitiativeParams
+    from vogt.application.services import create_initiative
+
+    create_initiative(wired, CreateInitiativeParams(title="Rust port", reason=WHY))
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=_rust_core_landing(
+                initiative_bases={"rust-port": "rust-core"}
+            ),
+            reason=WHY,
+        ),
+    )
+    item = native_work_item(
+        wired, title="port it", project="vogt", initiative="rust-port"
+    )
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item=item.ref,
+            reason=WHY,
+            worktree=True,
+            task="Cut a branch from rust-core and land it onto rust-core.",
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    assert "Policy overrides task" not in brief
+    assert "**Base** `rust-core`" in brief
+    assert engine.last_spec["worktree"]["base_ref"] == "rust-core"
+    policy = result.effective_policy
+    assert policy is not None
+    assert policy.base_branch == "rust-core"
+    assert policy.overrides == []
+
+
+def test_a_task_naming_a_known_long_lived_branch_is_taken_at_its_word(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=_rust_core_landing(long_lived_branches=["rust-core"]),
+            reason=WHY,
+        ),
+    )
+    item = native_work_item(wired, title="port it", project="vogt")
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item=item.ref, reason=WHY, task="Branch off rust-core and fix it."
+        ),
+    )
+    assert result.effective_policy is not None
+    assert result.effective_policy.base_branch == "rust-core"
+    assert result.effective_policy.overrides == []
+    assert "**Base** `rust-core`" in engine.last_spec["prompt"]
+
+
+def test_an_unknown_base_in_a_task_is_still_overridden(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=_rust_core_landing(long_lived_branches=["rust-core"]),
+            reason=WHY,
+        ),
+    )
+    item = native_work_item(wired, title="port it", project="vogt")
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item=item.ref, reason=WHY, task="Branch off develop and fix it."
+        ),
+    )
+    assert result.effective_policy is not None
+    assert result.effective_policy.base_branch == "main"
+    assert any("base `main`" in line for line in result.effective_policy.overrides)
+
+
+@pytest.mark.parametrize(
+    ("role", "purpose", "overridden"),
+    [
+        ("oversight", "mechanical", False),
+        ("oversight", "implement", True),
+        ("worker", "mechanical", True),
+    ],
+)
+def test_oversight_landing_work_is_not_told_not_to_merge(
+    wired: AppContext,
+    engine: StandInEngine,
+    role: str,
+    purpose: Literal["mechanical", "implement"],
+    overridden: bool,
+) -> None:
+    """WI-1841: where oversight merges, its own landing task keeps its merge."""
+    update_project(
+        wired,
+        UpdateProjectParams(slug="vogt", agent_policy=_push_only_landing(), reason=WHY),
+    )
+    item = native_work_item(wired, title="land me", project="vogt")
+    engine.roles[ENGINE_SESSION] = role
+    result = start_session(
+        _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+        StartSessionParams(
+            work_item=item.ref,
+            purpose=purpose,
+            reason=WHY,
+            task="Rebase the branch, then merge it into main.",
+        ),
+    )
+    assert result.effective_policy is not None
+    merged = any("do not merge" in line for line in result.effective_policy.overrides)
+    assert merged is overridden

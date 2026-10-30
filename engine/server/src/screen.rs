@@ -77,6 +77,11 @@ impl Terminal {
         }
     }
 
+    /// Whether the program has turned bracketed paste on (`CSI ? 2004 h`).
+    pub fn bracketed_paste(&self) -> bool {
+        self.parser.screen().bracketed_paste()
+    }
+
     /// The visible screen and up to `scrollback_lines` lines above it.
     pub fn render(&mut self, scrollback_lines: usize) -> (Rendered, Vec<String>) {
         read_parser(&mut self.parser, scrollback_lines)
@@ -167,6 +172,35 @@ pub struct Rendered {
     pub title: Option<String>,
 }
 
+/// The bytes `/input` writes for `text`, then Enter when `submit`.
+///
+/// Multi-line text typed raw into Claude Code lands as soft line breaks in
+/// its input box, and the Enter after it does not submit (WI-1870, seen
+/// live). When the program has bracketed paste on, multi-line text goes as
+/// one paste — newlines normalised to `\n`, and any paste-end marker inside
+/// it dropped so the text cannot close the paste early — and the Enter
+/// after it submits. Single-line text, and any text to a program without
+/// bracketed paste, is written as typed.
+pub fn input_bytes(text: &str, bracketed_paste: bool, submit: bool) -> Vec<u8> {
+    const START: &str = "\x1b[200~";
+    const END: &str = "\x1b[201~";
+    let multi_line = text.contains(['\n', '\r']);
+    let mut out = if bracketed_paste && multi_line {
+        let body = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace(END, "")
+            .replace(START, "");
+        format!("{START}{body}{END}").into_bytes()
+    } else {
+        text.as_bytes().to_vec()
+    };
+    if submit {
+        out.push(b'\r');
+    }
+    out
+}
+
 /// Replay `bytes` into a fresh `rows` x `cols` terminal and read it back.
 pub fn render(bytes: &[u8], rows: u16, cols: u16) -> Rendered {
     render_with_scrollback(bytes, rows, cols, 0).0
@@ -243,6 +277,36 @@ fn read_parser(
         },
         history,
     )
+}
+
+/// The permission mode Claude Code's footer shows, as the engine names it:
+/// `bypass` (bypass permissions on), `accept-edits`, `auto` or `plan`. `None`
+/// when the footer names none, which is its default mode, or the screen is not
+/// Claude Code's. Only the bottom of the screen is read, where the footer is.
+///
+/// The screen is the agent's to draw, so this is an observation, never a
+/// grant (WI-2252).
+pub fn claude_posture(lines: &[String]) -> Option<&'static str> {
+    const MODES: &[(&str, &str)] = &[
+        ("bypass permissions on", "bypass"),
+        ("accept edits on", "accept-edits"),
+        ("auto mode on", "auto"),
+        ("plan mode on", "plan"),
+    ];
+    // Claude Code draws inline, so a short conversation leaves blank rows
+    // below its footer: count from the last line with anything on it.
+    lines
+        .iter()
+        .rev()
+        .skip_while(|line| line.trim().is_empty())
+        .take(6)
+        .find_map(|line| {
+            let line = line.to_lowercase();
+            MODES
+                .iter()
+                .find(|(shown, _)| line.contains(shown))
+                .map(|(_, mode)| *mode)
+        })
 }
 
 /// Whether the screen shows an input prompt an agent TUI or REPL draws when
@@ -615,6 +679,33 @@ pub async fn kept_screen(
 mod tests {
     use super::*;
 
+    #[test]
+    fn claude_posture_reads_the_footer_below_any_blank_rows() {
+        let screen = |footer: &str| {
+            let mut lines: Vec<String> = ["> ", footer, "", "", "", "", "", "", ""]
+                .iter()
+                .map(|l| l.to_string())
+                .collect();
+            lines.insert(0, "earlier output".into());
+            lines
+        };
+        assert_eq!(
+            claude_posture(&screen("  ⏵⏵ bypass permissions on (shift+tab to cycle)")),
+            Some("bypass")
+        );
+        assert_eq!(
+            claude_posture(&screen("  ⏵⏵ accept edits on (shift+tab to cycle)")),
+            Some("accept-edits")
+        );
+        assert_eq!(claude_posture(&screen("  ⏵⏵ auto mode on")), Some("auto"));
+        assert_eq!(claude_posture(&screen("  ⏸ plan mode on")), Some("plan"));
+        assert_eq!(claude_posture(&screen("  ? for shortcuts")), None);
+        // Words far above the footer are conversation, not the mode.
+        let mut old: Vec<String> = vec!["bypass permissions on".into()];
+        old.extend((0..10).map(|i| format!("line {i}")));
+        assert_eq!(claude_posture(&old), None);
+    }
+
     /// WI-121: the frame reproduces the screen a raw replay would, in a
     /// handful of bytes, including a frame the tail replay loses.
     #[test]
@@ -793,6 +884,36 @@ mod tests {
             }
             assert_eq!(r.lines[1], "~ tick29", "limit {limit}: {r:?}");
         }
+    }
+
+    #[test]
+    fn multi_line_input_is_one_paste_when_the_program_asked_for_it() {
+        // WI-1870: raw newlines are soft breaks in Claude Code's box.
+        assert_eq!(
+            input_bytes("one\r\ntwo\nthree", true, true),
+            b"\x1b[200~one\ntwo\nthree\x1b[201~\r".to_vec()
+        );
+        assert_eq!(
+            input_bytes("a\n\x1b[201~b", true, false),
+            b"\x1b[200~a\nb\x1b[201~".to_vec(),
+            "a paste-end inside the text cannot end the paste early"
+        );
+        assert_eq!(input_bytes("one line", true, true), b"one line\r".to_vec());
+        assert_eq!(
+            input_bytes("a\nb", false, true),
+            b"a\nb\r".to_vec(),
+            "no bracketed paste: written as typed"
+        );
+    }
+
+    #[test]
+    fn the_grid_tracks_bracketed_paste() {
+        let mut terminal = Terminal::new(24, 80);
+        assert!(!terminal.bracketed_paste());
+        terminal.process(b"\x1b[?2004h");
+        assert!(terminal.bracketed_paste());
+        terminal.process(b"\x1b[?2004l");
+        assert!(!terminal.bracketed_paste());
     }
 
     #[test]
@@ -980,6 +1101,41 @@ mod tests {
             None
         ));
         assert!(!is_ready(ActivityState::Exited, false, &prompt, None, None));
+    }
+
+    /// WI-1669: a titled Codex is ready only when its title says so. A resumed
+    /// Codex reports `waiting-for-input` from screen glyphs while its composer
+    /// is still redrawing, and an Enter typed then sits in the composer. Stock
+    /// Codex sets no title, so it stays on the activity path.
+    #[test]
+    fn a_titled_codex_is_ready_only_on_its_own_word() {
+        let plain = vec!["building".to_string()];
+        assert!(
+            !is_ready(
+                ActivityState::WaitingForInput,
+                true,
+                &plain,
+                Some("codex"),
+                Some("codex: working"),
+            ),
+            "a working title is not a prompt, however the activity reads"
+        );
+        assert!(is_ready(
+            ActivityState::WaitingForInput,
+            true,
+            &plain,
+            Some("codex"),
+            Some("codex: ready"),
+        ));
+        // Stock Codex never sets a title this engine reads, so it keeps the
+        // activity answer. The Rust wait change does not help it (WI-1669).
+        assert!(is_ready(
+            ActivityState::WaitingForInput,
+            true,
+            &plain,
+            Some("codex"),
+            None,
+        ));
     }
 }
 

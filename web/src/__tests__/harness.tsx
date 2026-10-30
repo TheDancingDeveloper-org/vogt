@@ -24,6 +24,7 @@ import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { render } from "@solidjs/testing-library";
 import { vi } from "vitest";
 import { startEventStream, stopEventStream } from "../store";
+import { cancelPendingWakeForTests } from "../wakeCoordinator";
 
 /** The front door's mount, as `vogtApi.ts` names it. */
 const VOGT_PREFIX = "/api/vogt";
@@ -597,7 +598,11 @@ export function fakeVogt(routes: Routes = {}, engine: Routes = {}): FakeVogt {
     // path when something called `startEventStream`, and the alternative — a
     // 404 — puts `store.ts` into its reconnect backoff for the rest of the
     // file.
-    if (url.pathname === "/api/events") return openStream();
+    // A test that gives `GET /api/events` an engine route is refusing the
+    // stream on purpose: the engine is away, not just its session list.
+    if (url.pathname === "/api/events" && engine[`${method} /api/events`] === undefined) {
+      return openStream();
+    }
 
     if (!url.pathname.startsWith(VOGT_PREFIX)) {
       // The engine's own API — sessions, files, git. Recorded either way, so
@@ -687,7 +692,12 @@ export async function liveStream(vogt: FakeVogt): Promise<void> {
   await settle();
 }
 
-export const stopLiveStream = stopEventStream;
+export function stopLiveStream(): void {
+  stopEventStream();
+  // A reconnect notes a debounced wake; one still pending when the test ends
+  // would refetch the next test's surfaces under it.
+  cancelPendingWakeForTests();
+}
 
 // -- mounting a surface at a URL --------------------------------------------
 

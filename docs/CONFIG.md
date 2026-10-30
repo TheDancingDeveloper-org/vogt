@@ -29,12 +29,20 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `ci_alert_branches` | `VOGT_CI_ALERT_BRANCHES` | list of strings | `main`, `master`, `prod` | behaviour |
 | `ci_alert_tags` | `VOGT_CI_ALERT_TAGS` | list of strings | `v*` | behaviour |
 | `ci_watch_notify_sessions` | `VOGT_CI_WATCH_NOTIFY_SESSIONS` | boolean | `True` | behaviour |
+| `autopilot_done_requires_result_report` | `VOGT_AUTOPILOT_DONE_REQUIRES_RESULT_REPORT` | boolean | `False` | behaviour |
 | `deploy_lanes` | `VOGT_DEPLOY_LANES` | list of `DeployLane` tables | *(empty)* | behaviour |
+| `usage_accounts` | `VOGT_USAGE_ACCOUNTS` | list of `UsageAccount` tables | *(empty)* | behaviour |
+| `usage_litellm_url` | `VOGT_USAGE_LITELLM_URL` | string, optional | *(no default — must be set)* | behaviour |
+| `usage_litellm_keys` | `VOGT_USAGE_LITELLM_KEYS` | list of `UsageKey` tables | *(empty)* | behaviour |
+| `usage_daily_spend_alert_usd` | `VOGT_USAGE_DAILY_SPEND_ALERT_USD` | number, optional | *(no default — must be set)* | behaviour |
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `branch_binding_patterns` | `VOGT_BRANCH_BINDING_PATTERNS` | list of strings | `(?i)\bwi-?(?P<n>\d+)\b`, `(?i)\bgh-(?P<forge>\d+)\b` | behaviour |
 | `branch_binding_template` | `VOGT_BRANCH_BINDING_TEMPLATE` | string | `wi-{number}` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
+| `github_app_id` | `VOGT_GITHUB_APP_ID` | string, optional | *(no default — must be set)* | behaviour |
+| `github_app_installation_id` | `VOGT_GITHUB_APP_INSTALLATION_ID` | integer, optional | *(no default — must be set)* | behaviour |
+| `github_app_private_key_file` | `VOGT_GITHUB_APP_PRIVATE_KEY_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_account_key_file` | `VOGT_FORGE_ACCOUNT_KEY_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_token_files` | `VOGT_FORGE_TOKEN_FILES` | map of string to path | *(empty)* | behaviour |
 | `agent_activity_roots` | `VOGT_AGENT_ACTIVITY_ROOTS` | map of string to path | *(empty)* | behaviour |
@@ -55,6 +63,12 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `install_bootstrap_enabled` | `VOGT_INSTALL_BOOTSTRAP_ENABLED` | boolean | `True` | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
+| `watch_interval_seconds` | `VOGT_WATCH_INTERVAL_SECONDS` | integer | `60` | behaviour |
+| `cold_wake_compaction` | `VOGT_COLD_WAKE_COMPACTION` | boolean | `False` | behaviour |
+| `cold_wake_threshold_tokens` | `VOGT_COLD_WAKE_THRESHOLD_TOKENS` | integer | `100000` | behaviour |
+| `cold_wake_ttl_seconds` | `VOGT_COLD_WAKE_TTL_SECONDS` | map of string to integer | `{'anthropic': 300, 'deepseek': 300}` | behaviour |
+| `forge_posture_interval_seconds` | `VOGT_FORGE_POSTURE_INTERVAL_SECONDS` | integer | `86400` | behaviour |
+| `github_rate_limit_floor` | `VOGT_GITHUB_RATE_LIMIT_FLOOR` | integer | `500` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
 | `image_digest` | `VOGT_IMAGE_DIGEST` | string, optional | *(no default — must be set)* | behaviour |
 | `diagnostics_peer_url` | `VOGT_DIAGNOSTICS_PEER_URL` | string, optional | *(no default — must be set)* | exposure |
@@ -134,9 +148,29 @@ Tags (glob patterns) whose failed CI runs raise an Inbox alert — the release w
 
 When CI finishes on a branch bound to a work item (`work.bind_branch`), type a one-line pass/fail notice into each live session started for that item, so an agent wakes on the result instead of polling. Sent once per run conclusion, by the sweep that observed it. The Inbox entry is raised either way; this only turns the session nudge off.
 
+### `autopilot_done_requires_result_report`
+
+When true, the session sweep treats an `AUTOPILOT: DONE` as done only if the session posted a `result` report (`session.report`) since its turn began; otherwise the row reads `waiting` with the reason `done without a result report`, so oversight asks for one instead of trusting the line. Off by default.
+
 ### `deploy_lanes`
 
 Deployment lanes `deployed_versions` reports on, each a table with `name`, `project` (a registered slug), `branch` (default `main`), and a source: `receipt_repo` + `receipt_path` (a JSON receipt a deploy pipeline commits, read through the configured forge) and/or `version_url` (a running instance's public JSON version endpoint, e.g. Vogt's `/api/config`). Empty means the `deploy-lanes` collector is not registered and deployed versions are reported as not configured. A receipt whose status says the deploy or its smoke test failed raises an Inbox alert.
+
+### `usage_accounts`
+
+Provider accounts `usage.board` reports on, each a table with `name`, `agent` (`claude` or `codex`) and `dir` (that account's config directory). Read on request only: the newest limit and reset the account's own transcripts recorded. Empty, no account is reported.
+
+### `usage_litellm_url`
+
+Base URL of a LiteLLM proxy whose keys' spend `usage.board` reads through `/key/info`. Unset, no key spend is read.
+
+### `usage_litellm_keys`
+
+LiteLLM keys `usage.board` reports spend for: `name`, `key_env` (the environment variable holding the key) and an optional `daily_alert_usd`.
+
+### `usage_daily_spend_alert_usd`
+
+Default day-spend alert threshold, in USD, for every LiteLLM key without its own `daily_alert_usd`. Unset, no alert is raised.
 
 ### `marker_file_extensions`
 
@@ -157,6 +191,18 @@ How long observation *history* is kept. The newest observation per subject is ke
 ### `github_token_file`
 
 Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing.
+
+### `github_app_id`
+
+The ID or the client ID of a GitHub App for the forge adapter to authenticate as; GitHub accepts either as the JWT issuer. With `github_app_private_key_file` also set, GitHub reads and writes use short-lived installation tokens, which have their own rate limit, instead of `github_token_file`. The notifications collector stays on `github_token_file`, because notifications belong to a user and an App cannot read them. Not a secret, so plain config is fine. Setup, including the permissions the App needs, is in docs/GITHUB_APP.md.
+
+### `github_app_installation_id`
+
+Pin every GitHub request to one installation of `github_app_id`. Unset, the installation is discovered per repository owner (`GET /repos/{owner}/{repo}/installation`, then `/orgs/{owner}/installation` or `/users/{owner}/installation`) and remembered, so one App installed on several accounts or organisations covers them all; an owner without the App is read with `github_token_file`. Publishing a new repository needs an owner to create it under: this installation's account or, unset, the App's only installation. An App with several installations must set this to publish.
+
+### `github_app_private_key_file`
+
+Path to the GitHub App's PEM private key, which signs the short-lived JWT exchanged for installation tokens. A file for the same reason as `github_token_file`: the key never appears in the environment or a process listing. When this and `github_app_id` are set, the App takes precedence over `github_token_file` for every GitHub read and write except notifications. Unset, or unreadable, the personal token is used as before.
 
 ### `forge_account_key_file`
 
@@ -237,6 +283,30 @@ How hard SQLite works to survive a power cut. `normal` is the standard pairing f
 ### `sweep_interval_seconds`
 
 How often `serve` runs collectors in the background. Zero disables the schedule, leaving sweeps on-demand only. A default rather than a required value because an instance that never looks is the failure this product exists to prevent: stale evidence and no evidence are indistinguishable from the outside, so the safe default is to keep looking.
+
+### `watch_interval_seconds`
+
+How often `serve` evaluates armed watches (WI-2036) and wakes the sessions whose trigger fired. Zero disables the loop: watches are stored but nothing wakes. Vogt-side triggers (a work item's state, a session ending) fire within this interval; forge triggers read what the sweep observed, so they also wait on `sweep_interval_seconds`.
+
+### `cold_wake_compaction`
+
+Cache-aware compaction on a cold wake (WI-2037). When on, waking a hibernated session whose provider prompt cache has expired (hibernated longer than its `cold_wake_ttl_seconds`) and whose context is at least `cold_wake_threshold_tokens` starts a fresh conversation seeded with a structured summary — task, state, decisions, files, branch, next step — instead of resuming the transcript at full uncached price. Off by default; a session opts out with `cold_wake_opt_out` at start or hibernate.
+
+### `cold_wake_threshold_tokens`
+
+The context size, in tokens, at or above which a cold wake is compacted (WI-2037). A smaller conversation is cheap enough to re-read and is resumed as it is.
+
+### `cold_wake_ttl_seconds`
+
+Prompt-cache lifetime per provider, in seconds (WI-2037): a session hibernated longer than this is treated as cold. Keys are `anthropic`, `openai`, `deepseek`, `google`, … A provider with no entry is never compacted, because its cache cannot be judged. Anthropic's 1-hour cache tier is `anthropic = 3600`.
+
+### `forge_posture_interval_seconds`
+
+How often the forge posture collector re-reads a repository's update-automation settings (version-update config, vulnerability alerts, automated security fixes). Posture changes rarely and cost several API calls per repository, so the default is daily; sweeps in between skip it. Zero reads it on every sweep.
+
+### `github_rate_limit_floor`
+
+When GitHub reports fewer core API requests than this left in the hour, forge reads stop until the limit resets instead of spending the rest. The limit is per GitHub user and shared with every other tool on that account. Zero never pauses early.
 
 ### `verify_horizon_hours`
 

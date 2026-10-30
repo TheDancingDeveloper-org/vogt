@@ -38,6 +38,10 @@ export interface ApprovalPrompt {
   deadline_seconds?: number | null;
   deadline_at?: string | null;
   detected_at: string;
+  /** What kind of wait it is (WI-1736): a permission `approval` (the
+   *  default when absent) or a `picker`, an option list the agent is waiting
+   *  on a person to choose from. The engine side follows in a later phase. */
+  kind?: "approval" | "picker";
 }
 
 /** What a session is for (engine `SessionRole`, WI-957). */
@@ -256,6 +260,11 @@ interface AuthStateMessage {
 export interface AuthRejection {
   status: number;
   detail: string;
+  /**
+   * Set when this fact already survived `/api/auth/check`. The shell must
+   * not probe again. Absent on a raw 401 from a read.
+   */
+  confirmed?: boolean;
 }
 
 interface AuthRejectedMessage extends AuthRejection {
@@ -292,7 +301,12 @@ function publishAuthRejection(rejection: AuthRejection) {
   // filtered by `source` precisely so a tab never hears its own — so this
   // tab's listeners are called here, in-process, and the channel carries the
   // same fact to the others.
-  invalidate();
+  //
+  // A raw 401 is still provisional (WI-2708). Dropping the whole read cache
+  // on every blip makes every panel refetch, in every tab, for a refusal
+  // that the re-check may then reject. Only a confirmed refusal, or a
+  // deliberate sign-out, throws the cache away.
+  if (rejection.status !== 401 || rejection.confirmed === true) invalidate();
   for (const listener of [...authRejectedListeners]) listener(rejection);
   postAuthMessage({ type: "auth-rejected", source: AUTH_SOURCE_ID, ...rejection });
 }
@@ -305,9 +319,9 @@ function publishAuthRejection(rejection: AuthRejection) {
  * Anything that is not a 401 returns without a word — see `AuthRejection` for
  * why that silence is deliberate rather than an omission.
  */
-export function reportAuthResponse(status: number, detail = ""): void {
+export function reportAuthResponse(status: number, detail = "", confirmed = false): void {
   if (status !== 401) return;
-  publishAuthRejection({ status, detail });
+  publishAuthRejection({ status, detail, ...(confirmed ? { confirmed: true } : {}) });
 }
 
 /**
@@ -445,8 +459,14 @@ export function subscribeAuthRejected(
       channel.addEventListener("message", (event: MessageEvent<AuthMessage>) => {
         const data = event.data;
         if (data?.type === "auth-rejected" && data.source !== AUTH_SOURCE_ID) {
-          invalidate();
-          onRejected({ status: data.status, detail: data.detail });
+          // Same rule as the local publish: an unconfirmed 401 is not yet
+          // a sign-out, so it must not empty this tab's read cache either.
+          if (data.status !== 401 || data.confirmed === true) invalidate();
+          onRejected({
+            status: data.status,
+            detail: data.detail,
+            ...(data.confirmed ? { confirmed: true } : {}),
+          });
         }
       });
     }
@@ -1485,6 +1505,9 @@ export interface OperationalStatus {
   auth_broker: {
     auto_agent_auth: boolean;
     helper: string;
+    /** Latest session launched without its credentials (secrets manager unreachable). */
+    degraded_session_count?: number;
+    degraded?: { session_id: string; at: string; reason: string };
   };
   storage: {
     state_dir: string;
@@ -1612,14 +1635,32 @@ export function subscribeEvents(
       const res = await runtimeTransport().request(`${getBase()}/api/events`, {
         headers: authHeaders({ Accept: "text/event-stream" }),
         signal: controller.signal,
+        // Kept out of the HTTP cache. The engine answers `no-cache`, which a
+        // cache may still store, and Firefox holds a second GET for the same
+        // URL behind the entry the first is still writing — so a second tab
+        // (or window) on the same profile never got its headers while the
+        // first tab's stream was open, and every wake tore that pending
+        // connect down and started another (WI-2324).
+        cache: "no-store",
       });
-      // The stream is an authenticated read like any other, and the one
-      // most likely to meet a rotated token first — it outlives every panel.
-      // Reported through the same path rather than a second one, so a stream
-      // that dies on 401 signs the reader out instead of reconnecting on a
-      // dead credential until the backoff gives up.
+      // A 401 on the stream alone must not sign the reader out (WI-2708).
+      // It joins the shared `/api/auth/check` re-check; only that check's
+      // own 401 ends the session. Any other answer, including a dead
+      // socket, leaves the credential and lets the stream reconnect.
       if (!res.ok || !res.body) {
-        if (!res.ok) reportAuthResponse(res.status, "the event stream was refused");
+        if (res.status === 401) {
+          // Re-check, and publish only if that check also returns 401.
+          // Publishing the stream's own status would sign out immediately.
+          void import("./authRecheck").then(async ({ resolveAuthRejection }) => {
+            const confirmed = await resolveAuthRejection(
+              { status: 401, detail: "the event stream was refused" },
+              { fromStream: true },
+            );
+            if (confirmed) reportAuthResponse(confirmed.status, confirmed.detail, true);
+          });
+        } else if (!res.ok) {
+          reportAuthResponse(res.status, "the event stream was refused");
+        }
         throw new Error(`SSE failed: ${res.status}`);
       }
       if (cancelled) return;

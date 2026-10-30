@@ -45,7 +45,7 @@ import {
   onMount,
   type Accessor,
 } from "solid-js";
-import { onVogtChanged } from "./store";
+import { onVogtChangedEvent, type VogtChangedEvent } from "./store";
 import { onWake } from "./wakeCoordinator";
 
 /** How old a view with no poll may be before it stops calling itself current. */
@@ -247,6 +247,18 @@ export interface LiveOptions {
  *  one refetch, short enough that a single change still feels live. */
 const LIVE_COALESCE_MS = 400;
 
+/**
+ * Whether a change can alter anything a view shows. A sweep that found
+ * nothing new changed no work item, inbox entry or count, yet the core
+ * reports one per collector run: on prod they were 265 of every 296 sweep
+ * events, and each one re-read every open surface (WI-2328).
+ */
+export function changeIsVisible(event: Pick<VogtChangedEvent, "kind" | "summary">): boolean {
+  if (event.kind !== "sweep.completed") return true;
+  const summary = event.summary as { new?: unknown } | null | undefined;
+  return !(summary && typeof summary === "object" && summary.new === 0);
+}
+
 export function onVogtLive(handler: () => void, options: LiveOptions = {}): void {
   const allowed = () => {
     if (typeof document !== "undefined" && document.hidden) return false;
@@ -261,7 +273,8 @@ export function onVogtLive(handler: () => void, options: LiveOptions = {}): void
       // within the window into a single trailing refetch.
       let timer: ReturnType<typeof setTimeout> | null = null;
       let coalesced = false;
-      const nudge = () => {
+      const nudge = (event?: VogtChangedEvent) => {
+        if (event && !changeIsVisible(event)) return;
         if (!allowed()) return;
         if (timer === null) {
           handler();
@@ -276,7 +289,7 @@ export function onVogtLive(handler: () => void, options: LiveOptions = {}): void
           coalesced = true;
         }
       };
-      const stop = onVogtChanged(nudge);
+      const stop = onVogtChangedEvent(nudge);
       onCleanup(() => {
         if (timer !== null) clearTimeout(timer);
         stop();

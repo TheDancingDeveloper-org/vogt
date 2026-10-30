@@ -347,6 +347,11 @@ does not need an APK rebuild.
   defaults. Exposure and identity values such as a public URL or non-loopback
   bind address must be stated, not guessed. Read `docs/DEPLOYMENT.md` before
   changing Compose defaults.
+- Landing is through the merge queue (`docs/ci.md`): push a branch and open
+  a PR; the PR runs only fast, path-scoped checks, so don't expect full CI on
+  it and don't re-run the full suite by hand. `land-pr` enqueues the PR and
+  waits on the queue's `merge_group` runs, where the full suite runs. Rebase
+  only when the queue reports a conflict.
 - CI intentionally runs on self-hosted runners. A queued job is a runner
   capacity/availability question, never a reason to change `runs-on`. Fork
   limitations and local equivalents are documented in

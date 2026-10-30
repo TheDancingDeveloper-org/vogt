@@ -24,6 +24,13 @@
 //! autopilot does not nudge a held session, the turn in progress ends, the
 //! session rests at its prompt, and the next tick acts.
 //!
+//! A blocked report defers both, the same as a permission dialog: it says the
+//! agent is waiting on a person. It does not defer a hard limit. The report is
+//! the agent's own word, and one that keeps working while re-reporting it would
+//! otherwise never be stopped — the report suppresses the stop, and the stop is
+//! the only thing that ends it (WI-1281). At the hard limit the report is
+//! cleared and the session hibernates at the next turn boundary.
+//!
 //! Two clocks count only time the session is seen running — not idle, at its
 //! prompt, at a permission dialog, or blocked on a person:
 //!
@@ -90,8 +97,9 @@ enum Dimension {
 /// The line typed at the prompt on a soft warning. It names no marker, so its
 /// echo can never read as the agent finishing.
 pub const SOFT_LINE: &str = "[vogt] budget: {what} ({n} of {limit}). \
-Commit your work in progress on your branch, write a hand-off comment \
-(work_comment kind=handoff), then stop.";
+Commit your work in progress on your branch and push it, write a hand-off \
+comment (work_comment kind=handoff: branch, head_sha, done, remaining, \
+gates_run, blockers), then stop.";
 
 /// `used` against `limit`: missing or zero is no limit, at or over the limit
 /// is hard, at or over `soft_pct` of it is soft.
@@ -503,6 +511,17 @@ pub async fn run_once(
                 note_refusal(&session, bus, &refusal.to_string());
                 continue;
             }
+        }
+        // A blocked report says the agent is waiting on a person, and both the
+        // warning and the stop defer to that. But the report is the agent's own
+        // word, and an agent that keeps working while re-reporting it — the
+        // loop the repeat guard does not catch, because each report differs —
+        // would otherwise never be stopped: the report suppresses the stop, and
+        // the stop is the only thing that ends the loop. A hard limit overrides
+        // it. The report is cleared first, because hibernation copies it into
+        // the record a wake restores, and the wake would come back unenforced.
+        if level == Level::Hard && session.blocked().is_some() {
+            session.set_blocked(None, bus).ok();
         }
         let ready = at_prompt(&session, settle).await;
         let action = decide(level, dimension, ready, &reading);

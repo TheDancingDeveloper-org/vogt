@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 
@@ -104,6 +104,23 @@ class LandingPolicy(Entity):
     merge_mode: Literal["fast_forward", "rebase"]
     linear_history: bool = True
     deploy_by: str = "operator"
+    #: An initiative whose items cut from and land onto another long-lived
+    #: branch, keyed by initiative id or slug (WI-1841): the Rust port lands
+    #: on `rust-core`, not on `base_branch`.
+    initiative_bases: dict[str, str] = {}
+    #: Other long-lived branches a task may name as its base. A task that
+    #: names one is taken at its word rather than overridden (WI-1841).
+    long_lived_branches: list[str] = []
+
+    def known_bases(self) -> frozenset[str]:
+        """Every branch a worker on this project may cut from and land onto."""
+        return frozenset(
+            {
+                self.base_branch,
+                *self.initiative_bases.values(),
+                *self.long_lived_branches,
+            }
+        )
 
     @field_validator("branch_pattern")
     @classmethod
@@ -182,6 +199,21 @@ class AgentPolicy(Entity):
     landing: LandingPolicy | None = None
     review: ReviewPolicy | None = None
     verification: VerificationPolicy | None = None
+
+    def with_base(self, base: str) -> AgentPolicy:
+        """This policy for work that cuts from and lands onto `base` (WI-1841).
+
+        The landing rule's base and the worktree's base move together, so the
+        brief, the worktree and the conflict check all name the same branch.
+        """
+        if self.landing is None or self.landing.base_branch == base:
+            return self
+        return self.model_copy(
+            update={
+                "base_branch": base,
+                "landing": self.landing.model_copy(update={"base_branch": base}),
+            }
+        )
 
     @field_validator("session_wall_clock_minutes")
     @classmethod
@@ -493,6 +525,10 @@ class CodingSession(Entity):
     purpose: str | None = None
     started_by_session: str | None = None
     started_by_kind: Literal["person", "oversight", "worker"] | None = None
+    #: Never compact this session on a cold wake (WI-2037): a wake always
+    #: resumes its full transcript, whatever the deployment's setting. False
+    #: on a session from before migration 0028.
+    cold_wake_opt_out: bool = False
 
 
 class Token(Entity):
@@ -690,6 +726,26 @@ class ActorPreference(Entity):
     updated_at: datetime
 
 
+CharterScope = Literal["workspace", "project", "initiative"]
+
+
+class Charter(Entity):
+    """One version of a scope's standing instructions (WI-2038).
+
+    Append-only: setting a charter writes the next version, so the history is
+    the rows. An empty `body` is a cleared charter. The workspace charter has
+    `scope_id` "", a project's is its id, an initiative's is its id.
+    """
+
+    scope_kind: CharterScope
+    scope_id: str
+    version: int
+    body: str
+    author_actor_id: str
+    created_at: datetime
+    reason: str
+
+
 GrantKind = Literal["credential", "capability"]
 GrantUses = Literal["once", "ttl"]
 GrantState = Literal["pending", "approved", "denied", "revoked"]
@@ -788,6 +844,80 @@ class Decision(Entity):
         if self.state == "pending" and self.expires_at <= now:
             return "expired"
         return self.state
+
+
+WatchState = Literal["active", "fired", "failed", "cancelled", "expired"]
+
+
+class Watch(Entity):
+    """A session waiting on an event instead of polling for it (WI-2036).
+
+    `trigger` is the validated trigger as JSON (`core.watches`); `kind` is
+    its kind. The core's watch loop evaluates every active watch each pass
+    and, when one fires, types a one-line notice into `target_session` —
+    waking it first if it is hibernated. `expired` is stored once the loop
+    sees an active watch past `expires_at`; `effective_state` also computes
+    it on read so a listing never shows a lapsed watch as active.
+    """
+
+    id: str
+    owner_actor_id: str
+    target_session: str
+    kind: str
+    trigger: dict[str, Any]
+    note: str = ""
+    state: WatchState = "active"
+    created_at: datetime
+    expires_at: datetime
+    fired_at: datetime | None = None
+    outcome: dict[str, Any] | None = None
+    attempts: int = 0
+    last_error: str | None = None
+    reason: str
+
+    def effective_state(self, now: datetime) -> WatchState:
+        if self.state == "active" and self.expires_at <= now:
+            return "expired"
+        return self.state
+
+
+SessionReportKind = Literal["progress", "result", "question", "blocker"]
+
+
+class SessionReportFields(BaseModel):
+    """The structured half of a session report (WI-2039).
+
+    Every field is optional, as on a hand-off: a field left out means "not
+    stated". The text is the reporting agent's: untrusted data.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    branch: str | None = None
+    sha: str | None = None
+    pr: str | None = None
+    checks: list[str] = []
+    blockers: list[str] = []
+    next_step: str | None = None
+
+
+class SessionReport(Entity):
+    """A session's own short, typed report of where it is (WI-2039).
+
+    `progress` while working, `result` when a deliverable is done, `question`
+    or `blocker` when it needs someone. Keyed by the reporting engine session
+    so the sweep and the digest can show the latest one per row; the work item
+    is the one it was bound to (or named) when it reported.
+    """
+
+    id: str
+    actor_id: str
+    engine_session_id: str | None = None
+    work_item_id: str | None = None
+    kind: SessionReportKind
+    summary: str
+    fields: SessionReportFields = SessionReportFields()
+    created_at: datetime
 
 
 class DepRef(Entity):

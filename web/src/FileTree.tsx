@@ -26,12 +26,14 @@ import { railSections, setRailSection } from "./railSections";
 import {
   expandedPaths,
   fileTreeSearch,
+  fileTreeSelectedPath,
   folderVersion,
   invalidateFolder,
   isExpanded,
   parentFolder,
   setExpanded,
   setFileTreeSearch,
+  setFileTreeSelectedPath,
 } from "./fileTreeState";
 import { workspaceVersion } from "./workspaceVersion";
 import { onWake } from "./wakeCoordinator";
@@ -50,6 +52,9 @@ interface Props {
   onError?: (message: string) => void;
   /** A confirmation worth a toast, such as a copied path. */
   onNotify?: (message: string) => void;
+  /** Preview a file in place instead of opening it in the editor. The Files
+   *  place uses this; the rail keeps the editor. */
+  onPreviewFile?: (path: string) => void;
   /** Outside the rail (the Files place) the tree is the whole surface: it
    *  ignores the rail's collapsed/expanded memory and shows no caret. */
   alwaysExpanded?: boolean;
@@ -107,6 +112,16 @@ export function statusForPath(
   return entries.get(path) ?? null;
 }
 
+/** Keep the previous node object when a refetch describes the same file, so a
+ *  list keyed by reference does not remount a row the reader has selected. */
+function reuseNodes(previous: TreeNode[] | null | undefined, next: TreeNode[]): TreeNode[] {
+  const prior = new Map((previous ?? []).map((node) => [node.path, node]));
+  return next.map((node) => {
+    const old = prior.get(node.path);
+    return old && old.name === node.name && old.is_dir === node.is_dir ? old : node;
+  });
+}
+
 function joinPath(dir: string, name: string): string {
   const cleanDir = dir.replace(/^\/+|\/+$/g, "");
   const cleanName = name.replace(/^\/+/, "");
@@ -141,7 +156,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     setLoadError(null);
     try {
       const tree = await api.tree(props.node.path, 0);
-      setKids(tree);
+      setKids((current) => reuseNodes(current, tree));
     } catch (cause) {
       // A failed expand must not become an unhandled rejection (the effect
       // calls this with `void`): report it in place and leave the folder open
@@ -214,7 +229,10 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     });
   });
 
+  const selected = () => fileTreeSelectedPath() === props.node.path;
+
   const toggle = () => {
+    setFileTreeSelectedPath(props.node.path);
     if (!props.node.is_dir) {
       props.onOpenFile(props.node.path);
       return;
@@ -231,6 +249,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     <div>
       <div
         class="tree-row"
+        classList={{ "tree-row--selected": selected() }}
         title={props.node.path}
         ref={rowRef}
         onContextMenu={(event) => {
@@ -353,6 +372,12 @@ const FileTree: Component<Props> = (props) => {
     },
   );
   const statusMap = createMemo(() => buildStatusMap(gitStatus() ?? []));
+  // A refetch returns new objects for the same paths. Reusing the previous
+  // object for an unchanged path is what lets <For> keep that row mounted, so
+  // a selected file stays selected and keeps keyboard focus (WI-1682).
+  const stableRoot = createMemo<TreeNode[]>((prev) =>
+    reuseNodes(prev, tree.error ? [] : (tree() ?? [])),
+  []);
   // Search query is hoisted to the module store so it survives a tab switch.
   const searchQuery = fileTreeSearch;
   const setSearchQuery = setFileTreeSearch;
@@ -438,6 +463,10 @@ const FileTree: Component<Props> = (props) => {
   });
 
   const openFile = (path: string) => {
+    if (props.onPreviewFile) {
+      props.onPreviewFile(path);
+      return;
+    }
     openEditorTab(path);
     navigate(`/e/${encodeURIComponent(path)}`);
     // Do not call onOpen here. The rail passes onOpen so opening a terminal
@@ -679,7 +708,7 @@ const FileTree: Component<Props> = (props) => {
           fallback={
             // An errored resource throws when read; the banner above says
             // why, so an empty tree stands in rather than an uncaught error.
-            <For each={tree.error ? [] : (tree() ?? [])}>
+            <For each={stableRoot()}>
               {(node) => (
                 <TreeNodeView
                   node={node}

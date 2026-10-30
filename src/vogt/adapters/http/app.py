@@ -36,7 +36,11 @@ from vogt.adapters.http.etag import (
     if_none_match_matches,
     is_conditional_read,
 )
-from vogt.application.context import AppContext, build_context
+from vogt.application.context import (
+    AppContext,
+    build_context,
+    with_claimed_engine_session,
+)
 from vogt.application.identity import identity_from_headers
 from vogt.application.services.auth import Authenticated, authorize
 from vogt.errors import VogtError
@@ -225,6 +229,7 @@ def _endpoint_for(
         # front door stated, and only the adapter should read a request
         # (`identity.py`). A no-op unless this instance is configured as
         # fronted and a door actually said something.
+        ctx = with_claimed_engine_session(ctx, request.headers)
         result: BaseModel = await asyncio.to_thread(
             operation.run, _with_public_identity(ctx, request), params
         )

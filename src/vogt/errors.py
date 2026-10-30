@@ -72,6 +72,24 @@ class PersonRequired(VogtError):
     http_status = 403
 
 
+class PolicyRefused(VogtError):
+    """A start's model is one the project, or the template, will not run
+    (WI-1590).
+
+    A project's `agent_policy.review.never_models` is a hard rule, and so are
+    its `forbidden_text` patterns when the model id matches one: a session
+    whose model hits either is refused before the engine spawns anything,
+    whether the model came from the purpose's dispatch profile or from the
+    caller naming it. A template that resolves to Claude Code is refused the
+    same way when its model is not one Claude Code speaks. A start with no
+    model at all is not refused — there is nothing to judge — and a project
+    with no policy has nothing of its own to refuse against.
+    """
+
+    code = "policy_refused"
+    http_status = 422
+
+
 class RoleRefused(VogtError):
     """An agent asked to make a session an overseer (WI-957, WI-973 F3).
 
@@ -96,6 +114,17 @@ class GrantRefused(VogtError):
     """
 
     code = "grant_refused"
+    http_status = 403
+
+
+class ReportRefused(VogtError):
+    """A session tried to post a report as another session (WI-2039).
+
+    A report is a session's own account of itself; one agent may not put
+    words in another's row. Refused by who is asking.
+    """
+
+    code = "report_refused"
     http_status = 403
 
 
@@ -329,6 +358,12 @@ class PreferenceVersionConflict(Conflict):
     """A preference write named a version that is no longer current."""
 
     code = "preference_version_conflict"
+
+
+class CharterVersionConflict(Conflict):
+    """A charter write named a version that is no longer current."""
+
+    code = "charter_version_conflict"
 
 
 class InvalidPreference(InvalidRequest):

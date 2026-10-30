@@ -111,6 +111,17 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("project.get", {"slug": "parity-project"}),
+    (
+        "charter.set",
+        {
+            "scope": "project",
+            "ref": "parity-project",
+            "body": "Commit as the project identity.",
+            "expected_version": 0,
+            "reason": WHY,
+        },
+    ),
+    ("charter.get", {"scope": "project", "ref": "parity-project", "history": True}),
     ("project.list", {}),
     (
         "project.update",
@@ -143,6 +154,7 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ),
     ("notifications", {}),
     ("deployed.versions", {}),
+    ("usage.board", {}),
     # -- the forge foundation, armed before the work plane --
     # Per-actor account linking: paste, confirm, enumerate. The token is
     # validated against the stand-in forge and never echoed back; it is also
@@ -518,6 +530,17 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     (
+        "session.report",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "kind": "result",
+            "summary": "pushed the branch",
+            "branch": "wi-1-thing",
+            "checks": ["pytest: green"],
+            "reason": WHY,
+        },
+    ),
+    (
         "session.report_unblocked",
         lambda seen: {"id": seen["session.start"]["session"]["id"], "reason": WHY},
     ),
@@ -650,6 +673,20 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "label": "Merge",
             "reason": WHY,
         },
+    ),
+    # A watch (WI-2036): armed on the harness's session, listed, cancelled.
+    (
+        "watch.create",
+        lambda seen: {
+            "trigger": {"kind": "work_item", "work_item": "WI-1"},
+            "session": seen["session.start"]["session"]["id"],
+            "reason": WHY,
+        },
+    ),
+    ("watch.list", {"state": "active"}),
+    (
+        "watch.cancel",
+        lambda seen: {"id": seen["watch.create"]["watch"]["id"], "reason": WHY},
     ),
     (
         "session.stop",

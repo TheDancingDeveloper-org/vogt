@@ -172,8 +172,8 @@ def test_demo_publication_is_main_only_scanned_signed_and_never_deploys() -> Non
     assert "--exit-code 1" in scan
     assert "continue-on-error" not in scan
     assert "sbom: true" in job
-    assert 'cosign sign --yes "${DEMO_IMAGE}@${DIGEST}"' in job
-    assert "Pin this signed digest" in job
+    assert "cosign" not in job
+    assert "Pin this digest" in job
     assert "mobile-demo.html" in job
     assert "--env DEMO_ROOT_DOCUMENT=mobile-demo.html" in job
     assert "get index.html" in job

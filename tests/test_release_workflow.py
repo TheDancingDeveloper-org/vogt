@@ -1,10 +1,13 @@
 """The release is *build once, promote by digest* (`.github/workflows/release.yml`).
 
-`build.yml` builds, smoke-tests, signs and publishes the three images once per
-commit on `main`; the dev lane deploys and validates those digests; a `v*` tag
-then retags and release-signs the same digests. These tests pin the shape that
-makes that true, because each property is one innocent-looking edit away from
-quietly going back to "a release rebuilds something the dev lane never ran".
+`build.yml` builds, smoke-tests, signs and publishes the images once per
+commit on `main` — the core, the lean stack, the workbench stack and the
+voice sidecar; the dev lane deploys and validates the digests it consumes; a
+`v*` tag then retags the same digests (the release itself signs nothing).
+These tests pin the shape that makes that true, because each property is one
+innocent-looking
+edit away from quietly going back to "a release rebuilds something the dev
+lane never ran".
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ pytestmark = pytest.mark.skipif(
     not RELEASE.is_file(), reason="workflows are absent from the core-only test image"
 )
 
-IMAGES = ("IMAGE", "STACK_IMAGE", "VOICE_IMAGE")
+IMAGES = ("IMAGE", "STACK_IMAGE", "STACK_WORKBENCH_IMAGE", "VOICE_IMAGE")
 
 
 def _release() -> str:
@@ -81,7 +84,7 @@ def test_the_images_promoted_are_the_ones_build_yml_publishes() -> None:
         assert _group(pattern, release, re.M) == _group(pattern, build, re.M)
     # build.yml tags a main commit `sha-<7>` (metadata-action `type=sha`);
     # the release finds the digest by exactly that tag.
-    assert build.count("type=sha,enable=${{ github.ref == 'refs/heads/main' }}") == 3
+    assert build.count("type=sha,enable=${{ github.ref == 'refs/heads/main' }}") == 4
     assert "BUILD_TAG_PREFIX: sha-" in release
     assert 'BUILD_TAG_SHA_LENGTH: "7"' in release
 
@@ -94,17 +97,16 @@ def test_the_build_run_gate_names_build_yml_jobs_that_exist() -> None:
     block = _job_block(_release(), "build-run")
     required = _group(r"REQUIRED_JOBS: \|\n((?:\s{12}.+\n)+)", block)
     names = [line.strip() for line in required.splitlines() if line.strip()]
-    assert len(names) == 3
+    assert len(names) == 4
     assert set(names) <= build_names, set(names) - build_names
     assert "actions/workflows/build.yml/runs?head_sha=" in block
     assert "branch=main" in block
 
 
-def test_promotion_verifies_then_retags_and_signs_by_digest() -> None:
+def test_promotion_checks_then_retags_by_digest_and_never_signs() -> None:
     block = _job_block(_release(), "promote")
-    # Only what build.yml signed, on main, at this exact commit, is promoted.
-    assert "/.github/workflows/build.yml@refs/heads/main" in block
-    assert '--certificate-github-workflow-sha "$TAG_SHA"' in block
+    # The digest is found by build.yml's sha- tag and must carry the SBOM and
+    # provenance attestations; a digest without them is not promoted.
     assert "{{json .${kind}}}" in block and "SBOM Provenance" in block
     # Registry-side retag of the digest, re-checked afterwards.
     # `--prefer-index=false` keeps buildx from wrapping a single manifest in
@@ -113,14 +115,18 @@ def test_promotion_verifies_then_retags_and_signs_by_digest() -> None:
     assert '"${args[@]}" "${repo}@${digest}"' in block
     assert 'if [ "$got" != "$digest" ]; then' in block
     assert 'tags="$version ${version%.*} latest"' in block
-    # Signed by digest, never by tag, under this workflow's own identity.
-    for env in ("IMAGE", "STACK_IMAGE", "VOICE_IMAGE"):
-        assert re.search(
-            rf'cosign sign --yes "\${{{env}}}@\$\{{\w+_DIGEST\}}"', block
-        ), env
-    assert "id-token: write" in block
+    # Image signing was dropped: nothing in the release signs, and the job
+    # needs no OIDC token for it.
+    assert "cosign" not in block
+    assert "id-token: write" not in block
     # No silent fallback: the failure is an error, not a rebuild.
     assert "Nothing is rebuilt" in block
+
+
+def test_release_signs_nothing() -> None:
+    text = _release()
+    assert "cosign" not in text
+    assert "sigstore" not in text
 
 
 def test_the_manifest_records_the_source_and_every_digest() -> None:
@@ -134,7 +140,6 @@ def test_the_manifest_records_the_source_and_every_digest() -> None:
         'method: "build-once-promote-by-digest"',
         "rebuilt: false",
         "build_run_id:",
-        "cosign_identities:",
     ):
         assert key in block, key
     for need in ("build-run", "promote", "android", "release-pair"):
@@ -145,3 +150,41 @@ def test_the_android_shell_is_still_built_at_tag_time() -> None:
     block = _job_block(_release(), "android")
     assert "./gradlew assembleRelease" in block
     assert "apksigner" in block
+
+
+def test_core_and_stack_are_built_once_and_tagged_after_smoke() -> None:
+    """WI-1649: one push-by-digest build, smoke that digest, then tag and sign.
+
+    A second build-push of the same image would put bytes on a tag that the
+    smoke never ran, which is the failure this shape exists to remove.
+    """
+    build = BUILD.read_text(encoding="utf-8")
+    image = _job_block(build, "image")
+    stack = _job_block(build, "stack-image")
+    assert image.count("docker/build-push-action") == 1
+    assert "push-by-digest=true" in image
+    assert "docker pull" in image and "${IMAGE}@${DIGEST}" in image
+    assert image.index("docker pull") < image.index("imagetools create")
+    assert "cosign" not in build
+    assert "docker/build-push-action" not in stack
+    assert ".github/stack-bake.hcl" in stack
+    assert "stack gitguard" in stack
+    assert stack.index("docker pull") < stack.index("codex_gitguard_e2e")
+    assert stack.index("codex_gitguard_e2e") < stack.index("imagetools create")
+    bake = (ROOT / ".github" / "stack-bake.hcl").read_text(encoding="utf-8")
+    assert 'target "stack"' in bake and 'target "gitguard"' in bake
+    assert "push-by-digest=true" in bake
+    assert 'target     = "codex-gitguard-e2e"' in bake
+    # The bake's cache ref is a variable. The job must set it, or cache-from
+    # and cache-to are an empty registry ref and the stack cache is lost.
+    assert "CACHE_REF:" in stack
+    assert ":stack-${{ github.ref_name }}" in stack
+    # metadata-action labels are newline-separated. Splitting them on comma
+    # keeps only the first line.
+    assert "IFS=','" not in stack
+    assert "read -r pair" in stack
+    assert "mode=min" in bake
+    # The retention workflow already prunes the untagged orphan a failed
+    # smoke leaves. vogt and vogt-stack are in the package list it sweeps.
+    retention = (WORKFLOWS / "ghcr-retention.yml").read_text(encoding="utf-8")
+    assert "vogt vogt-stack" in retention

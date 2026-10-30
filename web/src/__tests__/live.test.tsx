@@ -267,6 +267,34 @@ describe("the board reloads on what the front door announced", () => {
     );
   });
 
+  it("ignores a burst of sweeps that found nothing (WI-2328)", async () => {
+    // Prod's core reports one sweep.completed per collector run; 265 of every
+    // 296 found nothing new, and each re-read the whole board.
+    const vogt = fakeVogt();
+    board();
+    await waitFor(() => expect(vogt.matching("GET /work")).toHaveLength(1));
+    await liveStream(vogt);
+    for (let i = 0; i < 50; i += 1) {
+      vogt.stream.changed({ kind: "sweep.completed", entity_kind: "sweep", entity_id: `swp_${i}`, summary: { new: 0 } });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(vogt.matching("GET /work")).toHaveLength(1);
+
+    vogt.stream.changed({ kind: "sweep.completed", entity_kind: "sweep", entity_id: "swp_new", summary: { new: 3 } });
+    await waitFor(() => expect(vogt.matching("GET /work")).toHaveLength(2));
+  });
+
+  it("reads a burst of real changes at most twice (WI-2328)", async () => {
+    const vogt = fakeVogt();
+    board();
+    await waitFor(() => expect(vogt.matching("GET /work")).toHaveLength(1));
+    await liveStream(vogt);
+    for (let i = 0; i < 50; i += 1) vogt.stream.changed({ entity_id: `01JWORK${i}` });
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    // Leading read plus one trailing read for the rest of the burst.
+    expect(vogt.matching("GET /work").length).toBeLessThanOrEqual(3);
+  });
+
   it("does not re-read under a reason somebody is typing", async () => {
     const vogt = fakeVogt();
     const { container } = board();
@@ -514,13 +542,15 @@ describe("a lost stream is indicated and reconciles on reconnect", () => {
     // believing it was connected forever, with every surface quiet and
     // nothing on screen saying so.
     vogt.stream.drop();
-    await waitFor(() => expect(isConnected()).toBe(false));
-
+    // The reopen lands inside the grace period (DISCONNECT_GRACE_MS), so the
+    // header is never shown as disconnected; a loss that outlasts the grace
+    // is covered by the store's own tests.
     await waitFor(() => expect(vogt.stream.opens()).toBeGreaterThan(1), {
       timeout: 5_000,
     });
     await vogt.stream.opened();
     await settle();
+    expect(isConnected()).toBe(true);
 
     vogt.route("GET /work", {
       body: { items: [workItem({ state: "in_progress" })], total: 1 },

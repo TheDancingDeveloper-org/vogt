@@ -872,10 +872,16 @@ textarea {
   gap: 14px;
   background: var(--bg-elev);
   border-right: 1px solid var(--bd);
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  /* The rail itself does not scroll. The session list
+     (`.places-rail-session-area`) is the one scroller, so nav, section toggles
+     and the footer stay put when there are many sessions. `min-height: 0` on
+     this column (already set) is what lets that child shrink below its content. */
+  overflow: hidden;
+}
+.places-rail:has(.file-tree .places-section-toggle[aria-expanded="true"]) {
+  /* Eight blocks times the 14px gap costs about 100px, which is what starves
+     an open file tree on a short window. Tighten it while Files is open. */
+  gap: 6px;
 }
 .places-brand {
   display: flex;
@@ -955,11 +961,71 @@ textarea {
   text-align: left;
 }
 .places-nav {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 .places-rail-session-area {
-  flex: 0 0 auto;
+  /* Take the leftover column and scroll inside it. `min-height: 0` is required:
+     a flex item's default minimum is its content size, which would grow the
+     rail instead of scrolling. The toggle stays put; only the list scrolls.
+     `position: relative` anchors the resize handle, which overlaps the bottom
+     edge instead of adding a row (WI-1664). */
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
   padding-top: 2px;
+}
+.places-rail-session-area > div {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.places-rail:has(.file-tree .places-section-toggle[aria-expanded="true"]) > .places-rail-session-area {
+  /* Files is open, so the running list gives up the space below this cap.
+     The list still scrolls inside itself. */
+  flex: 0 1 auto;
+  max-height: 220px;
+}
+/* A reader-chosen height (WI-1664). Flex no longer fills the leftover column;
+   the list inside still scrolls. The open-Files cap yields to the choice. */
+.places-rail-session-area--sized,
+.places-rail:has(.file-tree .places-section-toggle[aria-expanded="true"]) > .places-rail-session-area--sized {
+  flex: 0 0 auto;
+  max-height: none;
+}
+.session-area-resize-handle {
+  /* Over the bottom edge of the area, out of flow. A flex row (even with a
+     negative margin) shifted the places column and failed the desktop
+     screenshots; the drag still starts from the same edge. */
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  height: 8px;
+  cursor: row-resize;
+  touch-action: none;
+  border-radius: 4px;
+}
+.session-area-resize-handle:hover,
+.session-area-resize-handle:focus-visible,
+.session-area-resize-handle.dragging {
+  background: var(--accent);
+  opacity: 0.35;
+}
+.session-area-resize-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  opacity: 1;
+}
+@media (pointer: coarse) {
+  /* A hairline is not a touch target. The handle is a desk control; a coarse
+     pointer keeps the shipped flex height and the inner scroller. */
+  .session-area-resize-handle { display: none; }
 }
 .places-section-label {
   padding: 0 8px 4px;
@@ -984,7 +1050,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
 }
 .places-group-label {
   padding: 0 8px 4px;
@@ -1002,12 +1068,23 @@ textarea {
   border-radius: 5px;
   text-decoration: none;
   font-size: 13px;
+  /* One line each. Wrapped links doubled the nav and starved the session
+     list of the height it needs to scroll inside the rail. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .places-group a {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  white-space: nowrap;
+}
+.places-group a > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .place-count {
   display: inline-flex;
@@ -1069,16 +1146,16 @@ textarea {
   gap: 6px;
   padding-top: 10px;
   border-top: 1px solid var(--bd);
-  /* Pinned to the foot of the rail's own scroller: with a full session
-     list the footer used to sit below the fold, so Settings and Sign out were
-     unreachable at 1440×900 without scrolling. `margin-top: auto` keeps it at
-     the bottom when the rail is short; `sticky` keeps it on screen when it is
-     not. The elevated background is what stops the scrolling list showing
-     through it. */
-  position: sticky;
-  bottom: 0;
+  /* The rail no longer scrolls, so the footer is just the last flex item. It
+     stays at the foot when the session list is short (`margin-top: auto`) and
+     stays on screen when the list is long, because the list scrolls inside
+     itself rather than pushing the footer down. It may shrink on a short
+     window; its buttons then scroll inside it. */
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 140px;
+  overflow-y: auto;
   margin-top: auto;
-  z-index: 2;
   background: var(--bg-elev);
 }
 .rail-hidden-toggle {
@@ -1117,7 +1194,10 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  max-height: 160px;
 }
 
 .places-recent a {
@@ -2012,6 +2092,11 @@ textarea {
   padding: 6px 10px;
   cursor: pointer;
   border-left: 2px solid transparent;
+  /* A busy roster is a long list: rows off screen skip layout and paint
+     until they scroll near the viewport (WI-1903). `auto` remembers each
+     row's last real height, so the scrollbar does not jump. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 34px;
 }
 .session-row:hover {
   background: rgba(255, 255, 255, 0.04);
@@ -3509,11 +3594,19 @@ textarea {
   border-top: 1px solid var(--bd);
 }
 .places-rail > .file-tree {
-  /* The rail itself is the scroll viewport. Files keeps enough room for its
-     heading, search, several rows and progressive controls, then grows with
-     its contents instead of introducing another trapped scroll area. */
-  min-height: 260px;
+  /* The session list is the rail's scroller. A collapsed tree is just its
+     heading. Once open it keeps a usable floor (capped), and its own tree
+     scrolls inside that, so a deep tree cannot push the footer off screen. */
+  min-height: 0;
   flex: 0 0 auto;
+  overflow: hidden;
+}
+.places-rail > .file-tree:has(.places-section-toggle[aria-expanded="true"]) {
+  /* Open Files keeps enough for its heading, search and a row, and may grow.
+     The nav above it scrolls if the column cannot hold both. */
+  flex: 1 1 180px;
+  min-height: 150px;
+  max-height: 320px;
 }
 .file-tree-header {
   flex: 0 0 auto;
@@ -3563,8 +3656,11 @@ textarea {
   font-size: 12px;
 }
 .places-rail > .file-tree .tree-scroll {
-  flex: 0 0 auto;
-  overflow-y: visible;
+  /* Overrides the 140px floor on `.tree-scroll`. In the rail the tree must be
+     able to shrink so the search and a row stay visible in a short column. */
+  flex: 1 1 auto;
+  min-height: 0 !important;
+  overflow-y: auto;
 }
 .tree-row {
   display: flex;
@@ -3617,6 +3713,10 @@ textarea {
 .tree-status-conflicted,
 .tree-status-deleted { color: var(--activity-errored); }
 .tree-row:hover { background: rgba(255, 255, 255, 0.05); }
+/* The file the reader selected, kept across the rail rebuild a session update
+   triggers (WI-1682). Hover still wins while the pointer is on another row. */
+.tree-row--selected { background: rgba(255, 255, 255, 0.08); }
+.tree-row--selected:hover { background: rgba(255, 255, 255, 0.1); }
 .tree-search-meta {
   padding: 6px 8px;
   color: var(--fg-muted);
@@ -3804,10 +3904,66 @@ textarea {
   color: var(--fg-muted);
   font-size: 11px;
 }
+.editor-host-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
 .editor-host {
   flex: 1;
   min-height: 0;
   min-width: 0;
+}
+/* Touch edit bar: a long-press in the editor raises it (Editor.tsx). It sits at
+   the bottom so it never covers the first lines, where a long-press usually
+   lands, and its labels are not themselves selectable text. */
+.editor-touch-edit {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 30;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  max-width: calc(100% - 16px);
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.editor-touch-edit button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+/* Above the edit bar, never over the top lines: Monaco hit-tests a long-press
+   with caretRangeFromPoint, which a notice lying over the text would swallow. */
+.editor-touch-notice {
+  position: absolute;
+  bottom: 68px;
+  right: 8px;
+  z-index: 30;
+  max-width: calc(100% - 32px);
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.editor-touch-notice-error {
+  background: var(--danger);
 }
 /* Inline notices between the toolbar and the editor: a stale-save conflict and
    a restored-but-stale draft. */
@@ -11088,8 +11244,9 @@ a.vogt-projects-tag:hover {
 }
 
 /* == 5b — places rail ===================================================== *
- * Additive to the shipped rail. The rail is the scroller (`.places-rail`
- * overflow-y:auto); every block below stays flex:0 0 auto so that stays true.
+ * Additive to the shipped rail. The session list is the scroller
+ * (`.places-rail-session-area`); blocks below stay flex:0 0 auto so nav,
+ * toggles and the footer stay put.
  * ========================================================================= */
 
 /* 1. The attention card. Rendered only for a waiting session or an engine
@@ -11626,6 +11783,25 @@ a.vogt-projects-tag:hover {
   .sessions-place:not(.has-workspace) .sessions-tools a { flex: 0 0 auto; display: inline-flex; align-items: center; height: 34px; padding: 0 14px; border-color: transparent; border-radius: 999px; background: var(--bg-elev); font-size: 13px; }
   .sessions-place:not(.has-workspace) .sessions-tools a[aria-current="page"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
   .sessions-place:not(.has-workspace) .sessions-overview { padding: 0 16px 20px; }
+  /* WI-1830: the waiting cards sit above the overview, and the overview used
+     to be the only scroller inside an `overflow: hidden` place. Two cards
+     squeezed it to nothing and were clipped themselves, so the list stayed
+     stuck until every waiting session was answered. On a phone the place
+     itself scrolls: cards and list are one column, and the list grows to its
+     content instead of keeping a scroller of its own. */
+  .sessions-place:not(.has-workspace) {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .sessions-place:not(.has-workspace) > .sessions-waiting,
+  .sessions-place:not(.has-workspace) > .sessions-place-body,
+  .sessions-place:not(.has-workspace) .sessions-active-workspace,
+  .sessions-place:not(.has-workspace) .sessions-overview {
+    flex: 1 0 auto;
+    min-height: auto;
+    overflow: visible;
+  }
+  .sessions-place:not(.has-workspace) > .sessions-waiting { flex: 0 0 auto; }
   .sessions-overview-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 18px 0 8px; }
   .sessions-overview-heading {
     margin: 0;
@@ -11680,7 +11856,9 @@ a.vogt-projects-tag:hover {
   .session-waiting-identity { display: flex; flex-direction: column; gap: 2px; }
   .session-waiting-identity strong { color: var(--fg-bright); font-size: 16px; font-weight: 600; }
   .session-waiting-context { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .session-waiting-tail { max-height: 150px; padding: 10px 12px; border-radius: 10px; background: var(--term-bg); font-size: 12px; line-height: 1.55; }
+  /* A read-only snapshot of the last few lines, not a scroller: a swipe that
+     starts on it scrolls the page, never a box nested inside the card. */
+  .session-waiting-tail { max-height: none; overflow: hidden; padding: 10px 12px; border-radius: 10px; background: var(--term-bg); font-size: 12px; line-height: 1.55; touch-action: pan-y; }
   .session-waiting-acts { display: grid; grid-template-columns: 1fr 1fr; }
   .session-waiting-acts button { min-height: 46px; border-radius: 10px; font-size: 15px; font-weight: 600; }
   .session-waiting-acts button:first-child { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
@@ -11906,11 +12084,95 @@ a.vogt-projects-tag:hover {
   color: var(--fg-muted);
   font-size: 13px;
 }
+
 .files-place-body {
   display: flex;
   flex: 1;
   min-height: 0;
   min-width: 0;
+  gap: 0;
+}
+.files-place-tree {
+  display: flex;
+  flex: 0 0 280px;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--bd);
+}
+.files-place-preview {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.files-place-back { display: none; }
+.files-place-empty {
+  margin: auto;
+  padding: 24px;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+.file-preview {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.file-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--bd);
+}
+.file-preview-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.file-preview-toggle { display: flex; gap: 4px; }
+.file-preview-toggle button[aria-pressed="true"] {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.14);
+}
+.file-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+}
+.file-preview-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+.file-preview-source {
+  margin: 0;
+  padding: 12px 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.file-preview-image {
+  display: block;
+  max-width: 100%;
+  margin: 16px auto;
+}
+.file-preview-error, .file-preview-status {
+  margin: 16px;
+  color: var(--fg-muted);
 }
 .files-place .file-tree { flex: 1; min-height: 0; border-top: 0; }
 .files-place .file-tree--standalone .places-section-toggle:disabled {
@@ -11979,6 +12241,15 @@ a.vogt-projects-tag:hover {
 
   .files-place > .surface-header { padding: 10px 16px 8px; }
   .files-place > .surface-header h1 { margin-top: 2px; font-size: 22px; font-weight: 650; letter-spacing: -.01em; }
+  .files-place-tree { flex: 1 1 auto; border-right: 0; }
+  .files-place-body--previewing .files-place-tree { display: none; }
+  .files-place-back {
+    display: inline-flex;
+    align-items: center;
+    align-self: flex-start;
+    min-height: 40px;
+    margin: 6px 10px 0;
+  }
   .files-place .tree-scroll { padding: 4px 10px; font-size: 14px; }
   .files-place .tree-row { padding: 2px 4px; }
   .files-place .tree-actions button,
@@ -12303,3 +12574,130 @@ a.vogt-projects-tag:hover {
 .chat--narrow .chat-main { padding: 8px; }
 .chat--narrow .chat-row { max-width: 92%; }
 .chat--narrow .chat-composer textarea { font-size: 16px; }
+
+/* The session rail's sections (WI-1736): a filter row above the list, one
+   header per state with its count, workers nested under their oversight
+   session, and a compact row (the working directory moves to the tooltip). */
+.rail-session-tools {
+  padding: 4px 8px 6px;
+}
+.rail-search {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  color: inherit;
+}
+.rail-search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* A section header stays at the top of the list while its rows scroll under
+   it, so the operator always sees which state the rows belong to. */
+.places-rail-session-area .rail-section-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin-top: 0;
+  background: var(--bg-elev);
+}
+.places-rail-session-area .session-row .cwd {
+  display: none;
+}
+.session-row.session-row--child {
+  margin-left: 14px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+.session-row.session-row--dimmed {
+  opacity: 0.55;
+}
+.session-row .session-caret {
+  flex: 0 0 auto;
+  border: 0;
+  background: none;
+  color: inherit;
+  padding: 0 4px 0 0;
+  font: inherit;
+  cursor: pointer;
+}
+.session-row .session-lift {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-right: 4px;
+}
+.session-row .session-tally {
+  font-size: 11px;
+  opacity: 0.8;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+@media (pointer: coarse) {
+  .places-rail-session-area .session-row,
+  .places-rail-session-area .rail-section-head {
+    min-height: 44px;
+  }
+  .rail-search {
+    font-size: 16px;
+    min-height: 44px;
+  }
+}
+
+/* The phone and overview session lists are sectioned too (WI-1736): a header
+   per state, a button that folds it, and the count. */
+.session-list-section {
+  list-style: none;
+}
+.session-list-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: start;
+  cursor: pointer;
+}
+.session-list-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+@media (pointer: coarse) {
+  .session-list-head {
+    min-height: 44px;
+  }
+}
+
+/* State badges on a session row (WI-1736, design §4): one glyph each, with the
+   words in the title and the accessible name. */
+.session-row .session-badges {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.session-row .session-badge {
+  font-size: 10px;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+}
+/* The count of pinned sessions that need a person, on the Pinned header. */
+.session-list-needs {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--activity-waiting);
+}

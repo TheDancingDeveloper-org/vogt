@@ -2314,6 +2314,7 @@ test("Files rail keeps its hierarchy compact and exposes real modified-file stat
     }],
   } }));
   await page.goto("/#/sessions");
+  await page.getByRole("button", { name: /Files/ }).click();
   const files = page.getByRole("heading", { name: "Files" });
   const search = page.getByRole("searchbox", { name: "Search files" });
   await expect(files).toBeVisible();
@@ -2325,15 +2326,16 @@ test("Files rail keeps its hierarchy compact and exposes real modified-file stat
   await expect(search).toBeVisible();
   await expect(page.getByLabel("Modified file")).toHaveText("M");
   await expect(page.getByText("TSX", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "New", exact: true })).toBeVisible();
+  await expect(page.locator(".file-tree").getByRole("button", { name: "New", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Refresh files" })).toBeVisible();
   await expect(page.getByRole("button", { name: "New folder" })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "New", exact: true }).click();
+  const newFile = page.locator(".file-tree").getByRole("button", { name: "New", exact: true });
+  await newFile.click();
   await expect(page.getByRole("button", { name: "Upload files" })).toBeVisible();
   await expect(page.getByRole("button", { name: "New file" })).toBeVisible();
   await expect(page.getByRole("button", { name: "New folder" })).toBeVisible();
-  await page.getByRole("button", { name: "New", exact: true }).click();
+  await newFile.click();
 
   await page.getByRole("button", { name: "Expand src" }).click();
   await expect(page.getByText("nested-component.tsx")).toBeVisible();
@@ -2513,6 +2515,85 @@ test("Phone editor gives the editor the width and floats Files as an overlay dra
   await expect(page.locator(".editor-sidebar")).toHaveCount(0);
 });
 
+// WI-1591: Monaco owns a phone's long-press (no native selection or Copy/Paste
+// menu), so the editor answers it with its own edit bar. A real touch hold —
+// not a mouse right-click — must select the word under the finger, copy it to
+// the clipboard, and paste the clipboard back over a later selection.
+test("Phone editor long-press copies and pastes through the edit bar", async ({ page, context }) => {
+  test.skip(test.info().project.name !== "phone", "Touch long-press is the coarse-pointer path");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installFixtures(page);
+  await page.route("**/api/files**", async (route) => route.fulfill({ json: {
+    path: "src/an-identifiable-long-filename.tsx",
+    size: 21,
+    content: "const alpha = omega;\n",
+    content_base64: null,
+    is_binary: false,
+  } }));
+  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+  const lines = page.locator(".monaco-editor .view-lines");
+  // Monaco is a cold, lazily loaded chunk on the dev server.
+  await expect(lines).toContainText("const alpha = omega;", { timeout: 15_000 });
+
+  const cdp = await context.newCDPSession(page);
+  // Monaco hit-tests a hold where the touch *started*, against where the editor
+  // is when it *ends*; the shell header is still settling just after load, so
+  // wait for the editor to stop moving before holding a finger on it.
+  const editorRect = () => page.locator(".monaco-editor").evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return `${r.x},${r.y},${r.width},${r.height}`;
+  });
+  const settle = async () => {
+    let last = "";
+    await expect.poll(async () => {
+      const now = await editorRect();
+      const still = now === last;
+      last = now;
+      return still;
+    }, { intervals: [400] }).toBe(true);
+  };
+  // Hold a touch on a word for longer than Monaco's 700 ms hold delay. The
+  // point is measured on the word's own characters: whether the line is one
+  // span or several depends on whether the tokenizer has loaded yet.
+  const longPress = async (word: string) => {
+    await settle();
+    const point = await page.evaluate((target) => {
+      const walker = document.createTreeWalker(
+        document.querySelector(".monaco-editor .view-lines")!,
+        NodeFilter.SHOW_TEXT,
+      );
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const at = node.textContent!.indexOf(target);
+        if (at < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, at);
+        range.setEnd(node, at + target.length);
+        const r = range.getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      }
+      return null;
+    }, word);
+    expect(point).not.toBeNull();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point!] });
+    await page.waitForTimeout(900);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  };
+
+  await longPress("alpha");
+  const bar = page.getByRole("toolbar", { name: "Edit" });
+  await expect(bar).toBeVisible();
+  await bar.getByRole("button", { name: "Copy" }).tap();
+  await expect(page.getByText("Copied to clipboard")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("alpha");
+  await expect(bar).toBeHidden();
+
+  await longPress("omega");
+  await expect(bar).toBeVisible();
+  await bar.getByRole("button", { name: "Paste" }).tap();
+  await expect(lines).toContainText("const alpha = alpha;");
+  await expect(bar).toBeHidden();
+});
+
 test("Phone editor splitter resizes on a touch drag", async ({ page }) => {
   test.skip(test.info().project.name !== "phone", "The touch splitter is exercised on the phone project");
   await installFixtures(page, {}, [], [
@@ -2578,36 +2659,47 @@ for (const height of [700, 900]) {
     const search = page.getByRole("searchbox", { name: "Search files" });
     const row = page.getByText("an-identifiable-long-filename.tsx");
     const settings = page.getByRole("button", { name: "Settings" });
-    const metrics = await rail.evaluate((element) => ({
-      overflowY: getComputedStyle(element).overflowY,
-      scrollHeight: element.scrollHeight,
-      clientHeight: element.clientHeight,
-      nestedOverflow: [
-        ".places-nav",
-        ".places-rail-session-area",
-        ".places-recent",
-        ".file-tree .tree-scroll",
-      ].map((selector) => getComputedStyle(element.querySelector(selector)!).overflowY),
-    }));
-    expect(metrics.overflowY).toBe("auto");
-    expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
-    expect(metrics.nestedOverflow).not.toContain("auto");
+    const metrics = await rail.evaluate((element) => {
+      const sessions = element.querySelector(".places-rail-session-area");
+      const sessionList = sessions?.querySelector(":scope > div") ?? null;
+      return {
+        overflowY: getComputedStyle(element).overflowY,
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+        sessionScrolls: sessionList
+          ? sessionList.scrollHeight > sessionList.clientHeight + 1
+          : false,
+        nestedOverflow: [".places-nav"].map(
+          (selector) => getComputedStyle(element.querySelector(selector)!).overflowY,
+        ),
+      };
+    });
+    expect(metrics.overflowY).not.toBe("auto");
+    expect(metrics.overflowY).not.toBe("scroll");
+    expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight + 1);
+    expect(metrics.sessionScrolls).toBe(true);
     expect(metrics.nestedOverflow).not.toContain("scroll");
 
     await settings.focus();
     await expect(settings).toBeFocused();
     await expect(settings).toBeInViewport();
     await expect(files).toBeInViewport();
-    await expect(search).toBeInViewport();
-    await expect(row).toBeInViewport();
     await page.getByRole("link", { name: "Board" }).focus();
     await expect(page.getByRole("link", { name: "Board" })).toBeInViewport();
-    await page.getByRole("button", { name: "New", exact: true }).focus();
-    await expect(page.getByRole("button", { name: "New", exact: true })).toBeInViewport();
-    const fileHeight = await page.locator(".file-tree").evaluate((element) =>
-      element.getBoundingClientRect().height,
-    );
-    expect(fileHeight).toBeGreaterThanOrEqual(259);
+
+    // Opening Files puts its search and a row on screen without moving nav or
+    // the footer, and without making the rail itself scroll.
+    await files.click();
+    await expect(search).toBeVisible();
+    await expect(search).toBeInViewport();
+    await expect(row).toBeInViewport();
+    await expect(page.locator(".file-tree").getByRole("button", { name: "New", exact: true })).toBeInViewport();
+    const still = await rail.evaluate((element) => ({
+      scrolls: element.scrollHeight > element.clientHeight + 1,
+      fileHeight: element.querySelector(".file-tree")!.getBoundingClientRect().height,
+    }));
+    expect(still.scrolls).toBe(false);
+    expect(still.fileHeight).toBeGreaterThanOrEqual(80);
   });
 }
 
@@ -2883,11 +2975,95 @@ test("Phone Sessions overview reaches idle and busy sessions, not only the waiti
   const list = page.locator(".session-list");
   await expect(list.locator('a[href="#/t/sess-idle"]')).toContainText("idle-shell");
   await expect(list.locator('a[href="#/t/sess-busy"]')).toContainText("running-build");
-  // The waiting session is not duplicated as a row: it is the card.
-  await expect(list.locator('a[href="#/t/sess-wait"]')).toHaveCount(0);
+  // The waiting session is also a row, under Needs you (WI-1736): the card
+  // answers it, the list keeps the full state of the machine.
+  await expect(list.locator('a[href="#/t/sess-wait"]')).toHaveCount(1);
+  await expect(list.locator(".session-list-head", { hasText: "Needs you" })).toBeVisible();
 
   await list.locator('a[href="#/t/sess-idle"]').click();
   await expect(page).toHaveURL(/#\/t\/sess-idle$/);
+});
+
+// WI-1830: with sessions waiting for input the phone overview locked — the
+// cards sat in a non-scrolling band above the only scroller and squeezed it to
+// nothing, so nothing moved until every waiting session had been answered.
+test("Phone Sessions overview scrolls past three waiting cards from a swipe on a preview", async ({ page, context }) => {
+  test.skip(test.info().project.name !== "phone", "The waiting cards are the narrow body's");
+  const waiting = [1, 2, 3].map((n) => ({
+    id: `sess-wait-${n}`, name: `waiting-${n}`, cwd: `/workspace/w${n}`,
+    activity: "waiting-for-input", exit_code: null, scrollback_bytes: 1024,
+    created_at: "2026-08-18T08:00:00Z", activity_changed_at: `2026-08-18T08:00:3${n}Z`,
+  }));
+  const idle = Array.from({ length: 12 }, (_, n) => ({
+    id: `sess-idle-${n}`, name: `idle-${n}`, cwd: "/workspace/vogt",
+    activity: "idle", exit_code: null, scrollback_bytes: 1024,
+    created_at: "2026-08-18T08:00:00Z", activity_changed_at: "2026-08-18T08:00:00Z",
+  }));
+  // A Claude Code permission prompt as a TUI draws it: cursor moves for
+  // spacing and rows, box rules around it, blank padding below.
+  const prompt = [
+    "\x1b[2J\x1b[1;1H\u256d" + "\u2500".repeat(30) + "\u256e",
+    "\x1b[2;1H\u2502\x1b[1CBash\x1b[1Ccommand",
+    "\x1b[3;1H\u2502\x1b[3Cgit\x1b[1Cpush\x1b[1Corigin",
+    "\x1b[4;1H\u2502\x1b[1CDo\x1b[1Cyou\x1b[1Cwant\x1b[1Cto\x1b[1Cproceed?",
+    "\x1b[5;1H\u2502\x1b[1C\u276f\x1b[1C1.\x1b[1CYes",
+    "\x1b[6;1H\u2502\x1b[3C2.\x1b[1CNo",
+    "\x1b[7;1H\u2570" + "\u2500".repeat(30) + "\u256f",
+    "\x1b[8;1H   \x1b[9;1H \u00b7 \u00b7 \u00b7",
+  ].join("");
+  // The fixture base64s a byte string; hand it the prompt's UTF-8 bytes.
+  const promptBytes = String.fromCharCode(...new TextEncoder().encode(prompt));
+  await installFixtures(page, {}, [...waiting, ...idle], undefined, { scrollback: promptBytes });
+  await page.goto("/#/sessions");
+
+  const tails = page.getByTestId("waiting-tail");
+  await expect(tails).toHaveCount(3);
+  // The preview shows the prompt's words, not an empty dotted box.
+  await expect(tails.first()).toContainText("Do you want to proceed?");
+  await expect(tails.first()).toContainText("1. Yes");
+  // And it is short: six lines at most, so cards never fill the screen.
+  expect((await tails.first().textContent())!.split("\n").length).toBeLessThanOrEqual(6);
+
+  const last = page.locator('.session-list a[href="#/t/sess-idle-11"]');
+  await expect(last).toHaveCount(1);
+  await expect(last).not.toBeInViewport();
+
+  const client = await context.newCDPSession(page);
+  for (let swipe = 0; swipe < 20 && !(await last.isVisible() && await last.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const nav = document.querySelector(".phone-bottom-nav")?.getBoundingClientRect();
+    return rect.bottom <= (nav ? nav.top : window.innerHeight) && rect.top >= 0;
+  })); swipe++) {
+    // Start inside a preview while one is on screen; once they have all
+    // scrolled away, mid-list (never on the bottom navigation).
+    const box = await tails.evaluateAll((nodes) => {
+      for (const node of nodes) {
+        const rect = node.getBoundingClientRect();
+        if (rect.top >= 0 && rect.bottom <= window.innerHeight) return { x: rect.x + rect.width / 2, y: rect.bottom - 4 };
+      }
+      return null;
+    });
+    const x = box?.x ?? 200;
+    const y = box ? Math.max(box.y, 320) : 420;
+    await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+    for (let dy = 10; dy <= 300; dy += 10) {
+      await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y - dy }] });
+    }
+    await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  }
+
+  // No dead band: the scroller runs down to the bottom navigation (bar the
+  // few pixels of safe-area padding `main` keeps), and the last row ends
+  // above the navigation rather than under it.
+  const layout = await page.evaluate(() => {
+    const place = document.querySelector(".sessions-place")!.getBoundingClientRect();
+    const nav = document.querySelector(".phone-bottom-nav")?.getBoundingClientRect();
+    const row = document.querySelector('.session-list a[href="#/t/sess-idle-11"]')!.getBoundingClientRect();
+    const navTop = nav ? nav.top : window.innerHeight;
+    return { band: navTop - place.bottom, rowBottom: row.bottom, navTop };
+  });
+  expect(layout.band, JSON.stringify(layout)).toBeLessThan(16);
+  expect(layout.rowBottom, JSON.stringify(layout)).toBeLessThanOrEqual(layout.navTop);
 });
 
 test("Desktop Sessions overview lists the running sessions as links", async ({ page }) => {
@@ -4180,9 +4356,9 @@ test("A bounded Board cell continues from its cursor rather than re-reading", as
 });
 
 /**
- * The crowded rail: many live sessions must not push the file tree out of
- * the rail. The running list gets its own scroller and Files keeps a usable
- * minimum — asserted as geometry, because "usable" is a height.
+ * The crowded rail: many live sessions scroll inside the session area. The
+ * rail itself does not scroll, so nav and the footer stay put, and Files
+ * keeps a usable minimum — asserted as geometry, because "usable" is a height.
  */
 test("A crowded places rail keeps the file tree reachable", async ({ page }) => {
   test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
@@ -4206,37 +4382,313 @@ test("A crowded places rail keeps the file tree reachable", async ({ page }) => 
   const geometry = await rail.evaluate((node) => {
     const tree = node.querySelector(".file-tree");
     const sessions = node.querySelector(".places-rail-session-area");
+    const sessionList = sessions?.querySelector(":scope > div") ?? null;
     const treeBox = tree?.getBoundingClientRect();
     return {
       railBottom: node.getBoundingClientRect().bottom,
       viewport: window.innerHeight,
       treeTop: treeBox?.top ?? -1,
       treeHeight: treeBox?.height ?? -1,
-      sessionsScrolls: sessions
-        ? sessions.scrollHeight > sessions.clientHeight + 1
+      sessionsScrolls: sessionList
+        ? sessionList.scrollHeight > sessionList.clientHeight + 1
         : false,
       railScrolls: node.scrollHeight > node.clientHeight + 1,
     };
   });
 
-  // The rail is the one desktop scroller (by decision: no nested traps),
-  // it does not grow past the window, and Files keeps its usable minimum
-  // rather than being squeezed to a sliver under the crowd.
+  // The session area is the scroller; the rail does not grow past the window
+  // and does not scroll itself. Files keeps its usable minimum rather than
+  // being squeezed to a sliver under the crowd.
   expect(geometry.railBottom).toBeLessThanOrEqual(geometry.viewport + 1);
-  expect(geometry.railScrolls).toBe(true);
-  expect(geometry.treeHeight).toBeGreaterThanOrEqual(260);
+  expect(geometry.railScrolls).toBe(false);
+  expect(geometry.sessionsScrolls).toBe(true);
+  expect(geometry.treeHeight).toBeGreaterThanOrEqual(80);
 
-  // Reachable, not merely present: scrolling the rail brings Files onto the
-  // screen, with its search still usable there.
-  await rail.evaluate((node) => {
-    node.scrollTop = node.scrollHeight;
-  });
+  // Reachable without scrolling the rail: Files and its search are already
+  // on screen, and nav stayed put.
   const reached = await page.getByRole("heading", { name: "Files" }).evaluate((node) => {
     const box = node.getBoundingClientRect();
     return box.top >= 0 && box.bottom <= window.innerHeight;
   });
   expect(reached).toBe(true);
   await expect(page.getByRole("searchbox", { name: "Search files" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Board" })).toBeInViewport();
+  await expect(page.getByRole("button", { name: "Settings" })).toBeInViewport();
+});
+
+/**
+ * WI-1411: a long session list scrolls inside `.places-rail-session-area`.
+ * The rail, the nav and the footer do not move.
+ */
+test("A long session list scrolls inside the session area, not the rail", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+  const crowd = Array.from({ length: 40 }, (_, index) => ({
+    ...liveSession,
+    id: `scroll-${index}`,
+    name: `scroll-session-${index}`,
+    // Running, so the crowd sits in the Running section this test scrolls.
+    activity: "running",
+  }));
+  await installFixtures(page, {}, crowd);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/#/sessions");
+
+  const rail = page.locator(".places-rail");
+  const sessionArea = page.locator(".places-rail-session-area");
+  await expect(sessionArea).toBeVisible();
+  const before = await rail.evaluate((node) => {
+    const list = node.querySelector(".places-rail-session-area > div");
+    const board = node.querySelector(".places-nav");
+    const footer = node.querySelector(".places-rail-footer");
+    const toggle = node.querySelector(".places-rail-session-area .places-section-toggle");
+    return {
+      railScrolls: node.scrollHeight > node.clientHeight + 1,
+      listScrolls: list ? list.scrollHeight > list.clientHeight + 1 : false,
+      boardTop: board?.getBoundingClientRect().top ?? -1,
+      footerTop: footer?.getBoundingClientRect().top ?? -1,
+      toggleTop: toggle?.getBoundingClientRect().top ?? -1,
+    };
+  });
+  expect(before.railScrolls).toBe(false);
+  expect(before.listScrolls).toBe(true);
+
+  await sessionArea.locator(":scope > div").evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  const after = await rail.evaluate((node) => {
+    const board = node.querySelector(".places-nav");
+    const footer = node.querySelector(".places-rail-footer");
+    const toggle = node.querySelector(".places-rail-session-area .places-section-toggle");
+    const list = node.querySelector(".places-rail-session-area > div");
+    const rows = [...(list?.querySelectorAll(".session-row") ?? [])].filter(
+      (row) => getComputedStyle(row).display !== "none",
+    );
+    const last = rows[rows.length - 1] ?? null;
+    const listBox = list?.getBoundingClientRect();
+    const lastBox = last?.getBoundingClientRect();
+    return {
+      railScrollTop: node.scrollTop,
+      boardTop: board?.getBoundingClientRect().top ?? -1,
+      footerTop: footer?.getBoundingClientRect().top ?? -1,
+      toggleTop: toggle?.getBoundingClientRect().top ?? -1,
+      lastVisible: !!(lastBox && listBox
+        && lastBox.bottom <= listBox.bottom + 2
+        && lastBox.top < listBox.bottom),
+      listTop: listBox ? Math.round(listBox.top) : -1,
+      listBottom: listBox ? Math.round(listBox.bottom) : -1,
+      scrollTop: list ? Math.round(list.scrollTop) : -1,
+      scrollHeight: list ? list.scrollHeight : -1,
+    };
+  });
+  expect(after.railScrollTop).toBe(0);
+  expect(after.boardTop).toBe(before.boardTop);
+  expect(after.footerTop).toBe(before.footerTop);
+  expect(after.toggleTop).toBe(before.toggleTop);
+  expect(after.lastVisible).toBe(true);
+
+  // Collapsing the section still works, and the list stops scrolling.
+  await sessionArea.getByRole("button", { name: /Running/ }).click();
+  await expect(sessionArea.getByRole("button", { name: /Running/ })).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".places-rail-session-area .session-row").first()).toBeHidden();
+});
+
+/**
+ * WI-1736: the rail sorts sessions by what they need from a person. Workers
+ * nest under the oversight session that started them, a worker that needs a
+ * person is lifted into "Needs you" with its parent named, the section headers
+ * carry counts, and the filter narrows the list.
+ */
+test("The places rail groups sessions by state, nests workers, and filters", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  const sessions = [
+    { ...liveSession, id: "ovs-main", name: "ovs-main", role: "oversight", activity: "idle", created_at: minutesAgo(120), last_event_at: minutesAgo(1) },
+    { ...liveSession, id: "w-run", name: "w-run", activity: "running", created_at: minutesAgo(20), last_event_at: minutesAgo(1) },
+    {
+      ...liveSession,
+      id: "w-ask",
+      name: "w-ask",
+      activity: "awaiting-approval",
+      approval: { question: "Run the tests?", command_excerpt: "npm test", detected_at: minutesAgo(2) },
+      created_at: minutesAgo(30),
+      last_event_at: minutesAgo(2),
+    },
+    { ...liveSession, id: "solo", name: "solo", activity: "idle", created_at: minutesAgo(10), last_event_at: minutesAgo(3) },
+    { ...liveSession, id: "w-done", name: "w-done", activity: "exited", exit_code: 0, created_at: minutesAgo(90), last_event_at: minutesAgo(40) },
+  ];
+  await installFixtures(page, {}, sessions);
+  // Vogt says who started whom; the engine list does not.
+  await page.route((url) => url.pathname.endsWith("/vogt/sessions"), (route) => route.fulfill({
+    json: {
+      sessions: [
+        { id: "ses_run", engine_session_id: "w-run", started_by_session: "ovs-main" },
+        { id: "ses_ask", engine_session_id: "w-ask", started_by_session: "ovs-main" },
+        { id: "ses_done", engine_session_id: "w-done", started_by_session: "ovs-main" },
+      ],
+      engine: null,
+    },
+  }));
+  await page.goto("/#/sessions");
+
+  const area = page.locator(".places-rail-session-area");
+  const heads = area.locator(".rail-section-head");
+  await expect(heads.filter({ hasText: "Needs you" })).toBeVisible();
+  await expect(heads.filter({ hasText: "Running" })).toBeVisible();
+  await expect(heads.filter({ hasText: "Ready / idle" })).toBeVisible();
+  await expect(heads.filter({ hasText: "Done recently" })).toBeVisible();
+  // The old single "Running" header counted every listed session; each section
+  // now counts its own.
+  await expect(area.locator('[aria-label^="1 needs you sessions"]')).toHaveText("1");
+
+  // The waiting worker is lifted into Needs you, with its parent named.
+  const lifted = area.locator('.session-row[aria-label^="w-ask,"]');
+  await expect(lifted).toContainText("↳ ovs-main");
+  await expect(lifted).toHaveClass(/waiting/);
+
+  // The parent rolls up its children: one running, and the lifted one counts as needing you.
+  const parent = area.locator('.session-row[aria-label^="ovs-main,"]');
+  await expect(parent.locator(".session-tally")).toContainText("1▶");
+  await expect(area.locator(".session-row--child", { hasText: "w-run" })).toBeVisible();
+
+  // Folding the parent hides its children; a finished child stays in Done.
+  await parent.locator(".session-caret").click();
+  await expect(area.locator(".session-row--child", { hasText: "w-run" })).toBeHidden();
+  await parent.locator(".session-caret").click();
+  await expect(area.locator(".session-row--child", { hasText: "w-run" })).toBeVisible();
+
+  // The filter narrows the list, and Escape clears it.
+  const filter = area.getByRole("searchbox", { name: "Filter sessions" });
+  await filter.fill("solo");
+  await expect(area.locator('.session-row[aria-label^="solo,"]')).toBeVisible();
+  await expect(area.locator('.session-row[aria-label^="w-run,"]')).toHaveCount(0);
+  await filter.press("Escape");
+  await expect(filter).toHaveValue("");
+  await expect(area.locator('.session-row[aria-label^="w-run,"]')).toBeVisible();
+});
+
+/**
+ * WI-1736, phone width: the Sessions page groups sessions the way the rail
+ * does: a Pinned strip, state headers, a worker lifted into Needs you with its
+ * parent named, and a filter, with no horizontal scroll.
+ */
+test("Phone Sessions groups by state, pins, lifts, and filters at phone width", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The phone Sessions body is the phone surface");
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  await page.addInitScript(() => {
+    localStorage.setItem("vogt.sessionBookmarks.v1", JSON.stringify(["solo"]));
+  });
+  const sessions = [
+    { ...liveSession, id: "ovs-main", name: "ovs-main", role: "oversight", activity: "idle", created_at: minutesAgo(120), last_event_at: minutesAgo(1) },
+    { ...liveSession, id: "w-run", name: "w-run", activity: "running", created_at: minutesAgo(20), last_event_at: minutesAgo(1) },
+    {
+      ...liveSession,
+      id: "w-ask",
+      name: "w-ask",
+      activity: "awaiting-approval",
+      approval: { question: "Run the tests?", command_excerpt: "npm test", detected_at: minutesAgo(2) },
+      created_at: minutesAgo(30),
+      last_event_at: minutesAgo(2),
+    },
+    { ...liveSession, id: "solo", name: "solo", activity: "idle", created_at: minutesAgo(10), last_event_at: minutesAgo(3) },
+  ];
+  await installFixtures(page, {}, sessions);
+  await page.route((url) => url.pathname.endsWith("/vogt/sessions"), (route) => route.fulfill({
+    json: {
+      sessions: [
+        { id: "ses_run", engine_session_id: "w-run", started_by_session: "ovs-main" },
+        { id: "ses_ask", engine_session_id: "w-ask", started_by_session: "ovs-main" },
+      ],
+      engine: null,
+    },
+  }));
+  await page.goto("/#/sessions");
+
+  const list = page.locator(".session-list");
+  await expect(list.locator(".session-list-head", { hasText: "Pinned" })).toBeVisible();
+  await expect(list.locator(".session-list-head", { hasText: "Needs you" })).toBeVisible();
+  await expect(list.locator(".session-list-head", { hasText: "Ready / idle" })).toBeVisible();
+  // The pinned session sits in the strip, once.
+  await expect(list.locator('.session-row[aria-label^="solo,"]')).toHaveCount(1);
+  // The worker that needs a person is lifted into Needs you, with its parent named.
+  await expect(list.locator('.session-row[aria-label^="w-ask,"]')).toContainText("↳ ovs-main");
+  await expect(list.locator('.session-row[aria-label^="ovs-main,"] .session-tally')).toContainText("1▶");
+
+  // The filter narrows the list at phone width.
+  const filter = page.getByRole("searchbox", { name: "Filter sessions" });
+  await filter.fill("w-run");
+  await expect(list.locator('.session-row[aria-label^="w-run,"]')).toBeVisible();
+  await expect(list.locator('.session-row[aria-label^="solo,"]')).toHaveCount(0);
+
+  // Nothing scrolls sideways at phone width.
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+});
+
+/**
+ * WI-1664: the running-session block is drag-resizable from a handle on its
+ * bottom edge. The list keeps scrolling inside the area, the rail does not
+ * scroll with it, and the height survives a reload. Double-click returns the
+ * shipped auto height.
+ */
+test("The running session list resizes by drag and remembers the height", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+  const crowd = Array.from({ length: 30 }, (_, index) => ({
+    ...liveSession,
+    id: `resize-${index}`,
+    name: `resize-session-${index}`,
+  }));
+  await installFixtures(page, {}, crowd);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/#/sessions");
+
+  const area = page.locator(".places-rail-session-area");
+  const handle = page.getByRole("separator", { name: "Resize the running session list" });
+  await expect(handle).toBeVisible();
+  const before = (await area.boundingBox())!;
+  const box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  // The shipped height already fills the leftover column, so a drag down is
+  // clamped. Dragging up is the useful direction: more of the places list shows.
+  await page.mouse.move(box.x + box.width / 2, box.y - 140, { steps: 6 });
+  await page.mouse.up();
+
+  const shorter = (await area.boundingBox())!;
+  expect(shorter.height).toBeLessThan(before.height - 100);
+  expect(shorter.height).toBeGreaterThan(120);
+
+  const scrolled = await area.evaluate((node) => {
+    const list = node.querySelector(":scope > div");
+    const rail = node.closest(".places-rail");
+    if (!list || !rail) return { listScrolls: false, railScrolls: true };
+    list.scrollTop = list.scrollHeight;
+    return {
+      listScrolls: list.scrollHeight > list.clientHeight + 1,
+      railScrolls: rail.scrollHeight > rail.clientHeight + 1,
+      moved: list.scrollTop > 0,
+    };
+  });
+  expect(scrolled.listScrolls).toBe(true);
+  expect(scrolled.railScrolls).toBe(false);
+  expect(scrolled.moved).toBe(true);
+
+  await page.reload();
+  await expect.poll(async () => (await area.boundingBox())?.height ?? 0)
+    .toBeLessThan(before.height - 100);
+
+  const again = (await handle.boundingBox())!;
+  await page.mouse.dblclick(again.x + again.width / 2, again.y + again.height / 2);
+  await expect.poll(async () => page.evaluate(
+    () => localStorage.getItem("vogt.pane.places-session-area.height.v1"),
+  )).toBeNull();
+
+  // Arrow keys step the stored height, clamped at the three-row minimum.
+  await handle.focus();
+  await page.keyboard.press("ArrowDown");
+  const raised = Number(await handle.getAttribute("aria-valuenow"));
+  expect(raised).toBeGreaterThan(132);
+  await page.keyboard.press("ArrowUp");
+  expect(Number(await handle.getAttribute("aria-valuenow"))).toBe(raised - 24);
 });
 
 /**

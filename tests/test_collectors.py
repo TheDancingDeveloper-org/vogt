@@ -507,6 +507,59 @@ def test_a_vendored_crate_that_is_also_a_project_is_reported(
     ), "both declared versions are recorded; neither is compared to the other"
 
 
+def _mirror_index(tmp_path: Path) -> _Index:
+    published = tmp_path / "nzb-core"
+    _crate(published, "nzb-core", "0.4.0")
+    return _Index(
+        [
+            RegisteredProject(
+                id="prj_published", slug="nzb-core", root_path=str(published)
+            )
+        ]
+    )
+
+
+def test_a_root_under_a_symlinked_parent_yields_normal_findings(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """WI-1071: /home -> /data style roots used to raise ValueError."""
+    real = tmp_path / "data"
+    _crate(real / "rustnzb" / "crates" / "nzb-core", "nzb-core", "0.3.0")
+    link = tmp_path / "home"
+    link.symlink_to(real, target_is_directory=True)
+    index = _mirror_index(tmp_path)
+
+    found = list(
+        MirroredSourceCollector(index).collect(
+            ctx, _project(link / "rustnzb", "rustnzb")
+        )
+    )
+    assert [f.subject_key for f in found] == [
+        "mirror:rustnzb/crates/nzb-core->nzb-core"
+    ]
+    assert found[0].payload["local_path"] == "crates/nzb-core"
+    assert found[0].payload["manifest"] == "crates/nzb-core/Cargo.toml"
+
+
+def test_a_root_stored_with_dot_dot_yields_normal_findings(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """WI-1071: a root stored non-canonically with `..` in it."""
+    vendoring = tmp_path / "rustnzb"
+    _crate(vendoring / "crates" / "nzb-core", "nzb-core", "0.3.0")
+    (tmp_path / "elsewhere").mkdir()
+    index = _mirror_index(tmp_path)
+
+    stored = tmp_path / "elsewhere" / ".." / "rustnzb"
+    found = list(
+        MirroredSourceCollector(index).collect(ctx, _project(stored, "rustnzb"))
+    )
+    assert [f.subject_key for f in found] == [
+        "mirror:rustnzb/crates/nzb-core->nzb-core"
+    ]
+    assert found[0].payload["manifest"] == "crates/nzb-core/Cargo.toml"
+
+
 def test_a_project_is_not_a_mirror_of_itself(
     ctx: CollectorContext, tmp_path: Path
 ) -> None:

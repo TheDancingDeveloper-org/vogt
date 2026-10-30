@@ -15,11 +15,203 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Delivery = Literal["typed", "delivered", "queued", "unconfirmed"]
+Delivery = Literal["typed", "delivered", "queued", "stuck", "wedged", "unconfirmed"]
 
 #: Claude Code's hint under its input box while messages wait behind a turn
 #: ("Press up to edit queued messages"), and Codex's queued-message line.
 QUEUED_HINT = re.compile(r"(?i)queued messages?|message(?:s)? queued")
+
+#: Codex's prompt glyph. It starts the composer and every copy of the
+#: person's messages in the transcript, and marks the highlighted choice in
+#: its dialogs, so a line starting with it proves nothing on its own.
+CODEX_PROMPT = "\u203a"
+
+#: Codex's footer under the composer: the model, a " · ", the directory
+#: (`  grok high · ~/Working/...`). Captured live on 2026-10-16 (WI-1669).
+_CODEX_FOOTER = re.compile(r"^\s{2}\S.* \u00b7 \S")
+
+#: How much of the submitted text a composer has to show to count as still
+#: holding it: enough to rule out the placeholder, short enough to survive
+#: the composer wrapping a long text.
+_COMPOSER_MATCH = 40
+
+
+def _footer_index(rows: list[str]) -> int | None:
+    """Codex's footer row: the upper of the last two lines, as the hint
+    line under it can carry a " · " too ("⚠ 1 warning · f2 to view")."""
+    return next(
+        (
+            i
+            for i in range(max(len(rows) - 2, 0), len(rows))
+            if _CODEX_FOOTER.match(rows[i])
+        ),
+        None,
+    )
+
+
+def codex_composer(lines: tuple[str, ...]) -> str | None:
+    """The text in Codex's composer, or None when no composer is drawn.
+
+    The composer is the prompt line in the block directly above the footer:
+    `› text`, its wrapped continuation lines, one blank line, then the
+    model · directory line and a hint line. A `›` line anywhere else is a
+    transcript copy or a dialog's choice. An empty string is a composer
+    showing only its placeholder or nothing.
+    """
+    rows = list(lines)
+    while rows and not rows[-1].strip():
+        rows.pop()
+    footer = _footer_index(rows)
+    if footer is None:
+        return None
+    i = footer - 1
+    while i >= 0 and not rows[i].strip():
+        i -= 1
+    block: list[str] = []
+    while i >= 0 and rows[i].startswith("  ") and rows[i].strip():
+        block.append(rows[i].strip())
+        i -= 1
+    if i < 0 or not rows[i].startswith(CODEX_PROMPT):
+        return None
+    block.append(rows[i].removeprefix(CODEX_PROMPT).strip())
+    return " ".join(reversed(block)).strip()
+
+
+#: Claude Code's placeholder for a paste it folds: `[Pasted text #1 +4 lines]`.
+PASTED = re.compile(r"\[Pasted text #\d+")
+
+#: Claude Code's greyed suggestion in an empty box (`❯ Try "fix lint
+#: errors"`). The screen carries no colour, so it is told by its shape.
+SUGGESTION = re.compile(r'^Try "[^"]*"$')
+
+#: Claude Code's input box is drawn between two full-width rules of `─`.
+_CLAUDE_RULE = re.compile(r"^\s*\u2500{20,}\s*$")
+
+#: Claude Code's prompt glyphs: `❯` now, `>` in the older boxed input.
+_CLAUDE_PROMPTS = ("\u276f", ">")
+
+
+def claude_composer(lines: tuple[str, ...]) -> str | None:
+    """The text in Claude Code's input box, or None when none is drawn.
+
+    The box is the last pair of `─` rules on the screen with a prompt line
+    (`❯ text`, then any wrapped continuation lines) between them, as
+    captured live on 2026-10-18 (WI-1870). An empty string is a box showing
+    nothing, or only the "Press up to edit queued messages" hint.
+    """
+    rules = [i for i, line in enumerate(lines) if _CLAUDE_RULE.match(line)]
+    if len(rules) < 2:
+        return None
+    top, bottom = rules[-2], rules[-1]
+    inside = [line.strip() for line in lines[top + 1 : bottom]]
+    if not inside or not inside[0].startswith(_CLAUDE_PROMPTS):
+        return None
+    first = inside[0]
+    for glyph in _CLAUDE_PROMPTS:
+        first = first.removeprefix(glyph)
+    shown = " ".join([first.strip(), *inside[1:]]).strip()
+    if QUEUED_HINT.search(shown) or SUGGESTION.match(shown):
+        return ""
+    return shown
+
+
+def composer_text(lines: tuple[str, ...]) -> str | None:
+    """What an agent's input box holds — Codex's composer or Claude Code's
+    input box — or None when neither is drawn."""
+    shown = codex_composer(lines)
+    if shown is None:
+        shown = claude_composer(lines)
+    return shown
+
+
+def composer_holds(lines: tuple[str, ...], text: str) -> bool:
+    """Whether the input box still shows `text`, unsubmitted (WI-1669,
+    WI-1870).
+
+    A resumed Codex can swallow the Enter while it reads as working, and a
+    Claude Code turn can end with a queued message left in its box; the
+    text left in the input is the only sign.
+    """
+    wanted = " ".join(text.split())
+    shown = composer_text(lines)
+    if not wanted or not shown:
+        return False
+    if "\n" in text.strip() and PASTED.search(shown):
+        # Claude Code folds a long paste into a placeholder in its box.
+        return True
+    n = min(len(wanted), _COMPOSER_MATCH)
+    return " ".join(shown.split())[:n] == wanted[:n]
+
+
+#: Codex's marker for an error it shows in its transcript
+#: (`■ unexpected status 422 Unprocessable Entity: Budget has been
+#: exceeded! ...`), captured live on 2026-10-20 (WI-2027).
+CODEX_ERROR = "\u25a0"
+
+#: How a wedged session is recovered without losing its worktree or its
+#: conversation: hibernation stops the CLI and waking resumes it.
+RESTART_HINT = (
+    "restart it keeping its worktree and conversation: session_hibernate, "
+    "then session_wake (or send the input again, which wakes it)"
+)
+
+
+def codex_error_wedge(lines: tuple[str, ...], text: str | None = None) -> str | None:
+    """The API error a Codex session is wedged behind, or None (WI-2027).
+
+    After a turn ends in a model-API error (a 422 for an exceeded budget),
+    Codex can echo each new message into its transcript as `› text` and
+    then start no turn: no `•` working line ever follows. The sign is the
+    last `■` error line with only message echoes after it, above the
+    composer. With `text`, one of those echoes has to be it.
+    """
+    rows = list(lines)
+    while rows and not rows[-1].strip():
+        rows.pop()
+    footer = _footer_index(rows)
+    if footer is None:
+        return None
+    # Drop the composer: the prompt line above the footer and its wrap.
+    i = footer - 1
+    while i >= 0 and not rows[i].strip():
+        i -= 1
+    while i >= 0 and rows[i].startswith("  ") and rows[i].strip():
+        i -= 1
+    if i < 0 or not rows[i].startswith(CODEX_PROMPT):
+        return None
+    body = rows[:i]
+    errors = [n for n, row in enumerate(body) if row.startswith(CODEX_ERROR)]
+    if not errors:
+        return None
+    error = errors[-1]
+    echoes: list[str] = []
+    for row in body[error + 1 :]:
+        if row.startswith(CODEX_PROMPT):
+            echoes.append(row.removeprefix(CODEX_PROMPT).strip())
+        elif row.strip() and not row.startswith("  "):
+            # Anything else Codex drew (a `•` step, a new error): it moved.
+            return None
+        elif echoes and row.startswith("  "):
+            echoes[-1] = f"{echoes[-1]} {row.strip()}"
+    if not echoes:
+        return None
+    if text is not None:
+        wanted = " ".join(text.split())[:_COMPOSER_MATCH]
+        if not any(" ".join(e.split())[: len(wanted)] == wanted for e in echoes):
+            return None
+    return body[error].removeprefix(CODEX_ERROR).strip()
+
+
+def safe_to_resubmit(seen: Observation, text: str) -> bool:
+    """Whether one more Enter can only submit `text` (WI-1669).
+
+    Only while the composer is drawn and still holds the text, and nothing
+    asks for an answer: an Enter on a dialog or an approval would accept
+    whatever it has highlighted.
+    """
+    if seen.activity in {"awaiting-approval", "blocked"}:
+        return False
+    return composer_holds(seen.lines, text)
 
 
 @dataclass(frozen=True)
@@ -41,9 +233,16 @@ def judge(
     submitted: bool,
     before: str | None,
     after: list[Observation],
+    pending: str | None = None,
 ) -> Verdict:
     """What became of the input, from the activity before it and the reads
-    after it, in order."""
+    after it, in order.
+
+    `pending` is the submitted text: while the latest read shows the
+    agent off its turn with the text still in its input box, the Enter has
+    not landed (WI-1669) — `stuck`, not `queued`, even when a turn was
+    running as it was sent (WI-1870).
+    """
     if not submitted:
         return Verdict(
             "typed",
@@ -56,11 +255,37 @@ def judge(
                 "the agent shows a queued-message hint: it will take the "
                 "input when its current turn ends",
             )
+    if (
+        pending
+        and after
+        and after[-1].activity != "running"
+        and composer_holds(after[-1].lines, pending)
+    ):
+        return Verdict(
+            "stuck",
+            "the text is still in the input box and no turn is running: the "
+            "submit did not land; read session_screen",
+        )
+    if after and after[-1].activity not in {"running", "awaiting-approval"}:
+        error = codex_error_wedge(after[-1].lines, pending)
+        if error is not None:
+            return Verdict(
+                "wedged",
+                "Codex echoed the input but started no turn after an API "
+                f"error ({error[:120]}); it will not take input again — "
+                + RESTART_HINT,
+            )
     if before == "running":
         return Verdict(
             "queued",
             "a turn was already running when it was sent; agent CLIs queue "
             "input behind the running turn",
+        )
+    if pending and after and composer_holds(after[-1].lines, pending):
+        return Verdict(
+            "unconfirmed",
+            "the text is still in the composer after Enter: the submit did "
+            "not land; read session_screen",
         )
     for seen in after:
         if seen.activity == "running":
@@ -75,3 +300,10 @@ def judge(
         "sent, but no turn started and no queued hint showed while Vogt "
         "watched; read session_screen",
     )
+
+
+def input_pending(lines: tuple[str, ...]) -> str | None:
+    """The text an agent at rest still holds unsent in its input box, or
+    None (WI-1870). Only meaningful for a session not running a turn."""
+    shown = composer_text(lines)
+    return shown or None
