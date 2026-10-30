@@ -24,8 +24,9 @@
 #
 # ── Where it runs, and when ──────────────────────────────────────────────
 #
-# On `main` merges and nightly, plus manual — never on pull requests, which keep
-# the mocked suites (that is the whole point). Self-hosted by design, with
+# In the merge queue and nightly, plus manual — not on pull requests, which keep
+# the mocked suites (that is the whole point), unless the PR changes this
+# workflow or what it runs. Never on push to `main`: the queue ran it already. Self-hosted by design, with
 # the `docker` label because it builds and runs the compose stack.
 #
 # Run the smoke locally against any stack (see docs/CONTRIBUTING.md):
@@ -35,14 +36,20 @@
 name: e2e
 
 on:
-  # `main` merges, nightly to catch drift no merge would, and manual re-runs.
-  # Not `pull_request` — PRs keep the mocked suites. A docs-only push skips the
-  # expensive build.
-  push:
-    branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
+  # The merge queue (the exact tree `main` will become), nightly to catch
+  # drift no merge would, and manual re-runs. Not `push` to main: the queue
+  # already ran this on the same tree. Pull requests keep the mocked suites,
+  # except a PR that changes this workflow or the scripts and images it runs.
+  merge_group:
+  pull_request:
+    paths:
+      - ".github/workflows/e2e.yml"
+      - "scripts/e2e_stack_smoke.sh"
+      - "scripts/fixture_reset.py"
+      - "scripts/clean_consumer_smoke.sh"
+      - "deploy/e2e.*"
+      - "deploy/examples/custom-stack/**"
+      - "tests/fixtures/forge_fixture_manifest.json"
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
@@ -62,7 +69,8 @@ jobs:
     # Self-hosted, `docker` because it builds and runs the stack. A
     # static selector — dynamic `runs-on` is what the runner-policy gate forbids.
     runs-on: [self-hosted, docker]
-    timeout-minutes: 45
+    # Recent green runs take ~31 min; a hung run should fail, not hold the runner.
+    timeout-minutes: 40
     env:
       # The three compose files: the public base, the engine overlay, and the
       # e2e overlay that mounts the fake-agent and its preset.
@@ -243,7 +251,7 @@ jobs:
   clean-consumer:
     name: published pair pulls anonymously and renders
     runs-on: [self-hosted, docker]
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -295,7 +303,7 @@ jobs:
   custom-image:
     name: the custom-stack example builds and its overlay merges
     runs-on: [self-hosted, docker]
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
