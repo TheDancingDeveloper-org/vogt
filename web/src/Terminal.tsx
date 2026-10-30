@@ -14,7 +14,7 @@ import type { RuntimeSocket } from "./runtimeTransport";
 import { readClipboardText, writeClipboardText } from "./clipboard";
 import { decodeOsc52 } from "./terminalClipboard";
 import { terminalContextMenuAction, terminalWordAt } from "./terminalContextMenu";
-import { TerminalCompositionGuard } from "./terminalComposition";
+import { type CompositionInput, wireCompositionInput } from "./terminalComposition";
 import { sessionsStore } from "./store";
 import { wakeSession } from "./sessionHibernation";
 import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
@@ -279,7 +279,7 @@ const TerminalView: Component<Props> = (props) => {
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
   // Soft-keyboard IME guard; reset on re-attach so a lost compositionend
   // can't outlive the socket (WI-2707).
-  let composition: TerminalCompositionGuard | null = null;
+  let composition: CompositionInput | null = null;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
   const [statusText, setStatusText] = createSignal<string | null>("Connecting...");
   // The interactive reconnect overlay. Non-null only while we are between a
@@ -833,33 +833,15 @@ const TerminalView: Component<Props> = (props) => {
     // Wire input: user keystrokes → PTY stdin.
     // On a soft keyboard, IME composition commits are the one source of
     // typed text (see TerminalCompositionGuard).
-    const guard = isCoarsePointer ? new TerminalCompositionGuard() : null;
-    composition = guard;
     const textarea = term.textarea;
-    if (guard && textarea) {
-      textarea.addEventListener("compositionstart", () => guard.start());
-      textarea.addEventListener("compositionupdate", () => guard.update());
-      textarea.addEventListener("compositionend", (event) => {
-        const committed = guard.end(event.data ?? "", performance.now());
-        if (committed) dispatchInput(committed);
-      });
-      // Android can drop compositionend; never let a stale composition
-      // swallow input past a blur, page hide or paste.
-      textarea.addEventListener("blur", () => guard.reset());
-      textarea.addEventListener("paste", () => guard.reset(), { capture: true });
-      // keyCode 229 is the IME's own keydown inside a composition.
-      textarea.addEventListener("keydown", (event) => {
-        if (!event.isComposing && event.keyCode !== 229) guard.keydown();
-      }, { capture: true });
-      const onVisibility = () => {
-        if (document.visibilityState === "hidden") guard.reset();
-      };
-      document.addEventListener("visibilitychange", onVisibility);
-      onCleanup(() => document.removeEventListener("visibilitychange", onVisibility));
-    }
+    const input = isCoarsePointer && textarea
+      ? wireCompositionInput(textarea, (data) => dispatchInput(data))
+      : null;
+    composition = input;
+    if (input) onCleanup(() => input.dispose());
     term.onData((data) => {
-      const next = guard ? guard.filter(data, performance.now()) : data;
-      if (next) dispatchInput(next);
+      if (input) input.onData(data);
+      else dispatchInput(data);
     });
 
     // Paste MUST go through term.paste(): it emits the bracketed-paste markers
@@ -915,8 +897,8 @@ const TerminalView: Component<Props> = (props) => {
         if (v == null) return;
         text = v;
       }
-      composition?.reset();
-      if (text) term?.paste(text);
+      if (composition) composition.paste(text, (t) => term?.paste(t));
+      else if (text) term?.paste(text);
     };
 
     // Custom key handler for Ctrl+Shift+C/V and Cmd+C/V semantics.

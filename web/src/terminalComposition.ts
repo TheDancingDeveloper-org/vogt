@@ -83,3 +83,58 @@ export class TerminalCompositionGuard {
     return data;
   }
 }
+
+/** The guard wired to xterm's helper textarea; what Terminal.tsx drives. */
+export interface CompositionInput {
+  /** Route one xterm `onData` chunk; sends whatever survives the guard. */
+  onData(data: string): void;
+  /** Drop any stale composition (re-attach). */
+  reset(): void;
+  /** Programmatic paste: reset the composition, then hand the text to `sink`. */
+  paste(text: string, sink: (text: string) => void): void;
+  /** Remove the document-level listener. */
+  dispose(): void;
+}
+
+/**
+ * Wire a composition guard to xterm's textarea. `send` receives every byte
+ * bound for the PTY; `now` is the clock (performance.now in the app).
+ */
+export function wireCompositionInput(
+  textarea: HTMLTextAreaElement,
+  send: (data: string) => void,
+  now: () => number = () => performance.now(),
+  doc: Document = document,
+): CompositionInput {
+  const guard = new TerminalCompositionGuard();
+  textarea.addEventListener("compositionstart", () => guard.start());
+  textarea.addEventListener("compositionupdate", () => guard.update());
+  textarea.addEventListener("compositionend", (event) => {
+    const committed = guard.end(event.data ?? "", now());
+    if (committed) send(committed);
+  });
+  // Android can drop compositionend; never let a stale composition
+  // swallow input past a blur, page hide or paste.
+  textarea.addEventListener("blur", () => guard.reset());
+  textarea.addEventListener("paste", () => guard.reset(), { capture: true });
+  // keyCode 229 is the IME's own keydown inside a composition.
+  textarea.addEventListener("keydown", (event) => {
+    if (!event.isComposing && event.keyCode !== 229) guard.keydown();
+  }, { capture: true });
+  const onVisibility = () => {
+    if (doc.visibilityState === "hidden") guard.reset();
+  };
+  doc.addEventListener("visibilitychange", onVisibility);
+  return {
+    onData(data) {
+      const next = guard.filter(data, now());
+      if (next) send(next);
+    },
+    reset: () => guard.reset(),
+    paste(text, sink) {
+      guard.reset();
+      if (text) sink(text);
+    },
+    dispose: () => doc.removeEventListener("visibilitychange", onVisibility),
+  };
+}
