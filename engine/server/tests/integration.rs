@@ -4550,6 +4550,179 @@ async fn attach_during_a_flood_does_not_stall_the_reader_or_lose_bytes() {
 }
 
 #[tokio::test]
+async fn attach_snapshot_and_live_stream_meet_exactly_at_pos() {
+    // WI-2699. An attach snapshot samples `pos` and copies the grid under
+    // the scrollback lock, then renders the copy after the lock drops, so
+    // the reader is never stalled by a render and output it lands after
+    // `pos` can never appear in the frame *and* again on the live stream —
+    // the WI-891 duplicate. Deterministic on purpose: the one-shot hook runs
+    // between the copy and the render, writes a marked line to the PTY and
+    // waits for the reader to land well past `pos` (which a lock held across
+    // the render would block). The frame must then carry nothing past `pos`,
+    // and the live stream must resume exactly at `pos`.
+    // Fixed-width lines (`SEQ%08d`) so `pos` arithmetic and seq extraction
+    // are exact.
+    let (base, _h) = boot_with(4 * 1024 * 1024).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_command_session(
+        &client,
+        &base,
+        "attach-boundary",
+        vec![
+            "/bin/bash".into(),
+            "-c".into(),
+            "i=0; while true; do printf 'SEQ%08d\\n' $i; i=$((i+1)); done".into(),
+            "attach-boundary".into(),
+        ],
+    )
+    .await;
+    // The stream must be live before the attach, so the hook's write has a
+    // reader behind it and the resume check has output to wait for.
+    let _ = poll_scrollback_at_least(&client, &base, &id, 16 * 1024).await;
+
+    // Arm the one-shot hook. It runs on the server task answering the
+    // attach, after `pos` is sampled and the grid copied, with the
+    // scrollback lock released, and receives the session's own PTY writer.
+    const SENTINEL: &str = "AFTER_POS_SENTINEL";
+    let hook_pos = Arc::new(Mutex::new(None::<u64>));
+    {
+        let hook_pos2 = hook_pos.clone();
+        vogt_engine_server::pty::arm_frame_render_hook(Box::new(move |pos, writer, written| {
+            *hook_pos2.lock().unwrap() = Some(pos);
+            writer
+                .write_all(format!("echo {SENTINEL}\n").as_bytes())
+                .unwrap();
+            writer.flush().unwrap();
+            // The scrollback lock is free here, so the reader keeps landing
+            // the flood (and the sentinel's echo) while the frame is still
+            // to be rendered. Rendering under the lock would stall this.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while written() <= pos + 4096 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the reader stalled while an attach was rendering (WI-2699)"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }));
+    }
+
+    // Attach with a cursor past the end so the server renders the grid frame.
+    let mut ws = ws_attach_with_auth(
+        &base,
+        &id,
+        json!({
+            "type": "auth",
+            "token": TEST_TOKEN,
+            "resume_from": u64::MAX,
+            "snapshot_tail_bytes": 1024 * 1024,
+        }),
+    )
+    .await;
+    let mut snap_pos = 0u64;
+    let mut reset = false;
+    let mut payload = Vec::new();
+    let mut started = false;
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(15), ws.next())
+            .await
+            .expect("snapshot frame arrives")
+            .unwrap()
+            .unwrap();
+        match m {
+            Message::Text(s) => {
+                let v: Value = serde_json::from_str(&s).unwrap();
+                match v["type"].as_str() {
+                    Some("snapshot-start") => {
+                        started = true;
+                        reset = v["reset"].as_bool().unwrap_or(true);
+                        snap_pos = v["scrollback_pos"].as_u64().unwrap();
+                    }
+                    Some("snapshot-done") => break,
+                    _ => {}
+                }
+            }
+            Message::Binary(b) if started => payload.extend_from_slice(&b),
+            _ => {}
+        }
+    }
+    assert!(reset, "a cursor past the end renders the grid frame");
+    assert_eq!(
+        *hook_pos.lock().unwrap(),
+        Some(snap_pos),
+        "the hook ran mid-render, at the attach's sampled pos"
+    );
+
+    // The sentinel was written after `pos` was sampled, so it must not be on
+    // the frame — that is the WI-891 duplicate.
+    assert!(
+        !windows_contain(&payload, SENTINEL.as_bytes()),
+        "the frame carried `{SENTINEL}`, written after its sampled pos (WI-891)"
+    );
+    let newest_in_frame = seq_numbers(&payload).into_iter().max().unwrap_or_else(|| {
+        panic!(
+            "frame has SEQ lines: {:?}",
+            String::from_utf8_lossy(&payload[..payload.len().min(600)])
+        )
+    });
+
+    // The live stream resumes exactly at `pos`: the sentinel arrives live,
+    // and every SEQ on the live stream follows the frame's newest, in order.
+    let mut live = Vec::new();
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < drain_deadline
+        && !windows_contain(&live, SENTINEL.as_bytes())
+    {
+        match tokio::time::timeout(Duration::from_millis(250), ws.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => live.extend_from_slice(&b),
+            Ok(Some(Ok(_))) => continue,
+            _ => break,
+        }
+    }
+    ws.close(None).await.ok();
+    assert!(
+        windows_contain(&live, SENTINEL.as_bytes()),
+        "the live stream must carry `{SENTINEL}`, written after pos"
+    );
+    let live_seqs = seq_numbers(&live);
+    assert!(
+        !live_seqs.is_empty(),
+        "the live stream carries the resumed SEQ lines"
+    );
+    let first_live = live_seqs.iter().copied().min().unwrap();
+    let last_live = live_seqs.iter().copied().max().unwrap();
+    assert_eq!(
+        first_live,
+        newest_in_frame + 1,
+        "the live stream resumes exactly after the frame's newest SEQ          (frame max {newest_in_frame}, live starts {first_live})"
+    );
+    let expected: Vec<u32> = (first_live..=last_live).collect();
+    assert_eq!(
+        live_seqs, expected,
+        "no gap and no duplicate in the resume after the snapshot"
+    );
+
+    // `pos` is the boundary: the ring advanced past the sampled position by
+    // at least the sentinel's echo.
+    let end = scrollback_pos(&client, &base, &id).await;
+    assert!(
+        end > snap_pos,
+        "the sentinel landed after pos ({snap_pos} -> {end})"
+    );
+
+    kill_session(&client, &base, &id).await;
+}
+
+/// Byte-wise substring search.
+fn windows_contain(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[tokio::test]
 async fn pong_never_reports_the_server_ahead_of_this_socket() {
     // F2 (WI-126). Under load the liveness pong must carry the position actually
     // streamed to THIS socket, never `total_written` (which includes queued but

@@ -4057,6 +4057,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vogt-engine-contract",
+ "vogt-engine-server",
  "voicepipe",
  "vt100",
  "web-push",

@@ -33,6 +33,25 @@ pub struct OutputChunk {
     pub data: Bytes,
 }
 
+/// The one-shot attach hook: the sampled `pos`, the session's PTY writer and
+/// a reader of the ring's live `total_written`.
+#[cfg(any(test, feature = "integration-test-hook"))]
+pub type FrameRenderHook = Box<dyn FnOnce(u64, &mut dyn Write, &dyn Fn() -> u64) + Send>;
+
+#[cfg(any(test, feature = "integration-test-hook"))]
+pub(crate) fn frame_render_hook_cell() -> &'static Mutex<Option<FrameRenderHook>> {
+    static HOOK: std::sync::OnceLock<Mutex<Option<FrameRenderHook>>> = std::sync::OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+/// Arm a one-shot hook on the next grid frame render. Available in unit-test
+/// builds and to the integration tests via the `integration-test-hook`
+/// feature, which shipped builds never enable.
+#[cfg(any(test, feature = "integration-test-hook"))]
+pub fn arm_frame_render_hook(hook: FrameRenderHook) {
+    *frame_render_hook_cell().lock() = Some(hook);
+}
+
 pub struct Session {
     pub id: Uuid,
     pub name: Mutex<String>,
@@ -46,8 +65,12 @@ pub struct Session {
     scrollback: Mutex<Scrollback>,
     /// The terminal the PTY output is parsed into, so the screen is read from
     /// a grid that has seen every byte rather than replayed from a tail of the
-    /// ring (WI-990). `None` for a session restored from hibernation, which
-    /// has only the tail it kept and renders by replaying that.
+    /// ring (WI-990). Fed by the reader while the `scrollback` lock is held,
+    /// so it never describes bytes past the ring's `total_written`; attach
+    /// copies its cells under that same lock and renders the copy after it
+    /// drops (WI-2699). `None` for a session
+    /// restored from hibernation, which has only the tail it kept and renders
+    /// by replaying that.
     terminal: Mutex<Option<crate::screen::Terminal>>,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
@@ -762,76 +785,59 @@ impl Session {
         tail_bytes: Option<usize>,
     ) -> (Bytes, u64, bool) {
         // The reader thread pushes to the ring and feeds the grid under this
-        // lock, so `pos` and anything copied here describe one instant.
-        // Reading `pos` and then copying under a second acquisition let the
-        // reader land output in between: the payload carried bytes past
-        // `pos`, the live stream resumed from `pos`, and the client got those
-        // bytes twice (WI-891). The copies are cheap. Rendering the grid
-        // frame is not: it walks the whole grid, and doing that while this
-        // lock is held stalls the reader (WI-2699). The frame is therefore
-        // rendered after the lock is dropped. `pos` was sampled under the
-        // same acquisition the reader uses to feed the grid, so the frame
-        // never carries bytes past `pos`; output the reader writes afterwards
-        // starts strictly after `pos` and the live stream sends it once.
-        enum Taken {
-            /// Byte-exact delta, still inside the replay budget.
-            Delta(Bytes),
-            /// Raw ring tail, for a session with no live grid.
-            Raw(Bytes),
-            /// Render the grid after the scrollback lock is dropped.
-            Frame,
-        }
-        let (pos, taken) = {
+        // lock, so `pos`, the ring tail and the grid all describe one instant
+        // while it is held. Reading `pos` and then rendering the live grid
+        // under a later acquisition let the reader land output in between:
+        // the frame carried bytes past `pos`, the live stream resumed from
+        // `pos`, and the client got those bytes twice (WI-891). Rendering
+        // under the lock instead stalls the reader for the whole render
+        // (WI-2699). So the lock is held only to sample `pos` and copy what
+        // the payload is built from — the delta, the raw tail, or a copy of
+        // the grid's cells — and the frame is rendered from that copy after
+        // the lock drops. The copy describes exactly the bytes up to `pos`.
+        // The socket subscribed to the live stream before calling this, and
+        // every live chunk carries its own offset, so the stream forwards
+        // only bytes at or past `pos` (`ws::coalesce`): that offset handshake
+        // makes snapshot and subscribe one boundary, with nothing sent twice
+        // and nothing dropped.
+        let grid = {
             let sb = self.scrollback.lock();
             let pos = sb.total_written();
-            let taken = if let Some(cursor) = resume_from {
-                match sb.snapshot_since(cursor) {
-                    Some(delta) if tail_bytes.is_none_or(|limit| delta.len() <= limit) => {
+            if let Some(cursor) = resume_from {
+                if let Some(delta) = sb.snapshot_since(cursor) {
+                    if tail_bytes.is_none_or(|limit| delta.len() <= limit) {
                         // A retained delta within budget is byte-exact and
                         // appends (reset:false), so a switch-away that
                         // produced little still catches up without repainting.
-                        Taken::Delta(delta)
-                    }
-                    // Aged out, or a delta over budget: the live grid's frame,
-                    // not a tail of the raw ring (WI-121).
-                    _ => {
-                        if self.terminal.lock().is_some() {
-                            Taken::Frame
-                        } else {
-                            Taken::Raw(raw_tail(&sb, tail_bytes))
-                        }
+                        return (delta, pos, false);
                     }
                 }
-            } else if self.terminal.lock().is_some() {
-                Taken::Frame
-            } else {
-                Taken::Raw(raw_tail(&sb, tail_bytes))
-            };
-            (pos, taken)
+                // Aged out, or a delta over budget: the live grid's frame,
+                // not a tail of the raw ring (WI-121).
+            }
+            // Lock order stays scrollback, then terminal, as in the reader.
+            match self.terminal.lock().as_ref() {
+                Some(t) => (t.grid(), pos),
+                // A session restored from hibernation has no live grid:
+                // replay the raw tail, as a hibernated attach does.
+                None => return (raw_tail(&sb, tail_bytes), pos, true),
+            }
         };
-        match taken {
-            Taken::Delta(delta) => (delta, pos, false),
-            Taken::Raw(snapshot) => (snapshot, pos, true),
-            Taken::Frame => match self.grid_frame() {
-                // Lock order stays scrollback, then terminal, as in the reader.
-                Some(frame) => (self.bounded_frame(frame, tail_bytes), pos, true),
-                // The grid went away between the two locks (a restore that
-                // dropped it). Replay the raw tail rather than panic; `pos`
-                // was sampled before that, so the tail cannot run past it.
-                None => {
-                    let snapshot = {
-                        let sb = self.scrollback.lock();
-                        raw_tail(&sb, tail_bytes)
-                    };
-                    (snapshot, pos, true)
-                }
-            },
+        let (mut grid, pos) = grid;
+        // The attach-boundary hook (WI-2699): `pos` is sampled, the grid
+        // copied and the lock dropped, so a test can write to the PTY here,
+        // watch the reader land it, and then check the frame still stops at
+        // `pos`. Production never arms the hook.
+        #[cfg(any(test, feature = "integration-test-hook"))]
+        {
+            let hook = frame_render_hook_cell().lock().take();
+            if let Some(hook) = hook {
+                let written = || self.scrollback.lock().total_written();
+                hook(pos, &mut **self.writer.lock(), &written);
+            }
         }
-    }
-
-    /// The live grid's frame, when this session has one.
-    fn grid_frame(&self) -> Option<Vec<u8>> {
-        self.terminal.lock().as_mut().map(|t| t.frame())
+        let frame = crate::screen::frame_of(&mut grid);
+        (self.bounded_frame(frame, tail_bytes), pos, true)
     }
 
     /// The frame, cut to `tail_bytes` when one was given and the frame is
