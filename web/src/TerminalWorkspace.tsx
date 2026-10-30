@@ -9,8 +9,16 @@ import {
   createSignal,
   onCleanup,
   onMount,
+  untrack,
 } from "solid-js";
+import { Dynamic } from "solid-js/web";
 import Terminal, { type TerminalActions } from "./Terminal";
+import {
+  HandoffTerminal,
+  hasTerminalHandoff,
+  reserveTerminalHandoff,
+  terminalHandoffInput,
+} from "./terminalHandoff";
 import type { ISearchResultChangeEvent } from "@xterm/addon-search";
 import type { SessionSummary } from "./api";
 import {
@@ -411,7 +419,8 @@ const PaneView: Component<Omit<LayoutNodeProps, "node"> & { node: PaneNode }> = 
       </Show>
       <Show when={props.node.sessionId} keyed>
         {(sessionId) => (
-          <Terminal
+          <Dynamic
+            component={untrack(() => hasTerminalHandoff(sessionId)) ? HandoffTerminal : Terminal}
             parked={terminalPaneParked(
               !props.parked,
               props.activePaneId === paneId(),
@@ -537,6 +546,9 @@ const TerminalWorkspace: Component<Props> = (props) => {
   const [overflowOpen, setOverflowOpen] = createSignal(false);
   const [mobileSwipeOffset, setMobileSwipeOffset] = createSignal(0);
   const [mobileDestinationId, setMobileDestinationId] = createSignal<string | null>(null);
+  // The released swipe is settling onto the destination: only then does the
+  // slide's terminal attach (a spring-back stays a cached preview).
+  const [mobileCommitted, setMobileCommitted] = createSignal(false);
   const [mobileDestinationDirection, setMobileDestinationDirection] = createSignal<-1 | 1>(1);
   const [mobileDragging, setMobileDragging] = createSignal(false);
   const [mobileSettling, setMobileSettling] = createSignal(false);
@@ -640,7 +652,21 @@ const TerminalWorkspace: Component<Props> = (props) => {
       .map((id) => sessionsStore.sessions[id])
       .filter((session): session is SessionSummary => Boolean(session)),
   );
-  const mobileSessions = createMemo(() => sortSessionsByAttention(allSessions()));
+  // The pager's order is frozen while a finger is down and through the settle
+  // (WI-2706): a live attention re-sort must not move the pages being dragged.
+  const [mobileFrozenOrder, setMobileFrozenOrder] = createSignal<string[] | null>(null);
+  const mobileSessions = createMemo(() => {
+    const frozen = mobileFrozenOrder();
+    if (!frozen) return sortSessionsByAttention(allSessions());
+    return frozen
+      .map((id) => sessionsStore.sessions[id])
+      .filter((session): session is SessionSummary => Boolean(session));
+  });
+  const freezeMobileOrder = () => {
+    if (!mobileFrozenOrder()) {
+      setMobileFrozenOrder(mobileSessions().map((session) => session.id));
+    }
+  };
   const mobileIndex = createMemo(() => {
     const index = mobileSessions().findIndex((session) => session.id === props.sessionId);
     return index >= 0 ? index : 0;
@@ -658,11 +684,18 @@ const TerminalWorkspace: Component<Props> = (props) => {
       );
     }
   };
-  const changeMobileSessionById = (sessionId: string) => {
+  // A soft keyboard is up when a text field has focus. A swipe that started
+  // with one open keeps it open: focus goes to the new pane's input, not the
+  // session bar (WI-2706).
+  const mobileKeyboardOpen = () => {
+    const active = document.activeElement;
+    return active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement;
+  };
+  const changeMobileSessionById = (sessionId: string, keepKeyboard = false) => {
     const target = mobileSessions().find((session) => session.id === sessionId);
     if (!target || target.id === props.sessionId) return;
     props.onMobileSessionChange?.(target.id);
-    focusMobileSessionBar();
+    if (!keepKeyboard) focusMobileSessionBar();
   };
   const changeMobileSession = (index: number) => {
     const target = mobileSessions()[index];
@@ -679,12 +712,15 @@ const TerminalWorkspace: Component<Props> = (props) => {
     mobileSettleTimer = setTimeout(() => {
       setMobileSettling(false);
       setMobileDestinationId(null);
+      setMobileCommitted(false);
+      setMobileFrozenOrder(null);
     }, delay);
   };
   const onMobileTouchStart = (event: TouchEvent, forceHorizontal = false) => {
     if (mobileSettling()) return;
     const touch = event.touches[0];
     if (!touch) return;
+    freezeMobileOrder();
     mobileGesture = beginMobilePagerGesture(touch.clientX, touch.clientY);
     mobileForceHorizontal = forceHorizontal;
     setMobileSwipeOffset(0);
@@ -739,6 +775,11 @@ const TerminalWorkspace: Component<Props> = (props) => {
       return;
     }
 
+    const keepKeyboard = mobileKeyboardOpen();
+    // Move focus now, inside the touch's user gesture, so the keyboard does
+    // not drop while the slide animates; the hand-off re-focuses it after the
+    // terminal moves into its new pane.
+    if (keepKeyboard) terminalHandoffInput(destinationId)?.focus({ preventScroll: true });
     const direction = mobileDestinationDirection();
     const distance = mobileStageRef?.getBoundingClientRect().width
       ?? window.innerWidth;
@@ -746,6 +787,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
     setMobileDestinationDirection(direction);
     setMobileDestinationId(destinationId);
     setMobileSettling(true);
+    setMobileCommitted(true);
     setMobileSwipeOffset(direction > 0 ? -distance : distance);
     if (mobileSettleTimer !== undefined) clearTimeout(mobileSettleTimer);
     mobileSettleTimer = setTimeout(() => {
@@ -754,10 +796,16 @@ const TerminalWorkspace: Component<Props> = (props) => {
       const stillExists = mobileSessions().some(
         (session) => session.id === destinationId,
       );
+      // The slide's terminal is the new pane's terminal: keep it alive across
+      // the slide's teardown so the new tab adopts it instead of attaching a
+      // second time.
+      if (stillExists) reserveTerminalHandoff(destinationId, { focus: keepKeyboard });
       setMobileSettling(false);
       setMobileDestinationId(null);
+      setMobileCommitted(false);
       setMobileSwipeOffset(0);
-      if (stillExists) changeMobileSessionById(destinationId);
+      setMobileFrozenOrder(null);
+      if (stillExists) changeMobileSessionById(destinationId, keepKeyboard);
       else if (props.onMobileSessionUnavailable) {
         props.onMobileSessionUnavailable();
       } else {
@@ -1639,8 +1687,9 @@ const TerminalWorkspace: Component<Props> = (props) => {
                 }}
               >
                 <div class="terminal-pane active">
-                  <Terminal
+                  <HandoffTerminal
                     sessionId={destination.id}
+                    preview={!mobileCommitted()}
                     onNotify={props.onNotify}
                     onRequestFind={openFind}
                     onBell={() => props.onBell?.(destination.id)}
