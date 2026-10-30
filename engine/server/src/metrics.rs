@@ -344,6 +344,13 @@ pub struct Metrics {
     /// Resident memory of every process the engine can see: in a container,
     /// the whole pod, sessions or not (unlabelled).
     pub pod_rss: GaugeVec,
+    /// Terminal attaches that authenticated and found a live session.
+    pub ws_attach: CounterVec,
+    /// Terminal attach sockets ended, by the close code the engine sent
+    /// (`none` when the client went first or the socket failed).
+    pub ws_close: CounterVec,
+    /// Terminal attach sockets closed `4000 idle` by the server keepalive.
+    pub ws_idle_close: CounterVec,
 }
 
 impl Metrics {
@@ -415,6 +422,18 @@ impl Metrics {
                 "vogt_pod_rss_bytes",
                 "Resident memory summed over every process the engine can see (the pod), in bytes.",
             ),
+            ws_attach: CounterVec::new(
+                "vogt_ws_attach_total",
+                "Terminal attaches that authenticated and found a live session.",
+            ),
+            ws_close: CounterVec::new(
+                "vogt_ws_close_total",
+                "Terminal attach sockets ended, by the close code the engine sent (none: client or transport).",
+            ),
+            ws_idle_close: CounterVec::new(
+                "vogt_ws_idle_close_total",
+                "Terminal attach sockets closed by the server keepalive after missed pongs.",
+            ),
         }
     }
 
@@ -434,6 +453,9 @@ impl Metrics {
         self.session_processes.render(&mut out);
         self.sessions_rss_total.render(&mut out);
         self.pod_rss.render(&mut out);
+        self.ws_attach.render(&mut out);
+        self.ws_close.render(&mut out);
+        self.ws_idle_close.render(&mut out);
         out
     }
 }

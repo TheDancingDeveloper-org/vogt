@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 use axum::{
     extract::{
@@ -54,6 +60,34 @@ const MAX_CONSECUTIVE_RESYNCS: u32 = 5;
 /// How long a freshly-upgraded socket has to send `{"type":"auth",...}` before
 /// we drop it. Keeps unauth clients from hanging on to a socket indefinitely.
 const AUTH_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Pongs a socket may miss before the keepalive closes it `4000 idle`
+/// (WI-2704). Any inbound frame counts as an answer, so a client that is
+/// typing or probing is never closed for not echoing a Ping.
+const KEEPALIVE_MISSED_PONGS: u32 = 2;
+
+/// Close code for a socket the keepalive gave up on.
+const CLOSE_IDLE: CloseCode = 4000;
+
+/// Close code for an attach the engine could not authenticate because the
+/// core was unreachable: retry, unlike `4401`.
+const CLOSE_CORE_UNAVAILABLE: CloseCode = 4503;
+
+/// How long an idle close waits for the outbound task to write the close
+/// frame before the socket is dropped anyway. A half-open peer can leave the
+/// write blocked on a full send buffer.
+const IDLE_CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// Milliseconds since `base`, for the shared last-heard-from stamp.
+fn millis_since(base: Instant) -> u64 {
+    base.elapsed().as_millis() as u64
+}
+
+/// Whether a socket last heard from `since_heard` ago has missed enough
+/// Pongs to close.
+fn keepalive_expired(since_heard: Duration, interval: Duration) -> bool {
+    since_heard >= interval * KEEPALIVE_MISSED_PONGS
+}
 
 /// De-duplicate a live broadcast chunk against the already-replayed snapshot.
 ///
@@ -242,16 +276,46 @@ pub async fn attach(
 }
 
 async fn close_with(socket: &mut WebSocket, code: CloseCode, reason: &'static str) {
-    let _ = socket
-        .send(Message::Close(Some(CloseFrame {
-            code,
-            reason: reason.into(),
-        })))
-        .await;
+    let _ = socket.send(close_frame(code, reason)).await;
 }
 
-async fn token_ok(state: &AppState, candidate: &str) -> Option<auth::AuthorizedIdentity> {
-    auth::ws_session_identity(state, candidate).await
+fn close_frame(code: CloseCode, reason: &'static str) -> Message {
+    record_close(&code.to_string());
+    Message::Close(Some(CloseFrame {
+        code,
+        reason: reason.into(),
+    }))
+}
+
+fn record_close(code: &str) {
+    crate::metrics::metrics().ws_close.inc(&[("code", code)]);
+}
+
+/// Why an attach bearer was not accepted, as the socket should be told.
+enum TokenVerdict {
+    Ok(auth::AuthorizedIdentity),
+    /// Nobody recognises it: a guess, counted and slowed.
+    Refused,
+    /// The core could not be asked. Not the client's fault, so not counted
+    /// as an auth failure; closed `4503` so the client retries.
+    Unavailable,
+}
+
+async fn token_ok(state: &AppState, candidate: &str) -> TokenVerdict {
+    match auth::ws_session_identity(state, candidate).await {
+        Ok(identity) => TokenVerdict::Ok(identity),
+        Err(auth::AuthRefusal::Unauthorized) => TokenVerdict::Refused,
+        Err(auth::AuthRefusal::Unavailable(detail)) => {
+            tracing::warn!(
+                target: "vogt::audit",
+                method = "WS",
+                path = "/api/sessions/{id}/attach",
+                detail = %detail,
+                "could not authenticate attach: vogt-core unavailable"
+            );
+            TokenVerdict::Unavailable
+        }
+    }
 }
 
 /// What a successful attach handshake tells the snapshot: where to resume from
@@ -280,7 +344,12 @@ async fn authenticate(
     // in: a token there lands in proxy/access logs and browser history.
     if let Some(tok) = legacy_token {
         if state.config.ws_query_token_allowed {
-            if let Some(identity) = token_ok(state, tok).await {
+            let verdict = token_ok(state, tok).await;
+            if let TokenVerdict::Unavailable = verdict {
+                close_with(socket, CLOSE_CORE_UNAVAILABLE, "core unavailable, retry").await;
+                return None;
+            }
+            if let TokenVerdict::Ok(identity) = verdict {
                 tracing::warn!(
                     target: "vogt::audit",
                     "WS attach authenticated via the deprecated ?token= query \
@@ -331,23 +400,32 @@ async fn authenticate(
             return None;
         }
     };
-    let attached = match parsed {
-        ClientControl::Auth {
-            token,
-            resume_from,
-            snapshot_tail_bytes,
-        } => token_ok(state, &token).await.map(|identity| AttachAuth {
+    let ClientControl::Auth {
+        token,
+        resume_from,
+        snapshot_tail_bytes,
+    } = parsed
+    else {
+        auth::record_ws_auth_failure("wrong-token").await;
+        close_with(socket, 4401, "unauthorized").await;
+        return None;
+    };
+    match token_ok(state, &token).await {
+        TokenVerdict::Ok(identity) => Some(AttachAuth {
             resume_from,
             snapshot_tail_bytes,
             identity,
         }),
-        _ => None,
-    };
-    if attached.is_none() {
-        auth::record_ws_auth_failure("wrong-token").await;
-        close_with(socket, 4401, "unauthorized").await;
+        TokenVerdict::Refused => {
+            auth::record_ws_auth_failure("wrong-token").await;
+            close_with(socket, 4401, "unauthorized").await;
+            None
+        }
+        TokenVerdict::Unavailable => {
+            close_with(socket, CLOSE_CORE_UNAVAILABLE, "core unavailable, retry").await;
+            None
+        }
     }
-    attached
 }
 
 /// The attach exchange for a hibernated session: a full snapshot of its kept
@@ -452,7 +530,16 @@ async fn handle_socket(
         }
     };
 
+    crate::metrics::metrics().ws_attach.inc(&[]);
     let (mut sink, mut stream) = socket.split();
+    // Keepalive (WI-2704): the inbound task stamps every frame it reads; the
+    // outbound task pings on `ping_every`; the watchdog below closes the
+    // socket once nothing has come back for `KEEPALIVE_MISSED_PONGS` pings.
+    let ping_every = state.config.ws_ping_interval;
+    let clock = Instant::now();
+    let last_heard = Arc::new(AtomicU64::new(0));
+    let heard = Arc::clone(&last_heard);
+    let (idle_tx, mut idle_rx) = tokio::sync::oneshot::channel::<()>();
     // Carries liveness-probe ids from the inbound task to the outbound task.
     // The pong is *formed* by the outbound task with the position it has
     // actually streamed, not by the inbound task with `total_written` — see the
@@ -521,6 +608,7 @@ async fn handle_socket(
     let inbound = tokio::spawn(async move {
         while let Some(msg) = stream.next().await {
             let Ok(msg) = msg else { break };
+            heard.store(millis_since(clock), Ordering::Relaxed);
             match msg {
                 Message::Binary(data) => {
                     if data.len() > MAX_INPUT_BYTES {
@@ -593,9 +681,28 @@ async fn handle_socket(
         // live output; a client that trips the ceiling is handed back to a
         // clean reattach instead of driving unbounded resnapshotting.
         let mut resyncs: u32 = 0;
+        let mut ping_tick =
+            tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
+        ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
+                _ = &mut idle_rx => {
+                    // Counted by the watchdog, which knows it closed even if
+                    // this write never completes.
+                    let _ = sink
+                        .send(Message::Close(Some(CloseFrame {
+                            code: CLOSE_IDLE,
+                            reason: "idle".into(),
+                        })))
+                        .await;
+                    return;
+                }
+                _ = ping_tick.tick() => {
+                    if sink.send(Message::Ping(bytes::Bytes::new())).await.is_err() {
+                        break;
+                    }
+                }
                 Ok(()) = size_rx.changed() => {
                     // Another client (or this one) resized the PTY. Flush the
                     // output already queued — it was painted before the
@@ -768,24 +875,65 @@ async fn handle_socket(
         }
     });
 
-    // First one to finish terminates the other.
-    tokio::select! {
-        _ = inbound => {}
-        _ = outbound => {}
+    // First one to finish terminates the other — aborted, not just dropped:
+    // a dropped JoinHandle detaches, and a stale outbound task would keep its
+    // broadcast receiver (and the dead socket) alive (WI-2704).
+    let mut inbound = inbound;
+    let mut outbound = outbound;
+    let mut watchdog = tokio::time::interval(ping_every / 4);
+    watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut idle_tx = Some(idle_tx);
+    let closed_by_server = loop {
+        tokio::select! {
+            _ = &mut inbound => break false,
+            _ = &mut outbound => break false,
+            _ = watchdog.tick() => {
+                let since = Duration::from_millis(
+                    millis_since(clock).saturating_sub(last_heard.load(Ordering::Relaxed)),
+                );
+                if keepalive_expired(since, ping_every) {
+                    crate::metrics::metrics().ws_idle_close.inc(&[]);
+                    tracing::info!(session = %id, silent_ms = since.as_millis() as u64,
+                        "closing idle attach socket: missed keepalive pongs");
+                    if let Some(tx) = idle_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    record_close(&CLOSE_IDLE.to_string());
+                    let _ = tokio::time::timeout(IDLE_CLOSE_GRACE, &mut outbound).await;
+                    break true;
+                }
+            }
+        }
+    };
+    inbound.abort();
+    outbound.abort();
+    if !closed_by_server {
+        record_close("none");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{coalesce, live_skip};
+    use super::{coalesce, keepalive_expired, live_skip};
     use crate::pty::OutputChunk;
     use bytes::Bytes;
+    use std::time::Duration;
 
     fn chunk(pos: u64, data: &'static [u8]) -> OutputChunk {
         OutputChunk {
             pos,
             data: Bytes::from_static(data),
         }
+    }
+
+    #[test]
+    fn the_default_keepalive_closes_a_silent_socket_within_45_s() {
+        // Two missed 20 s pings, checked every quarter interval: closed by
+        // 45 s at the latest, never before 40 s.
+        let every = Duration::from_secs(20);
+        assert!(!keepalive_expired(Duration::from_secs(39), every));
+        assert!(keepalive_expired(Duration::from_secs(40), every));
+        assert!(Duration::from_secs(40) + every / 4 <= Duration::from_secs(45));
     }
 
     #[test]
