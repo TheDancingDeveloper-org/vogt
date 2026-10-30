@@ -13,9 +13,9 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from vogt.adapters.engine.client import EngineSession, EngineUnavailable
+from vogt.adapters.engine.client import EngineClient, EngineSession, EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
     BacklogParams,
@@ -67,6 +67,16 @@ class _CountingEngine:
         )
 
 
+def _wired(instance: AppContext, engine: _CountingEngine) -> AppContext:
+    """`instance` with the stand-in as its engine.
+
+    `EngineClient` is a frozen dataclass, so the stand-in cannot subclass it
+    and keep a mutable call count. Inbox only ever calls `list_sessions` on
+    the engine, which `_CountingEngine` provides, so the cast is safe here.
+    """
+    return replace(instance, engine=cast(EngineClient, engine))
+
+
 def _project(ctx: AppContext, tmp_path: Path, name: str = "alpha") -> None:
     register_project(
         ctx,
@@ -91,7 +101,7 @@ def test_inbox_asks_the_engine_once_and_reuses_the_stored_half(
 ) -> None:
     _project(instance, tmp_path)
     engine = _CountingEngine()
-    wired = replace(instance, engine=engine)
+    wired = _wired(instance, engine)
     stored_calls = {"n": 0}
     real = _gather  # keep a name so the patch below is the only one
 
@@ -125,7 +135,7 @@ def test_inbox_reachability_reuses_the_failed_probe(
 ) -> None:
     _project(instance, tmp_path)
     engine = _CountingEngine(fail=True)
-    wired = replace(instance, engine=engine)
+    wired = _wired(instance, engine)
 
     result = list_inbox(wired, InboxListParams())
 
