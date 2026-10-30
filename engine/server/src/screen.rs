@@ -99,39 +99,50 @@ impl Terminal {
     /// consumed while building the grid, so nothing reaches the client that
     /// the grid did not accept (WI-987).
     pub fn frame(&mut self) -> Vec<u8> {
-        let (rows, _cols) = self.parser.screen().size();
-        let mut out = Vec::new();
-        // Clear the visible screen only. RIS (`ESC c`) would also wipe the
-        // client's scrollback, which is exactly where the history below has
-        // to land, and the client already resets its terminal on reset:true.
-        // History rows, oldest first, one per line. Read straight off the
-        // grid rather than sliced out of a formatted dump: a scrolled view
-        // overlaps the next one, and slicing that overlap off dropped rows.
-        let history: Vec<Vec<u8>> = {
-            let screen = self.parser.screen_mut();
-            screen.set_scrollback(usize::MAX);
-            let total = screen.scrollback();
-            let mut rows_out = Vec::with_capacity(total);
-            let mut off = total;
-            while off > 0 {
-                let take = off.min(rows as usize);
-                screen.set_scrollback(off);
-                rows_out.extend(screen.rows_formatted(0, u16::MAX).take(take));
-                off -= take;
-            }
-            rows_out
-        };
-        for row in &history {
-            out.extend_from_slice(row);
-            out.extend_from_slice(b"\r\n");
-        }
-        self.parser.screen_mut().set_scrollback(0);
-        let screen = self.parser.screen();
-        out.extend_from_slice(&screen.state_formatted());
-        out.extend_from_slice(&screen.cursor_state_formatted());
-        out
+        frame_of(self.parser.screen_mut())
     }
 
+    /// A copy of the grid, cheap next to [`Terminal::frame`]: it copies cells
+    /// and formats nothing. Attach takes it under the scrollback lock, so the
+    /// copy describes exactly the bytes up to the sampled position, and
+    /// renders it with [`frame_of`] after the lock drops (WI-2699).
+    pub fn grid(&self) -> vt100::Screen {
+        self.parser.screen().clone()
+    }
+}
+
+/// The frame [`Terminal::frame`] describes, rendered from any grid — the
+/// live one or a copy taken by [`Terminal::grid`].
+pub fn frame_of(screen: &mut vt100::Screen) -> Vec<u8> {
+    let (rows, _cols) = screen.size();
+    let mut out = Vec::new();
+    // Clear the visible screen only. RIS (`ESC c`) would also wipe the
+    // client's scrollback, which is exactly where the history below has
+    // to land, and the client already resets its terminal on reset:true.
+    // History rows, oldest first, one per line. Read straight off the
+    // grid rather than sliced out of a formatted dump: a scrolled view
+    // overlaps the next one, and slicing that overlap off dropped rows.
+    screen.set_scrollback(usize::MAX);
+    let total = screen.scrollback();
+    let mut history = Vec::with_capacity(total);
+    let mut off = total;
+    while off > 0 {
+        let take = off.min(rows as usize);
+        screen.set_scrollback(off);
+        history.extend(screen.rows_formatted(0, u16::MAX).take(take));
+        off -= take;
+    }
+    for row in &history {
+        out.extend_from_slice(row);
+        out.extend_from_slice(b"\r\n");
+    }
+    screen.set_scrollback(0);
+    out.extend_from_slice(&screen.state_formatted());
+    out.extend_from_slice(&screen.cursor_state_formatted());
+    out
+}
+
+impl Terminal {
     /// A hash of what the screen shows: the text of every visible cell and
     /// the window title. Attributes and the cursor are left out on purpose:
     /// a blinking cursor is a TUI redrawing one cell in reverse video and
