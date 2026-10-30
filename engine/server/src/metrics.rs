@@ -36,6 +36,17 @@ const LAUNCH_BUCKETS: &[f64] = &[
     0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0,
 ];
 
+/// Seconds. Prometheus' default buckets: request latency, 5 ms to 10 s.
+const REQUEST_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+];
+
+/// Response header the core sets to the route template it matched (WI-2697).
+pub const CORE_ROUTE_HEADER: &str = "x-vogt-route";
+
+/// The route label for a request no route claimed: one series, not one per path.
+pub const UNMATCHED: &str = "unmatched";
+
 pub type Labels = Vec<(&'static str, String)>;
 
 struct Histogram {
@@ -351,6 +362,10 @@ pub struct Metrics {
     pub ws_close: CounterVec,
     /// Terminal attach sockets closed `4000 idle` by the server keepalive.
     pub ws_idle_close: CounterVec,
+    /// Time to response start of every engine request, by route template,
+    /// method and status (WI-2697). The `/api/vogt` proxy hop is labelled by
+    /// the core's route template, from `x-vogt-route`.
+    pub http_request: HistogramVec,
 }
 
 impl Metrics {
@@ -434,6 +449,11 @@ impl Metrics {
                 "vogt_ws_idle_close_total",
                 "Terminal attach sockets closed by the server keepalive after missed pongs.",
             ),
+            http_request: HistogramVec::new(
+                "vogt_engine_http_request_seconds",
+                "Time the engine took to start answering a request, by route template, method and status.",
+                REQUEST_BUCKETS,
+            ),
         }
     }
 
@@ -456,6 +476,7 @@ impl Metrics {
         self.ws_attach.render(&mut out);
         self.ws_close.render(&mut out);
         self.ws_idle_close.render(&mut out);
+        self.http_request.render(&mut out);
         out
     }
 }
@@ -465,6 +486,51 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::new);
 /// The process-wide registry.
 pub fn metrics() -> &'static Metrics {
     &METRICS
+}
+
+/// The route label for one request: axum's matched template, except on the
+/// `/api/vogt` proxy hop, where it is the core's template (from the core's
+/// `x-vogt-route`, mapped back under `/api/vogt`) so the label names the core
+/// route rather than the catch-all. Never a raw path: a path carries ids.
+pub fn route_label(matched: Option<&str>, core_route: Option<&str>) -> String {
+    let Some(matched) = matched else {
+        return UNMATCHED.to_string();
+    };
+    if matched.starts_with(crate::vogt_core::API_PREFIX) {
+        if let Some(core) = core_route.filter(|r| r.starts_with('/') && *r != UNMATCHED) {
+            let rest = core.strip_prefix("/api").unwrap_or(core);
+            return format!("{}{rest}", crate::vogt_core::API_PREFIX);
+        }
+    }
+    matched.to_string()
+}
+
+/// Route-layer middleware: time the request to its response start and record
+/// it under the matched route template. A route layer, not an outer one,
+/// because axum only knows the [`MatchedPath`] once it has routed; requests
+/// no route claims fall to the catch-alls, which are routes too.
+pub async fn record_request(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let matched = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string());
+    let method = request.method().as_str().to_string();
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let core_route = response
+        .headers()
+        .get(CORE_ROUTE_HEADER)
+        .and_then(|v| v.to_str().ok());
+    let route = route_label(matched.as_deref(), core_route);
+    let status = response.status().as_u16().to_string();
+    metrics().http_request.observe(
+        &[("route", &route), ("method", &method), ("status", &status)],
+        started.elapsed(),
+    );
+    response
 }
 
 async fn scrape() -> impl IntoResponse {
@@ -534,6 +600,29 @@ mod tests {
             out.contains("t_seconds_count{launcher=\"agent-auth\"} 3"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn the_proxy_hop_is_labelled_by_the_core_route_template() {
+        assert_eq!(
+            route_label(Some("/api/vogt/{*path}"), Some("/api/work/list")),
+            "/api/vogt/work/list"
+        );
+        // No header (core down, refused before forwarding): the catch-all.
+        assert_eq!(
+            route_label(Some("/api/vogt/{*path}"), None),
+            "/api/vogt/{*path}"
+        );
+        assert_eq!(
+            route_label(Some("/api/vogt/{*path}"), Some(UNMATCHED)),
+            "/api/vogt/{*path}"
+        );
+        // An engine route keeps its own template whatever a header says.
+        assert_eq!(
+            route_label(Some("/api/sessions/{id}"), Some("/api/x")),
+            "/api/sessions/{id}"
+        );
+        assert_eq!(route_label(None, None), UNMATCHED);
     }
 
     #[test]

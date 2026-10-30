@@ -582,6 +582,9 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .merge(ws_routes)
         .merge(api_fallback)
         .merge(asset_routes)
+        // Every route above, timed by its template (WI-2697). A route layer
+        // because only a routed request knows its `MatchedPath`.
+        .route_layer(middleware::from_fn(crate::metrics::record_request))
         // Negotiate gzip for the PWA and finite API responses. tower-http's
         // default predicate excludes SSE, images, ranges, and responses that
         // already have Content-Encoding; upgrade responses remain untouched.

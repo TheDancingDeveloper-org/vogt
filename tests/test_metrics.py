@@ -12,8 +12,11 @@ import socket
 import urllib.request
 
 import pytest
+from fastapi.testclient import TestClient
 
 from vogt.adapters.http import metrics
+from vogt.adapters.http.server import ServeOptions, build_server
+from vogt.application.context import AppContext
 from vogt.errors import InvalidRequest
 
 
@@ -95,3 +98,48 @@ def test_starting_twice_does_not_rebind() -> None:
         metrics.start(f"127.0.0.1:{port}")
         assert _series(_scrape(port), "process_resident_memory_bytes")
     assert metrics._server is None
+
+
+# -- request latency (WI-2697) ------------------------------------------------
+
+
+def _request_samples(route: str, status: str) -> float:
+    """The count of ``vogt_core_http_request_seconds`` for one label set."""
+    for metric in metrics.registry().collect():
+        if metric.name != "vogt_core_http_request_seconds":
+            continue
+        for sample in metric.samples:
+            if (
+                sample.name.endswith("_count")
+                and sample.labels.get("route") == route
+                and sample.labels.get("status") == status
+            ):
+                return float(sample.value)
+    return 0.0
+
+
+def test_a_request_is_timed_by_route_template_and_echoes_it(
+    instance: AppContext,
+) -> None:
+    options = ServeOptions(host="127.0.0.1", port=18099, require_auth=False)
+    before = _request_samples("/api/projects", "200")
+    with TestClient(build_server(options, config=instance.config)) as client:
+        response = client.get("/api/projects", params={"limit": 1})
+    assert response.status_code == 200
+    assert response.headers[metrics.ROUTE_HEADER] == "/api/projects"
+    assert _request_samples("/api/projects", "200") == before + 1
+
+
+def test_an_unrouted_request_is_one_unmatched_series(instance: AppContext) -> None:
+    options = ServeOptions(host="127.0.0.1", port=18099, require_auth=False)
+    before = _request_samples(metrics.UNMATCHED, "404")
+    with TestClient(build_server(options, config=instance.config)) as client:
+        response = client.get("/nowhere/at/all")
+    assert response.status_code == 404
+    assert response.headers[metrics.ROUTE_HEADER] == metrics.UNMATCHED
+    assert _request_samples(metrics.UNMATCHED, "404") == before + 1
+
+
+def test_the_buckets_are_the_default_ones_up_to_ten_seconds() -> None:
+    assert metrics.REQUEST_BUCKETS[0] == 0.005
+    assert metrics.REQUEST_BUCKETS[-1] == 10.0
