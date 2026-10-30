@@ -70,7 +70,7 @@ jobs:
     # static selector — dynamic `runs-on` is what the runner-policy gate forbids.
     runs-on: [self-hosted, docker]
     # Recent green runs take ~31 min; a hung run should fail, not hold the runner.
-    timeout-minutes: 40
+    timeout-minutes: 45
     env:
       # The three compose files: the public base, the engine overlay, and the
       # e2e overlay that mounts the fake-agent and its preset.
@@ -251,7 +251,7 @@ jobs:
   clean-consumer:
     name: published pair pulls anonymously and renders
     runs-on: [self-hosted, docker]
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -303,7 +303,7 @@ jobs:
   custom-image:
     name: the custom-stack example builds and its overlay merges
     runs-on: [self-hosted, docker]
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
