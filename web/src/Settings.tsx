@@ -20,6 +20,7 @@ import { getPreferServerStt, setPreferServerStt } from "./sttPref";
 import TemplateEditor from "./TemplateEditor";
 import Dialog from "./Dialog";
 import { THEMES, getThemeName, setThemeName } from "./terminalThemes";
+import { readTerminalRenderer, writeTerminalRenderer } from "./terminalRenderer";
 import {
   APP_THEMES,
   APP_THEME_ORDER,
@@ -182,6 +183,7 @@ const Settings: Component<Props> = (props) => {
   const [pushQuietEnd, setPushQuietEnd] = createSignal("07:00");
   const [templateEditorOpen, setTemplateEditorOpen] = createSignal(false);
   const [terminalTheme, setTerminalTheme] = createSignal(getThemeName());
+  const [terminalRenderer, setTerminalRenderer] = createSignal(readTerminalRenderer());
   const [appTheme, setAppThemeSel] = createSignal(getAppThemeSelection());
   const [workspaceLayouts, setWorkspaceLayouts] = createSignal<SavedWorkspaceLayout[]>(
     listWorkspaceLayouts(),
@@ -1140,6 +1142,22 @@ const Settings: Component<Props> = (props) => {
                 {(name) => <option value={name}>{name}</option>}
               </For>
             </select>
+
+            <label style={{ display: "flex", gap: "8px", "align-items": "center", "font-size": "13px" }}>
+              <input
+                type="checkbox"
+                checked={terminalRenderer() === "dom"}
+                onChange={(e) => {
+                  const next = e.currentTarget.checked ? "dom" : "webgl";
+                  writeTerminalRenderer(next);
+                  setTerminalRenderer(next);
+                }}
+              />
+              Force the DOM terminal renderer
+              <span style={{ color: "var(--fg-muted)", "font-size": "12px" }}>
+                Off uses WebGL, with a DOM fallback if the context is lost. New panes pick this up; a pane already open keeps its renderer.
+              </span>
+            </label>
           </div>
 
           </section>
