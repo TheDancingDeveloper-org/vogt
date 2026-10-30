@@ -1504,6 +1504,18 @@ class SessionSummary(Result):
     stop_reason: str | None = Field(
         default=None, description="Live from the engine: why it was stopped."
     )
+    workspace_kind: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine (WI-1324): `worktree` when the session runs "
+            "in a linked git worktree, `checkout` in a repository's main "
+            "checkout, null when its directory is in no repo."
+        ),
+    )
+    workspace_path: str | None = Field(
+        default=None,
+        description="Live from the engine: the top level of that git tree.",
+    )
     permission_mode: str | None = Field(
         default=None,
         description=(

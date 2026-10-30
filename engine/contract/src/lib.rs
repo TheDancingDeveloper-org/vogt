@@ -320,6 +320,11 @@ pub struct SessionSummary {
     /// `SessionSpec::work_item`); absent when it is bound to none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// The git tree the session runs in, when its cwd is inside one
+    /// (WI-1324): what kind, where, and what was already dirty before it
+    /// started. Absent for a session outside any repo.
+    #[serde(default)]
+    pub workspace: Option<Workspace>,
     /// Set when someone asked the session to stop: who, when and why. The
     /// exit that follows reads `stopped`, not `errored` (WI-913).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -443,6 +448,55 @@ pub struct SessionResources {
 pub struct SessionResourcesSample {
     pub id: Uuid,
     pub resources: SessionResources,
+}
+
+/// How a session's git tree came to be (WI-1324).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceKind {
+    /// A linked worktree (`git worktree add`), the engine's own or not.
+    Worktree,
+    /// A repository's main checkout.
+    Checkout,
+}
+
+impl WorkspaceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkspaceKind::Worktree => "worktree",
+            WorkspaceKind::Checkout => "checkout",
+        }
+    }
+}
+
+/// The engine's record of a session's git tree (WI-1324), captured once at
+/// the first start and kept across hibernation, so the baseline is what was
+/// dirty before the session, not what it has since touched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub kind: WorkspaceKind,
+    /// The tree's top level (`git rev-parse --show-toplevel`).
+    pub path: String,
+    /// The main checkout: the one a worktree was cut from, or `path` itself.
+    pub repo_root: String,
+    /// The branch checked out, or `detached`.
+    pub branch: String,
+    /// The ref an engine-cut worktree was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    /// What `base_ref` resolved to when the worktree was cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
+    pub created_at: String,
+    /// Repo-relative paths dirty before the session started
+    /// (`git status --porcelain=v1`, rename sources included).
+    #[serde(default)]
+    pub baseline_dirty: Vec<String>,
+    /// The build-output directory names a worktree cleanup removes.
+    #[serde(default)]
+    pub build_dirs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleaned_at: Option<String>,
 }
 
 /// A request to stop a session: `POST /api/sessions/{id}/kill`'s optional
