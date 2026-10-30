@@ -7062,7 +7062,7 @@ async fn answering_a_gate_resolves_it_and_the_run_continues() {
         .post(format!(
             "{base}/api/agent-tasks/{task_id}/gates/{gate_id}/answer"
         ))
-        .json(&json!({ "option": 0, "actor": "sprooty" }))
+        .json(&json!({ "option": 0, "actor": "local:operator" }))
         .send()
         .await
         .unwrap()
@@ -7070,7 +7070,7 @@ async fn answering_a_gate_resolves_it_and_the_run_continues() {
         .await
         .unwrap();
     assert_eq!(answered["state"], "answered");
-    assert_eq!(answered["actor"], "sprooty");
+    assert_eq!(answered["actor"], "local:operator");
     assert_eq!(answered["approved"], true);
 
     let detail = wait_for_run_finish(&client, &base, &task_id).await;
@@ -7234,7 +7234,7 @@ async fn a_queued_steer_reaches_the_pty_at_the_next_boundary() {
 
     let steered: Value = client
         .post(format!("{base}/api/agent-tasks/{task_id}/steer"))
-        .json(&json!({ "text": "focus here", "actor": "sprooty" }))
+        .json(&json!({ "text": "focus here", "actor": "local:operator" }))
         .send()
         .await
         .unwrap()
@@ -7281,7 +7281,7 @@ async fn an_interrupting_steer_cancels_the_cli_first() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     client
         .post(format!("{base}/api/agent-tasks/{task_id}/steer"))
-        .json(&json!({ "text": "stop", "interrupt": true, "actor": "sprooty" }))
+        .json(&json!({ "text": "stop", "interrupt": true, "actor": "local:operator" }))
         .send()
         .await
         .unwrap();
