@@ -21,6 +21,10 @@ pub struct ListQuery {
     /// the ones it shows (WI-1289). Anything else, including absent, is the
     /// visible set. `hidden_count` is reported either way.
     pub include: Option<String>,
+    /// `rail` is the slim shape the web rail polls (WI-2692): each summary
+    /// without `command`, `economics` and `conversation`. Anything else,
+    /// including absent, is the full summary the core and History read.
+    pub view: Option<String>,
 }
 
 pub async fn list_sessions(
@@ -28,7 +32,21 @@ pub async fn list_sessions(
     Query(q): Query<ListQuery>,
 ) -> Json<SessionList> {
     let include_hidden = q.include.as_deref() == Some("hidden");
-    Json(state.sessions.list(include_hidden))
+    let mut list = state.sessions.list(include_hidden);
+    if q.view.as_deref() == Some("rail") {
+        slim_for_rail(&mut list);
+    }
+    Json(list)
+}
+
+/// Drop the heavy per-session fields the rail does not show (WI-2692).
+/// The detail route, `GET /api/sessions/{id}`, keeps them.
+fn slim_for_rail(list: &mut SessionList) {
+    for s in &mut list.sessions {
+        s.command = None;
+        s.economics = None;
+        s.conversation = None;
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1785,5 +1803,43 @@ mod disk_status_tests {
         let row = disk_status(missing, 85);
         assert!(row.needs_attention);
         assert_eq!(row.total_bytes, 0);
+    }
+}
+
+#[cfg(test)]
+mod rail_view_tests {
+    use super::*;
+
+    fn full() -> SessionSummary {
+        serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::from_u128(1),
+            "name": "w",
+            "activity": "idle",
+            "exit_code": null,
+            "alive": true,
+            "command": "claude --model opus",
+            "activity_changed_at": "2026-10-30T00:00:00Z",
+            "approval": null,
+            "blocked": null,
+            "conversation": {"agent": "claude", "id": "c1"},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn rail_view_drops_command_economics_and_conversation() {
+        let uri: axum::http::Uri = "/api/sessions?view=rail".parse().unwrap();
+        let Query(q) = Query::<ListQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(q.view.as_deref(), Some("rail"));
+        let mut list = SessionList {
+            sessions: vec![full()],
+            hidden_count: 0,
+        };
+        slim_for_rail(&mut list);
+        let row = serde_json::to_value(&list.sessions[0]).unwrap();
+        assert!(row.get("command").is_none());
+        assert!(row.get("economics").is_none());
+        assert!(row.get("conversation").is_none());
+        assert_eq!(row["name"], "w");
     }
 }

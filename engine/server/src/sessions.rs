@@ -1085,7 +1085,7 @@ impl SessionRegistry {
             return None;
         }
         let record = self.records.get(&id)?;
-        let screen_len = hibernation::read_screen(&self.cfg.state_dir, id).len() as u64;
+        let screen_len = screen_len_of(&record, &self.cfg.state_dir);
         hibernated_summary(&record, screen_len)
     }
 
@@ -1348,6 +1348,7 @@ impl SessionRegistry {
         }
         record.rows = Some(rows);
         record.cols = Some(cols);
+        record.screen_len = Some(screen.len() as u64);
         // A handoff survives a forced wake and a later hibernation that does
         // not name one: the live session carries the mark the record had.
         record.superseded_by = superseded_by.or_else(|| session.superseded_by());
@@ -2041,32 +2042,40 @@ impl SessionRegistry {
     /// the default list leaves out (WI-1289). `include_hidden` returns the
     /// aged-out rows too; `hidden_count` counts them either way.
     pub fn list(&self, include_hidden: bool) -> vogt_engine_contract::SessionList {
-        let mut out: Vec<_> = self
-            .sessions
-            .iter()
-            .map(|kv| kv.value().summary())
-            .collect();
-        let hibernated: Vec<Uuid> = self
-            .records
-            .iter()
-            .filter(|r| r.hibernation.is_some() && !self.sessions.contains_key(r.key()))
-            .map(|r| *r.key())
-            .collect();
-        out.extend(
-            hibernated
-                .into_iter()
-                .filter_map(|id| self.hibernated_summary(id)),
-        );
+        // Rail view (WI-2692): decide hidden from the record and the live
+        // flags before any summary is built, so an aged-out hibernated
+        // session never stats a screen file. `hidden_count` still counts them.
         let now = time::OffsetDateTime::now_utc();
-        for summary in &mut out {
-            summary.last_event_at = Some(latest_event_at(summary));
+        let retain = self.cfg.session_list_retain_after;
+        let mut hidden_count = 0u64;
+        let mut out = Vec::new();
+        for kv in self.sessions.iter() {
+            let session = kv.value();
+            let hidden = live_session_is_hidden(session, retain, now);
+            if hidden {
+                hidden_count += 1;
+            }
+            if include_hidden || !hidden {
+                let mut summary = session.summary();
+                summary.last_event_at = Some(latest_event_at(&summary));
+                out.push(summary);
+            }
         }
-        let hidden_count = out
-            .iter()
-            .filter(|s| session_is_hidden(s, self.cfg.session_list_retain_after, now))
-            .count() as u64;
-        if !include_hidden {
-            out.retain(|s| !session_is_hidden(s, self.cfg.session_list_retain_after, now));
+        for kv in self.records.iter() {
+            if kv.hibernation.is_none() || self.sessions.contains_key(kv.key()) {
+                continue;
+            }
+            let hidden = record_is_hidden(&kv, retain, now);
+            if hidden {
+                hidden_count += 1;
+            }
+            if include_hidden || !hidden {
+                let screen_len = screen_len_of(&kv, &self.cfg.state_dir);
+                if let Some(mut summary) = hibernated_summary(&kv, screen_len) {
+                    summary.last_event_at = Some(latest_event_at(&summary));
+                    out.push(summary);
+                }
+            }
         }
         out.sort_by(session_list_order);
         vogt_engine_contract::SessionList {
@@ -2386,6 +2395,85 @@ fn parse_rfc3339(raw: &str) -> Option<time::OffsetDateTime> {
 /// person; it is still alive and idle (a live agent between turns); a person
 /// typed within the window; or its latest event is inside the window.
 /// `retain` of `None` (`ENGINE_SESSION_LIST_RETAIN_AFTER=off`) hides nothing.
+/// Bytes of a hibernated screen without reading it (WI-2692): the length
+/// stored when the file was written, else the file's metadata. A missing
+/// file is zero. The detail path still reads the bytes.
+fn screen_len_of(record: &Record, state_dir: &std::path::Path) -> u64 {
+    record
+        .screen_len
+        .unwrap_or_else(|| hibernation::screen_metadata_len(state_dir, record.id))
+}
+
+/// The same rule as [`session_is_hidden`], read off the live session so the
+/// rail can drop a row before [`Session::summary`] copies command and
+/// economics onto it.
+fn live_session_is_hidden(
+    session: &Session,
+    retain: Option<std::time::Duration>,
+    now: time::OffsetDateTime,
+) -> bool {
+    let Some(retain) = retain else {
+        return false;
+    };
+    if session.role() == SessionRole::Oversight || session.keep_awake() {
+        return false;
+    }
+    let activity = session.activity();
+    if matches!(
+        activity,
+        ActivityState::Running | ActivityState::AwaitingApproval | ActivityState::WaitingForInput
+    ) || session.blocked().is_some()
+        || session.approval_prompt().is_some()
+    {
+        return false;
+    }
+    if session.is_alive() && activity == ActivityState::Idle {
+        return false;
+    }
+    let window_start = now - retain;
+    let recent = |at: time::OffsetDateTime| at >= window_start;
+    if session.last_person_input_at().is_some_and(recent) {
+        return false;
+    }
+    // The clocks `latest_event_at` would take, without copying command,
+    // economics or the screen onto a summary first.
+    let mut clocks = vec![session.activity_changed_at_stamp()];
+    if let Some(at) = session.last_output_at_stamp() {
+        clocks.push(at);
+    }
+    if let Some(at) = session.last_person_input_at() {
+        clocks.push(at);
+    }
+    clocks.into_iter().max().is_none_or(|at| at < window_start)
+}
+
+/// Hidden for a hibernated record, without building a summary or touching
+/// the screen file. A hibernated session is not alive and not idle-running.
+fn record_is_hidden(
+    record: &Record,
+    retain: Option<std::time::Duration>,
+    now: time::OffsetDateTime,
+) -> bool {
+    let Some(retain) = retain else {
+        return false;
+    };
+    if record.role == SessionRole::Oversight || record.keep_awake {
+        return false;
+    }
+    if record.blocked.is_some() {
+        return false;
+    }
+    let window_start = now - retain;
+    let recent = |at: &str| parse_rfc3339(at).is_some_and(|t| t >= window_start);
+    let at = record
+        .hibernation
+        .as_ref()
+        .map(|h| h.at.as_str())
+        .unwrap_or(record.created_at.as_str());
+    !recent(at)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn session_is_hidden(
     summary: &SessionSummary,
     retain: Option<std::time::Duration>,
@@ -2541,9 +2629,13 @@ fn recover_records(
                 resumable,
                 superseded_by: record.superseded_by.clone(),
             });
-            if hibernation::read_screen(state_dir, id).is_empty() {
+            if record.screen_len.unwrap_or(0) == 0
+                && hibernation::screen_metadata_len(state_dir, id) == 0
+            {
                 if let Some(tail) = history.and_then(|h| log_tail(&h.log_path(id))) {
-                    let _ = hibernation::write_screen(state_dir, id, &tail);
+                    if hibernation::write_screen(state_dir, id, &tail).is_ok() {
+                        record.screen_len = Some(tail.len() as u64);
+                    }
                 }
             }
             if let Err(e) = hibernation::write(state_dir, &record) {
@@ -2658,6 +2750,56 @@ fn wake_settings_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::normalize_session_name;
+    use vogt_engine_contract::SessionSummary;
+
+    #[test]
+    fn stored_screen_len_is_used_when_the_file_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::from_u128(7);
+        let mut record =
+            crate::hibernation::Record::new(id, "aged".into(), "2020-01-01T00:00:00Z".into());
+        record.hibernation = Some(vogt_engine_contract::Hibernation {
+            at: "2020-01-01T00:00:00Z".into(),
+            trigger: vogt_engine_contract::HibernateTrigger::Idle,
+            reason: None,
+            resumable: false,
+            superseded_by: None,
+        });
+        record.screen_len = Some(4096);
+        let summary =
+            super::hibernated_summary(&record, super::screen_len_of(&record, dir.path())).unwrap();
+        assert_eq!(summary.scrollback_bytes, 4096);
+        // No screen file was created, so the fallback never had bytes to read.
+        assert_eq!(crate::hibernation::screen_metadata_len(dir.path(), id), 0);
+    }
+
+    #[test]
+    fn a_hidden_hibernated_record_is_decided_without_a_screen_file() {
+        let mut record = crate::hibernation::Record::new(
+            uuid::Uuid::nil(),
+            "old".into(),
+            "2020-01-01T00:00:00Z".into(),
+        );
+        record.hibernation = Some(vogt_engine_contract::Hibernation {
+            at: "2020-01-01T00:00:00Z".into(),
+            trigger: vogt_engine_contract::HibernateTrigger::Idle,
+            reason: None,
+            resumable: false,
+            superseded_by: None,
+        });
+        let now = time::OffsetDateTime::now_utc();
+        assert!(super::record_is_hidden(
+            &record,
+            Some(std::time::Duration::from_secs(60)),
+            now,
+        ));
+        record.keep_awake = true;
+        assert!(!super::record_is_hidden(
+            &record,
+            Some(std::time::Duration::from_secs(60)),
+            now,
+        ));
+    }
 
     #[test]
     fn a_named_missing_codex_policy_refuses_a_codex_launch_and_only_codex() {
@@ -2836,10 +2978,7 @@ mod tests {
         );
     }
 
-    use vogt_engine_contract::SessionSummary;
-
     fn aged(id: u128, activity: vogt_engine_contract::ActivityState) -> SessionSummary {
-        use vogt_engine_contract::SessionSummary;
         SessionSummary {
             id: uuid::Uuid::from_u128(id),
             name: format!("s{id}"),

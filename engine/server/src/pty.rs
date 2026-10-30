@@ -861,6 +861,16 @@ impl Session {
         *self.last_person_input_at.lock()
     }
 
+    /// When the current activity began. The rail's hidden filter reads this
+    /// instead of building a full summary (WI-2692).
+    pub fn activity_changed_at_stamp(&self) -> time::OffsetDateTime {
+        *self.activity_changed_at.lock()
+    }
+
+    pub fn last_output_at_stamp(&self) -> Option<time::OffsetDateTime> {
+        *self.last_output_at.lock()
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let master = self.master.lock();
         master
