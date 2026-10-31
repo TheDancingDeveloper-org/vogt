@@ -421,7 +421,11 @@ The recipe is **start with a task → wait until ready → read → answer → s
    with `outcome` `awaiting-approval` (a permission dialog; see below),
    `blocked` (the agent says it needs a person), `exited`, `hibernated`
    (asleep: wake it, see below), or `timeout`. One
-   call, no polling; `timeout_s` up to 600. `until: "any_change"` wakes on
+   call, no polling; `timeout_s` up to 600, but one call blocks at most
+   280 s (under Codex's 300 s tool timeout): past that it answers `timeout`
+   with `still_waiting: true`, and you call again (`session_wait_any` with
+   its `next_cursor`). Read-only tools carry `readOnlyHint`, so Codex calls
+   them without an approval prompt. `until: "any_change"` wakes on
    any change, `"exited"` when it ends. (Polling `session_screen` for
    `ready` still works on an engine without the wait route.)
 3. **Read.** `session_last_reply` (`n` up to 20) gives the agent's last

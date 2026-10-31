@@ -6278,7 +6278,11 @@ class SessionWaitParams(Params):
         default=120,
         ge=1,
         le=600,
-        description="Seconds to wait at most (1-600). Answers `timeout` then.",
+        description=(
+            "Seconds to wait at most (1-600). Answers `timeout` then. One call "
+            "blocks at most 280 s; past that it answers `timeout` with "
+            "`still_waiting`."
+        ),
     )
     screen: bool = Field(
         default=False,
@@ -6309,6 +6313,14 @@ class SessionWaitResult(Result):
     screen: SessionScreenResult | None = None
     digest: SessionDigest | None = None
     screen_tail: list[str] = []
+    still_waiting: bool = Field(
+        default=False,
+        description=(
+            "True when the wait hit the per-call cap (280 s, under MCP "
+            "clients' 300 s tool timeout) before `timeout_s`: nothing matched "
+            "yet, so call again to keep waiting."
+        ),
+    )
 
 
 class SessionChange(Result):
@@ -6408,7 +6420,11 @@ class SessionWaitAnyParams(Params):
         default=120,
         ge=1,
         le=600,
-        description="Seconds to wait at most (1-600). Answers `timeout` then.",
+        description=(
+            "Seconds to wait at most (1-600). Answers `timeout` then. One call "
+            "blocks at most 280 s; past that it answers `timeout` with "
+            "`still_waiting`."
+        ),
     )
 
     @field_validator("cursor", mode="before")
@@ -6441,6 +6457,14 @@ class SessionWaitAnyResult(Result):
     change: SessionChange | None = None
     next_cursor: int = Field(
         description="The seq to pass as `cursor` on the next wait."
+    )
+    still_waiting: bool = Field(
+        default=False,
+        description=(
+            "True when the wait hit the per-call cap (280 s, under MCP "
+            "clients' 300 s tool timeout) before `timeout_s`: nothing matched "
+            "yet, so call again with `next_cursor` to keep waiting."
+        ),
     )
 
 

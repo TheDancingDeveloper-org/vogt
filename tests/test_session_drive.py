@@ -1197,3 +1197,34 @@ def test_an_overseer_still_drives_a_session_with_no_permission_prompt(
     with wired.declared.read() as view:
         rows = [r for r in view.list_audit(limit=50) if r.operation == "session.answer"]
     assert rows[0].actor_identity_ref == AGENTS[0]
+
+
+def test_wait_any_blocks_at_most_the_cap_and_says_still_waiting(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1574: Codex cuts a tool call at 300 s, so one wait blocks 280 s."""
+    waited = session_wait_any(
+        wired, SessionWaitAnyParams(until=["exited"], timeout_s=600)
+    )
+    assert "timeout_s=280" in engine.wait_any_queries[-1]
+    assert waited.outcome == "timeout" and waited.still_waiting is True
+    assert waited.next_cursor == 8
+
+
+def test_wait_any_under_the_cap_is_not_still_waiting(
+    wired: AppContext, engine: Engine
+) -> None:
+    waited = session_wait_any(
+        wired, SessionWaitAnyParams(until=["exited"], timeout_s=5)
+    )
+    assert waited.still_waiting is False
+
+
+def test_wait_blocks_at_most_the_cap(wired: AppContext, engine: Engine) -> None:
+    ses_id, _ = _started(wired)
+    waited = session_wait(
+        wired, SessionWaitParams(id=ses_id, until="any_change", timeout_s=600)
+    )
+    assert engine.wait_queries[-1] == "until=any-change&timeout_s=280"
+    # The fake answers a match, not a timeout: nothing is still waiting.
+    assert waited.still_waiting is False
