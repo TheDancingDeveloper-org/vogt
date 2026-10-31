@@ -752,6 +752,15 @@ than these routes.
   at most 600) passes; answers with the `outcome` (`ready`,
   `awaiting-approval`, `blocked`, `exited`, `changed`, `timeout`), whether
   it `matched`, `waited_ms` and the `screen` then. Requires `sessions`.
+- `POST /api/sessions/:id/report` `ReportSession` -> `SessionSummary` —
+  announce a session's own typed report (WI-1520): `{"kind", "summary"}`,
+  kind `progress`, `result`, `question` or `blocker`, summary at most 2000
+  bytes. Publishes a `session-reported` event, read as a `reported` change
+  (first 120 characters of the summary) that `wait-any?until=reported`
+  wakes on; a `result` also declares the session done (`session-done`,
+  source `report`) and turns its autopilot off, as the `AUTOPILOT: DONE`
+  marker does. vogt-core's `session.report` stores the report, checks the
+  caller is the session itself and calls this. Requires `sessions`.
 - `POST /api/sessions/:id/blocked` `SetBlocked` -> `SessionSummary` — set
   (`{"blocked": true, "reason", "items"}`) or clear (`{"blocked": false}`)
   the agent's "blocked on a person" report, which rides on the summary and

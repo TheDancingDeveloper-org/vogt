@@ -572,6 +572,14 @@ one before it takes DONE as done. Never paste a credential or raw command
 output into a report: credential-shaped text is redacted before it is
 stored, but that is a safety net, not a licence.
 
+A retry is safe: the same report (or the same `idempotency_key`) from the
+same session within 24 hours returns the first one with `duplicate: true`.
+A `result` also ends your autopilot as `AUTOPILOT: DONE` does, a `blocker`
+also sets your blocked report as `session_report_blocked` does, and every
+report wakes a driver waiting with `session_wait_any(until=[reported])`.
+Without MCP, post the same body from a shell:
+`curl -H "Authorization: Bearer $VOGT_HTTP_TOKEN" -H 'Content-Type: application/json' -d '{"kind":"result","summary":"…","reason":"…"}' "$VOGT_URL/sessions/report"`.
+
 #### When you, or a session you drive, need a person
 
 If you cannot go on without a person — a decision, a credential, an action
