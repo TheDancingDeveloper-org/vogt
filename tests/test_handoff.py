@@ -171,14 +171,16 @@ def test_the_brief_leads_with_the_latest_handoff(instance: AppContext) -> None:
         assert stored is not None
         brief = brief_for_work_item(view, stored, "ses-1").text
 
-    assert "## Hand-off" in brief
-    assert brief.index("## Hand-off") < brief.index("## Comments")
+    assert "## Latest hand-off (" in brief
+    assert "— a claim, not evidence" in brief
     assert "new-branch" in brief
     assert "second stop, the one that counts" in brief
     assert "old-branch" not in brief
-    # A remark made before the latest hand-off is superseded by it.
-    assert "a later remark" not in brief
-    assert "after the hand-off" in brief
+    assert "1 earlier hand-off omitted." in brief
+    # The fixture's notes are a person's, so they are decisions, newest first,
+    # and a decision is not superseded by a later hand-off (WI-1320).
+    assert brief.index("after the hand-off") < brief.index("a later remark")
+    assert brief.index("## Decisions") < brief.index("## Latest hand-off")
 
 
 def test_from_handoff_opens_on_the_item(instance: AppContext) -> None:
@@ -204,7 +206,7 @@ def test_from_handoff_opens_on_the_item(instance: AppContext) -> None:
 
     started = start_session(ctx, StartSessionParams(from_handoff=item.ref, reason=WHY))
     assert started.session.work_item == item.ref
-    assert "## Hand-off" in engine.last_spec["prompt"]
+    assert "## Latest hand-off (" in engine.last_spec["prompt"]
     assert "where I stopped" in engine.last_spec["prompt"]
 
 
@@ -339,7 +341,7 @@ def test_a_review_brief_checks_the_diff_against_the_items_own_criteria(
     assert "a remark, not the review" not in review
     assert "## Why this is ranked" not in review
     assert "## Comments" not in review
-    assert "## Hand-off" in worker and "## The diff" not in worker
+    assert "## Latest hand-off (" in worker and "## The diff" not in worker
 
 
 def _review_of(
@@ -731,3 +733,235 @@ def test_verdict_field_rules() -> None:
         CommentParams(
             ref="WI-1", body="x", kind="note", verification=_check(), reason=WHY
         )
+
+
+# -- what the worker brief carries from the thread (WI-1320) ----------------
+
+
+class _Thread:
+    """A read view whose thread for every item is the given comments."""
+
+    def __init__(self, view: object, comments: list[Comment]) -> None:
+        self._view = view
+        self._comments = sorted(comments, key=lambda c: c.created_at, reverse=True)
+
+    def comments_for(self, *_: object, **__: object) -> list[Comment]:
+        return self._comments
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._view, name)
+
+
+def _at(day: int) -> datetime:
+    return datetime(2026, 10, day, tzinfo=UTC)
+
+
+def _comment(day: int, body: str, *, by: str = "person", **fields: object) -> Comment:
+    return Comment.model_validate(
+        {
+            "id": f"c-{day}-{body}",
+            "work_item_id": "wi",
+            "actor_id": by,
+            "actor_display_name": by,
+            "body": body,
+            "created_at": _at(day),
+            **fields,
+        }
+    )
+
+
+def _handoff_c(day: int, branch: str) -> Comment:
+    return _comment(
+        day, f"stop {branch}", kind="handoff", handoff=_fields(branch=branch)
+    )
+
+
+def _verdict_c(day: int, head: str, *blockers: str) -> Comment:
+    verdict = "blockers" if blockers else "no_blockers"
+    return _comment(
+        day,
+        f"review {head}",
+        kind="verdict",
+        verdict=_verdict(head_sha=head, verdict=verdict, blockers=list(blockers)),
+    )
+
+
+def _render(instance: AppContext, comments: list[Comment]) -> str:
+    register_project(
+        instance, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    item = native_work_item(instance, title="Thread", project="vogt", body="the body")
+    with instance.declared.read() as view:
+        stored = view.work_item_by_ref(item.ref)
+        assert stored is not None
+        thread = _Thread(view, comments)
+        return brief_for_work_item(
+            thread,  # type: ignore[arg-type]
+            stored,
+            "ses-1",
+            decision_author=lambda c: c.actor_id in ("person", "oversight"),
+        ).text
+
+
+def test_a_brief_with_no_thread_has_no_thread_headings(instance: AppContext) -> None:
+    brief = _render(instance, [])
+    assert "the body" in brief
+    for heading in ("## Decisions", "## Latest hand-off", "## Latest review"):
+        assert heading not in brief
+
+
+def test_a_brief_drops_worker_notes_and_leaves_no_empty_heading(
+    instance: AppContext,
+) -> None:
+    brief = _render(
+        instance, [_comment(n, f"worker note {n}", by="worker") for n in (1, 2)]
+    )
+    assert "worker note" not in brief
+    assert "## Decisions" not in brief and "### Note" not in brief
+
+
+def test_a_brief_with_only_a_handoff(instance: AppContext) -> None:
+    brief = _render(instance, [_handoff_c(3, "only-branch")])
+    assert "## Latest hand-off (2026-10-03, person) — a claim, not evidence" in brief
+    assert "- **branch** only-branch" in brief
+    assert "## Latest review verdict" not in brief
+    assert "omitted" not in brief
+
+
+def test_a_brief_with_only_a_verdict(instance: AppContext) -> None:
+    brief = _render(instance, [_verdict_c(4, "f00d", "tests missing", "no docs")])
+    assert "## Latest review verdict (2026-10-04, person, head f00d)" in brief
+    assert "1. tests missing\n2. no docs" in brief
+    assert "## Latest hand-off" not in brief
+    assert "predates" not in brief
+
+
+def test_the_latest_of_each_wins(instance: AppContext) -> None:
+    brief = _render(
+        instance,
+        [
+            _handoff_c(1, "h-one"),
+            _handoff_c(3, "h-two"),
+            _handoff_c(5, "h-three"),
+            _verdict_c(2, "v-one", "old blocker"),
+            _verdict_c(6, "v-two"),
+        ],
+    )
+    assert brief.count("## Latest hand-off") == 1
+    assert brief.count("## Latest review verdict") == 1
+    assert "h-three" in brief and "h-one" not in brief and "h-two" not in brief
+    assert "head v-two" in brief and "old blocker" not in brief
+    assert "No blockers." in brief
+    assert "2 earlier hand-offs omitted." in brief
+    assert "1 earlier verdict omitted." in brief
+    assert "predates" not in brief
+
+
+def test_a_verdict_older_than_the_latest_handoff_says_so(
+    instance: AppContext,
+) -> None:
+    brief = _render(instance, [_verdict_c(2, "old-head"), _handoff_c(3, "newer")])
+    verdict = brief.index(
+        "## Latest review verdict (2026-10-02, person, head old-head)"
+    )
+    assert brief.index("## Latest hand-off") < verdict
+    assert "This verdict predates the latest hand-off" in brief[verdict:]
+
+
+def test_decision_notes_are_newest_first_capped_and_labelled(
+    instance: AppContext,
+) -> None:
+    notes = [_comment(n, f"decision {n}") for n in range(1, 8)]
+    notes.append(_comment(9, "x" * 2000, by="oversight"))
+    brief = _render(instance, notes)
+    assert "### Note (2026-10-09, oversight)" in brief
+    assert "x" * 1500 + "…" in brief and "x" * 1501 not in brief
+    # Five notes in all: the oversight note and the four newest person notes.
+    assert brief.count("### Note (") == 5
+    assert brief.index("decision 7") < brief.index("decision 4")
+    assert "decision 3" not in brief
+
+
+def test_the_brief_carries_decisions_not_the_worker_thread(
+    instance: AppContext,
+) -> None:
+    """The Done-means case, end to end through `session.start`."""
+    engine = StandInEngine()
+    engine.roles["eng-ses_ov"] = "oversight"
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    ref, item_id = _item_with_worker(ctx, title="Decided")
+    overseer = _session(ctx, item_id, sid="ses_ov", purpose="oversight")
+    worker = _session(ctx, item_id, sid="ses_wk", purpose="implement")
+    for n in (1, 2):
+        comment_work(
+            ctx,
+            CommentParams(
+                ref=ref,
+                body=f"stop {n}",
+                kind="handoff",
+                handoff=_fields(branch=f"hand-{n}"),
+                reason=WHY,
+            ),
+        )
+    _post_verdict(ctx, ref, head_sha="first-head")
+    _post_verdict(ctx, ref, head_sha="second-head")
+    comment_work(ctx, CommentParams(ref=ref, body="person decides", reason=WHY))
+    comment_work(overseer, CommentParams(ref=ref, body="oversight relays", reason=WHY))
+    for n in range(4):
+        comment_work(worker, CommentParams(ref=ref, body=f"worker {n}", reason=WHY))
+
+    start_session(ctx, StartSessionParams(work_item=ref, reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert brief.count("## Latest hand-off") == 1 and "hand-2" in brief
+    assert "hand-1" not in brief
+    assert brief.count("## Latest review verdict") == 1
+    assert "head second-head" in brief and "first-head" not in brief
+    assert brief.count("### Note (") == 2
+    assert brief.index("oversight relays") < brief.index("person decides")
+    assert "worker 0" not in brief and "worker 3" not in brief
+
+
+def test_a_rendered_brief_snapshot(instance: AppContext) -> None:
+    brief = _render(
+        instance,
+        [
+            _comment(1, "ship it behind a flag"),
+            _comment(2, "noise", by="worker"),
+            _handoff_c(3, "wi-1-thread"),
+            _verdict_c(4, "abc123", "the flag is missing"),
+        ],
+    )
+    start = brief.index("## Description")
+    end = brief.index("## Deployment policy")
+    assert brief[start:end] == (
+        "## Description\n"
+        "\n"
+        "the body\n"
+        "\n"
+        "## Decisions\n"
+        "\n"
+        "### Note (2026-10-01, person)\n"
+        "\n"
+        "ship it behind a flag\n"
+        "\n"
+        "## Latest hand-off (2026-10-03, person) — a claim, not evidence\n"
+        "\n"
+        "- **branch** wi-1-thread\n"
+        "- **head** abc123\n"
+        "- **done** kind round-trips\n"
+        "- **remaining** phase 2\n"
+        "\n"
+        "stop wi-1-thread\n"
+        "\n"
+        "## Latest review verdict (2026-10-04, person, head abc123)\n"
+        "\n"
+        "Blockers:\n"
+        "\n"
+        "1. the flag is missing\n"
+        "\n"
+        "review abc123\n"
+        "\n"
+    )

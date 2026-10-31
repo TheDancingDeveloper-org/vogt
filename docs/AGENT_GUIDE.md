@@ -282,8 +282,16 @@ started cannot post one. A check run on a deployed lane is
 `work.comment --kind verification` (`head_sha`, `lane`, `what`, `evidence`);
 anyone but the worker may post it, and Vogt fills `by`.
 
-A worker brief pastes only the remarks made since the latest hand-off; the
-thread before it — old root causes, old verdicts — is superseded by it.
+A worker brief does not paste the comment thread. After the description it
+carries, in this order: the **decision notes** — `note` comments written by a
+person or by a session whose engine role is `oversight` (a session that no
+longer exists counts as a worker), newest first, at most five, each headed
+with its date and author and cut at 1500 characters; the **latest hand-off**,
+headed "a claim, not evidence"; and the **latest verdict**, with its head sha
+and numbered blockers. Older hand-offs and verdicts are counted, not shown. A
+verdict older than the latest hand-off is still shown, with a line saying it
+reviewed an earlier head. Notes from worker sessions are never rendered: an
+overseer passes anything else a worker needs in the start's `task`.
 
 The same hand-off is how a budget ends. A worker session carries a budget
 (120 turns and 90 minutes, unless the start named one), and when it crosses

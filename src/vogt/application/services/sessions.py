@@ -124,8 +124,10 @@ from vogt.application.services import _resolve
 from vogt.application.services._brief import (
     AUTOPILOT,
     ComposedBrief,
+    DecisionAuthor,
     brief_for_project,
     brief_for_work_item,
+    person_author,
     review_brief_for_work_item,
 )
 from vogt.application.services._policy_conflicts import (
@@ -146,6 +148,7 @@ from vogt.core.entities import (
     Actor,
     AgentPolicy,
     CodingSession,
+    Comment,
     LandingPolicy,
     Project,
     Token,
@@ -4035,7 +4038,12 @@ def _resolve_subject(
                 review_brief_for_work_item(view, item, session_id, project=project)
                 if params.review_of is not None
                 else brief_for_work_item(
-                    view, item, session_id, _ranking(ctx, item.ref), project=project
+                    view,
+                    item,
+                    session_id,
+                    _ranking(ctx, item.ref),
+                    project=project,
+                    decision_author=_decision_author(ctx, view),
                 )
             ),
             policy=project.agent_policy,
@@ -4051,6 +4059,46 @@ def _resolve_subject(
         brief=brief_for_project(view, project.slug, session_id, project=project),
         policy=project.agent_policy,
     )
+
+
+def _decision_author(ctx: AppContext, view: ReadView) -> DecisionAuthor:
+    """Whose notes a worker brief carries (WI-1320): a person's, or oversight's.
+
+    A session author counts when the engine says its role is `oversight`
+    now. A session that no longer exists, or an engine that cannot say,
+    counts as a worker, and its notes are dropped. One engine read per
+    author, however many notes it wrote.
+    """
+    person = person_author(view)
+    roles: dict[str, bool] = {}
+
+    def oversight(actor_id: str) -> bool:
+        actor = view.actor_by_id(actor_id)
+        if actor is None or ctx.engine is None:
+            return False
+        ref = actor.identity_ref
+        engine_id: str | None = None
+        if ref.startswith("agent:session:"):
+            row = view.session_by_id(ref.removeprefix("agent:session:"))
+            engine_id = None if row is None else row.engine_session_id
+        elif ref.startswith(ENGINE_SESSION_ACTOR_PREFIX):
+            engine_id = ref.removeprefix(ENGINE_SESSION_ACTOR_PREFIX)
+        if engine_id is None:
+            return False
+        try:
+            live = ctx.engine.get_session(engine_id)
+        except EngineUnavailable:
+            return False
+        return live is not None and live.role == "oversight"
+
+    def judge(comment: Comment) -> bool:
+        if person(comment):
+            return True
+        if comment.actor_id not in roles:
+            roles[comment.actor_id] = oversight(comment.actor_id)
+        return roles[comment.actor_id]
+
+    return judge
 
 
 def _with_item_base(
