@@ -71,6 +71,7 @@ from vogt.core.ci_alerts import (
 from vogt.core.digest import digest_of
 from vogt.core.entities import (
     Actor,
+    AuditRecord,
     CodingSession,
     DriftProposal,
     InboxTriage,
@@ -99,6 +100,9 @@ REF_FAILURE_KIND = "ci.ref_failure"
 BRANCH_CONCLUDED_KIND = "ci.branch_concluded"
 RUN_HUNG_KIND = "ci.run_hung"
 DEPLOY_FAILED_KIND = "deploy.failed"
+#: Beside `session.attention`: an oversight session started past a dispatch
+#: rule with `override` (WI-1329). The audit operation of the same name.
+DISPATCH_OVERRIDE_KIND = "dispatch.override"
 MAX_SCAN = 10_000
 #: Reports read for the Inbox; the newest per session is kept.
 _REPORT_SCAN = 500
@@ -659,6 +663,13 @@ def _collect_live(
         if declared is not None and declared.stopped_at is not None:
             continue
         entries.append(_report_entry(view, row, projects))
+    # Oversight overrides of the dispatch rules (WI-1329): one entry per
+    # override, for as long as a report would stay, so a person sees every
+    # start that went past the worker cap or the review rule.
+    for record in view.list_audit(
+        operation=DISPATCH_OVERRIDE_KIND, since=oldest, limit=_REPORT_SCAN
+    ):
+        entries.append(_override_entry(view, record, projects))
 
     if ctx.engine is not None:
         try:
@@ -1230,6 +1241,44 @@ def _decision_entry(decision: DecisionView, view: ReadView) -> InboxEntry:
         actor_login=decision.asker,
         actor_kind="human" if asker is not None and asker.kind == "human" else "bot",
         actor_relation="org_member",
+    )
+
+
+def _override_entry(
+    view: ReadView, record: AuditRecord, projects: dict[str, Project]
+) -> InboxEntry:
+    """A start oversight made past the dispatch rules (WI-1329).
+
+    The reason is the overseer's override text — untrusted, shown verbatim.
+    """
+    declared = view.session_by_id(record.entity_id)
+    project = None if declared is None else projects.get(declared.project_id)
+    ref = _bound_ref(view, declared, None)
+    label = f"{ref} session {record.entity_id}" if ref else record.entity_id
+    return InboxEntry(
+        entry_key=f"agent:dispatch.override:{record.id}",
+        source=AGENT_KIND,
+        kind=DISPATCH_OVERRIDE_KIND,
+        occurred_at=record.at,
+        observed_at=None,
+        title=f"Dispatch override: {label} started by {record.actor_identity_ref}",
+        summary=record.reason[:1000],
+        project_slug=None if project is None else project.slug,
+        session_id=(
+            record.entity_id if declared is None else declared.engine_session_id
+        ),
+        work_item_ref=ref,
+        source_subject_key=record.entity_id,
+        trust_state="unverified",
+        freshness="live",
+        provisional=True,
+        action=InboxAction(
+            kind="session",
+            session_id=(
+                record.entity_id if declared is None else declared.engine_session_id
+            ),
+        ),
+        **_actor_fields(SYSTEM_ACTOR),
     )
 
 

@@ -130,3 +130,78 @@ def test_the_budget_restart_cap_defaults_to_one_and_can_be_off() -> None:
     off = dispatch.resolve({dispatch.BUDGET_RESTARTS_KEY: {"value": 0}})
     assert off.budget_restarts_per_item == 0
     assert dispatch.validate(dispatch.BUDGET_RESTARTS_KEY, {"value": 0}) == {"value": 0}
+
+
+# -- check (WI-1329) ------------------------------------------------------
+
+_SETTINGS = dispatch.resolve({})
+
+
+def _check(**overrides: object) -> dispatch.Decision:
+    args: dict[str, object] = {
+        "purpose": None,
+        "review": False,
+        "model": None,
+        "caller_role": "oversight",
+        "live_workers": 0,
+        "blockers_count": 0,
+        "settings": _SETTINGS,
+    } | overrides
+    return dispatch.check(**args)  # type: ignore[arg-type]
+
+
+def _rules(decision: dispatch.Decision) -> list[str]:
+    return [v.rule for v in decision.violations]
+
+
+def test_enforcement_is_off_by_default() -> None:
+    assert _SETTINGS.enforce is False
+    assert dispatch.resolve({dispatch.ENFORCE_KEY: {"value": True}}).enforce
+
+
+def test_a_worker_starting_a_review_breaks_review_by_oversight_only() -> None:
+    assert _rules(_check(review=True, caller_role="worker")) == [
+        "review_by_oversight_only"
+    ]
+    assert _rules(_check(review=True, caller_role="oversight")) == []
+    assert _rules(_check(review=True, caller_role="person")) == []
+    off = dispatch.resolve({dispatch.REVIEW_BY_OVERSIGHT_KEY: {"value": False}})
+    assert _rules(_check(review=True, caller_role="worker", settings=off)) == []
+
+
+@pytest.mark.parametrize("purpose", ["implement", "mechanical"])
+def test_a_model_other_than_the_profiles_is_named(purpose: str) -> None:
+    decision = _check(purpose=purpose, model="something-else")
+    [violation] = decision.violations
+    assert violation.rule == "profile_model"
+    assert "something-else" in violation.message
+    profile_model = _SETTINGS.profiles[purpose].model  # type: ignore[index]
+    assert _rules(_check(purpose=purpose, model=profile_model)) == []
+
+
+def test_the_model_rule_follows_a_profile_override() -> None:
+    settings = dispatch.resolve(
+        {dispatch.PROFILES_KEY: {"implement": {"model": "grok-4.8"}}}
+    )
+    assert (
+        _rules(_check(purpose="implement", model="grok-4.8", settings=settings)) == []
+    )
+    assert _rules(_check(purpose="implement", model="grok-4.7", settings=settings)) == [
+        "profile_model"
+    ]
+
+
+def test_the_worker_cap_refuses_the_sixth() -> None:
+    assert _rules(_check(live_workers=4)) == []
+    [violation] = _check(live_workers=5).violations
+    assert violation.message.startswith("max_workers_per_overseer=5 reached")
+    assert _rules(_check(live_workers=9, caller_role="person")) == []
+
+
+def test_failed_reviews_escalate_implement() -> None:
+    assert _check(purpose="implement", blockers_count=1).escalated_to is None
+    assert (
+        _check(purpose="implement", blockers_count=2).escalated_to
+        == "implement-careful"
+    )
+    assert _check(purpose="mechanical", blockers_count=5).escalated_to is None

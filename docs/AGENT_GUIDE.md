@@ -217,8 +217,33 @@ The table is the deployment's, not yours. A person overrides fields with
 store holds `dispatch.max_workers_per_overseer` (`{"value": 5}`),
 `dispatch.escalate_after_failed_reviews` (`{"value": 2}`),
 `dispatch.review_by_oversight_only` (`{"value": true}`) and
-`dispatch.budget_restarts_per_item` (`{"value": 1}`). An agent cannot set
-any `dispatch.*` key.
+`dispatch.budget_restarts_per_item` (`{"value": 1}`) and
+`dispatch.enforce` (`{"value": false}`). An agent cannot set any
+`dispatch.*` key.
+
+**Dispatch rules (WI-1329).** When a person sets `dispatch.enforce` to
+`{"value": true}`, an agent's `session_start` is refused (`invalid_request`,
+naming the rule and its values, before any terminal starts) when:
+
+- it starts a review (`purpose=review` or `review_of`) from a `worker`
+  session while `dispatch.review_by_oversight_only` is true;
+- `purpose` is `implement` or `mechanical` and the model is not the
+  profile's (after `dispatch.profiles`);
+- the caller already has `dispatch.max_workers_per_overseer` live sessions it
+  started (`max_workers_per_overseer=5 reached`).
+
+An `implement` start for an item with at least
+`dispatch.escalate_after_failed_reviews` `verdict=blockers` comments runs as
+`implement-careful`, and the result's `escalated_to` says so. A project's
+`review.never_models` is refused for every caller, with or without
+enforcement.
+
+A person is never refused. With enforcement off, or for a person, a broken
+rule is recorded under `dispatch_notes` on the `session.started` audit
+summary instead. An oversight session can pass `override="<why>"` to start
+past the rules: the text is audited as its own `dispatch.override` row
+(and `override_reason` on the start) and raised as a `dispatch.override`
+Inbox entry. `override` from any other caller is refused.
 
 A session the engine stops at its budget always leaves a hand-off (WI-1833).
 If the agent wrote none after the soft warning, the scheduled sweep writes a

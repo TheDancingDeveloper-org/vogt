@@ -3342,3 +3342,139 @@ def test_oversight_landing_work_is_not_told_not_to_merge(
     assert result.effective_policy is not None
     merged = any("do not merge" in line for line in result.effective_policy.overrides)
     assert merged is overridden
+
+
+# -- dispatch enforcement (WI-1329) ---------------------------------------
+
+
+def _enforce(ctx: AppContext, **scalars: object) -> None:
+    from vogt.application.models import PreferenceSetParams
+    from vogt.application.services import set_preference
+
+    for key, value in {"enforce": True, **scalars}.items():
+        set_preference(
+            ctx,
+            PreferenceSetParams(
+                key=f"dispatch.{key}", value={"value": value}, reason=WHY
+            ),
+        )
+
+
+def test_dispatch_is_not_enforced_by_default_but_noted(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    engine.roles[ENGINE_SESSION] = "worker"
+    start_session(
+        _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+        StartSessionParams(work_item="WI-1", purpose="review", reason=WHY),
+    )
+    notes = _last_started(wired)["dispatch_notes"]
+    assert any("review_by_oversight_only" in note for note in notes)
+
+
+def test_a_worker_cannot_start_a_reviewer(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    _enforce(wired)
+    engine.roles[ENGINE_SESSION] = "worker"
+    posts = sum(row["method"] == "POST" for row in engine.sent)
+    with pytest.raises(InvalidRequest, match="review_by_oversight_only"):
+        start_session(
+            _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+            StartSessionParams(work_item="WI-1", purpose="review", reason=WHY),
+        )
+    # Refused before the engine is asked: no terminal is started.
+    assert sum(row["method"] == "POST" for row in engine.sent) == posts
+
+
+def test_an_agent_is_refused_the_wrong_model_and_a_person_is_noted(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    _enforce(wired)
+    engine.roles[ENGINE_SESSION] = "oversight"
+    params = StartSessionParams(
+        work_item="WI-1", purpose="implement", model="grok-9", reason=WHY
+    )
+    with pytest.raises(InvalidRequest, match=r"profile_model|grok-4\.7"):
+        start_session(_as(wired, f"agent:engine:{ENGINE_SESSION}"), params)
+    start_session(wired, params)
+    summary = _last_started(wired)
+    assert summary["started_by_kind"] == "person"
+    assert any("grok-9" in note for note in summary["dispatch_notes"])
+
+
+def test_the_sixth_worker_from_one_overseer_is_refused(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    _enforce(wired)
+    engine.roles[ENGINE_SESSION] = "oversight"
+    overseer = _as(wired, f"agent:engine:{ENGINE_SESSION}")
+    for _ in range(5):
+        start_session(overseer, StartSessionParams(work_item="WI-1", reason=WHY))
+    with pytest.raises(InvalidRequest, match="max_workers_per_overseer=5 reached"):
+        start_session(overseer, StartSessionParams(work_item="WI-1", reason=WHY))
+
+
+def test_an_override_from_a_worker_is_refused(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    engine.roles[ENGINE_SESSION] = "worker"
+    with pytest.raises(InvalidRequest, match="only from an oversight session"):
+        start_session(
+            _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+            StartSessionParams(work_item="WI-1", override="need one", reason=WHY),
+        )
+
+
+def test_an_override_from_oversight_is_audited_with_an_inbox_row(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    from vogt.application.models import InboxListParams
+    from vogt.application.services import list_inbox
+
+    _enforce(wired, max_workers_per_overseer=1)
+    engine.roles[ENGINE_SESSION] = "oversight"
+    overseer = _as(wired, f"agent:engine:{ENGINE_SESSION}")
+    start_session(overseer, StartSessionParams(work_item="WI-1", reason=WHY))
+    result = start_session(
+        overseer,
+        StartSessionParams(work_item="WI-1", override="urgent prod fix", reason=WHY),
+    )
+    assert _last_started(wired)["override_reason"] == "urgent prod fix"
+    with wired.declared.read() as view:
+        [record] = view.list_audit(operation="dispatch.override", limit=10)
+    assert record.reason == "urgent prod fix"
+    assert record.entity_id == result.session.id
+    entries = list_inbox(wired, InboxListParams()).entries
+    [row] = [e for e in entries if e.kind == "dispatch.override"]
+    assert row.summary == "urgent prod fix"
+
+
+def test_an_item_that_failed_review_escalates_to_implement_careful(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    from vogt.application.models import CommentParams
+    from vogt.application.services import comment_work
+    from vogt.core.entities import VerdictFields
+
+    _enforce(wired)
+    for _ in range(2):
+        comment_work(
+            wired,
+            CommentParams(
+                ref="WI-1",
+                body="blocked",
+                kind="verdict",
+                verdict=VerdictFields(
+                    head_sha="abc", verdict="blockers", blockers=["x"]
+                ),
+                reason=WHY,
+            ),
+        )
+    engine.roles[ENGINE_SESSION] = "oversight"
+    result = start_session(
+        _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+        StartSessionParams(work_item="WI-1", purpose="implement", reason=WHY),
+    )
+    assert result.escalated_to == "implement-careful"
+    assert engine.last_spec["model"] == "opus"
