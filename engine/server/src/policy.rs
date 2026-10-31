@@ -486,17 +486,24 @@ fn expanded_program(words: &[String]) -> Option<Vec<String>> {
         } else {
             words.iter().skip(1).position(|w| w.contains('`'))? + 1
         }
-    } else if first.starts_with('$') {
-        0
     } else {
-        return None;
+        // `$GIT`, `${GIT_BIN}`: a variable named for git. `$EDITOR` is not.
+        let name = first.strip_prefix('$')?;
+        if !name.to_ascii_lowercase().contains("git") {
+            return None;
+        }
+        0
     };
     Some(words[end + 1..].to_vec())
 }
 
-/// Whether `git`'s global options define an alias inline.
+/// Whether `git`'s global options define an alias inline, or include a
+/// config file that may define one (`include.path`, `includeIf.*.path`).
 fn inline_alias(words: &[String]) -> bool {
-    let is_alias = |v: &str| v.to_ascii_lowercase().starts_with("alias.");
+    let is_alias = |v: &str| {
+        let v = v.to_ascii_lowercase();
+        v.starts_with("alias.") || v.starts_with("include.") || v.starts_with("includeif.")
+    };
     words.iter().enumerate().any(|(i, w)| {
         (w == "-c" && words.get(i + 1).is_some_and(|v| is_alias(v)))
             || w.strip_prefix("-c").is_some_and(is_alias)
@@ -525,17 +532,42 @@ fn git_calls(command: &str, cwd: &Path) -> Vec<GitCall> {
     .iter()
     .any(|v| command.contains(v))
         || command.to_ascii_lowercase().contains("core.worktree");
-    walk(command, cwd, moved, 0, &mut out);
+    // Config from the environment (`GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`,
+    // `GIT_CONFIG_PARAMETERS`, another config file) may define an alias, so
+    // every git on the line is read as one.
+    let config_env = [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG=",
+    ]
+    .iter()
+    .any(|v| command.contains(v));
+    walk(command, cwd, moved, config_env, 0, &mut out);
     out
 }
 
-fn walk(command: &str, cwd: &Path, unreadable: bool, depth: usize, out: &mut Vec<GitCall>) {
+fn walk(
+    command: &str,
+    cwd: &Path,
+    unreadable: bool,
+    config_env: bool,
+    depth: usize,
+    out: &mut Vec<GitCall>,
+) {
     if depth > MAX_DEPTH {
         return;
     }
     let mut dir = cwd.to_path_buf();
     let mut unreadable = unreadable;
     for simple in split_commands(command) {
+        // `$( … )` and backticks run their own commands, from this
+        // directory, before this one.
+        for body in substitutions(&simple) {
+            walk(&body, &dir, unreadable, config_env, depth + 1, out);
+        }
         let mut words = command_words(&simple);
         if words.is_empty() {
             continue;
@@ -572,17 +604,31 @@ fn walk(command: &str, cwd: &Path, unreadable: bool, depth: usize, out: &mut Vec
             }
             "bash" | "sh" | "zsh" | "dash" | "ksh" => {
                 if let Some(payload) = shell_payload(&words) {
-                    walk(payload, &dir, unreadable, depth + 1, out);
+                    walk(payload, &dir, unreadable, config_env, depth + 1, out);
                 }
             }
             "eval" => {
-                walk(&words[1..].join(" "), &dir, true, depth + 1, out);
+                walk(
+                    &words[1..].join(" "),
+                    &dir,
+                    true,
+                    config_env,
+                    depth + 1,
+                    out,
+                );
                 // eval runs in this shell: a cd inside it moves the rest.
                 unreadable = true;
             }
             "xargs" => {
                 // The paths arrive on stdin.
-                walk(&xargs_command(&words).join(" "), &dir, true, depth + 1, out);
+                walk(
+                    &xargs_command(&words).join(" "),
+                    &dir,
+                    true,
+                    config_env,
+                    depth + 1,
+                    out,
+                );
             }
             "git" => {
                 let hidden = expanded
@@ -590,7 +636,7 @@ fn walk(command: &str, cwd: &Path, unreadable: bool, depth: usize, out: &mut Vec
                     || words
                         .iter()
                         .any(|w| w.starts_with("--git-dir") || w.starts_with("--work-tree"));
-                let aliased = inline_alias(&words);
+                let aliased = config_env || inline_alias(&words);
                 out.push(GitCall {
                     words,
                     cwd: dir.clone(),
@@ -601,6 +647,52 @@ fn walk(command: &str, cwd: &Path, unreadable: bool, depth: usize, out: &mut Vec
             _ => {}
         }
     }
+}
+
+/// The bodies of the `$( … )` and backtick substitutions in `simple`, outside
+/// single quotes. A nested one is found when its body is walked.
+fn substitutions(simple: &str) -> Vec<String> {
+    let chars: Vec<char> = simple.chars().collect();
+    let mut out = Vec::new();
+    let mut single = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if single {
+            single = c != '\'';
+        } else if c == '\\' {
+            i += 1;
+        } else if c == '\'' {
+            single = true;
+        } else if c == '$' && chars.get(i + 1) == Some(&'(') {
+            let start = i + 2;
+            let mut depth = 1;
+            let mut j = start;
+            while j < chars.len() && depth > 0 {
+                match chars[j] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            let end = if depth == 0 { j - 1 } else { j };
+            out.push(chars[start..end].iter().collect());
+            i = j;
+            continue;
+        } else if c == '`' {
+            let start = i + 1;
+            let end = chars[start..]
+                .iter()
+                .position(|&c| c == '`')
+                .map_or(chars.len(), |p| start + p);
+            out.push(chars[start..end].iter().collect());
+            i = end + 1;
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 /// The script a `sh -c` runs: the word after the first option cluster that
@@ -668,7 +760,9 @@ fn discard(policy: &SessionPolicy, calls: &[GitCall], repos: &mut Repos) -> Opti
         let Some(sub) = args.first() else {
             continue;
         };
-        let reach = if call.aliased {
+        // A subcommand git does not ship may be an alias from the config
+        // (`git config alias.x 'checkout --'`): it may discard anything.
+        let reach = if call.aliased || !builtin(sub) {
             Reach {
                 all: true,
                 paths: Vec::new(),
@@ -719,7 +813,8 @@ fn discard(policy: &SessionPolicy, calls: &[GitCall], repos: &mut Repos) -> Opti
 /// Which discarding form `git <sub> <args>` is, if any. Mirrors gitguard's
 /// `discard`, minus its staging rules.
 fn discards(sub: &str, args: &[String]) -> Option<Reach> {
-    let (flags, paths, dashdash) = split_args(args);
+    let (valued, valued_short) = valued(sub);
+    let (flags, paths, dashdash) = split_args(args, valued);
     // A long option may be abbreviated to any prefix git can tell apart
     // (`--ha` is `--hard`); a short one may sit in a cluster (`-qf`).
     let has = |names: &[&str]| {
@@ -728,12 +823,16 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
                 if n.starts_with("--") {
                     long_matches(f, n)
                 } else {
-                    f == n || short_in_cluster(f, n.chars().nth(1).unwrap_or('-'))
+                    f == n || short_in_cluster(f, n.chars().nth(1).unwrap_or('-'), valued_short)
                 }
             })
         })
     };
-    let short = |letter: char| flags.iter().any(|f| short_in_cluster(f, letter));
+    let short = |letter: char| {
+        flags
+            .iter()
+            .any(|f| short_in_cluster(f, letter, valued_short))
+    };
     let all = || {
         Some(Reach {
             all: true,
@@ -793,13 +892,38 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
     }
 }
 
-/// The short options of the discarding commands that take a value: in a
-/// cluster, the rest of the word is that value (`-sSTABLE`, `-bnew`).
-const VALUED_SHORT: &[char] = &['s', 'b', 'B', 'm', 'e', 'o'];
+/// The options of a discarding subcommand that take a value, long and short.
+/// They differ per subcommand: `-m` is `stash`'s message but `checkout`'s
+/// `--merge`, and `-c` is `switch --create`. In a cluster, the rest of the
+/// word after a valued short option is its value (`-sSTABLE`, `-cfoo`).
+fn valued(sub: &str) -> (&'static [&'static str], &'static [char]) {
+    match sub {
+        "checkout" => (&["-b", "-B", "--orphan", "--conflict"], &['b', 'B']),
+        "switch" => (
+            &[
+                "-c",
+                "-C",
+                "--create",
+                "--force-create",
+                "--orphan",
+                "--conflict",
+            ],
+            &['c', 'C'],
+        ),
+        "restore" => (
+            &["-s", "--source", "--conflict", "--pathspec-from-file"],
+            &['s'],
+        ),
+        "stash" => (&["-m", "--message", "--pathspec-from-file"], &['m']),
+        "clean" => (&["-e", "--exclude"], &['e']),
+        "rm" | "reset" => (&["--pathspec-from-file"], &[]),
+        _ => (&[], &[]),
+    }
+}
 
 /// Whether the short option `-<letter>` is in the cluster `flag` (`-qf`),
 /// reading no further than an option that takes the rest as its value.
-fn short_in_cluster(flag: &str, letter: char) -> bool {
+fn short_in_cluster(flag: &str, letter: char, valued: &[char]) -> bool {
     let Some(cluster) = flag.strip_prefix('-') else {
         return false;
     };
@@ -810,7 +934,7 @@ fn short_in_cluster(flag: &str, letter: char) -> bool {
         if c == letter {
             return true;
         }
-        if VALUED_SHORT.contains(&c) {
+        if valued.contains(&c) {
             return false;
         }
     }
@@ -847,22 +971,9 @@ fn long_matches(flag: &str, name: &str) -> bool {
     flag.len() >= min && name.starts_with(flag)
 }
 
-/// Flags and positional words, the value of an option that takes one
-/// consumed with it. Everything after `--` is positional.
-fn split_args(args: &[String]) -> (Vec<String>, Vec<String>, bool) {
-    const VALUED: &[&str] = &[
-        "-s",
-        "--source",
-        "-m",
-        "--message",
-        "-b",
-        "-B",
-        "--orphan",
-        "-e",
-        "--exclude",
-        "--pathspec-from-file",
-        "--conflict",
-    ];
+/// Flags and positional words, the value of an option in `valued` consumed
+/// with it. Everything after `--` is positional.
+fn split_args(args: &[String], valued: &[&str]) -> (Vec<String>, Vec<String>, bool) {
     let mut flags = Vec::new();
     let mut paths = Vec::new();
     let mut rest = args.iter();
@@ -873,7 +984,7 @@ fn split_args(args: &[String]) -> (Vec<String>, Vec<String>, bool) {
         }
         if arg.starts_with('-') && arg != "-" {
             flags.push(arg.clone());
-            if VALUED.contains(&arg.as_str()) {
+            if valued.contains(&arg.as_str()) {
                 rest.next();
             }
         } else {
@@ -951,6 +1062,167 @@ fn protected(policy: &SessionPolicy, calls: &[GitCall], repos: &mut Repos) -> Op
         ));
     }
     None
+}
+
+/// Git's own commands (`git help -a`), plus the common external ones. Any
+/// other subcommand may be an alias.
+const BUILTIN: &[&str] = &[
+    "add",
+    "am",
+    "annex",
+    "annotate",
+    "apply",
+    "archimport",
+    "archive",
+    "backfill",
+    "bisect",
+    "blame",
+    "branch",
+    "bugreport",
+    "bundle",
+    "cat-file",
+    "check-attr",
+    "check-ignore",
+    "check-mailmap",
+    "check-ref-format",
+    "checkout",
+    "checkout-index",
+    "cherry",
+    "cherry-pick",
+    "citool",
+    "clean",
+    "clone",
+    "column",
+    "commit",
+    "commit-graph",
+    "commit-tree",
+    "config",
+    "count-objects",
+    "credential",
+    "cvsexportcommit",
+    "cvsimport",
+    "cvsserver",
+    "daemon",
+    "describe",
+    "diagnose",
+    "diff",
+    "diff-files",
+    "diff-index",
+    "diff-tree",
+    "difftool",
+    "fast-export",
+    "fast-import",
+    "fetch",
+    "fetch-pack",
+    "filter-branch",
+    "filter-repo",
+    "flow",
+    "fmt-merge-msg",
+    "for-each-ref",
+    "for-each-repo",
+    "format-patch",
+    "fsck",
+    "fsmonitor--daemon",
+    "gc",
+    "get-tar-commit-id",
+    "gitk",
+    "grep",
+    "gui",
+    "hash-object",
+    "help",
+    "hook",
+    "http-backend",
+    "imap-send",
+    "index-pack",
+    "init",
+    "instaweb",
+    "interpret-trailers",
+    "lfs",
+    "log",
+    "ls-files",
+    "ls-remote",
+    "ls-tree",
+    "maintenance",
+    "mailinfo",
+    "mailsplit",
+    "merge",
+    "merge-base",
+    "merge-file",
+    "merge-index",
+    "merge-one-file",
+    "merge-tree",
+    "mergetool",
+    "mktag",
+    "mktree",
+    "multi-pack-index",
+    "mv",
+    "name-rev",
+    "notes",
+    "p4",
+    "pack-objects",
+    "pack-redundant",
+    "pack-refs",
+    "patch-id",
+    "prune",
+    "prune-packed",
+    "pull",
+    "push",
+    "quiltimport",
+    "range-diff",
+    "read-tree",
+    "rebase",
+    "reflog",
+    "refs",
+    "remote",
+    "repack",
+    "replace",
+    "replay",
+    "request-pull",
+    "rerere",
+    "reset",
+    "restore",
+    "rev-list",
+    "rev-parse",
+    "revert",
+    "rm",
+    "scalar",
+    "send-email",
+    "send-pack",
+    "shortlog",
+    "show",
+    "show-branch",
+    "show-index",
+    "show-ref",
+    "sparse-checkout",
+    "stage",
+    "stash",
+    "status",
+    "stripspace",
+    "submodule",
+    "subtree",
+    "svn",
+    "switch",
+    "symbolic-ref",
+    "tag",
+    "unpack-file",
+    "unpack-objects",
+    "update-index",
+    "update-ref",
+    "update-server-info",
+    "upload-archive",
+    "upload-pack",
+    "var",
+    "verify-commit",
+    "verify-pack",
+    "verify-tag",
+    "version",
+    "whatchanged",
+    "worktree",
+    "write-tree",
+];
+
+fn builtin(sub: &str) -> bool {
+    BUILTIN.contains(&sub)
 }
 
 /// Whether `git <sub> <args>` writes to the repository or its work tree.
@@ -1042,6 +1314,13 @@ fn command_words(simple: &str) -> Vec<String> {
             }
             Some(w) if w.len() > 1 && w.starts_with(['{', '!']) => {
                 words[0].remove(0);
+            }
+            Some("coproc") => {
+                words.remove(0);
+                // `coproc NAME { …; }`: the name is not the command.
+                if words.get(1).is_some_and(|w| w.starts_with('{')) {
+                    words.remove(0);
+                }
             }
             Some("time") => {
                 words.remove(0);
@@ -1135,7 +1414,8 @@ fn split_commands(command: &str) -> Vec<String> {
                     cur.push(n);
                 }
             }
-            None if c == '"' || c == '\'' => {
+            // A backtick substitution stays in its word, like a quote.
+            None if c == '"' || c == '\'' || c == '`' => {
                 quote = Some(c);
                 cur.push(c);
             }
@@ -1571,6 +1851,78 @@ mod tests {
         ] {
             assert_eq!(check(&p, command, root), None, "{command}");
         }
+    }
+
+    /// The third review's routes (WI-1326): config aliases from the
+    /// environment or an include, aliases from the config file, commands
+    /// inside substitutions and `coproc`, and per-subcommand valued flags.
+    #[test]
+    fn discard_guard_reads_the_remaining_routes() {
+        let root = Path::new("/r");
+        let p = workspace(&["README.md", "src/a.py"], Some("checkout"), root);
+        for command in [
+            // 1. config aliases from the environment or an included file
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='checkout --' git x README.md",
+            "export GIT_CONFIG_COUNT=1; git x README.md",
+            "env GIT_CONFIG_PARAMETERS=\"'alias.x=reset'\" git x --hard",
+            "git -c include.path=/tmp/a x README.md",
+            "git -c includeIf.onbranch:main.path=/tmp/a x README.md",
+            // 2. an alias defined in the config earlier on the line
+            "git config alias.x 'checkout --' && git x README.md",
+            "git wipe",
+            // 3. inside substitutions and coproc
+            "echo $(git checkout -- README.md)",
+            "echo \"$(git reset --hard)\"",
+            "echo `git stash`",
+            "x=$(echo $(git reset --hard))",
+            "coproc git reset --hard",
+            "coproc W { git reset --hard; }",
+            // 4. checkout -m is --merge, not a message
+            "git checkout -m README.md",
+            "git checkout -qm src/a.py",
+        ] {
+            let reason = check(&p, command, root).unwrap_or_else(|| panic!("allowed: {command}"));
+            assert!(reason.contains("discard guard"), "{command}: {reason}");
+        }
+        for command in [
+            "GIT_CONFIG_NOSYSTEM=1 git status",
+            "git -c core.pager=cat log",
+            "git config --get user.name",
+            "git log --oneline",
+            "git lfs pull",
+            "echo $(git rev-parse HEAD)",
+            "echo `git status --short`",
+            "echo '$(git reset --hard)'",
+            "coproc git status",
+            "git checkout -m main other.md",
+            "git stash list -m x",
+            // `$VAR` is git only when it is named for git
+            "$EDITOR README.md",
+            "${PAGER} src/a.py",
+            // `switch -c` takes the branch name: `-cf` is not a force
+            "git switch -cf main",
+            "git switch -c fresh",
+        ] {
+            assert_eq!(check(&p, command, root), None, "{command}");
+        }
+        assert!(check(&p, "git switch -fc fresh", root).is_some());
+        assert!(check(&p, "${GIT_BIN} reset --hard", root).is_some());
+    }
+
+    #[test]
+    fn a_config_env_alias_counts_as_a_write_to_a_protected_checkout() {
+        let (main, wt) = checkout_and_worktree("cfgenv");
+        let mut p = workspace(&[], Some("worktree"), &wt);
+        p.protected_checkouts = vec![main.display().to_string()];
+        let command = format!(
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.l GIT_CONFIG_VALUE_0=commit git -C {} l -m x",
+            main.display()
+        );
+        assert!(check(&p, &command, &wt).is_some());
+        let inner = format!("echo $(git -C {} commit -m x)", main.display());
+        assert!(check(&p, &inner, &wt).is_some());
+        std::fs::remove_dir_all(&main).ok();
+        std::fs::remove_dir_all(&wt).ok();
     }
 
     #[test]
