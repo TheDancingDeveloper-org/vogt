@@ -22,7 +22,7 @@ def send(msg: dict[str, object]) -> None:
 
 def start_thread(rid: object, params: dict[str, object]) -> None:
     time.sleep(0.3)
-    thread_id = params.get("threadId", "t")
+    thread_id = str(params.get("threadId", "t"))
     threads.add(thread_id)
     send({"jsonrpc": "2.0", "id": rid, "result": {"thread": {"id": thread_id}}})
 

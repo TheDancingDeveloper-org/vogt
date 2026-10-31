@@ -111,7 +111,9 @@ def build_app(
         del request
         return JSONResponse(
             status_code=exc.http_status,
-            content={"error": {"code": exc.code, "message": str(exc)}},
+            content={
+                "error": {"code": exc.code, "message": str(exc), **(exc.details or {})}
+            },
         )
 
     @app.exception_handler(RequestValidationError)

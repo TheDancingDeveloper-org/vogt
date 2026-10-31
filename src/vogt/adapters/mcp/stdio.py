@@ -186,7 +186,7 @@ class StdioServer:
         except VogtError as exc:
             # A failed tool call is a *result* with isError, not a protocol
             # error: the model is meant to see it and try something else.
-            return _result(message_id, _tool_error(exc.code, str(exc)))
+            return _result(message_id, _tool_error(exc.code, str(exc), exc.details))
         except ValidationError as exc:
             # A bad-argument error names fields, not internals, and the model
             # is meant to see it and correct the call.
@@ -227,11 +227,20 @@ def _error(
     return {"jsonrpc": "2.0", "id": message_id, "error": error}
 
 
-def _tool_error(code: str, message: str) -> dict[str, Any]:
-    return {
+def _tool_error(
+    code: str, message: str, details: dict[str, str] | None = None
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
         "content": [{"type": "text", "text": f"{code}: {message}"}],
         "isError": True,
     }
+    if details:
+        # The keys an escalated refusal hands back (WI-996), readable
+        # without parsing the text.
+        result["structuredContent"] = {
+            "error": {"code": code, "message": message, **details}
+        }
+    return result
 
 
 def _without_nulls(value: object) -> object:
