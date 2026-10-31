@@ -247,3 +247,40 @@ def test_a_success_carries_the_whole_result_as_compact_text() -> None:
     assert "\n" not in text
     assert result["structuredContent"] == payload
     assert result["isError"] is False
+
+
+def test_work_writes_are_compact_text_unless_verbose_wi1525(
+    instance: AppContext,
+) -> None:
+    """WI-1525: work_create and work_transition text is {ref, state, title,
+    updated_at}, under 300 characters; structuredContent stays the full
+    result; `verbose: true` puts the full result in the text too."""
+    create = {"kind": "bug", "title": "Compact", "reason": "compact test"}
+    responses, _ = _session(
+        instance,
+        _request(1, "tools/call", name="work_create", arguments=create),
+        _request(
+            2,
+            "tools/call",
+            name="work_create",
+            arguments={**create, "verbose": True},
+        ),
+        _request(
+            3,
+            "tools/call",
+            name="work_transition",
+            arguments={"ref": "WI-1", "to_state": "in_progress", "reason": "go"},
+        ),
+    )
+    compact = responses[0]["result"]
+    text = compact["content"][0]["text"]
+    assert len(text) <= 300
+    assert set(json.loads(text)) == {"ref", "state", "title", "updated_at"}
+    assert compact["structuredContent"]["item"]["ref"] == "WI-1"
+
+    verbose = json.loads(responses[1]["result"]["content"][0]["text"])
+    assert verbose["item"]["ref"] == "WI-2"
+
+    moved = responses[2]["result"]
+    assert moved["isError"] is False, moved
+    assert json.loads(moved["content"][0]["text"])["ref"] == "WI-1"

@@ -457,8 +457,15 @@ Rules:
   When you already know which sessions you oversee, prefer the delta loop:
   `session_wait_any` (their ids, the kinds you care about) blocks until one
   of them changes, then `session_changes` from the `next_cursor` it returns
-  reads what happened. There is no supervised-by-me filter yet, so pass the
-  ids yourself. A `truncated` page means events were dropped; sweep once.
+  reads what happened. `session_sweep(supervised_by=<your id>)` keeps only
+  the sessions you started. A `truncated` page means events were dropped;
+  sweep once. The digest leaves out the operator's own hand-typed sessions
+  (`exclude_roles`, default `["operator"]`).
+- **Write results are compact.** `session_start`, `session_hibernate`,
+  `session_wake`, `session_stop`, `session_bind_work`, `work_create` and
+  `work_transition` return a digest (the session row, or the item's ref,
+  state and title) as tool text. Pass `verbose: true` when you need the
+  whole object.
 - **Hibernated sessions** (`activity: "hibernated"`) have had their
   processes stopped to free memory. Their screen is the last one they
   showed, and their conversation is intact. `session_input` wakes one by

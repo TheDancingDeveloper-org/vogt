@@ -356,6 +356,20 @@ the full `session.list` row (turn timing, `last_reply_excerpt`, `blocked`,
 the rows per class and `needs_you`. Use it instead of a `session_screen` per
 session.
 
+Digest mode (the default) leaves out sessions in `exclude_roles`, which
+defaults to `["operator"]`: a session Vogt never linked, typed by hand. Pass
+`exclude_roles: []` for every role; full mode drops none unless asked, and
+`session.list` takes the same parameter. `supervised_by` keeps only the
+sessions one starter started. A digest row omits an empty `screen_tail` and
+the row-level `ready` (`digest.ready` carries it) (WI-1525).
+
+Over MCP, the tool text of `session.start`, `session.hibernate`,
+`session.wake`, `session.stop`, `session.bind_work` (`digest`, plus
+`previous_work_item`, `project_mismatch` and `engine_label`), `work.create`
+and `work.transition` (`ref`, `state`, `title`, `updated_at`) is a compact
+digest. Pass `verbose: true` for the full result as text. structuredContent,
+REST and the CLI always return the full result (WI-1525).
+
 `session.hibernate` (`work.write`, audited) stops a session's processes to
 free their memory and revokes its token. The session stays listed with
 `activity: "hibernated"`, a `hibernation` (`at`, `trigger`, `reason`,

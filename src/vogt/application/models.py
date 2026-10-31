@@ -1577,6 +1577,14 @@ class SessionSummary(Result):
 
 
 class CreateWorkParams(Params):
+    verbose: bool = Field(
+        default=False,
+        description=(
+            "MCP only: `true` returns the full result as the tool text. The "
+            "default text is a compact digest (WI-1525); structuredContent, "
+            "REST and the CLI always carry the full result."
+        ),
+    )
     kind: WorkKind = Field(description="feature / bug / chore / question.")
     title: Name
     body: str = ""
@@ -2091,6 +2099,14 @@ class UpdateWorkParams(Params):
 
 
 class TransitionWorkParams(Params):
+    verbose: bool = Field(
+        default=False,
+        description=(
+            "MCP only: `true` returns the full result as the tool text. The "
+            "default text is a compact digest (WI-1525); structuredContent, "
+            "REST and the CLI always carry the full result."
+        ),
+    )
     ref: str = Field(description="Work item reference, e.g. WI-7. Alias: `id`.")
     to_state: str = Field(
         description="Target state, e.g. in_progress. Aliases: `to`, `state`."
@@ -4372,6 +4388,15 @@ class StartSessionParams(Params):
     which is the failure the registry-owned `cwd` rule exists against.
     """
 
+    verbose: bool = Field(
+        default=False,
+        description=(
+            "MCP only: `true` returns the full result as the tool text. The "
+            "default text is a compact digest (WI-1525); structuredContent, "
+            "REST and the CLI always carry the full result."
+        ),
+    )
+
     work_item: str | None = Field(default=None, description="Work item ref, e.g. WI-7.")
     project: str | None = Field(default=None, description="Project slug.")
     template: str | None = Field(
@@ -4627,6 +4652,14 @@ SESSION_ID_DESCRIPTION = (
 
 
 class StopSessionParams(Params):
+    verbose: bool = Field(
+        default=False,
+        description=(
+            "MCP only: `true` returns the full result as the tool text. The "
+            "default text is a compact digest (WI-1525); structuredContent, "
+            "REST and the CLI always carry the full result."
+        ),
+    )
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     reason: Reason = Field(description="Why this write is being made (audited).")
 
@@ -4659,6 +4692,22 @@ class SweepSessionsParams(Params):
     project: str | None = Field(
         default=None,
         description="Only sessions Vogt linked to this project (slug).",
+    )
+    exclude_roles: list[Literal["operator", "oversight", "worker"]] | None = Field(
+        default=None,
+        description=(
+            "Drop sessions in these roles from digest rows. `operator` is a "
+            "session Vogt never linked (typed by hand); otherwise the "
+            'session\'s role. Default `["operator"]` in digest mode and none '
+            "in full mode; pass an empty list to keep every role."
+        ),
+    )
+    supervised_by: str | None = Field(
+        default=None,
+        description=(
+            "Keep only sessions this one started: the starter's engine id or "
+            "its Vogt `ses_…` id."
+        ),
     )
     mode: SessionViewMode = Field(
         default="digest",
@@ -4727,11 +4776,17 @@ class SessionSweepRow(Result):
     attention_reason: str = Field(description="Why, in words.")
     session: SessionSummary | None = None
     digest: SessionDigest | None = None
-    screen_tail: list[str] = Field(
-        default=[],
-        description="The last non-blank lines of its screen. Untrusted terminal text.",
+    screen_tail: list[str] | None = Field(
+        default=None,
+        description=(
+            "The last non-blank lines of its screen. Untrusted terminal text. "
+            "Always a list in full mode; omitted on a digest row with none."
+        ),
     )
-    ready: bool | None = None
+    ready: bool | None = Field(
+        default=None,
+        description="Omitted on a digest row, where `digest.ready` carries it.",
+    )
     blocked_since: datetime | None = Field(
         default=None,
         description="When the session's blocked report was made, if it has one.",
@@ -4926,6 +4981,14 @@ COLD_WAKE_OPT_OUT_DESCRIPTION = (
 
 
 class HibernateSessionParams(Params):
+    verbose: bool = Field(
+        default=False,
+        description=(
+            "MCP only: `true` returns the full result as the tool text. The "
+            "default text is a compact digest (WI-1525); structuredContent, "
+            "REST and the CLI always carry the full result."
+        ),
+    )
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     allow_shell: bool = Field(
         default=False,
@@ -4961,6 +5024,14 @@ class HibernateSessionParams(Params):
 
 
 class WakeSessionParams(Params):
+    verbose: bool = Field(
+        default=False,
+        description=(
+            "MCP only: `true` returns the full result as the tool text. The "
+            "default text is a compact digest (WI-1525); structuredContent, "
+            "REST and the CLI always carry the full result."
+        ),
+    )
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     force: bool = Field(
         default=False,
@@ -5064,6 +5135,14 @@ class SetSessionRoleParams(Params):
 
 
 class BindSessionWorkParams(Params):
+    verbose: bool = Field(
+        default=False,
+        description=(
+            "MCP only: `true` returns the full result as the tool text. The "
+            "default text is a compact digest (WI-1525); structuredContent, "
+            "REST and the CLI always carry the full result."
+        ),
+    )
     id: str | None = Field(
         default=None,
         description=(
@@ -5413,6 +5492,15 @@ class ListSessionsParams(Params):
             "Keep only sessions this one started: the starter's engine "
             "session id, or its Vogt `ses_…` id. Unlinked engine sessions "
             "(no starter) never match."
+        ),
+    )
+    exclude_roles: list[Literal["operator", "oversight", "worker"]] | None = Field(
+        default=None,
+        description=(
+            "Drop sessions in these roles from digest rows. `operator` is a "
+            "session Vogt never linked (typed by hand); otherwise the "
+            'session\'s role. Default `["operator"]` in digest mode and none '
+            "in full mode; pass an empty list to keep every role."
         ),
     )
     states: list[str] | None = Field(
