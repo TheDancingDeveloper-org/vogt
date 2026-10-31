@@ -333,8 +333,9 @@ def test_a_review_brief_checks_the_diff_against_the_items_own_criteria(
     assert "## The diff" in review
     assert "wi-1299-review-brief" in review
     assert "integrate/vogt-next" in review
-    # The real base and head, not placeholders.
-    assert "`git diff integrate/vogt-next...abc123`" in review
+    # The real base, and the tip resolved against the hand-off head.
+    assert "`git diff integrate/vogt-next...<tip>`" in review
+    assert "hand-off head abc123 · reviewed tip <tip>" in review
     assert "<base>" not in review and "<head>" not in review
     # The worker's claim is quoted as a claim. The remark thread and the
     # ranking — both of which read as "carry on" — are not the review.
@@ -445,12 +446,19 @@ def test_a_review_brief_fills_in_the_real_diff_command(instance: AppContext) -> 
         instance, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
     )
     pinned = _review_of(instance, branch="wi-9-x", head_sha="deadbeef", base="b0")
-    assert "`git diff b0...deadbeef`" in pinned
-    assert "`git rev-parse wi-9-x`" in pinned
-    assert "review `deadbeef`" in pinned
+    assert "`git diff b0...<tip>`" in pinned
+    assert "`git fetch origin wi-9-x`" in pinned
+    assert "`git rev-parse origin/wi-9-x`" in pinned
+    # A branch that moved past the hand-off is reviewed at its tip, with the
+    # hand-off head shown beside it, never the stale head alone (WI-1837).
+    assert "review the tip, not `deadbeef`" in pinned
+    assert "`git log deadbeef..<tip>`" in pinned
+    assert "hand-off head deadbeef · reviewed tip <tip>" in pinned
+    assert "review `deadbeef` and say the branch has moved" not in pinned
 
     unpinned = _review_of(instance, branch="wi-9-y", head_sha=None, base="b0")
-    assert "`git diff b0...wi-9-y`" in unpinned
+    assert "`git diff b0...<tip>`" in unpinned
+    assert "`git rev-parse origin/wi-9-y`" in unpinned
     assert "The hand-off names no head sha" in unpinned
 
 
