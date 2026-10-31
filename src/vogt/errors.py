@@ -16,6 +16,9 @@ class VogtError(Exception):
     code = "error"
     #: HTTP status the REST adapter uses for this class of error.
     http_status = 500
+    #: Structured facts beside the message (WI-996: an escalated refusal's
+    #: keys), surfaced on every transport when set. Never secret values.
+    details: dict[str, str] | None = None
 
 
 class NotInitialized(VogtError):

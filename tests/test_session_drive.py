@@ -1104,6 +1104,40 @@ def test_an_agent_cannot_answer_a_permission_prompt(
     assert "session.input" not in audited
 
 
+def test_a_refused_answer_comes_back_escalated_with_its_keys(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-996: the refusal names the Inbox entry a person answers and the
+    dialog's content key, `outcome: escalated`, on both routes."""
+    from vogt.application.models import AnswerSessionParams
+    from vogt.application.services import answer_session
+    from vogt.errors import PersonRequired
+
+    ses_id, engine_id = _started(wired)
+    engine.permission_prompt = True
+    engine.extra = {
+        "activity": "awaiting-approval",
+        "activity_changed_at": "2026-10-31T01:02:03Z",
+        "approval": {"question": "Do you want to proceed?", "options": []},
+    }
+    agent = _as(wired, AGENTS[0])
+    with pytest.raises(PersonRequired, match="escalated to a person") as answered:
+        answer_session(agent, AnswerSessionParams(id=ses_id, option=1, reason=WHY))
+    details = answered.value.details or {}
+    assert details["outcome"] == "escalated"
+    assert details["needs"] == "person"
+    assert details["inbox_entry_key"] == (
+        f"agent:session:{engine_id}:awaiting-approval:2026-10-31T01:02:03Z"
+    )
+    assert details["escalation_key"].startswith(f"{engine_id}:permission_prompt:")
+    with pytest.raises(PersonRequired) as typed:
+        session_input(
+            agent, SessionInputParams(id=ses_id, text="1", submit=True, reason=WHY)
+        )
+    # The same prompt is one escalation, whichever route met it.
+    assert typed.value.details == details
+
+
 def test_an_oversight_session_answers_a_permission_prompt_and_is_audited(
     wired: AppContext, engine: Engine
 ) -> None:
@@ -1286,3 +1320,18 @@ def test_wait_blocks_at_most_the_cap(wired: AppContext, engine: Engine) -> None:
     assert engine.wait_queries[-1] == "until=any-change&timeout_s=280"
     # The fake answers a match, not a timeout: nothing is still waiting.
     assert waited.still_waiting is False
+
+
+def test_an_escalated_refusal_carries_its_keys_on_the_mcp_result() -> None:
+    """WI-996: the keys reach a model as structuredContent, not only text."""
+    from vogt.adapters.mcp.stdio import _tool_error
+
+    plain = _tool_error("person_required", "no")
+    assert "structuredContent" not in plain
+    keyed = _tool_error("person_required", "no", {"outcome": "escalated"})
+    assert keyed["isError"] is True
+    assert keyed["structuredContent"]["error"] == {
+        "code": "person_required",
+        "message": "no",
+        "outcome": "escalated",
+    }

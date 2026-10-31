@@ -173,6 +173,7 @@ from vogt.errors import (
     EngineOnly,
     InvalidRequest,
     NotFound,
+    PersonRequired,
     PolicyRefused,
     RoleRefused,
     VogtError,
@@ -1870,6 +1871,15 @@ def log_tail(ctx: AppContext, params: LogTailParams) -> LogTailResult:
 
 
 def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputResult:
+    """Type into a session (`_session_input`). Input an agent may not give
+    to a permission prompt comes back as an escalation (WI-996)."""
+    try:
+        return _session_input(ctx, params)
+    except PersonRequired as refused:
+        raise _escalated(ctx, params.id, refused) from None
+
+
+def _session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputResult:
     """Type into a session: the text, then each named key, then Enter.
 
     Each part is its own engine write, in that order, so a terminal reading
@@ -3434,14 +3444,17 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
     # audit line records which answered.
     by_person = _answers_as_person(ctx)
     by_oversight = not by_person and _is_oversight_caller(ctx, engine)
-    answered = engine.answer_session(
-        engine_id,
-        option=params.option,
-        label=None if params.label is None else params.label.strip(),
-        expect_question=params.expect_question,
-        person=by_person,
-        overseer=_caller_engine_session_id(ctx) if by_oversight else None,
-    )
+    try:
+        answered = engine.answer_session(
+            engine_id,
+            option=params.option,
+            label=None if params.label is None else params.label.strip(),
+            expect_question=params.expect_question,
+            person=by_person,
+            overseer=_caller_engine_session_id(ctx) if by_oversight else None,
+        )
+    except PersonRequired as refused:
+        raise _escalated(ctx, params.id, refused) from None
     if answered is None:
         msg = (
             f"the engine has no session {params.id!r}, or predates answering "
@@ -3962,6 +3975,48 @@ class _Target:
     ) -> None:
         self.engine_session_id = engine_session_id
         self.session = session
+
+
+def _escalated(
+    ctx: AppContext, session_id: str, refused: PersonRequired
+) -> PersonRequired:
+    """The engine's refusal of an agent's answer to a permission prompt
+    (WI-983), handed back as an escalation (WI-996): the prompt already
+    stands in the Inbox for a person, so the refusal names that entry and
+    the dialog's content key — `session:permission_prompt:hash(question)`,
+    the shape a blocked report's key has — with `outcome: escalated`. The
+    caller waits on it or reports blocked; it does not retry.
+
+    Built from the engine's read of the session. When that read fails the
+    refusal still carries the outcome; only the keys are missing.
+    """
+    details: dict[str, str] = {
+        "outcome": "escalated",
+        "needs": "person",
+        "boundary": "permission_prompt",
+    }
+    try:
+        engine_id = _target(ctx, session_id).engine_session_id
+        seen = _engine(ctx).get_session(engine_id)
+    except (EngineUnavailable, NotFound):
+        seen = None
+    if seen is not None:
+        details["session_id"] = seen.id
+        question = "" if seen.approval is None else seen.approval.question.strip()
+        digest = hashlib.sha256(question.encode()).hexdigest()[:16]
+        details["escalation_key"] = f"{seen.id}:permission_prompt:{digest}"
+        if seen.activity == "awaiting-approval":
+            details["inbox_entry_key"] = (
+                f"agent:session:{seen.id}:awaiting-approval:"
+                f"{seen.activity_changed_at or 'unknown'}"
+            )
+    escalated = PersonRequired(
+        f"{refused} The prompt is escalated to a person in the Inbox"
+        + (f" ({details['inbox_entry_key']})" if "inbox_entry_key" in details else "")
+        + "; wait for it, do not retry."
+    )
+    escalated.details = details
+    return escalated
 
 
 def _target(ctx: AppContext, session_id: str) -> _Target:
