@@ -913,6 +913,27 @@ pub struct SessionChange {
     pub kind: String,
     /// At most 120 characters.
     pub summary: String,
+    /// Set when the change is an ask that someone else must resolve: a
+    /// blocked report, a permission dialog or a grant request (WI-996 E1).
+    /// `until=escalated` waits for any change that carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<ChangeEscalation>,
+}
+
+/// The escalation a session change carries (WI-996 E1): who can resolve it,
+/// what kind of boundary it is, the ask and its content key, and the ways it
+/// can be resolved (`answer`, `grant`, `do`, `lift_hold`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeEscalation {
+    pub needs: EscalationNeeds,
+    pub boundary: EscalationBoundary,
+    /// The ask, at most 120 characters. Untrusted text.
+    pub ask: String,
+    /// `session:boundary:hash`, the same key the Inbox and push dedupe on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolve: Vec<String>,
 }
 
 /// The answer to `GET /api/sessions/changes`.

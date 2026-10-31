@@ -62,6 +62,7 @@ from vogt.application.models import (
     BindSessionWorkParams,
     BindSessionWorkResult,
     CancelWatchParams,
+    ChangeEscalation,
     CommentParams,
     CommitForSessionParams,
     CommitForSessionResult,
@@ -2498,6 +2499,15 @@ def _change(change: EngineChange, labels: dict[str, str]) -> SessionChange:
         session=labels.get(change.session, change.session),
         kind=change.kind,
         summary=change.summary,
+        escalation=None
+        if change.escalation is None
+        else ChangeEscalation(
+            needs=change.escalation.needs,
+            boundary=change.escalation.boundary,
+            ask=change.escalation.ask,
+            key=change.escalation.key,
+            resolve=list(change.escalation.resolve),
+        ),
     )
 
 

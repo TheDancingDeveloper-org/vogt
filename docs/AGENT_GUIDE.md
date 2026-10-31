@@ -499,7 +499,10 @@ Rules:
   When you already know which sessions you oversee, prefer the delta loop:
   `session_wait_any` (their ids, the kinds you care about) blocks until one
   of them changes, then `session_changes` from the `next_cursor` it returns
-  reads what happened. `session_sweep(supervised_by=<your id>)` keeps only
+  reads what happened. `until=[escalated]` wakes on any ask someone else
+  must resolve: a blocked report, a permission dialog or a grant request.
+  Each such change carries `escalation` (needs, boundary, ask, key,
+  resolve). `session_sweep(supervised_by=<your id>)` keeps only
   the sessions you started. A `truncated` page means events were dropped;
   sweep once. The digest leaves out the operator's own hand-typed sessions
   (`exclude_roles`, default `["operator"]`). Sweep with `cursor: true` to get

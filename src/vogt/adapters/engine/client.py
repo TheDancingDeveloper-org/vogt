@@ -564,6 +564,29 @@ class EngineWait:
 
 
 @dataclass(frozen=True)
+class EngineChangeEscalation:
+    """The ask a session change carries (WI-996 E1): a blocked report, a
+    permission dialog or a grant request."""
+
+    needs: str
+    boundary: str
+    ask: str
+    key: str
+    resolve: tuple[str, ...]
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineChangeEscalation:
+        resolve = payload.get("resolve")
+        return cls(
+            needs=str(payload.get("needs", "person")),
+            boundary=str(payload.get("boundary", "other")),
+            ask=str(payload.get("ask", "")),
+            key=str(payload.get("key", "")),
+            resolve=tuple(str(w) for w in resolve) if isinstance(resolve, list) else (),
+        )
+
+
+@dataclass(frozen=True)
 class EngineChange:
     """One session delta from `GET /api/sessions/changes`."""
 
@@ -572,15 +595,20 @@ class EngineChange:
     session: str
     kind: str
     summary: str
+    escalation: EngineChangeEscalation | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineChange:
+        escalation = payload.get("escalation")
         return cls(
             seq=_optional_int(payload.get("seq")) or 0,
             at=_optional_str(payload.get("at")) or "",
             session=str(payload.get("session", "")),
             kind=str(payload.get("kind", "")),
             summary=str(payload.get("summary", "")),
+            escalation=EngineChangeEscalation.from_payload(escalation)
+            if isinstance(escalation, dict)
+            else None,
         )
 
 

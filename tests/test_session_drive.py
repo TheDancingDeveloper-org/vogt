@@ -149,6 +149,27 @@ class Engine:
                 return 404, b""
             self.wait_any_queries.append(url.partition("?")[2])
             query = url.partition("?")[2]
+            if "until=escalated" in query:
+                return 200, json.dumps(
+                    {
+                        "outcome": "changed",
+                        "change": {
+                            "seq": 9,
+                            "at": "2026-10-11T00:00:02Z",
+                            "session": UNLINKED,
+                            "kind": "escalated",
+                            "summary": "grant request: asks for GH_TOKEN",
+                            "escalation": {
+                                "needs": "person",
+                                "boundary": "credential",
+                                "ask": "asks for GH_TOKEN",
+                                "key": f"{UNLINKED}:credential:grant:grt_1",
+                                "resolve": ["grant"],
+                            },
+                        },
+                        "next_cursor": 9,
+                    }
+                ).encode()
             if "cursor=now" in query or (
                 "timeout" in query and "until=exited" in query
             ):
@@ -743,6 +764,28 @@ def test_wait_any_passes_its_query_and_returns_the_mapped_change(
     assert waited.outcome == "changed"
     assert waited.change is not None and waited.change.session == UNLINKED
     assert waited.next_cursor == 8
+
+
+def test_wait_any_until_escalated_returns_the_escalation_payload(
+    wired: AppContext, engine: Engine
+) -> None:
+    waited = session_wait_any(
+        wired, SessionWaitAnyParams(until=["escalated"], timeout_s=30)
+    )
+    assert "until=escalated" in engine.wait_any_queries[-1]
+    assert waited.change is not None and waited.change.kind == "escalated"
+    esc = waited.change.escalation
+    assert esc is not None
+    assert (esc.needs, esc.boundary, esc.resolve) == ("person", "credential", ["grant"])
+    assert esc.key == f"{UNLINKED}:credential:grant:grt_1"
+    assert esc.ask == "asks for GH_TOKEN"
+
+
+def test_a_change_without_an_escalation_maps_to_none(
+    wired: AppContext, engine: Engine
+) -> None:
+    waited = session_wait_any(wired, SessionWaitAnyParams(until=["blocked"]))
+    assert waited.change is not None and waited.change.escalation is None
 
 
 def test_wait_any_timeout_has_no_change(wired: AppContext, engine: Engine) -> None:

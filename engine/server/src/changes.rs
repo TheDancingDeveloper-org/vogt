@@ -19,7 +19,10 @@ use std::{collections::HashSet, time::Duration};
 
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
-use vogt_engine_contract::{ActivityState, SessionChange, SessionChanges, SessionWaitAny};
+use vogt_engine_contract::{
+    ActivityState, BlockedReport, ChangeEscalation, EscalationBoundary, EscalationNeeds,
+    SessionChange, SessionChanges, SessionWaitAny,
+};
 
 use crate::{
     error::{ApiError, Result},
@@ -45,6 +48,7 @@ const KINDS: &[&str] = &[
     "budget",
     "done",
     "reported",
+    "escalated",
 ];
 
 /// What an overseer waits for when it does not say.
@@ -59,9 +63,94 @@ fn clip(text: &str) -> String {
     out
 }
 
+/// The core event a grant request raises (`grants.SESSION_GRANT_REQUESTED_EVENT`).
+const GRANT_REQUESTED_KIND: &str = "session.grant_requested";
+
+/// The ways a blocked report of this boundary can be resolved.
+fn resolve_for(boundary: EscalationBoundary) -> Vec<String> {
+    let ways: &[&str] = match boundary {
+        EscalationBoundary::PermissionPrompt | EscalationBoundary::Decision => &["answer"],
+        EscalationBoundary::Credential => &["grant", "do"],
+        EscalationBoundary::DeniedAction => &["do", "lift_hold"],
+        EscalationBoundary::Other => &["do"],
+    };
+    ways.iter().map(|w| (*w).to_string()).collect()
+}
+
+fn blocked_escalation(report: &BlockedReport) -> ChangeEscalation {
+    ChangeEscalation {
+        needs: report.needs,
+        boundary: report.boundary,
+        ask: clip(report.reason.trim()),
+        key: report.key.clone(),
+        resolve: resolve_for(report.boundary),
+    }
+}
+
+/// A permission dialog as an escalation. The key is the one the WI-983
+/// refusal names: `session:permission_prompt:sha256(question)[:16]`.
+fn approval_escalation(
+    id: Uuid,
+    approval: Option<&vogt_engine_contract::ApprovalPrompt>,
+) -> ChangeEscalation {
+    use sha2::{Digest, Sha256};
+    let question = approval.map(|a| a.question.trim()).unwrap_or("");
+    let digest = Sha256::digest(question.as_bytes());
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    ChangeEscalation {
+        needs: EscalationNeeds::Person,
+        boundary: EscalationBoundary::PermissionPrompt,
+        ask: clip(if question.is_empty() {
+            "permission prompt"
+        } else {
+            question
+        }),
+        key: format!("{id}:permission_prompt:{hex}"),
+        resolve: vec!["answer".to_string()],
+    }
+}
+
+/// A core grant request (WI-973), republished as `VogtChanged`, as the
+/// change of its target session. Built from the summary alone, which names
+/// the grant and never a value.
+fn grant_change(summary: &serde_json::Value) -> Option<(Uuid, String, ChangeEscalation)> {
+    let field = |k: &str| summary.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let target: Uuid = field("target").parse().ok()?;
+    let var = field("var");
+    let grant_id = field("grant_id");
+    let ask = clip(&if var.is_empty() {
+        "asks for a grant".to_string()
+    } else {
+        format!("asks for {var}")
+    });
+    let escalation = ChangeEscalation {
+        needs: EscalationNeeds::Person,
+        boundary: EscalationBoundary::Credential,
+        ask: ask.clone(),
+        key: format!("{target}:credential:grant:{grant_id}"),
+        resolve: vec!["grant".to_string()],
+    };
+    Some((target, format!("grant request: {ask}"), escalation))
+}
+
 /// The change one bus event is, when it is one an overseer reads.
 pub fn change_of(sequenced: &Sequenced) -> Option<SessionChange> {
+    let mut escalation = None;
     let (session, kind, summary) = match &sequenced.event {
+        ServerEvent::VogtChanged { kind, summary, .. } if kind == GRANT_REQUESTED_KIND => {
+            let (target, text, esc) = grant_change(summary)?;
+            escalation = Some(esc);
+            (target, "escalated", text)
+        }
+        ServerEvent::Activity {
+            id,
+            state: ActivityState::AwaitingApproval,
+            approval,
+            ..
+        } => {
+            escalation = Some(approval_escalation(*id, approval.as_ref()));
+            (*id, "approval", "activity approval".to_string())
+        }
         ServerEvent::Activity { id, state, .. } => {
             let kind = match state {
                 ActivityState::WaitingForInput => "ready",
@@ -85,7 +174,10 @@ pub fn change_of(sequenced: &Sequenced) -> Option<SessionChange> {
             (*id, "reported", format!("{kind}: {summary}"))
         }
         ServerEvent::SessionBlocked { id, blocked } => match blocked {
-            Some(report) => (*id, "blocked", format!("blocked: {}", report.reason)),
+            Some(report) => {
+                escalation = Some(blocked_escalation(report));
+                (*id, "blocked", format!("blocked: {}", report.reason))
+            }
             None => (*id, "unblocked", "unblocked".to_string()),
         },
         ServerEvent::SessionHibernated { id, trigger } => {
@@ -120,6 +212,7 @@ pub fn change_of(sequenced: &Sequenced) -> Option<SessionChange> {
         session,
         kind: kind.to_string(),
         summary: clip(&summary),
+        escalation,
     })
 }
 
@@ -161,7 +254,11 @@ fn parse_ids(raw: Option<&str>) -> Result<Option<HashSet<Uuid>>> {
 }
 
 fn matches(change: &SessionChange, ids: Option<&HashSet<Uuid>>, until: &HashSet<String>) -> bool {
-    ids.is_none_or(|ids| ids.contains(&change.session)) && until.contains(&change.kind)
+    // `escalated` names no event of its own: it matches any change that
+    // carries an escalation (WI-996 E1).
+    ids.is_none_or(|ids| ids.contains(&change.session))
+        && (until.contains(&change.kind)
+            || (change.escalation.is_some() && until.contains("escalated")))
 }
 
 /// Changes published after `since`, filtered, oldest first.
@@ -484,5 +581,112 @@ mod tests {
         assert_eq!(timed.outcome, "timeout");
         assert!(timed.change.is_none());
         assert_eq!(timed.next_cursor, head);
+    }
+
+    #[test]
+    fn escalated_matches_blocked_reports_dialogs_and_grant_requests_with_their_payload() {
+        let bus = EventBus::new(16);
+        let id = Uuid::from_u128(7);
+        bus.publish(activity(ActivityState::WaitingForInput));
+        bus.publish(ServerEvent::SessionBlocked {
+            id,
+            blocked: Some(BlockedReport {
+                reason: " gh pr merge denied ".to_string(),
+                needs: EscalationNeeds::Overseer,
+                boundary: EscalationBoundary::DeniedAction,
+                key: "k1".to_string(),
+                ..Default::default()
+            }),
+        });
+        bus.publish(activity(ActivityState::AwaitingApproval));
+        bus.publish(ServerEvent::VogtChanged {
+            kind: GRANT_REQUESTED_KIND.to_string(),
+            entity_kind: "session".to_string(),
+            entity_id: "ses_1".to_string(),
+            seq: 1,
+            summary: serde_json::json!({"target": id.to_string(), "var": "GH_TOKEN", "grant_id": "grt_1"}),
+        });
+        // Another core event, and a grant request naming no session, are not changes.
+        bus.publish(ServerEvent::VogtChanged {
+            kind: "work.transitioned".to_string(),
+            entity_kind: "work".to_string(),
+            entity_id: "wrk_1".to_string(),
+            seq: 2,
+            summary: serde_json::Value::Null,
+        });
+        bus.publish(ServerEvent::VogtChanged {
+            kind: GRANT_REQUESTED_KIND.to_string(),
+            entity_kind: "session".to_string(),
+            entity_id: "ses_2".to_string(),
+            seq: 3,
+            summary: serde_json::json!({"var": "X"}),
+        });
+
+        let until = parse_until(Some("escalated")).unwrap();
+        let replay = bus.since(0).0;
+        let got: Vec<SessionChange> = replay
+            .iter()
+            .filter_map(change_of)
+            .filter(|c| matches(c, None, &until))
+            .collect();
+        assert_eq!(
+            got.iter().map(|c| c.kind.as_str()).collect::<Vec<_>>(),
+            ["blocked", "approval", "escalated"]
+        );
+
+        let blocked = got[0].escalation.as_ref().unwrap();
+        assert_eq!(blocked.needs, EscalationNeeds::Overseer);
+        assert_eq!(blocked.boundary, EscalationBoundary::DeniedAction);
+        assert_eq!(blocked.ask, "gh pr merge denied");
+        assert_eq!(blocked.key, "k1");
+        assert_eq!(blocked.resolve, ["do", "lift_hold"]);
+
+        // The dialog key is the WI-983 refusal's: sha256(question)[:16].
+        let dialog = got[1].escalation.as_ref().unwrap();
+        assert_eq!(dialog.boundary, EscalationBoundary::PermissionPrompt);
+        assert_eq!(dialog.needs, EscalationNeeds::Person);
+        assert_eq!(
+            dialog.key,
+            format!("{}:permission_prompt:e3b0c44298fc1c14", Uuid::nil())
+        );
+        assert_eq!(dialog.resolve, ["answer"]);
+
+        assert_eq!(got[2].session, id);
+        let grant = got[2].escalation.as_ref().unwrap();
+        assert_eq!(grant.boundary, EscalationBoundary::Credential);
+        assert_eq!(grant.ask, "asks for GH_TOKEN");
+        assert_eq!(grant.key, format!("{id}:credential:grant:grt_1"));
+        assert_eq!(grant.resolve, ["grant"]);
+
+        // The default set is unchanged: a grant request is not in it.
+        let default = parse_until(None).unwrap();
+        assert!(!default.contains("escalated"));
+        assert!(!matches(&got[2], None, &default));
+    }
+
+    #[tokio::test]
+    async fn wait_any_until_escalated_wakes_on_a_grant_request() {
+        let bus = std::sync::Arc::new(EventBus::new(16));
+        let until = parse_until(Some("escalated")).unwrap();
+        let id = Uuid::from_u128(9);
+        let bus2 = bus.clone();
+        let waiter =
+            tokio::spawn(
+                async move { wait_any(&bus2, None, &until, 0, Duration::from_secs(5)).await },
+            );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        bus.publish(activity(ActivityState::WaitingForInput));
+        bus.publish(ServerEvent::VogtChanged {
+            kind: GRANT_REQUESTED_KIND.to_string(),
+            entity_kind: "session".to_string(),
+            entity_id: "ses_9".to_string(),
+            seq: 4,
+            summary: serde_json::json!({"target": id.to_string(), "grant_id": "grt_9"}),
+        });
+        let hit = waiter.await.unwrap().unwrap();
+        assert_eq!(hit.outcome, "changed");
+        let change = hit.change.unwrap();
+        assert_eq!(change.kind, "escalated");
+        assert_eq!(change.escalation.unwrap().ask, "asks for a grant");
     }
 }
