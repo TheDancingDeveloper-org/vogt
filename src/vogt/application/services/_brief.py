@@ -15,6 +15,7 @@ else. Two rules shaped it:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from vogt.application.models import WhyResult
@@ -314,6 +315,102 @@ def _latest_handoff(view: ReadView, item: WorkItem) -> Comment | None:
     return next((one for one in comments if one.kind == "handoff"), None)
 
 
+#: Whether a note's author decides things (WI-1320): a person, or a session
+#: whose role is oversight. Worker notes are not decisions, and are dropped.
+DecisionAuthor = Callable[[Comment], bool]
+
+#: How many decision notes a brief carries, and how long each may run.
+_DECISION_NOTES = 5
+_NOTE_CHARS = 1500
+
+
+def person_author(view: ReadView) -> DecisionAuthor:
+    """A note is a decision when a person wrote it."""
+
+    def judge(comment: Comment) -> bool:
+        actor = view.actor_by_id(comment.actor_id)
+        return actor is not None and actor.kind == "human"
+
+    return judge
+
+
+def _label(comment: Comment) -> str:
+    return f"{comment.created_at:%Y-%m-%d}, {comment.actor_display_name}"
+
+
+def _capped(body: str) -> str:
+    body = body.strip()
+    return body if len(body) <= _NOTE_CHARS else body[:_NOTE_CHARS].rstrip() + "…"
+
+
+def _older(count: int, what: str) -> list[str]:
+    if count == 0:
+        return []
+    return [f"{count} earlier {what}{'' if count == 1 else 's'} omitted.", ""]
+
+
+def _thread_sections(
+    view: ReadView, item: WorkItem, decision_author: DecisionAuthor | None
+) -> list[str]:
+    """What the thread decided, not the thread (WI-1320).
+
+    The decision notes, newest first; then the latest hand-off, which is a
+    claim rather than evidence; then the latest verdict. Older hand-offs and
+    verdicts are counted, not pasted, and worker notes are not rendered at
+    all — an overseer passes anything else a worker needs in its task.
+    """
+    judge = decision_author or person_author(view)
+    comments = view.comments_for(item.id, limit=200, order="newest")
+    lines: list[str] = []
+
+    notes = [one for one in comments if one.kind == "note" and judge(one)]
+    if notes:
+        lines += ["## Decisions", ""]
+        for note in notes[:_DECISION_NOTES]:
+            lines += [f"### Note ({_label(note)})", "", _capped(note.body), ""]
+
+    handoffs = [one for one in comments if one.kind == "handoff" and one.handoff]
+    handoff = handoffs[0] if handoffs else None
+    if handoff is not None and handoff.handoff is not None:
+        lines += [
+            f"## Latest hand-off ({_label(handoff)}) — a claim, not evidence",
+            "",
+            *_handoff_facts(handoff.handoff),
+            "",
+        ]
+        if handoff.body.strip():
+            lines += [handoff.body.strip(), ""]
+        lines += _older(len(handoffs) - 1, "hand-off")
+
+    verdicts = [one for one in comments if one.kind == "verdict" and one.verdict]
+    verdict = verdicts[0] if verdicts else None
+    if verdict is not None and verdict.verdict is not None:
+        fields = verdict.verdict
+        lines += [
+            f"## Latest review verdict ({_label(verdict)}, head {fields.head_sha})",
+            "",
+        ]
+        if handoff is not None and verdict.created_at < handoff.created_at:
+            # A verdict from before the latest hand-off reviewed an earlier
+            # head; it is still the last word a reviewer gave, so it is shown,
+            # but not as a verdict on the work as it stands now.
+            lines += [
+                "This verdict predates the latest hand-off, so it reviewed "
+                "an earlier head, not the work as it stands now.",
+                "",
+            ]
+        if fields.verdict == "blockers":
+            lines += ["Blockers:", ""]
+            lines += [f"{n}. {one}" for n, one in enumerate(fields.blockers, 1)]
+            lines.append("")
+        else:
+            lines += ["No blockers.", ""]
+        if verdict.body.strip():
+            lines += [verdict.body.strip(), ""]
+        lines += _older(len(verdicts) - 1, "verdict")
+    return lines
+
+
 def _handoff_where(fields: HandoffFields) -> list[str]:
     """Where the hand-off says its work is, one bullet a line."""
     rows: list[str] = []
@@ -507,6 +604,7 @@ def brief_for_work_item(
     ranking: WhyResult | None = None,
     *,
     project: Project | None = None,
+    decision_author: DecisionAuthor | None = None,
 ) -> ComposedBrief:
     """The work item, as a page an agent can read before it starts.
 
@@ -516,6 +614,11 @@ def brief_for_work_item(
     the tail wagging the dog. `project` carries the agent policy; without it
     the brief says nothing about one, which is also what a project with an
     empty policy says.
+
+    `decision_author` says whose notes are decisions (WI-1320): a person's,
+    or an oversight session's. It is the caller's because a session's role
+    is the engine's live state, which this pure composer cannot ask for;
+    without one, only a person's notes count.
     """
     lines: list[str] = [f"# {item.ref} — {item.title}", ""]
 
@@ -579,23 +682,7 @@ def brief_for_work_item(
                 lines.append(f"- {name} — {note}")
         lines.append("")
 
-    comments = view.comments_for(item.id, limit=200, order="newest")
-    handoff = next((one for one in comments if one.kind == "handoff"), None)
-    if handoff is not None and handoff.handoff is not None:
-        # The latest hand-off is its own section, ahead of the remarks, so a
-        # fresh session reads where the last one stopped before the thread.
-        lines += ["## Hand-off", "", *_handoff_facts(handoff.handoff)]
-        lines += ["", handoff.body.strip(), ""]
-    # A hand-off supersedes the thread before it — old root causes, old
-    # verdicts — so only the remarks made since the latest one are pasted.
-    # `comments` is newest first, so the ones ahead of the hand-off are later.
-    since = comments if handoff is None else comments[: comments.index(handoff)]
-    notes = [one for one in since if one.kind == "note"][:20]
-    if notes:
-        lines += ["## Comments", ""]
-        for comment in notes:
-            lines.append(f"- {comment.body.strip()}")
-        lines.append("")
+    lines += _thread_sections(view, item, decision_author)
 
     lines += _policy_section(project)
     if project is not None:
