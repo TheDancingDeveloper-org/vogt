@@ -79,6 +79,70 @@ pub fn worker_names(extra: &[String]) -> Vec<String> {
     out
 }
 
+/// The bridge command that speaks to the vogt endpoint.
+const VOGT_BRIDGE: &str = "vogt-mcp-remote";
+
+/// Where an entry points: its URL without the query (the tool profile rides
+/// there), or its command and arguments.
+fn endpoint_of(entry: &serde_json::Value) -> Option<String> {
+    if let Some(url) = entry.get("url").and_then(|v| v.as_str()) {
+        let base = url.split(['?', '#']).next().unwrap_or(url);
+        return Some(format!("url:{}", base.trim_end_matches('/')));
+    }
+    let command = entry.get("command").and_then(|v| v.as_str())?;
+    let args: Vec<&str> = entry
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    Some(format!("cmd:{command} {}", args.join(" ")))
+}
+
+fn is_vogt_bridge(entry: &serde_json::Value) -> bool {
+    entry
+        .get("command")
+        .and_then(|v| v.as_str())
+        .and_then(|c| Path::new(c).file_name())
+        .is_some_and(|n| n == VOGT_BRIDGE)
+}
+
+/// The extras that are safe to add (WI-2750): an extra registered as a
+/// second door to the vogt endpoint (a `vogt-admin` on the same URL, or the
+/// vogt bridge under another name) would hand a worker the full vogt tool
+/// profile, so it is dropped with a warning. `servers` is the config's
+/// server map, as JSON.
+pub fn safe_extra(
+    servers: Option<&serde_json::Map<String, serde_json::Value>>,
+    extra: &[String],
+) -> Vec<String> {
+    let Some(servers) = servers else {
+        return extra.to_vec();
+    };
+    let vogt = servers.get("vogt").and_then(endpoint_of);
+    extra
+        .iter()
+        .filter(|name| {
+            let name = name.trim();
+            if WORKER_SERVERS.contains(&name) {
+                return true;
+            }
+            let Some(entry) = servers.get(name) else {
+                return true;
+            };
+            let aliases_vogt =
+                is_vogt_bridge(entry) || (vogt.is_some() && endpoint_of(entry) == vogt);
+            if aliases_vogt {
+                tracing::warn!(
+                    name,
+                    "project mcp_extra names a server on the vogt endpoint; dropped"
+                );
+            }
+            !aliases_vogt
+        })
+        .cloned()
+        .collect()
+}
+
 /// The `mcpServers` object a worker Claude Code session gets: the kept
 /// entries of `~/.claude.json`, vogt told to ask for its worker profile.
 /// `extra` adds the project's servers (WI-2746); unregistered ones are skipped.
@@ -88,7 +152,7 @@ pub fn claude_worker_config(
 ) -> serde_json::Value {
     let mut kept = serde_json::Map::new();
     if let Some(servers) = claude_json.get("mcpServers").and_then(|v| v.as_object()) {
-        for name in worker_names(extra) {
+        for name in worker_names(&safe_extra(Some(servers), extra)) {
             let Some(entry) = servers.get(&name) else {
                 continue;
             };
@@ -133,11 +197,11 @@ fn with_profile(url: &str) -> String {
 /// server outside [`WORKER_SERVERS`] and `extra` disabled, vogt on its
 /// worker profile.
 pub fn codex_worker_args(config: &toml::Table, extra: &[String]) -> Vec<String> {
-    let keep = worker_names(extra);
     let mut out = Vec::new();
     let Some(servers) = config.get("mcp_servers").and_then(|v| v.as_table()) else {
         return out;
     };
+    let keep = worker_names(&safe_extra(codex_servers_json(servers).as_ref(), extra));
     for (name, entry) in servers {
         if !is_bare_key(name) {
             // A name that would need quoting cannot be addressed safely in a
@@ -165,6 +229,13 @@ pub fn codex_worker_args(config: &toml::Table, extra: &[String]) -> Vec<String> 
         }
     }
     out
+}
+
+fn codex_servers_json(servers: &toml::Table) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match serde_json::to_value(servers).ok()? {
+        serde_json::Value::Object(map) => Some(map),
+        _ => None,
+    }
 }
 
 fn is_bare_key(name: &str) -> bool {
@@ -213,10 +284,13 @@ pub fn prepare(
                 match write_private(&path, &config) {
                     Ok(()) => {
                         trim.claude_config = Some(path);
-                        trim.claude_servers = worker_names(extra)
-                            .into_iter()
-                            .filter(|n| config["mcpServers"].get(n).is_some())
-                            .collect();
+                        trim.claude_servers = worker_names(&safe_extra(
+                            claude.get("mcpServers").and_then(|v| v.as_object()),
+                            extra,
+                        ))
+                        .into_iter()
+                        .filter(|n| config["mcpServers"].get(n).is_some())
+                        .collect();
                     }
                     Err(e) => tracing::warn!(error = %e, "worker MCP config not written; full set"),
                 }
@@ -240,7 +314,11 @@ pub fn prepare(
         .unwrap_or_default();
     if let Some(codex) = codex.as_ref() {
         trim.codex_args = codex_worker_args(codex, extra);
-        trim.codex_servers = worker_names(extra)
+        let servers = codex
+            .get("mcp_servers")
+            .and_then(|v| v.as_table())
+            .and_then(codex_servers_json);
+        trim.codex_servers = worker_names(&safe_extra(servers.as_ref(), extra))
             .into_iter()
             .filter(|n| codex_registered.contains(n))
             .collect();
@@ -538,5 +616,57 @@ mod tests {
             home.join(".claude.json")
         );
         assert_eq!(claude_json_path(None, None), None);
+    }
+
+    #[test]
+    fn a_claude_extra_on_the_vogt_endpoint_is_dropped() {
+        let home = serde_json::json!({
+            "mcpServers": {
+                "vogt": {"type": "http", "url": "https://v.example/mcp"},
+                "vogt-admin": {"type": "http", "url": "https://v.example/mcp/?profile=full"},
+                "bridge": {"command": "/usr/local/bin/vogt-mcp-remote"},
+                "komodo": {"command": "k"},
+            }
+        });
+        let out = claude_worker_config(&home, &names(&["vogt-admin", "bridge", "komodo"]));
+        let mut kept: Vec<_> = out["mcpServers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["komodo", "vogt"]);
+        assert_eq!(
+            out["mcpServers"]["vogt"]["url"],
+            "https://v.example/mcp?profile=worker"
+        );
+    }
+
+    #[test]
+    fn a_stdio_extra_with_vogts_command_is_dropped() {
+        let servers = serde_json::json!({
+            "vogt": {"command": "vogt-mcp", "args": ["--remote"]},
+            "again": {"command": "vogt-mcp", "args": ["--remote"], "env": {"X": "1"}},
+            "other": {"command": "vogt-mcp", "args": ["--other"]},
+        });
+        assert_eq!(
+            safe_extra(servers.as_object(), &names(&["again", "other", "ghost"])),
+            ["other", "ghost"]
+        );
+    }
+
+    #[test]
+    fn a_codex_extra_on_the_vogt_endpoint_stays_disabled() {
+        let config: toml::Table = r#"
+            [mcp_servers.vogt]
+            url = "https://v.example/mcp"
+            [mcp_servers.vogt-admin]
+            url = "https://v.example/mcp?profile=full"
+        "#
+        .parse()
+        .unwrap();
+        let args = codex_worker_args(&config, &names(&["vogt-admin"]));
+        assert!(args.contains(&"mcp_servers.vogt-admin.enabled=false".to_string()));
     }
 }

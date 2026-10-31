@@ -409,7 +409,12 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
         project=project,
         open_work=len(gathered.ranked),
         open_bugs=sum(1 for entry in gathered.ranked if entry.kind == "bug"),
-        mcp_extra_unregistered=unregistered_mcp(project.mcp_extra),
+        mcp_extra_unregistered=unregistered_mcp(
+            project.mcp_extra,
+            claude_dirs=[
+                a.dir for a in ctx.config.usage_accounts if a.agent == "claude"
+            ],
+        ),
         declared_work=gathered.declared,
         observed_work=gathered.observed,
         by_state=dict(sorted(by_state.items())),
@@ -452,19 +457,26 @@ def _mcp_names(names: list[str]) -> list[str]:
     return out
 
 
-def unregistered_mcp(names: list[str], home: Path | None = None) -> list[str]:
+def unregistered_mcp(
+    names: list[str],
+    home: Path | None = None,
+    claude_dirs: list[Path] | None = None,
+) -> list[str]:
     """Extras no MCP config on this host registers (WI-2746 drift).
 
     Reads the same configs the engine trims from: `~/.claude.json` (or
-    `$CLAUDE_CONFIG_DIR/.claude.json`) and `~/.codex/config.toml`. A config
-    that is missing or unreadable registers nothing.
+    `$CLAUDE_CONFIG_DIR/.claude.json`) and `~/.codex/config.toml`. A session
+    can run under another Claude account, whose config dir is not this
+    process's, so each of `claude_dirs` (the configured accounts) counts too
+    (WI-2750). A config that is missing or unreadable registers nothing.
     """
     if not names:
         return []
     root = home if home is not None else Path.home()
     registered: set[str] = set()
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR") if home is None else None
-    for claude in {Path(config_dir) if config_dir else root, root}:
+    dirs = {Path(config_dir) if config_dir else root, root, *(claude_dirs or [])}
+    for claude in dirs:
         try:
             data = json.loads((claude / ".claude.json").read_text())
             registered.update(data.get("mcpServers") or {})
@@ -537,8 +549,15 @@ def _digest_in_progress(
     if not working:
         return []
     sessions = view.list_sessions(project_id=project.id, limit=500, offset=0)
+    # The newest live session holds an item, whatever order the store
+    # returns them in (WI-2750).
+    live = sorted(
+        (s for s in sessions if s.stopped_at is None),
+        key=lambda s: s.started_at,
+        reverse=True,
+    )
     held_by: dict[str, str] = {}
-    for session in sessions:
+    for session in live:
         if session.work_item_id is not None:
             held_by.setdefault(session.work_item_id, f"session {session.id}")
     working.sort(key=lambda item: item.updated_at, reverse=True)
