@@ -214,6 +214,9 @@ pub struct Session {
     /// RFC 3339. Set once per turn, so a re-render of the same screen does not
     /// declare it again; cleared when the next turn starts.
     done_at: Mutex<Option<String>>,
+    /// What a Codex rollout said about this session's turns (WI-1576). Once
+    /// a rollout is read, readiness and done come from it, not the screen.
+    rollout: Mutex<crate::codex_rollout::RolloutTurns>,
 }
 
 impl Session {
@@ -352,6 +355,34 @@ impl Session {
         }
         *done = Some(at);
         true
+    }
+
+    /// Fold rollout events into this session's turn state (WI-1576).
+    pub(crate) fn apply_rollout(
+        &self,
+        events: &[crate::codex_rollout::RolloutEvent],
+        replay: bool,
+    ) -> crate::codex_rollout::Outcome {
+        self.rollout.lock().apply(events, replay)
+    }
+
+    /// Publish the `ready` a rollout's `task_complete` stands for. The rollout
+    /// already deduplicates by turn id; the flag keeps the screen path quiet.
+    pub(crate) fn announce_rollout_ready(&self, bus: &EventBus) {
+        self.ready_announced.store(true, Ordering::Release);
+        bus.publish(ServerEvent::SessionReady { id: self.id });
+    }
+
+    /// A Codex rollout is driving this session's readiness and done (WI-1576).
+    pub fn rollout_seen(&self) -> bool {
+        self.rollout.lock().seen
+    }
+
+    /// The rollout says a turn is under way, or a goal continues idle turns
+    /// on its own: either way autopilot must not nudge (WI-1576).
+    pub fn rollout_own_loop(&self) -> bool {
+        let turns = self.rollout.lock();
+        turns.seen && (turns.running || turns.goal_active)
     }
 
     /// Put a done declaration back onto a session that was just woken, without
@@ -1452,6 +1483,7 @@ pub fn spawn(
         budget_hold: AtomicBool::new(false),
         ready_announced: AtomicBool::new(false),
         done_at: Mutex::new(None),
+        rollout: Mutex::new(Default::default()),
     });
 
     spawn_reader_thread(
@@ -2109,7 +2141,9 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
 /// rest in the same turn that was not at a prompt does not count, because the
 /// prompt often lands a moment after the output that began the turn.
 fn announce_ready_if_at_prompt(session: &Session, resting: ActivityState, bus: &EventBus) {
-    if session.ready_announced.load(Ordering::Acquire) {
+    // A session whose Codex rollout is read announces from `task_complete`
+    // instead (WI-1576); the screen is the fallback when there is none.
+    if session.ready_announced.load(Ordering::Acquire) || session.rollout_seen() {
         return;
     }
     let (rendered, _) = session.render_screen(0);
