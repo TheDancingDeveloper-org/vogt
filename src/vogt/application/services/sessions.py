@@ -149,9 +149,10 @@ from vogt.application.services.reports import latest_reports, one_line
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
 from vogt.collectors.base import CollectorError
-from vogt.core import cold_wake, delivery, oversight, runtime
+from vogt.core import cold_wake, delivery, dispatch, oversight, runtime
 from vogt.core.auth import Scope, hash_token, issue, parse_scopes
 from vogt.core.branches import default_branch_name
+from vogt.core.digest import digest_of
 from vogt.core.entities import (
     Actor,
     AgentPolicy,
@@ -182,6 +183,9 @@ _LOG = logger("sessions")
 SESSION_START = "session.start"
 SESSION_STOP = "session.stop"
 SESSION_STARTED_EVENT = "session.started"
+#: The audit operation (and event) an oversight `override` writes beside the
+#: start it allowed (WI-1329); the Inbox lists them.
+DISPATCH_OVERRIDE = "dispatch.override"
 SESSION_STOPPED_EVENT = "session.stopped"
 SESSION_INPUT = "session.input"
 SESSION_INPUT_EVENT = "session.input"
@@ -287,6 +291,17 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             "checkout, cwd opens one that already exists"
         )
         raise InvalidRequest(msg)
+    started_by_session, started_by_kind = _started_by(ctx, engine)
+    override = _override_reason(params, started_by_kind)
+    with ctx.declared.read() as view:
+        settings = dispatch_settings(view)
+        blockers_count = _failed_reviews(view, params)
+    # Escalation before the profile fills the start (WI-1329): an item that
+    # keeps failing review gets the careful profile's model and budget.
+    escalated_to = dispatch.escalation(params.purpose, blockers_count, settings)
+    enforcing = ctx.principal.kind == "agent" and settings.enforce
+    if escalated_to is not None and enforcing:
+        params = params.model_copy(update={"purpose": escalated_to})
     params, overrides, read_only = _resolve_purpose(ctx, params)
     if params.cwd and params.worktree:
         params = params.model_copy(update={"worktree": None})
@@ -294,7 +309,20 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # a project's review policy is a rule, and a start that would run a model
     # it forbids is refused rather than spawned (WI-1590).
     _refuse_forbidden_model(ctx, params)
-    started_by_session, started_by_kind = _started_by(ctx, engine)
+    decision = _dispatch_check(
+        ctx, params, settings, started_by_session, started_by_kind, blockers_count
+    )
+    if enforcing and override is None and decision.violations:
+        # Refused before the engine is asked: no terminal is started.
+        msg = "; ".join(v.message for v in decision.violations)
+        raise InvalidRequest(f"dispatch refused this start — {msg}")
+    dispatch_notes = [v.message for v in decision.violations]
+    if escalated_to is not None and not enforcing:
+        dispatch_notes.append(
+            f"escalate_after_failed_reviews={settings.escalate_after_failed_reviews}"
+            f": {blockers_count} failed reviews would run {escalated_to}"
+        )
+    escalated = escalated_to if enforcing else None
     session_id = ctx.id_factory("ses")
     params, created_chore = _bind_unbound_worker(ctx, params)
     try:
@@ -393,7 +421,6 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     )
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
-        del actor
         now = ctx.clock()
         holder = Actor(
             id=ctx.id_factory("act"),
@@ -439,6 +466,10 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         # Additive and forward-only — this writes a name, never a branch: git
         # is not touched, and the row rides this session's audit like every
         # other change in the transaction.
+        if override is not None:
+            _audit_override(
+                txn, actor, session, override, decision, subject.work_item_ref, now
+            )
         declared_branch = (
             None
             if subject.work_item is None
@@ -456,6 +487,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 effective_policy=_effective_policy(
                     subject.policy, params.task, caller_merges=caller_merges
                 ),
+                escalated_to=escalated,
             ),
             entity_kind="session",
             entity_id=session.id,
@@ -500,6 +532,12 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 "repo_map": params.repo_map,
                 "started_by_session": started_by_session,
                 "started_by_kind": started_by_kind,
+                # Dispatch (WI-1329): the rules this start broke but was not
+                # refused for (a person, enforcement off, or an override),
+                # the oversight override's reason, and any escalation.
+                "dispatch_notes": dispatch_notes,
+                "override_reason": override,
+                "escalated_to": escalated,
                 # How long the engine took to start it (WI-927); the launch
                 # inside it is timed by the engine's own launch report.
                 "engine_spawn_ms": engine_spawn_ms,
@@ -4914,6 +4952,122 @@ def _model_matches_forbidden_text(model: str, patterns: list[str]) -> str | None
         except re.error:
             continue
     return None
+
+
+def _override_reason(
+    params: StartSessionParams, started_by_kind: str | None
+) -> str | None:
+    """The cleaned `override` text, refused unless oversight sent it (WI-1329).
+
+    A worker that could override would lift its own cap; a person is never
+    held to the rules, so it has nothing to override.
+    """
+    if params.override is None:
+        return None
+    if started_by_kind != "oversight":
+        msg = (
+            "override is accepted only from an oversight session "
+            f"(this caller is {started_by_kind or 'of unknown role'}); "
+            "ask oversight or a person to start this session"
+        )
+        raise InvalidRequest(msg)
+    return writes.validate_reason(params.override)
+
+
+def _failed_reviews(view: ReadView, params: StartSessionParams) -> int:
+    """How many `verdict=blockers` comments the start's item has (WI-1319)."""
+    ref = params.work_item or params.review_of or params.from_handoff
+    if ref is None:
+        return 0
+    try:
+        item = _resolve.work_item(view, ref)
+    except VogtError:
+        return 0
+    return sum(
+        1
+        for comment in view.comments_for(item.id, limit=_MAX_COMMENTS_SCANNED)
+        if comment.kind == "verdict"
+        and comment.verdict is not None
+        and comment.verdict.verdict == "blockers"
+    )
+
+
+_MAX_COMMENTS_SCANNED = 1000
+
+
+def _dispatch_check(
+    ctx: AppContext,
+    params: StartSessionParams,
+    settings: dispatch.DispatchSettings,
+    started_by_session: str | None,
+    started_by_kind: Literal["person", "oversight", "worker"] | None,
+    blockers_count: int,
+) -> dispatch.Decision:
+    """The dispatch rules this start breaks (WI-1329), judged for any caller.
+
+    Live workers are the caller's started sessions Vogt has not stopped; an
+    agent can start only workers, so every one counts.
+    """
+    live_workers = 0
+    if started_by_session is not None:
+        with ctx.declared.read() as view:
+            live_workers = len(
+                view.list_sessions(
+                    started_by_session=started_by_session,
+                    limit=settings.max_workers_per_overseer + 1,
+                    offset=0,
+                )
+            )
+    return dispatch.check(
+        purpose=params.purpose,
+        review=params.purpose == "review" or params.review_of is not None,
+        model=params.model,
+        caller_role=started_by_kind,
+        live_workers=live_workers,
+        blockers_count=blockers_count,
+        settings=settings,
+    )
+
+
+def _audit_override(
+    txn: WriteTxn,
+    actor: Actor,
+    session: CodingSession,
+    reason: str,
+    decision: dispatch.Decision,
+    work_item: str | None,
+    at: datetime,
+) -> None:
+    """The audit row and event an oversight override leaves (WI-1329).
+
+    Its own operation, so the Inbox and `audit_list` find every override
+    without reading start payloads; the override text is its reason.
+    """
+    payload: dict[str, object] = {
+        "session": session.id,
+        "work_item": work_item,
+        "override_reason": reason,
+        "rules": [v.rule for v in decision.violations],
+        "notes": [v.message for v in decision.violations],
+    }
+    record = txn.append_audit(
+        actor=actor,
+        operation=DISPATCH_OVERRIDE,
+        entity_kind="session",
+        entity_id=session.id,
+        reason=reason,
+        payload_digest=digest_of(payload),
+        at=at,
+    )
+    txn.append_event(
+        kind=DISPATCH_OVERRIDE,
+        entity_kind="session",
+        entity_id=session.id,
+        actor_id=actor.id,
+        audit_id=record.id,
+        summary=payload,
+        at=at,
+    )
 
 
 def _refuse_forbidden_model(ctx: AppContext, params: StartSessionParams) -> None:

@@ -4663,6 +4663,17 @@ class StartSessionParams(Params):
             "as an override. Recorded on the session."
         ),
     )
+    override: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Why this start may break the dispatch rules (WI-1329): the "
+            "worker cap, review by oversight only and the profile's model. "
+            "Accepted only from an oversight session; audited as "
+            "`dispatch.override` with this text as its reason, and raised "
+            "in the Inbox."
+        ),
+    )
 
 
 #: The two id forms every session operation accepts. A session Vogt started
@@ -5640,6 +5651,14 @@ class SessionResult(Result):
         description=(
             "On `session.start` for a project with a landing rule: the rule "
             "the worker runs under and any task lines it overrode."
+        ),
+    )
+    escalated_to: str | None = Field(
+        default=None,
+        description=(
+            "On `session.start`: the purpose an `implement` start ran as "
+            "instead, because its item failed review "
+            "`dispatch.escalate_after_failed_reviews` times (WI-1329)."
         ),
     )
 

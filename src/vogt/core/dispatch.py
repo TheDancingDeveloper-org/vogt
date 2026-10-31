@@ -10,8 +10,9 @@ restating the rest.
 
 The three limits beside it (`max_workers_per_overseer`,
 `escalate_after_failed_reviews`, `review_by_oversight_only`) are read and
-validated here too. Nothing in this item refuses a start on them; that is
-WI-1329's enforcement.
+validated here too, and `check` judges an agent's start against them
+(WI-1329). They are enforced only when `dispatch.enforce` is on; until a
+person turns it on, a start that breaks one is recorded, not refused.
 
 A profile never carries a role or a permission posture. Both are a person's
 decision on each start, and a profile is a default an agent can name, so a
@@ -44,6 +45,7 @@ MAX_WORKERS_KEY = "dispatch.max_workers_per_overseer"
 ESCALATE_KEY = "dispatch.escalate_after_failed_reviews"
 REVIEW_BY_OVERSIGHT_KEY = "dispatch.review_by_oversight_only"
 BUDGET_RESTARTS_KEY = "dispatch.budget_restarts_per_item"
+ENFORCE_KEY = "dispatch.enforce"
 KEY_PREFIX = "dispatch."
 
 
@@ -163,6 +165,8 @@ DEFAULT_REVIEW_BY_OVERSIGHT_ONLY = True
 #: a budget stop (WI-1833). `0` turns the restart off; the hand-off is still
 #: written.
 DEFAULT_BUDGET_RESTARTS_PER_ITEM = 1
+#: Off, so a deployment's starts change only once a person turns it on.
+DEFAULT_ENFORCE = False
 
 
 class _IntSetting(BaseModel):
@@ -187,6 +191,7 @@ _SCALAR_SHAPES: dict[str, type[BaseModel]] = {
     ESCALATE_KEY: _IntSetting,
     REVIEW_BY_OVERSIGHT_KEY: _BoolSetting,
     BUDGET_RESTARTS_KEY: _CountSetting,
+    ENFORCE_KEY: _BoolSetting,
 }
 KEYS: tuple[str, ...] = (PROFILES_KEY, *_SCALAR_SHAPES)
 
@@ -201,6 +206,7 @@ class DispatchSettings(BaseModel):
     escalate_after_failed_reviews: int = DEFAULT_ESCALATE_AFTER_FAILED_REVIEWS
     review_by_oversight_only: bool = DEFAULT_REVIEW_BY_OVERSIGHT_ONLY
     budget_restarts_per_item: int = DEFAULT_BUDGET_RESTARTS_PER_ITEM
+    enforce: bool = DEFAULT_ENFORCE
 
 
 def _problems(error: ValidationError) -> str:
@@ -270,6 +276,7 @@ def resolve(stored: Mapping[str, Mapping[str, object]]) -> DispatchSettings:
         (ESCALATE_KEY, "escalate_after_failed_reviews"),
         (REVIEW_BY_OVERSIGHT_KEY, "review_by_oversight_only"),
         (BUDGET_RESTARTS_KEY, "budget_restarts_per_item"),
+        (ENFORCE_KEY, "enforce"),
     ):
         raw = stored.get(key)
         if not raw:
@@ -281,16 +288,120 @@ def resolve(stored: Mapping[str, Mapping[str, object]]) -> DispatchSettings:
     return DispatchSettings(profiles=profiles, **scalars)  # type: ignore[arg-type]
 
 
+Rule = Literal["review_by_oversight_only", "profile_model", "max_workers_per_overseer"]
+CallerRole = Literal["person", "oversight", "worker"]
+
+
+class Violation(BaseModel):
+    """One dispatch rule a start breaks, with the values that broke it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rule: Rule
+    message: str
+
+
+class Decision(BaseModel):
+    """What `check` found: the rules broken, and the purpose to run instead.
+
+    `escalated_to` is set when an `implement` start is resolved as
+    `implement-careful` because the item has failed review often enough.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    violations: tuple[Violation, ...] = ()
+    escalated_to: Purpose | None = None
+    blockers_count: int = 0
+
+
+def escalation(
+    purpose: Purpose | None, blockers_count: int, settings: DispatchSettings
+) -> Purpose | None:
+    """`implement-careful` when an `implement` item has failed review enough."""
+    if (
+        purpose == "implement"
+        and blockers_count >= settings.escalate_after_failed_reviews
+    ):
+        return "implement-careful"
+    return None
+
+
+def check(
+    *,
+    purpose: Purpose | None,
+    review: bool,
+    model: str | None,
+    caller_role: CallerRole | None,
+    live_workers: int,
+    blockers_count: int,
+    settings: DispatchSettings,
+) -> Decision:
+    """Judge one start against the dispatch rules (design §2.4, WI-1329).
+
+    `purpose` is the purpose the start will run (after any escalation) and
+    `model` the model it will run, the caller's or the profile's.
+    `caller_role` is the starter's engine role (`person` for a person);
+    `live_workers` counts the caller's live started sessions. A rule that
+    has nothing to judge (no model, an unknown role) is not broken. The
+    project's `review.never_models` is not judged here: that refusal holds
+    for every caller and is made before this (WI-1590).
+    """
+    violations: list[Violation] = []
+    if review and caller_role == "worker" and settings.review_by_oversight_only:
+        violations.append(
+            Violation(
+                rule="review_by_oversight_only",
+                message=(
+                    "review_by_oversight_only=true: a worker session cannot "
+                    "start a reviewer; a person or an oversight session does"
+                ),
+            )
+        )
+    if purpose in ("implement", "mechanical") and model is not None:
+        expected = settings.profiles[purpose].model
+        if model != expected:
+            violations.append(
+                Violation(
+                    rule="profile_model",
+                    message=(
+                        f"purpose={purpose} runs model {expected!r} by the "
+                        f"dispatch profile, not {model!r}"
+                    ),
+                )
+            )
+    cap = settings.max_workers_per_overseer
+    if caller_role in ("oversight", "worker") and live_workers >= cap:
+        violations.append(
+            Violation(
+                rule="max_workers_per_overseer",
+                message=(
+                    f"max_workers_per_overseer={cap} reached: this session "
+                    f"already has {live_workers} live workers; stop one first"
+                ),
+            )
+        )
+    return Decision(
+        violations=tuple(violations),
+        escalated_to=escalation(purpose, blockers_count, settings),
+        blockers_count=blockers_count,
+    )
+
+
 __all__ = [
     "DEFAULT_PROFILES",
     "KEYS",
     "KEY_PREFIX",
     "PROFILES_KEY",
     "PURPOSES",
+    "Decision",
     "DispatchError",
     "DispatchSettings",
     "Profile",
     "Purpose",
+    "Violation",
+    "check",
+    "escalation",
     "resolve",
     "validate",
 ]
