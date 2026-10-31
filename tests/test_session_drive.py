@@ -856,6 +856,12 @@ def test_a_typed_blocked_report_carries_needs_boundary_and_a_content_key(
         if e.kind == "session.blocked"
     ]
     assert f"agent:session:{engine_id}:blocked:{result.blocked.key}" in first
+    titles = [
+        e.title
+        for e in list_inbox(wired, InboxListParams()).entries
+        if e.kind == "session.blocked"
+    ]
+    assert titles and titles[0].endswith("is blocked on its overseer")
     report_blocked(wired, params)
     again = [
         e.entry_key

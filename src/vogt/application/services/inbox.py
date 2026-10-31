@@ -1010,6 +1010,15 @@ def _drift_entry(
     )
 
 
+#: Who a blocked report waits on, by its `needs` (WI-996). An unknown value
+#: (a newer engine) reads as a person, as `_needs` does.
+_BLOCKED_ON = {
+    "person": "you",
+    "overseer": "its overseer",
+    "either": "you or its overseer",
+}
+
+
 def _blocked_entry(
     ctx: AppContext,
     session_id: str,
@@ -1026,13 +1035,15 @@ def _blocked_entry(
     One occurrence per ask: its key is the report's content key (WI-996), so
     the same ask reported again stays one entry (archived stays archived) and
     a different ask surfaces anew. A report from an engine without content
-    keys falls back to the report's time. The text is the agent's —
+    keys falls back to the report's time. The title names who it waits on
+    (`needs`). The text is the agent's —
     untrusted, shown verbatim.
     """
     project = None if declared is None else projects.get(declared.project_id)
     ref = _bound_ref(view, declared, work_label)
     todo = "; ".join(blocked.items)
     summary = f"{blocked.reason}{' — to do: ' + todo if todo else ''}"[:1000]
+    on = _BLOCKED_ON.get(blocked.needs, "you")
     return InboxEntry(
         entry_key=(
             f"agent:session:{session_id}:blocked:{blocked.key}"
@@ -1044,9 +1055,9 @@ def _blocked_entry(
         occurred_at=_when(blocked.since) or ctx.clock(),
         observed_at=None,
         title=(
-            f"{ref} session {name or session_id} is blocked on you"
+            f"{ref} session {name or session_id} is blocked on {on}"
             if ref
-            else f"Session {name or session_id} is blocked on you"
+            else f"Session {name or session_id} is blocked on {on}"
         ),
         summary=summary,
         project_slug=None if project is None else project.slug,
