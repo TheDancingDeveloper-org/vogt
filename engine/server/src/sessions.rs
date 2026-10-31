@@ -140,6 +140,44 @@ enum Origin {
 }
 
 /// What [`SessionRegistry::clean_scratch`] does to a session's scratchpad.
+/// A stop's request to remove the worktree after cleaning it (WI-1774).
+struct Removal {
+    base_ref: Option<String>,
+}
+
+/// Remove a stopped session's linked worktree when nothing in it would be
+/// lost: the tree is clean (untracked files count, git-ignored ones do not),
+/// `HEAD` is in its base, upstream, `origin/HEAD` or `origin/main`, and the
+/// branch has no stash entries. The caller has already made sure no other
+/// running or hibernated session works there and the session's processes
+/// are gone. Any doubt keeps the tree; never forced.
+fn remove_stopped_worktree(id: Uuid, root: &std::path::Path, base_ref: Option<&str>) {
+    let plan = match crate::workspace_clean::plan_removal(root, base_ref, false) {
+        Ok(plan) => plan,
+        Err(why) => {
+            tracing::info!(session = %id, worktree = %root.display(), %why, "kept the stopped session's worktree");
+            return;
+        }
+    };
+    match crate::workspace_clean::remove(&plan) {
+        Ok((bytes, branch)) => tracing::info!(
+            target: "vogt::audit",
+            event = "workspace.clean",
+            session = %id,
+            path = %root.display(),
+            mode = "remove",
+            actor = "engine",
+            outcome = "done",
+            bytes_freed = bytes,
+            branch_deleted = branch.as_deref().unwrap_or(""),
+            "removed the stopped session's merged, clean worktree"
+        ),
+        Err(why) => {
+            tracing::warn!(session = %id, worktree = %root.display(), %why, "could not remove the stopped session's worktree")
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Scratch {
     Remove,
@@ -1462,7 +1500,7 @@ impl SessionRegistry {
         self.secret_broker.revoke(id);
         self.kill_strays(id);
         if self.cfg.worktree_clean_on_hibernate {
-            self.clean_worktree(id, &session.cwd, session.pid(), tree);
+            self.clean_worktree(id, &session.cwd, session.pid(), tree, None);
         }
         self.clean_scratch(id, Scratch::Prune);
         self.bus
@@ -2270,7 +2308,8 @@ impl SessionRegistry {
         if let Some(pid) = s.pid() {
             hibernation::kill_tree(pid, &tree);
         }
-        self.clean_worktree(id, &s.cwd, s.pid(), tree);
+        let removal = self.removal_for(s.workspace());
+        self.clean_worktree(id, &s.cwd, s.pid(), tree, removal);
     }
 
     /// `SIGKILL` whatever still runs with session `id`'s environment after
@@ -2328,17 +2367,33 @@ impl SessionRegistry {
     /// running after a short wait, or while another session — running, or
     /// hibernated, which a wake brings back — has its directory inside the
     /// same worktree. An exited session left in the registry builds nothing.
-    fn clean_worktree(&self, id: Uuid, cwd: &str, pid: Option<u32>, tree: Vec<u32>) {
-        self.clean_worktree_after(id, cwd, Leader::Process(pid, tree));
+    fn clean_worktree(
+        &self,
+        id: Uuid,
+        cwd: &str,
+        pid: Option<u32>,
+        tree: Vec<u32>,
+        removal: Option<Removal>,
+    ) {
+        self.clean_worktree_after(id, cwd, Leader::Process(pid, tree), removal);
     }
 
     /// `clean_worktree` for a session whose processes are already gone: a
     /// hibernated one being removed, whose tree its hibernation stopped.
-    fn clean_stopped_worktree(&self, id: Uuid, cwd: &str) {
-        self.clean_worktree_after(id, cwd, Leader::Stopped);
+    fn clean_stopped_worktree(&self, id: Uuid, cwd: &str, removal: Option<Removal>) {
+        self.clean_worktree_after(id, cwd, Leader::Stopped, removal);
     }
 
-    fn clean_worktree_after(&self, id: Uuid, cwd: &str, leader: Leader) {
+    /// Whether a stop should go on to remove the worktree (WI-1774): only
+    /// with `ENGINE_WORKTREE_REMOVE_ON_STOP`, carrying the ref the engine
+    /// cut it from so a branch merged into that base counts as merged.
+    fn removal_for(&self, workspace: Option<vogt_engine_contract::Workspace>) -> Option<Removal> {
+        self.cfg.worktree_remove_on_stop.then(|| Removal {
+            base_ref: workspace.and_then(|w| w.base_ref),
+        })
+    }
+
+    fn clean_worktree_after(&self, id: Uuid, cwd: &str, leader: Leader, removal: Option<Removal>) {
         let Some(root) = crate::worktree_clean::linked_worktree(std::path::Path::new(cwd)) else {
             return;
         };
@@ -2397,6 +2452,9 @@ impl SessionRegistry {
                     "cleaned build output from the session's worktree"
                 );
             }
+            if let Some(removal) = removal {
+                remove_stopped_worktree(id, &root, removal.base_ref.as_deref());
+            }
         };
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
@@ -2436,7 +2494,8 @@ impl SessionRegistry {
             self.clean_scratch(id, Scratch::Remove);
             if let Some((_, record)) = recorded_record.as_ref() {
                 if let Some(cwd) = record.cwd.as_deref() {
-                    self.clean_stopped_worktree(id, cwd);
+                    let removal = self.removal_for(record.workspace.clone());
+                    self.clean_stopped_worktree(id, cwd, removal);
                 }
             }
         }
