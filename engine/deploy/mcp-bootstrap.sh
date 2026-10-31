@@ -607,19 +607,27 @@ def _discover() -> dict[str, int] | None:
         except (TypeError, ValueError):
             return None
 
+    # WI-2745: each group keeps its own probe time under "probed", and "at"
+    # is the oldest of them, so a group carried forward unprobed is never
+    # passed off as fresh.
     cached_groups = None
+    probed: dict[str, float] = {}
+    now = time.time()
     try:
         with open(probe_path, encoding="utf-8") as fh:
             cached = json.load(fh)
         cached_groups = _groups(cached.get("groups")) if isinstance(cached, dict) else None
+        if cached.get("base") == base and isinstance(cached.get("probed"), dict):
+            probed = {str(k): float(v) for k, v in cached["probed"].items()}
         if (
             cached_groups
             and cached.get("base") == base
-            and time.time() - float(cached.get("at", 0)) < ttl
+            and now - float(cached.get("at", 0)) < ttl
         ):
             return cached_groups
     except (OSError, ValueError, TypeError, AttributeError):
         cached_groups = None
+        probed = {}
     if not key or os.environ.get("VOGT_CODEX_CATALOG_PROBE", "1") == "0":
         return cached_groups or None
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -654,24 +662,34 @@ def _discover() -> dict[str, int] | None:
         except Exception:
             return False
 
-    # WI-2744 N5: with a model asked for, only that group is probed; the rest
-    # are the groups that answered last time, else the known list. Without
-    # one, every group is probed, as on a first bootstrap.
+    # WI-2744 N5: with a model asked for, that group is probed, and so is
+    # every group whose own last probe is past the TTL or missing (WI-2745);
+    # the rest keep last time's answer. Without one, every group is probed.
     requested = _requested_model()
     if requested and requested in reported:
-        trusted = set(cached_groups or ()) or set(ROUTER_GROUPS)
+        trusted = set(cached_groups or ())
+        to_probe = [
+            slug for slug in reported
+            if slug == requested or now - probed.get(slug, 0.0) >= ttl
+        ]
         ok = {slug: slug in trusted for slug in reported}
-        ok[requested] = _answers(requested)
     else:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            ok = dict(zip(reported, pool.map(_answers, reported)))
+        to_probe = list(reported)
+        ok = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ok.update(zip(to_probe, pool.map(_answers, to_probe)))
+    stamped = {slug: probed.get(slug, 0.0) for slug in reported}
+    stamped.update({slug: now for slug in to_probe})
     groups = {slug: _context_window(slug, reported[slug]) for slug in reported if ok[slug]}
     if not groups:
         return None
     try:
         fd, tmp = tempfile.mkstemp(prefix=".vogt-model-catalog.probe.", dir=os.path.dirname(path) or ".")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"at": time.time(), "base": base, "groups": groups}, fh)
+            json.dump(
+                {"at": min(stamped.values()), "base": base, "groups": groups, "probed": stamped},
+                fh,
+            )
         os.replace(tmp, probe_path)
     except OSError:
         pass
@@ -1386,29 +1404,79 @@ _codex_link_skills() {
 # HTTP server at the Node B tailnet address (ops personal/crw). It needs no
 # token, so the registration is a URL only. VOGT_CRW_MCP_URL moves it, and an
 # empty value removes an entry this script wrote. Each CLI is asked only when
-# the stored URL differs, so a session launch costs one jq or grep, not a CLI.
-CRW_MCP_URL="${VOGT_CRW_MCP_URL-http://100.92.54.45:18190/mcp}"
+# the stored URL differs, so a session launch costs one jq or python read.
+# WI-2745: the URL this script last wrote is kept in a marker file beside each
+# CLI's config; an entry with any other URL (one added by hand) is left alone.
+# An unmarked entry at the default URL counts as ours (written before markers).
+CRW_DEFAULT_URL="http://100.92.54.45:18190/mcp"
+CRW_MCP_URL="${VOGT_CRW_MCP_URL-$CRW_DEFAULT_URL}"
 
-install_crw_server() {
-    local url="$CRW_MCP_URL" config
-    if command -v claude >/dev/null 2>&1; then
-        config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
-        if [[ -z "$url" ]]; then
-            claude_lacks crw || claude mcp remove --scope user crw >/dev/null 2>&1 || true
-        elif ! jq -e --arg u "$url" '.mcpServers.crw.url == $u' "$config" >/dev/null 2>&1; then
-            claude mcp remove --scope user crw >/dev/null 2>&1 || true
-            claude mcp add --scope user --transport http crw "$url" >/dev/null \
-                || printf 'mcp-bootstrap: claude registration of crw failed\n' >&2
+# crw_action CURRENT MARKER: CURRENT is the crw URL now in the CLI's
+# config ("" if none). Prints "add", "replace", "remove" or nothing.
+crw_action() {
+    local current="$1" marker="$2" url="$CRW_MCP_URL" owned=""
+    if [[ -n "$current" ]]; then
+        if [[ -f "$marker" ]]; then
+            [[ "$(cat "$marker")" == "$current" ]] && owned=1
+        elif [[ "$current" == "$CRW_DEFAULT_URL" ]]; then
+            owned=1
         fi
     fi
-    if command -v codex >/dev/null 2>&1; then
+    if [[ -z "$url" ]]; then
+        [[ -n "$owned" ]] && echo remove
+    elif [[ -z "$current" ]]; then
+        echo add
+    elif [[ "$current" != "$url" ]]; then
+        if [[ -n "$owned" ]]; then
+            echo replace
+        else
+            printf 'mcp-bootstrap: crw entry at %s was not written by Vogt; left alone\n' "$current" >&2
+        fi
+    fi
+    return 0
+}
+
+install_crw_server() {
+    local url="$CRW_MCP_URL" config marker current action
+    if command -v claude >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+        marker="${CLAUDE_CONFIG_DIR:-$HOME}/.vogt-crw-url"
+        current="$(jq -r '.mcpServers.crw.url // empty' "$config" 2>/dev/null || true)"
+        action="$(crw_action "$current" "$marker")"
+        [[ "$action" == remove || "$action" == replace ]] \
+            && claude mcp remove --scope user crw >/dev/null 2>&1
+        [[ "$action" == remove ]] && rm -f "$marker"
+        if [[ "$action" == add || "$action" == replace ]]; then
+            if claude mcp add --scope user --transport http crw "$url" >/dev/null; then
+                printf '%s' "$url" >"$marker"
+            else
+                printf 'mcp-bootstrap: claude registration of crw failed\n' >&2
+            fi
+        fi
+    fi
+    if command -v codex >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
         config="${CODEX_HOME:-$HOME/.codex}/config.toml"
-        if [[ -z "$url" ]]; then
-            grep -qsF '[mcp_servers.crw]' "$config" && codex mcp remove crw >/dev/null 2>&1 || true
-        elif ! grep -qsF "url = \"$url\"" "$config" || ! grep -qsF '[mcp_servers.crw]' "$config"; then
-            codex mcp remove crw >/dev/null 2>&1 || true
-            codex mcp add crw --url "$url" >/dev/null \
-                || printf 'mcp-bootstrap: codex registration of crw failed\n' >&2
+        marker="${CODEX_HOME:-$HOME/.codex}/vogt-crw-url"
+        # Read [mcp_servers.crw].url itself, not a url line anywhere.
+        current="$(python3 -c '
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as fh:
+        url = tomllib.load(fh).get("mcp_servers", {}).get("crw", {}).get("url", "")
+except (OSError, ValueError, AttributeError):
+    url = ""
+print(url if isinstance(url, str) else "")
+' "$config" 2>/dev/null || true)"
+        action="$(crw_action "$current" "$marker")"
+        [[ "$action" == remove || "$action" == replace ]] \
+            && codex mcp remove crw >/dev/null 2>&1
+        [[ "$action" == remove ]] && rm -f "$marker"
+        if [[ "$action" == add || "$action" == replace ]]; then
+            if codex mcp add crw --url "$url" >/dev/null; then
+                printf '%s' "$url" >"$marker"
+            else
+                printf 'mcp-bootstrap: codex registration of crw failed\n' >&2
+            fi
         fi
     fi
     return 0

@@ -1312,7 +1312,9 @@ def _counting_router(posts: list[str]) -> Any:
             self.wfile.write(data)
 
         def do_GET(self) -> None:
-            rows = [{"model_name": n, "model_info": {}} for n in ("grok", "gpt-5.4")]
+            rows: list[dict[str, object]] = [
+                {"model_name": n, "model_info": {}} for n in ("grok", "gpt-5.4")
+            ]
             self._send(200, {"data": rows})
 
         def do_POST(self) -> None:
@@ -1330,9 +1332,26 @@ def _counting_router(posts: list[str]) -> Any:
     reason="the Codex config rewrite needs python3 and flock",
 )
 def test_codex_catalog_probes_only_the_requested_model(tmp_path: Path) -> None:
-    """WI-2744 N5: a cache miss with a model asked for probes that one only."""
+    """WI-2744 N5: a cache miss with a model asked for probes that one only,
+    when every other group's own probe is still fresh (WI-2745)."""
+    import time
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
     posts: list[str] = []
     server = _counting_router(posts)
+    now = time.time()
+    (codex_home / "vogt-model-catalog.probe.json").write_text(
+        json.dumps(
+            {
+                "at": now - 99999,
+                "base": f"http://127.0.0.1:{server.server_address[1]}/v1",
+                "groups": {"grok": 1000},
+                "probed": {"grok": now, "gpt-5.4": now - 99999},
+            }
+        ),
+        encoding="utf-8",
+    )
     env = {
         "HOMELAB_LITELLM_SESSION_KEY": "test-key",
         "VOGT_LITELLM_BASE_URL": f"http://127.0.0.1:{server.server_address[1]}/v1",
@@ -1430,3 +1449,132 @@ def test_bootstrap_registers_crw_as_one_http_server(tmp_path: Path, url: str) ->
         assert adds == [f"mcp add --scope user --transport http crw {url}"]
     else:
         assert adds == []
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_codex_catalog_reprobes_groups_whose_own_probe_is_stale(
+    tmp_path: Path,
+) -> None:
+    """WI-2745: a launch asking for one model still re-probes every group
+    whose own probe time is past the TTL, and keeps per-group times."""
+    import time
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    posts: list[str] = []
+    server = _counting_router(posts)
+    base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    now = time.time()
+    (codex_home / "vogt-model-catalog.probe.json").write_text(
+        json.dumps(
+            {
+                "at": now - 99999,
+                "base": base,
+                "groups": {"grok": 1000},
+                "probed": {"grok": now - 99999, "gpt-5.4": now},
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = {
+        "HOMELAB_LITELLM_SESSION_KEY": "test-key",
+        "VOGT_LITELLM_BASE_URL": base,
+        "VOGT_CODEX_MODEL": "gpt-5.4",
+    }
+    try:
+        proc = _codex_bootstrap(tmp_path, env)
+    finally:
+        server.shutdown()
+    assert proc.returncode == 0, proc.stderr
+    assert sorted(posts) == ["gpt-5.4", "grok"]
+    cache = json.loads(
+        (codex_home / "vogt-model-catalog.probe.json").read_text(encoding="utf-8")
+    )
+    assert set(cache["probed"]) == {"grok", "gpt-5.4"}
+    assert cache["at"] == min(cache["probed"].values())
+    assert now - cache["at"] < 60
+
+
+def _crw_run(tmp_path: Path, cli: str, url: str) -> list[str]:
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    calls = tmp_path / f"{cli}-calls"
+    calls.unlink(missing_ok=True)
+    shim = bindir / cli
+    shim.write_text(f'#!/bin/sh\necho "$*" >> {calls}\nexit 0\n', encoding="utf-8")
+    shim.chmod(0o755)
+    proc = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "VOGT_SRC": str(tmp_path / "absent"),
+            "VOGT_CRW_MCP_URL": url,
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    lines = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    return [line for line in lines if " crw" in line]
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the fast path reads with jq")
+@pytest.mark.parametrize("url", ["http://crw.test:1/mcp", ""])
+def test_crw_leaves_a_hand_added_claude_entry_alone(tmp_path: Path, url: str) -> None:
+    """WI-2745: a crw entry Vogt did not write is neither replaced nor removed."""
+    (tmp_path / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"crw": {"type": "http", "url": "http://mine/mcp"}}}),
+        encoding="utf-8",
+    )
+    assert _crw_run(tmp_path, "claude", url) == []
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the fast path reads with jq")
+def test_crw_moves_and_removes_its_own_claude_entry(tmp_path: Path) -> None:
+    """WI-2745: an entry this script wrote (marker) moves with the URL, and an
+    empty URL removes it."""
+    config = tmp_path / ".claude.json"
+    config.write_text('{"mcpServers": {}}', encoding="utf-8")
+    assert _crw_run(tmp_path, "claude", "http://a/mcp") == [
+        "mcp add --scope user --transport http crw http://a/mcp"
+    ]
+    assert (tmp_path / ".vogt-crw-url").read_text(encoding="utf-8") == "http://a/mcp"
+    config.write_text(
+        json.dumps({"mcpServers": {"crw": {"type": "http", "url": "http://a/mcp"}}}),
+        encoding="utf-8",
+    )
+    assert _crw_run(tmp_path, "claude", "http://a/mcp") == []
+    assert _crw_run(tmp_path, "claude", "http://b/mcp") == [
+        "mcp remove --scope user crw",
+        "mcp add --scope user --transport http crw http://b/mcp",
+    ]
+    config.write_text(
+        json.dumps({"mcpServers": {"crw": {"type": "http", "url": "http://b/mcp"}}}),
+        encoding="utf-8",
+    )
+    assert _crw_run(tmp_path, "claude", "") == ["mcp remove --scope user crw"]
+    assert not (tmp_path / ".vogt-crw-url").exists()
+
+
+@pytest.mark.skipif(shutil.which("python3") is None, reason="reads TOML with python3")
+def test_crw_codex_reads_the_url_under_its_own_table(tmp_path: Path) -> None:
+    """WI-2745: a matching url line in another table does not count as crw."""
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        '[mcp_servers.crw]\nurl = "http://old/mcp"\n\n'
+        '[mcp_servers.other]\nurl = "http://new/mcp"\n',
+        encoding="utf-8",
+    )
+    (codex_home / "vogt-crw-url").write_text("http://old/mcp", encoding="utf-8")
+    assert _crw_run(tmp_path, "codex", "http://new/mcp") == [
+        "mcp remove crw",
+        "mcp add crw --url http://new/mcp",
+    ]
