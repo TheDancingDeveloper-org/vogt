@@ -958,6 +958,33 @@ class DependencySummary(Result):
     detail: str | None = None
 
 
+class ProjectDigest(Result):
+    """A compact status digest derived on read (WI-2747).
+
+    Nothing here is stored: every line is computed from work items, sessions,
+    session reports and observations at the moment the brief is read. Each
+    list is capped and each entry is one line, so the digest stays small.
+    """
+
+    initiatives: list[str] = Field(
+        default=[],
+        description="Open initiatives with open work here, heaviest first.",
+    )
+    in_progress: list[str] = Field(
+        default=[], description="Items in progress here, with who holds each."
+    )
+    recent_results: list[str] = Field(
+        default=[],
+        description="The newest `result` session reports on this project's items.",
+    )
+    last_merge: str | None = Field(
+        default=None, description="The newest merged pull request observed."
+    )
+    last_deploy: str | None = Field(
+        default=None, description="The newest deployment lane observation."
+    )
+
+
 class ProjectBriefResult(Result):
     """The per-repo view in one call."""
 
@@ -1008,6 +1035,10 @@ class ProjectBriefResult(Result):
     ci_status: CiSummary
     dependencies: DependencySummary
     freshness: Freshness
+    digest: ProjectDigest = Field(
+        default_factory=ProjectDigest,
+        description="Derived status digest; bounded, one line per entry.",
+    )
 
 
 # -- work ------------------------------------------------------------------

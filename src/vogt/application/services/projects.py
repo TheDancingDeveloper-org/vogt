@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
+from vogt.adapters.forge.kinds import KIND_DEPLOY_LANE
 from vogt.application.context import AppContext
 from vogt.application.models import (
     DEFAULT_EXCLUSIONS,
@@ -15,6 +17,7 @@ from vogt.application.models import (
     ListProjectsParams,
     ProjectBriefParams,
     ProjectBriefResult,
+    ProjectDigest,
     ProjectListing,
     ProjectListResult,
     ProjectResult,
@@ -35,12 +38,21 @@ from vogt.core.contract import (
     Scaffold,
     default_scaffold,
 )
-from vogt.core.entities import Actor, Project
+from vogt.core.entities import Actor, Project, WorkItem
 from vogt.core.ids import slugify
 from vogt.core.principal import LOCAL_SCHEME
-from vogt.core.workflow import check_lifecycle_transition
+from vogt.core.workflow import (
+    IN_PROGRESS,
+    TERMINAL_STATES,
+    check_lifecycle_transition,
+)
 from vogt.errors import Conflict, InvalidRequest, NotFound
-from vogt.storage.interface import ProjectUpdate, WorkFilter, WriteTxn
+from vogt.storage.interface import (
+    ProjectUpdate,
+    ReadView,
+    WorkFilter,
+    WriteTxn,
+)
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -371,6 +383,7 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
             by_kind[item.kind] = by_kind.get(item.kind, 0) + 1
 
         observed_version = _observed_version(ctx, project)
+        digest = _digest(ctx, view, project, items)
 
     # The same population `backlog` and `bugs` rank, so the three views agree
     # about one project at one moment. They did not: this read the declared
@@ -422,7 +435,151 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
         ci_status=_ci_summary(ctx, project),
         dependencies=_dependency_summary(ctx, project),
         freshness=freshness_of(ctx),
+        digest=digest,
     )
+
+
+#: Caps on the digest (WI-2747): each list is bounded and each entry one line.
+_DIGEST_INITIATIVES = 5
+_DIGEST_IN_PROGRESS = 8
+_DIGEST_RESULTS = 3
+_DIGEST_REPORT_SCAN = 200
+_DIGEST_LINE = 160
+
+
+def _line(text: str) -> str:
+    """One line, at most `_DIGEST_LINE` characters."""
+    flat = " ".join(text.split())
+    if len(flat) <= _DIGEST_LINE:
+        return flat
+    return flat[: _DIGEST_LINE - 1] + "…"
+
+
+def _digest(
+    ctx: AppContext, view: ReadView, project: Project, items: list[WorkItem]
+) -> ProjectDigest:
+    """The derived status digest (WI-2747): computed on read, never stored."""
+    live = [
+        item
+        for item in items
+        if item.superseded_by is None and item.state not in TERMINAL_STATES
+    ]
+    return ProjectDigest(
+        initiatives=_digest_initiatives(view, live),
+        in_progress=_digest_in_progress(view, project, live),
+        recent_results=_digest_results(view, items),
+        last_merge=_digest_last_merge(ctx, project),
+        last_deploy=_digest_last_deploy(ctx, project),
+    )
+
+
+def _digest_initiatives(view: ReadView, items: list[WorkItem]) -> list[str]:
+    counts: dict[str, int] = {}
+    for item in items:
+        if item.initiative_id is not None:
+            counts[item.initiative_id] = counts.get(item.initiative_id, 0) + 1
+    found = [
+        (initiative, counts[initiative_id])
+        for initiative_id in counts
+        if (initiative := view.initiative_by_id(initiative_id)) is not None
+        and initiative.state == "open"
+    ]
+    found.sort(key=lambda pair: (-pair[0].weight, pair[0].slug))
+    return [
+        _line(f"{i.slug} (weight {i.weight}, {n} open here): {i.title}")
+        for i, n in found[:_DIGEST_INITIATIVES]
+    ]
+
+
+def _digest_in_progress(
+    view: ReadView, project: Project, items: list[WorkItem]
+) -> list[str]:
+    working = [item for item in items if item.state == IN_PROGRESS]
+    if not working:
+        return []
+    sessions = view.list_sessions(project_id=project.id, limit=500, offset=0)
+    held_by: dict[str, str] = {}
+    for session in sessions:
+        if session.work_item_id is not None:
+            held_by.setdefault(session.work_item_id, f"session {session.id}")
+    working.sort(key=lambda item: item.updated_at, reverse=True)
+    lines = []
+    for item in working[:_DIGEST_IN_PROGRESS]:
+        holder = held_by.get(item.id) or item.assignee_identity_ref or "unheld"
+        lines.append(_line(f"{item.ref} [{holder}]: {item.title}"))
+    return lines
+
+
+def _digest_results(view: ReadView, items: list[WorkItem]) -> list[str]:
+    refs = {item.id: item.ref for item in items}
+    lines = []
+    for report in view.list_session_reports(kind="result", limit=_DIGEST_REPORT_SCAN):
+        ref = refs.get(report.work_item_id or "")
+        if ref is None:
+            continue
+        when = report.created_at.strftime("%Y-%m-%d %H:%MZ")
+        lines.append(_line(f"{when} {ref}: {report.summary}"))
+        if len(lines) == _DIGEST_RESULTS:
+            break
+    return lines
+
+
+def _parse_when(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _digest_last_merge(ctx: AppContext, project: Project) -> str | None:
+    if not ctx.observed.has_evidence_tables():
+        return None
+    best: tuple[datetime, str] | None = None
+    for obs in ctx.observed.latest(
+        kinds=("forge.pull_request",), project_id=project.id, limit=1000
+    ):
+        payload = obs.payload
+        if payload.get("state") != "merged":
+            continue
+        when = _parse_when(payload.get("merged_at") or payload.get("closed_at"))
+        when = when or obs.observed_at
+        if best is not None and when <= best[0]:
+            continue
+        number = payload.get("number")
+        title = str(payload.get("title") or "")
+        best = (when, f"{when:%Y-%m-%d %H:%MZ} #{number}: {title}")
+    return _line(best[1]) if best else None
+
+
+def _digest_last_deploy(ctx: AppContext, project: Project) -> str | None:
+    if not ctx.observed.has_evidence_tables():
+        return None
+    seen = ctx.observed.latest(
+        kinds=(KIND_DEPLOY_LANE,), project_id=project.id, limit=50
+    )
+    lines: list[tuple[datetime, str]] = []
+    for obs in seen:
+        payload = obs.payload
+        sha = None
+        for source in ("live", "receipt"):
+            block = payload.get(source)
+            if isinstance(block, dict) and isinstance(block.get("source_sha"), str):
+                sha = block["source_sha"]
+                break
+        if sha is None:
+            continue
+        lane = payload.get("lane") or obs.subject_key
+        lines.append(
+            (
+                obs.observed_at,
+                f"{lane} at {sha[:12]} (seen {obs.observed_at:%Y-%m-%d %H:%MZ})",
+            )
+        )
+    if not lines:
+        return None
+    return _line(max(lines)[1])
 
 
 def _observed_version(ctx: AppContext, project: Project) -> str | None:
