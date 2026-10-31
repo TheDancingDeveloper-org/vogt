@@ -351,7 +351,13 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
 /// Type the nudge, then Enter on its own: a TUI that reads a burst ending in
 /// a carriage return as a paste would keep the newline as text.
 async fn nudge(session: &Session) -> std::io::Result<()> {
-    session.write_input(NUDGE.as_bytes())?;
+    type_line(session, NUDGE).await
+}
+
+/// Type one line into a session's prompt and submit it, the way a nudge is
+/// typed. Shared with the overseer wake (WI-1521).
+pub async fn type_line(session: &Session, line: &str) -> std::io::Result<()> {
+    session.write_input(line.as_bytes())?;
     tokio::time::sleep(Duration::from_millis(300)).await;
     session.write_input(b"\r")
 }

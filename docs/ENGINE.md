@@ -813,6 +813,16 @@ than these routes.
   vogt-core's own credential. Answers and refusals are both audited
   (`vogt::audit`, `event=session.permission_answer`, `via=answer|input`,
   with the overseer, question and command excerpt).
+- `SessionSpec.supervisor` (an engine session id) and `SessionSpec.wake_on`
+  (WI-1521): vogt-core names the session that called `session.start` as the
+  new session's supervisor; both are kept in the record and on the summary,
+  so a wake keeps them. An oversight session whose `wake_on` names a kind
+  (`done`, `reported`, `blocked`, `approval`, `errored`, `budget`) is typed
+  one line when sessions it supervises change that way:
+  `[vogt] 2 workers changed (done: a; blocked: b) — session_changes(since=N)`.
+  Changes coalesce for 60 s; at most one wake a minute; never while the
+  overseer is mid-turn, blocked, hibernated or had input within 30 s. Logged
+  as `event=oversight.wake`. Empty `wake_on` (the default) types nothing.
 - `GET /api/sessions/changes[?since=N&ids=&limit=]` and
   `GET /api/sessions/wait-any[?ids=&until=&cursor=&timeout_s=]` — the overseer
   delta (WI-1246, WI-1672). `cursor` is a sequence number, or `now` to skip

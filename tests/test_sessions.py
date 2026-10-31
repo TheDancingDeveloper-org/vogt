@@ -3546,3 +3546,64 @@ def test_an_item_that_failed_review_escalates_to_implement_careful(
     )
     assert result.escalated_to == "implement-careful"
     assert engine.last_spec["model"] == "opus"
+
+
+def test_a_session_start_names_its_supervisor_to_the_engine_wi1521(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1521: the starter is sent as the engine's `supervisor` and shown on
+    the digest; a person's start sends none, and no `wake_on` by default."""
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert "supervisor" not in engine.last_spec
+    assert "wake_on" not in engine.last_spec
+    engine.roles[ENGINE_SESSION] = "oversight"
+    start_session(
+        _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+        StartSessionParams(work_item="WI-1", purpose="mechanical", reason=WHY),
+    )
+    assert engine.last_spec["supervisor"] == ENGINE_SESSION
+    from vogt.application.services.sessions import _digest_of
+
+    [full] = list_sessions(
+        wired, ListSessionsParams(mode="full", started_by_session=ENGINE_SESSION)
+    ).sessions
+    assert _digest_of(full).supervisor == ENGINE_SESSION
+
+
+def test_wake_on_is_sent_to_the_engine_and_checked_wi1521(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", role="oversight", wake_on=["done", "blocked"], reason=WHY
+        ),
+    )
+    assert engine.last_spec["wake_on"] == ["done", "blocked"]
+    with pytest.raises(ValueError):
+        StartSessionParams(work_item="WI-1", wake_on=["ready"], reason=WHY)
+
+
+def test_supervised_by_narrows_changes_and_wait_any_to_the_starters_sessions_wi1521(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1521: `supervised_by` (an id, or `me` for a session caller) becomes
+    the engine ids that starter started, intersected with `ids`; a filter
+    nothing matches sends the nil id rather than reading every session."""
+    from vogt.application.services.sessions import _engine_ids
+
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    engine.roles[ENGINE_SESSION] = "oversight"
+    caller = _as(wired, f"agent:engine:{ENGINE_SESSION}")
+    child = start_session(
+        caller,
+        StartSessionParams(work_item="WI-1", purpose="mechanical", reason=WHY),
+    ).session
+    assert _engine_ids(wired, [], ENGINE_SESSION) == [child.engine_session_id]
+    assert _engine_ids(caller, [], "me") == [child.engine_session_id]
+    assert _engine_ids(wired, [child.id], ENGINE_SESSION) == [child.engine_session_id]
+    nil = "00000000-0000-0000-0000-000000000000"
+    assert _engine_ids(wired, [], "11111111-2222-4333-8444-555566667777") == [nil]
+    assert _engine_ids(wired, [], None) is None
+    with pytest.raises(InvalidRequest, match="supervised_by=me"):
+        _engine_ids(wired, [], "me")

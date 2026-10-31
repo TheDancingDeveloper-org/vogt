@@ -137,6 +137,11 @@ Make every agent conversation findable, whatever started it:
 
 ### 3. Supervision linkage (slice 2)
 
+> Status (WI-1521): implemented. `session.start` records the starter; the
+> engine keeps it as `supervisor` on the record and summary (a wake keeps it),
+> the digest shows it, and `session.changes`, `session.wait_any` and
+> `session.sweep` take `supervised_by` (`me` is the caller).
+
 - **Who supervises whom is derived from the principal, never a parameter.**
   When `session.start` is called by `agent:session:ses_X` or
   `agent:engine:<uuid>`, the new session's supervisor is that session. This
@@ -158,6 +163,15 @@ Make every agent conversation findable, whatever started it:
   board groups the same way.
 
 ### 4. Notifications to the overseer (slice 3)
+
+> Status (WI-1521): the engine wake is implemented
+> (`engine/server/src/oversight_wake.rs`), off by default. An oversight
+> session started with `wake_on` (kinds `done`, `reported`, `blocked`,
+> `approval`, `errored`, `budget`) is typed one coalesced line 60 s after the
+> first matching change of a session it started, at most once a minute, only
+> while it rests at its prompt and nobody typed into it within 30 s. A
+> hibernated overseer is not woken. Logged `event=oversight.wake`. `wake_on`
+> is set at start only; there is no route to change it on a live session yet.
 
 The overseer should not have to poll. The engine already has every
 transition on its bus. What is missing is routing.

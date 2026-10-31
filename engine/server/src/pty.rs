@@ -148,6 +148,10 @@ pub struct Session {
     template: Mutex<Option<String>>,
     /// The work item it serves (see `SessionSummary::work_item`, WI-998).
     work_item: Mutex<Option<String>>,
+    /// The session that started it (see `SessionSummary::supervisor`, WI-1521).
+    supervisor: Mutex<Option<Uuid>>,
+    /// Change kinds that wake it as an overseer (WI-1521).
+    wake_on: Mutex<Vec<String>>,
     /// Its git tree, when it runs in one (WI-1324).
     workspace: Mutex<Option<vogt_engine_contract::Workspace>>,
     /// The session its work was handed to (WI-1251). Kept on the live session
@@ -581,6 +585,8 @@ impl Session {
             done_at: self.done_at(),
             role: self.role(),
             work_item: self.work_item(),
+            supervisor: self.supervisor(),
+            wake_on: self.wake_on(),
             workspace: self.workspace(),
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
@@ -675,6 +681,27 @@ impl Session {
 
     pub fn work_item(&self) -> Option<String> {
         self.work_item.lock().clone()
+    }
+
+    pub fn set_supervisor(&self, supervisor: Option<Uuid>) {
+        *self.supervisor.lock() = supervisor;
+    }
+
+    pub fn supervisor(&self) -> Option<Uuid> {
+        *self.supervisor.lock()
+    }
+
+    pub fn set_wake_on(&self, wake_on: Vec<String>) {
+        *self.wake_on.lock() = wake_on;
+    }
+
+    pub fn wake_on(&self) -> Vec<String> {
+        self.wake_on.lock().clone()
+    }
+
+    /// When input last reached the PTY, a person's keystrokes or a typed nudge.
+    pub fn last_input(&self) -> Option<Instant> {
+        *self.last_input.lock()
     }
 
     pub fn set_workspace(&self, workspace: Option<vogt_engine_contract::Workspace>) {
@@ -1396,6 +1423,8 @@ pub fn spawn(
         resources: Mutex::new(None),
         template: Mutex::new(None),
         work_item: Mutex::new(None),
+        supervisor: Mutex::new(None),
+        wake_on: Mutex::new(Vec::new()),
         workspace: Mutex::new(None),
         superseded_by: Mutex::new(None),
         permission_mode: Mutex::new(None),

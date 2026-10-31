@@ -1170,9 +1170,10 @@ class SessionDigest(Result):
 
     Target under 300 characters so fifty rows fit in one 15k tool result.
     `budget` is the engine's economics line when its tailer has metered the
-    session, and null until then. `supervisor` is named for WI-956 and stays
-    null until that exists. `brief_file` is null until the engine reports a
-    brief path; the launch argv stays on `mode=full`.
+    session, and null until then. `supervisor` is the engine id of the
+    session that started this one (WI-1521), null when a person did.
+    `brief_file` is null until the engine reports a brief path; the launch
+    argv stays on `mode=full`.
     """
 
     id: str
@@ -1240,7 +1241,10 @@ class SessionDigest(Result):
         ),
     )
     supervisor: str | None = Field(
-        default=None, description="Reserved for WI-956; null until supervision exists."
+        default=None,
+        description=(
+            "Engine id of the session that started this one; null when a person did."
+        ),
     )
     extra: dict[str, Any] | None = Field(
         default=None,
@@ -4621,6 +4625,17 @@ class StartSessionParams(Params):
             "refused. Change it later with session.set_role."
         ),
     )
+    wake_on: list[
+        Literal["done", "reported", "blocked", "approval", "errored", "budget"]
+    ] = Field(
+        default=[],
+        description=(
+            "For an oversight session: change kinds of the sessions it starts "
+            "that make the engine type one coalesced line into it while it "
+            "rests at its prompt (at most one a minute, never while a person "
+            "is typing). Empty (default) never types anything."
+        ),
+    )
     from_handoff: str | None = Field(
         default=None,
         description=(
@@ -4807,8 +4822,8 @@ class SweepSessionsParams(Params):
     supervised_by: str | None = Field(
         default=None,
         description=(
-            "Keep only sessions this one started: the starter's engine id or "
-            "its Vogt `ses_…` id."
+            "Keep only sessions this one started: the starter's engine id, "
+            "its Vogt `ses_…` id, or `me` for the caller."
         ),
     )
     mode: SessionViewMode = Field(
@@ -6327,7 +6342,14 @@ class SessionChangesParams(Params):
         default=[],
         description=(
             "Sessions to read, each `ses_…` or an engine UUID. Empty reads "
-            "every session. There is no supervised-by-me filter yet."
+            "every session."
+        ),
+    )
+    supervised_by: str | None = Field(
+        default=None,
+        description=(
+            "Keep only sessions this one started: the starter's engine id, "
+            "its Vogt `ses_…` id, or `me` for the caller."
         ),
     )
     limit: int = Field(
@@ -6353,7 +6375,14 @@ class SessionWaitAnyParams(Params):
         default=[],
         description=(
             "Sessions to wait on, each `ses_…` or an engine UUID. Empty waits "
-            "on every session. There is no supervised-by-me filter yet."
+            "on every session."
+        ),
+    )
+    supervised_by: str | None = Field(
+        default=None,
+        description=(
+            "Keep only sessions this one started: the starter's engine id, "
+            "its Vogt `ses_…` id, or `me` for the caller."
         ),
     )
     until: list[str] = Field(

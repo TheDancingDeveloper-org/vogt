@@ -137,6 +137,12 @@ pub struct Record {
     /// The work item it serves (WI-998); a wake and a redeploy keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// The session that started it (WI-1521); a wake keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<uuid::Uuid>,
+    /// Change kinds that wake it as an overseer (WI-1521); a wake keeps them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wake_on: Vec<String>,
     /// Its git tree and the baseline taken at the first start (WI-1324); a
     /// wake reuses it rather than taking the baseline again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,6 +241,8 @@ impl Record {
             budget_session_secs: 0,
             role: SessionRole::Worker,
             work_item: None,
+            supervisor: None,
+            wake_on: Vec::new(),
             workspace: None,
             superseded_by: None,
             hibernation: None,
