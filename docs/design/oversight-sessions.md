@@ -167,7 +167,8 @@ Make every agent conversation findable, whatever started it:
 > Status (WI-1521): the engine wake is implemented
 > (`engine/server/src/oversight_wake.rs`), off by default. An oversight
 > session started with `wake_on` (kinds `done`, `reported`, `blocked`,
-> `approval`, `errored`, `budget`) is typed one coalesced line 60 s after the
+> `approval`, `errored`, `budget`, and `escalated` (WI-996), which matches
+> any change carrying an escalation) is typed one coalesced line 60 s after the
 > first matching change of a session it started, at most once a minute, only
 > while it rests at its prompt and nobody typed into it within 30 s. A
 > hibernated overseer is not woken. Logged `event=oversight.wake`. `wake_on`
