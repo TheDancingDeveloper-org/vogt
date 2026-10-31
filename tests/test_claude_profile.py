@@ -14,11 +14,15 @@ The `claude` CLI is a shim that records `mcp add`, so the tests are offline.
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import shutil
 import subprocess
+import threading
+from collections.abc import Iterator
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -222,3 +226,89 @@ def test_path_env_and_list(sandbox: dict[str, str]) -> None:
         "no-login\n",
     ]
     assert registrations(sandbox) == []
+
+
+# `check` sends one request shaped as an interactive session's (WI-2741). A
+# fake API refuses it the way the real one did for an organisation with no
+# credit for interactive Claude Code, and accepts anything else.
+class _FakeApi(http.server.BaseHTTPRequestHandler):
+    seen: ClassVar[list[dict[str, object]]] = []
+    refuse = True
+
+    def do_POST(self) -> None:
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        type(self).seen.append(
+            {
+                "key": self.headers.get("x-api-key"),
+                "beta": self.headers.get("anthropic-beta"),
+                "body": body,
+            }
+        )
+        refused = (
+            type(self).refuse and "cc_entrypoint=cli;" in body["system"][0]["text"]
+        )
+        reply = (
+            {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Your credit balance is too low to access the API.",
+                },
+            }
+            if refused
+            else {"type": "message", "content": []}
+        )
+        data = json.dumps(reply).encode()
+        self.send_response(400 if refused else 200)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def fake_api(sandbox: dict[str, str]) -> Iterator[dict[str, str]]:
+    if shutil.which("curl") is None:
+        pytest.skip("needs curl")
+    _FakeApi.seen = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeApi)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    profile = Path(sandbox["CLAUDE_ACCOUNTS_ROOT"]) / "keyed"
+    profile.mkdir(parents=True)
+    (profile / "settings.json").write_text(
+        json.dumps({"apiKeyHelper": "echo sk-test-not-real"}), encoding="utf-8"
+    )
+    yield {**sandbox, "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}"}
+    server.shutdown()
+
+
+def test_check_reports_an_api_key_refused_for_interactive_sessions(
+    fake_api: dict[str, str],
+) -> None:
+    _FakeApi.refuse = True
+    proc = run(PROFILE, ["check", "keyed"], fake_api)
+    assert proc.returncode == 1
+    assert "credit balance too low" in proc.stderr
+    assert "sk-test-not-real" not in proc.stdout + proc.stderr
+    (req,) = _FakeApi.seen
+    assert req["key"] == "sk-test-not-real"
+    assert req["beta"] == "claude-code-20250219"
+
+
+def test_check_passes_an_api_key_that_can_run_interactive_sessions(
+    fake_api: dict[str, str],
+) -> None:
+    _FakeApi.refuse = False
+    proc = run(PROFILE, ["check", "keyed"], fake_api)
+    assert proc.returncode == 0, proc.stderr
+    assert "ok" in proc.stdout
+
+
+def test_check_skips_a_subscription_login(sandbox: dict[str, str]) -> None:
+    (Path(sandbox["CLAUDE_ACCOUNTS_ROOT"]) / "sub").mkdir(parents=True)
+    proc = run(PROFILE, ["check", "sub"], sandbox)
+    assert proc.returncode == 0, proc.stderr
+    assert "no apiKeyHelper" in proc.stdout
