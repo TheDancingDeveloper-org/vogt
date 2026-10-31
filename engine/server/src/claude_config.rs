@@ -52,6 +52,12 @@ pub struct Onboarding {
     /// (`ENGINE_AGENT_CLAUDE_ACCOUNTS`), each a config directory holding its
     /// own login. See [`parse_accounts`].
     pub accounts: Vec<ClaudeAccount>,
+    /// Where prepared profiles are discovered when a name is not in
+    /// `accounts` (`ENGINE_AGENT_CLAUDE_ACCOUNTS_ROOT`, default
+    /// `$HOME/.claude-accounts`; `off` turns discovery off). Read on every
+    /// lookup, so a profile prepared after start works without a restart
+    /// (WI-2734). See [`discover_account`].
+    pub accounts_root: Option<PathBuf>,
     /// The Codex half (WI-1143 / WI-1146): the managed requirements file Codex
     /// reads from `/etc/codex/requirements.toml`, or a deployment's own path.
     /// Unlike the opencode policy, a named file that is missing or unreadable
@@ -131,6 +137,79 @@ pub fn parse_accounts(value: Option<&str>) -> Vec<ClaudeAccount> {
         });
     }
     accounts
+}
+
+/// The file `claude-profile prepare` writes into a profile directory. It, or
+/// a `.claude.json`, marks a directory under the accounts root as an account.
+pub const PROFILE_MARKER: &str = ".vogt-claude-profile";
+
+/// `ENGINE_AGENT_CLAUDE_ACCOUNTS_ROOT`, read: a path, `off` for no discovery,
+/// unset or empty for `$HOME/.claude-accounts`. A relative path is refused.
+pub fn accounts_root_from(value: Option<&str>, home: Option<&Path>) -> Option<PathBuf> {
+    match value.map(str::trim) {
+        Some("off") => None,
+        Some(path) if !path.is_empty() => {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                Some(path)
+            } else {
+                tracing::warn!(path = %path.display(), "ENGINE_AGENT_CLAUDE_ACCOUNTS_ROOT is not absolute; discovery off");
+                None
+            }
+        }
+        _ => home.map(|h| h.join(".claude-accounts")),
+    }
+}
+
+/// The account `name` discovered under `root`: `root/<name>` when it is a
+/// directory whose real path is still inside the root's real path and that
+/// holds [`PROFILE_MARKER`] or `.claude.json` as a regular file. Returns the
+/// canonical directory, so the `CLAUDE_CONFIG_DIR` a session gets is never a
+/// symlink a later swap could redirect. The name is checked first, so a
+/// caller can never pass a path.
+pub fn discover_account(root: &Path, name: &str) -> std::result::Result<PathBuf, String> {
+    if !is_account_name(name) {
+        return Err(format!(
+            "account {name:?} is not a name ([a-z0-9][a-z0-9_-]{{0,31}})"
+        ));
+    }
+    let real_root =
+        std::fs::canonicalize(root).map_err(|_| format!("account {name:?}: not found"))?;
+    let dir = std::fs::canonicalize(real_root.join(name))
+        .map_err(|_| format!("account {name:?}: not found"))?;
+    if !dir.starts_with(&real_root) || dir == real_root {
+        return Err(format!(
+            "account {name:?}: its directory leaves the accounts root"
+        ));
+    }
+    if !dir.is_dir() {
+        return Err(format!("account {name:?}: not a directory"));
+    }
+    let marked = [PROFILE_MARKER, ".claude.json"]
+        .iter()
+        .any(|f| std::fs::symlink_metadata(dir.join(f)).is_ok_and(|m| m.file_type().is_file()));
+    if !marked {
+        return Err(format!(
+            "account {name:?}: not a prepared profile (run `claude-profile prepare {name}`)"
+        ));
+    }
+    Ok(dir)
+}
+
+/// Every account discoverable under `root` right now, by name.
+pub fn discover_accounts(root: &Path) -> Vec<ClaudeAccount> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut found: Vec<ClaudeAccount> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter_map(|name| {
+            let dir = discover_account(root, &name).ok()?;
+            Some(ClaudeAccount { name, dir })
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
 }
 
 /// `ENGINE_AGENT_CLAUDE_SETTINGS`, read: a path names a deployment's own
@@ -451,6 +530,7 @@ impl Default for Onboarding {
             settings_file: None,
             opencode_config: None,
             accounts: Vec::new(),
+            accounts_root: None,
             // A hand-built config has no policy. A named missing file is the
             // error; "not configured" is not.
             codex_policy: Ok(None),
@@ -482,38 +562,73 @@ impl Onboarding {
                     .ok()
                     .as_deref(),
             ),
+            accounts_root: accounts_root_from(
+                std::env::var("ENGINE_AGENT_CLAUDE_ACCOUNTS_ROOT")
+                    .ok()
+                    .as_deref(),
+                std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+            ),
             codex_policy: codex_policy_from(
                 std::env::var("ENGINE_AGENT_CODEX_POLICY").ok().as_deref(),
             ),
         }
     }
 
-    /// The `CLAUDE_CONFIG_DIR` for the account `name`, or why there is none.
-    pub fn account_dir(&self, name: &str) -> std::result::Result<&Path, String> {
-        self.accounts
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.dir.as_path())
-            .ok_or_else(|| {
-                let known: Vec<&str> = self.accounts.iter().map(|a| a.name.as_str()).collect();
-                if known.is_empty() {
-                    format!("account {name:?}: no accounts are configured (ENGINE_AGENT_CLAUDE_ACCOUNTS)")
-                } else {
-                    format!("account {name:?} is not one of {}", known.join(", "))
+    /// The `CLAUDE_CONFIG_DIR` for the account `name`, or why there is none:
+    /// a listed account first, then one prepared under the accounts root,
+    /// looked up afresh on every call.
+    pub fn account_dir(&self, name: &str) -> std::result::Result<PathBuf, String> {
+        if let Some(a) = self.accounts.iter().find(|a| a.name == name) {
+            return Ok(a.dir.clone());
+        }
+        let discovered = match &self.accounts_root {
+            Some(root) => match discover_account(root, name) {
+                Ok(dir) => return Ok(dir),
+                Err(why) if !is_account_name(name) => return Err(why),
+                Err(why) => Some((why, discover_accounts(root))),
+            },
+            None => None,
+        };
+        let mut known: Vec<&str> = self.accounts.iter().map(|a| a.name.as_str()).collect();
+        if let Some((_, found)) = &discovered {
+            for a in found {
+                if !known.contains(&a.name.as_str()) {
+                    known.push(a.name.as_str());
                 }
-            })
+            }
+        }
+        if known.is_empty() {
+            return Err(match discovered {
+                Some((why, _)) => format!(
+                    "{why}; no accounts are configured (ENGINE_AGENT_CLAUDE_ACCOUNTS or a prepared profile under the accounts root)"
+                ),
+                None => format!(
+                    "account {name:?}: no accounts are configured (ENGINE_AGENT_CLAUDE_ACCOUNTS)"
+                ),
+            });
+        }
+        Err(format!(
+            "account {name:?} is not one of {}",
+            known.join(", ")
+        ))
     }
 
     /// Every Claude Code config directory whose `projects/` may hold a
     /// transcript: the engine's own `CLAUDE_CONFIG_DIR` when set, then each
-    /// configured account. The default `~/.claude` is the caller's to add.
+    /// listed account, then each discovered one. The default `~/.claude` is
+    /// the caller's to add.
     pub fn claude_dirs(&self) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = std::env::var_os("CLAUDE_CONFIG_DIR")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .into_iter()
             .collect();
-        for account in &self.accounts {
+        let discovered = self
+            .accounts_root
+            .as_deref()
+            .map(discover_accounts)
+            .unwrap_or_default();
+        for account in self.accounts.iter().chain(&discovered) {
             if !dirs.contains(&account.dir) {
                 dirs.push(account.dir.clone());
             }
@@ -908,11 +1023,133 @@ mod tests {
             accounts: parse_accounts(Some("a=/a,b=/b")),
             ..Default::default()
         };
-        assert_eq!(onboarding.account_dir("b"), Ok(Path::new("/b")));
+        assert_eq!(onboarding.account_dir("b"), Ok(PathBuf::from("/b")));
         let err = onboarding.account_dir("c").unwrap_err();
         assert!(err.contains("a, b"), "{err}");
         let none = Onboarding::default().account_dir("a").unwrap_err();
         assert!(none.contains("no accounts are configured"), "{none}");
+    }
+
+    fn prepared(root: &Path, name: &str) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(PROFILE_MARKER), "").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_profile_prepared_after_start_is_found_at_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("accounts");
+        let onboarding = Onboarding {
+            accounts: parse_accounts(Some("main=/main")),
+            accounts_root: Some(root.clone()),
+            ..Default::default()
+        };
+        let err = onboarding.account_dir("probe").unwrap_err();
+        assert!(err.contains("not one of main"), "{err}");
+        let dir = prepared(&root, "probe");
+        let real = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(onboarding.account_dir("probe"), Ok(real.clone()));
+        // A listed account wins over a discovered one of the same name.
+        prepared(&root, "main");
+        assert_eq!(onboarding.account_dir("main"), Ok(PathBuf::from("/main")));
+        assert!(onboarding.claude_dirs().contains(&real));
+        // .claude.json alone also marks a profile.
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(".claude.json"), "{}").unwrap();
+        assert!(onboarding.account_dir("other").is_ok());
+        let err = onboarding.account_dir("nope").unwrap_err();
+        assert!(err.contains("main, other, probe"), "{err}");
+    }
+
+    #[test]
+    fn a_discovered_account_without_a_marker_or_with_a_bad_name_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir_all(root.join("bare")).unwrap();
+        // A marker that is a directory, or a symlink, does not count.
+        std::fs::create_dir_all(root.join("dirmark").join(PROFILE_MARKER)).unwrap();
+        prepared(&root, "real");
+        std::fs::create_dir_all(root.join("linkmark")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("real").join(PROFILE_MARKER),
+            root.join("linkmark").join(".claude.json"),
+        )
+        .unwrap();
+        for name in ["bare", "dirmark", "linkmark"] {
+            let err = discover_account(&root, name).unwrap_err();
+            assert!(err.contains("not a prepared profile"), "{name}: {err}");
+        }
+        for name in [
+            "..",
+            ".",
+            "../real",
+            "/etc",
+            "Upper",
+            "",
+            "a/b",
+            &"x".repeat(33),
+        ] {
+            let err = discover_account(&root, name).unwrap_err();
+            assert!(err.contains("is not a name"), "{name}: {err}");
+        }
+        let onboarding = Onboarding {
+            accounts_root: Some(root.clone()),
+            ..Default::default()
+        };
+        assert!(onboarding
+            .account_dir("../real")
+            .unwrap_err()
+            .contains("is not a name"));
+        assert!(onboarding.account_dir("bare").is_err());
+        let names: Vec<String> = discover_accounts(&root)
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(names, vec!["real".to_string()]);
+    }
+
+    #[test]
+    fn a_discovered_account_that_symlinks_out_of_the_root_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("accounts");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = prepared(tmp.path(), "outside");
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        let err = discover_account(&root, "escape").unwrap_err();
+        assert!(err.contains("leaves the accounts root"), "{err}");
+        // A link to the root itself is refused too.
+        std::os::unix::fs::symlink(&root, root.join("self")).unwrap();
+        assert!(discover_account(&root, "self").is_err());
+        // A link that stays inside the root resolves to its real directory.
+        let inner = prepared(&root, "inner");
+        std::os::unix::fs::symlink(&inner, root.join("alias")).unwrap();
+        assert_eq!(
+            discover_account(&root, "alias"),
+            Ok(std::fs::canonicalize(&inner).unwrap())
+        );
+        assert!(discover_accounts(&root).iter().all(|a| a.name != "escape"));
+    }
+
+    #[test]
+    fn the_accounts_root_defaults_to_home_and_can_be_turned_off() {
+        let home = Path::new("/h");
+        assert_eq!(
+            accounts_root_from(None, Some(home)),
+            Some(PathBuf::from("/h/.claude-accounts"))
+        );
+        assert_eq!(
+            accounts_root_from(Some(""), Some(home)),
+            Some(PathBuf::from("/h/.claude-accounts"))
+        );
+        assert_eq!(accounts_root_from(Some("off"), Some(home)), None);
+        assert_eq!(accounts_root_from(Some("rel"), Some(home)), None);
+        assert_eq!(
+            accounts_root_from(Some("/r"), Some(home)),
+            Some(PathBuf::from("/r"))
+        );
     }
 
     #[test]
@@ -1022,6 +1259,7 @@ mod tests {
             settings_file: None,
             opencode_config: None,
             accounts: Vec::new(),
+            accounts_root: None,
             codex_policy: Ok(None),
         };
         let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())];

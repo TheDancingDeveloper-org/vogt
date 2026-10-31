@@ -9,9 +9,11 @@
 #   claude-profile list
 #
 # A profile is only a directory. Select it for a shell with
-# `export CLAUDE_CONFIG_DIR=$(claude-profile path <name>)`, or let the engine
-# do it by listing it in ENGINE_AGENT_CLAUDE_ACCOUNTS and starting a session
-# with `account: <name>`.
+# `export CLAUDE_CONFIG_DIR=$(claude-profile path <name>)`, or start an engine
+# session with `account: <name>`. `prepare` writes the marker file the engine
+# looks for, so a profile under the default root is usable at once, with no
+# restart; one made with --dir elsewhere must be listed in
+# ENGINE_AGENT_CLAUDE_ACCOUNTS.
 #
 # Credentials are never copied. Claude Code's OAuth refresh token rotates on
 # use, so two copies of one login fight and one of them is signed out. Each
@@ -26,6 +28,10 @@
 set -euo pipefail
 
 readonly ROOT="${CLAUDE_ACCOUNTS_ROOT:-$HOME/.claude-accounts}"
+# The file that marks a directory under ROOT as a prepared profile, for the
+# engine's account discovery. Keep in step with PROFILE_MARKER in
+# engine/server/src/claude_config.rs.
+readonly MARKER=.vogt-claude-profile
 readonly SHARE_FROM="${CLAUDE_PROFILE_SHARE_FROM:-$HOME/.claude}"
 # Settings a profile shares with the main account, by symlink. Everything else
 # in a config directory is the account's own: its login, its history, its
@@ -128,13 +134,18 @@ cmd_prepare() {
     link_shared "$dir"
     dismiss_auto_mode "$dir"
     [[ "$mcp" == no ]] || register_mcp "$dir"
+    [[ -f "$dir/$MARKER" ]] || : >"$dir/$MARKER"
     printf 'profile %s ready: %s\n' "$name" "$dir"
     if [[ -f "$dir/.credentials.json" ]]; then
         printf 'login: present\n'
     else
         printf 'login: none yet. Run once:  CLAUDE_CONFIG_DIR=%q claude   then /login\n' "$dir"
     fi
-    printf 'to let the engine use it, add  %s=%s  to ENGINE_AGENT_CLAUDE_ACCOUNTS\n' "$name" "$dir"
+    if [[ "$dir" == "$ROOT/$name" ]]; then
+        printf 'the engine finds it as account %s (if its accounts root is %s)\n' "$name" "$ROOT"
+    else
+        printf 'to let the engine use it, add  %s=%s  to ENGINE_AGENT_CLAUDE_ACCOUNTS\n' "$name" "$dir"
+    fi
 }
 
 cmd_list() {
