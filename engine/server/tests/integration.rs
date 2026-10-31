@@ -13428,6 +13428,263 @@ while IFS= read -r _; do box; done
     );
 }
 
+/// WI-1576: a sandbox whose economics tailer reads Codex rollouts from
+/// `<tmp>/.codex/sessions`, and the rollout file for `conversation`, holding
+/// only its `session_meta` head.
+fn codex_rollout_sandbox(
+    conversation: &str,
+    autopilot: vogt_engine_server::autopilot::Policy,
+) -> (tempfile::TempDir, Config, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.economics_home = Some(tmp.path().to_path_buf());
+    cfg.economics_tick = Duration::from_millis(300);
+    cfg.autopilot = autopilot;
+    let rollout = tmp
+        .path()
+        .join(".codex/sessions/2026/10/31")
+        .join(format!("rollout-2026-10-31T00-00-00-{conversation}.jsonl"));
+    std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n",
+            json!({"type": "session_meta", "payload": {"id": conversation, "cwd": "/tmp"}})
+        ),
+    )
+    .unwrap();
+    (tmp, cfg, rollout)
+}
+
+/// Append Codex `event_msg` entries to a rollout, the way Codex persists them.
+fn append_rollout(rollout: &std::path::Path, payloads: &[Value]) {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(rollout)
+        .unwrap();
+    for payload in payloads {
+        writeln!(
+            file,
+            "{}",
+            json!({"timestamp": "2026-10-31T00:00:00Z", "type": "event_msg", "payload": payload})
+        )
+        .unwrap();
+    }
+}
+
+/// The changes of `kind` for one session, from the start of the feed.
+async fn changes_of(client: &reqwest::Client, base: &str, id: &str, kind: &str) -> Vec<Value> {
+    let feed: Value = client
+        .get(format!(
+            "{base}/api/sessions/changes?since=0&ids={id}&limit=500"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    feed["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == kind)
+        .cloned()
+        .collect()
+}
+
+/// Poll until the session has `want` changes of `kind`.
+async fn await_changes(client: &reqwest::Client, base: &str, id: &str, kind: &str, want: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if changes_of(client, base, id, kind).await.len() >= want {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session {id} never reached {want} {kind} change(s)"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// WI-1576: a Codex session's readiness and done come from the rollout's
+/// `task_complete`, not a screen render: exactly one `ready` per turn id,
+/// however often the tailer reads, and a final message ending in
+/// `AUTOPILOT: DONE` is one `done` change with autopilot turned off.
+#[tokio::test]
+async fn a_codex_rollout_task_complete_is_one_ready_per_turn_and_its_done_marker_one_done() {
+    let conversation = "7d2e1f3a-6c8b-4f2d-8a4e-3b9c8d7e6f50";
+    let (_tmp, cfg, rollout) = codex_rollout_sandbox(
+        conversation,
+        vogt_engine_server::autopilot::Policy {
+            nudge_after: Duration::from_secs(600),
+            max_nudges: 10,
+        },
+    );
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    // The stand-in draws nothing, so no screen could read as ready: every
+    // `ready` below is the rollout's.
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "codex-rollout", "command": ["/bin/cat"], "autopilot": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    client
+        .post(format!("{base}/api/sessions/{id}/conversation"))
+        .json(&json!({ "agent": "codex", "id": conversation }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    append_rollout(
+        &rollout,
+        &[
+            json!({"type": "task_started", "turn_id": "turn-1"}),
+            json!({"type": "agent_message", "message": "working"}),
+            json!({"type": "task_complete", "turn_id": "turn-1", "last_agent_message": "first item landed"}),
+        ],
+    );
+    await_changes(&client, &base, &id, "ready", 1).await;
+
+    append_rollout(
+        &rollout,
+        &[
+            json!({"type": "task_started", "turn_id": "turn-2"}),
+            json!({
+                "type": "task_complete", "turn_id": "turn-2",
+                "last_agent_message": "Nothing unblocked is left.\n\nAUTOPILOT: DONE\n"
+            }),
+        ],
+    );
+    await_changes(&client, &base, &id, "done", 1).await;
+
+    // Sit past several ticks: nothing repeats.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let ready = changes_of(&client, &base, &id, "ready").await;
+    assert_eq!(ready.len(), 2, "one ready per turn: {ready:?}");
+    let done = changes_of(&client, &base, &id, "done").await;
+    assert_eq!(done.len(), 1, "exactly one done: {done:?}");
+    let detail: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        detail["summary"].get("autopilot").is_none(),
+        "autopilot is off: {}",
+        detail["summary"]
+    );
+}
+
+/// WI-1576: a Codex session whose `/goal` is active continues idle turns by
+/// itself, so autopilot does not nudge it while it rests at its prompt. Once
+/// the goal completes, the same prompt is nudged.
+#[tokio::test]
+async fn a_codex_session_with_an_active_goal_is_not_nudged() {
+    use std::os::unix::fs::PermissionsExt;
+    let conversation = "8e3f2a4b-7d9c-4a3e-9b5f-4c0d9e8f7a61";
+    let (tmp, cfg, rollout) = codex_rollout_sandbox(
+        conversation,
+        vogt_engine_server::autopilot::Policy {
+            nudge_after: Duration::from_millis(400),
+            max_nudges: 10,
+        },
+    );
+    let log = tmp.path().join("input.log");
+    let go = tmp.path().join("go");
+    let codex = tmp.path().join("codex");
+    // The prompt appears only once the rollout is being read, so the screen
+    // cannot be nudged before the goal is known.
+    std::fs::write(
+        &codex,
+        format!(
+            "#!/usr/bin/env bash\nwhile [ ! -e '{}' ]; do sleep 0.05; done\nprintf '\\r\\n> \\r\\n'\nwhile IFS= read -r line; do echo x >> '{}'; done\n",
+            go.display(),
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "codex-goal",
+            "command": [codex.display().to_string()],
+            "autopilot": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    client
+        .post(format!("{base}/api/sessions/{id}/conversation"))
+        .json(&json!({ "agent": "codex", "id": conversation }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    append_rollout(
+        &rollout,
+        &[
+            json!({"type": "thread_goal_updated", "goal": {"status": "active", "objective": "ship it"}}),
+            json!({"type": "task_started", "turn_id": "turn-1"}),
+            json!({"type": "task_complete", "turn_id": "turn-1", "last_agent_message": "step one done"}),
+        ],
+    );
+    await_changes(&client, &base, &id, "ready", 1).await;
+    std::fs::write(&go, "").unwrap();
+
+    // Well past `nudge_after`, at its prompt: no nudge while the goal drives.
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap_or_default(),
+        "",
+        "an active goal is not nudged"
+    );
+
+    // The goal completes; the same prompt is now autopilot's to drive.
+    append_rollout(
+        &rollout,
+        &[
+            json!({"type": "thread_goal_updated", "goal": {"status": "complete", "objective": "ship it"}}),
+        ],
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while std::fs::read_to_string(&log).unwrap_or_default().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a codex session with no active goal is nudged"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// A session blocked on a person is never nudged, autopilot or not.
 #[tokio::test]
 async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {

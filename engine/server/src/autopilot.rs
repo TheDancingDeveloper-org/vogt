@@ -255,8 +255,14 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
         let Ok(view) = screen::session_screen(Arc::clone(&session), 0).await else {
             continue;
         };
-        let own_loop =
-            agent == "klaudia" && screen::klaudia_goal_loop(view.title.as_deref(), &view.lines);
+        // A Codex rollout carries the turn boundaries and the goal state, so
+        // it decides both instead of the screen (WI-1576): done arrives from
+        // `task_complete`, and a running turn or an active `/goal` is left
+        // alone, as Klaudia's goal loop is.
+        let rollout = agent == "codex" && session.rollout_seen();
+        let own_loop = (agent == "klaudia"
+            && screen::klaudia_goal_loop(view.title.as_deref(), &view.lines))
+            || (rollout && session.rollout_own_loop());
         let api_error = api_client_error(&view.lines);
         let step = decide(
             policy,
@@ -265,7 +271,7 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
                 blocked,
                 quiet_for,
                 ready: view.ready,
-                done: says_done(&view.lines),
+                done: !rollout && says_done(&view.lines),
                 own_loop,
                 api_error: api_error.is_some(),
                 nudges: session.autopilot_nudges(),
