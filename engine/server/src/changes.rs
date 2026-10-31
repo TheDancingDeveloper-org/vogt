@@ -44,6 +44,7 @@ const KINDS: &[&str] = &[
     "woken",
     "budget",
     "done",
+    "reported",
 ];
 
 /// What an overseer waits for when it does not say.
@@ -80,6 +81,9 @@ pub fn change_of(sequenced: &Sequenced) -> Option<SessionChange> {
         // An autopilot agent declared itself done (WI-1518): the change an
         // overseer waits for when a worker finishes its backlog.
         ServerEvent::SessionDone { id, .. } => (*id, "done", "done".to_string()),
+        ServerEvent::SessionReported { id, kind, summary } => {
+            (*id, "reported", format!("{kind}: {summary}"))
+        }
         ServerEvent::SessionBlocked { id, blocked } => match blocked {
             Some(report) => (*id, "blocked", format!("blocked: {}", report.reason)),
             None => (*id, "unblocked", "unblocked".to_string()),
@@ -390,6 +394,23 @@ mod tests {
         assert_eq!(got.changes[0].session, id);
         assert!(parse_until(None).unwrap().contains("done"));
         assert!(parse_until(Some("done")).unwrap().contains("done"));
+    }
+
+    #[test]
+    fn a_session_report_is_a_reported_change_an_overseer_can_wait_for() {
+        let bus = EventBus::new(16);
+        let id = Uuid::from_u128(10);
+        bus.publish(ServerEvent::SessionReported {
+            id,
+            kind: "result".into(),
+            summary: "branch pushed".into(),
+        });
+        let got = changes(&bus, 0, None, None).unwrap();
+        assert_eq!(got.changes.len(), 1);
+        assert_eq!(got.changes[0].kind, "reported");
+        assert_eq!(got.changes[0].summary, "result: branch pushed");
+        assert!(parse_until(Some("reported")).unwrap().contains("reported"));
+        assert!(!parse_until(None).unwrap().contains("reported"));
     }
 
     #[test]

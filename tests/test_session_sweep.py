@@ -41,6 +41,7 @@ class Engine:
         self.refuse_starts = False
         self.sweep_queries: list[str] = []
         self.inputs: list[tuple[str, dict[str, Any]]] = []
+        self.reports: list[tuple[str, dict[str, Any]]] = []
 
     def row(self, engine_id: str, **over: Any) -> dict[str, Any]:
         base = {
@@ -87,6 +88,12 @@ class Engine:
                     if req["blocked"]
                     else None
                 )
+                return 200, json.dumps(row).encode()
+            if row is not None and method == "POST" and tail == "report":
+                req = json.loads(body)
+                self.reports.append((parts[3], req))
+                if req["kind"] == "result":
+                    row.update(done_at="2026-10-18T09:30:00Z", autopilot=False)
                 return 200, json.dumps(row).encode()
             if row is not None and method == "POST" and tail == "input":
                 self.inputs.append((parts[3], json.loads(body)))
