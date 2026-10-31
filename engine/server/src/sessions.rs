@@ -2143,6 +2143,49 @@ impl SessionRegistry {
         out
     }
 
+    /// The directory of every running session and every hibernated one (a
+    /// wake brings it back), other than `except`: what a workspace cleanup
+    /// must not pull a tree out from under (WI-1325).
+    /// `hibernated: false` leaves the hibernated ones out, for a cleanup that
+    /// only must not race a running build.
+    pub fn cwds_in_use(&self, except: Option<Uuid>, hibernated: bool) -> Vec<String> {
+        self.sessions
+            .iter()
+            .filter(|e| Some(*e.key()) != except && e.value().is_alive())
+            .map(|e| e.value().cwd.clone())
+            .chain(
+                self.records
+                    .iter()
+                    .filter(|_| hibernated)
+                    .filter(|e| Some(*e.key()) != except && e.value().hibernation.is_some())
+                    .filter_map(|e| e.value().cwd.clone()),
+            )
+            .collect()
+    }
+
+    /// Stamp `cleaned_at` on every workspace block whose path is `path`,
+    /// running or hibernated (WI-1325). A hibernated record is rewritten so
+    /// the stamp survives a restart.
+    pub fn mark_workspace_cleaned(&self, path: &str, at: &str) {
+        for kv in self.sessions.iter() {
+            if let Some(mut ws) = kv.value().workspace().filter(|w| w.path == path) {
+                ws.cleaned_at = Some(at.to_string());
+                kv.value().set_workspace(Some(ws));
+            }
+        }
+        for mut kv in self.records.iter_mut() {
+            let Some(ws) = kv.workspace.as_mut().filter(|w| w.path == path) else {
+                continue;
+            };
+            ws.cleaned_at = Some(at.to_string());
+            if kv.hibernation.is_some() {
+                if let Err(e) = hibernation::write(&self.cfg.state_dir, kv.value()) {
+                    tracing::warn!(error = %e, "could not persist a workspace's cleaned_at");
+                }
+            }
+        }
+    }
+
     /// A configured session template matched by name (case-insensitive) or,
     /// failing that, by tag — so a caller can say `claude` and reach the
     /// template tagged `claude`. When a tag matches more than one template an

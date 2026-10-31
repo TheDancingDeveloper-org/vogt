@@ -17065,6 +17065,121 @@ async fn the_workspaces_route_lists_each_session_tree_with_its_size() {
     }
 }
 
+/// WI-1325: `POST /api/workspaces/clean` drops build output and stamps
+/// `cleaned_at`, and removes a worktree only when no live or hibernated
+/// session uses it, the tree is clean (`force` or not), and its branch is
+/// merged (unless forced) — deleting the merged branch with it.
+#[tokio::test]
+async fn workspace_clean_refuses_live_dirty_and_unmerged_trees() {
+    let (tmp, cfg, stub) = hibernation_sandbox();
+    std::fs::write(&stub, "#!/bin/sh\nprintf '> '\nsleep 300\n").unwrap();
+    let repo = tmp.path().join("repo");
+    worktree_checkout(&repo);
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(
+            &json!({ "name": "wc worktree", "command": [stub.to_string_lossy()],
+                       "cwd": repo.to_string_lossy(),
+                       "worktree": { "branch": "wi-1325-worker", "base_ref": "main" } }),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let listed: Value = client
+        .get(format!("{base}/api/workspaces"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let path = listed["workspaces"][0]["path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tree = std::path::PathBuf::from(&path);
+    std::fs::create_dir_all(tree.join("node_modules/pkg")).unwrap();
+    std::fs::write(tree.join("node_modules/pkg/index.js"), "x".repeat(4096)).unwrap();
+    let clean = |mode: &'static str, force: bool| {
+        let client = client.clone();
+        let url = format!("{base}/api/workspaces/clean");
+        let path = path.clone();
+        async move {
+            client
+                .post(url)
+                .json(&json!({ "path": path, "mode": mode, "force": force }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    // A running session's tree: neither mode touches it.
+    assert_eq!(
+        clean("build_output", false).await.status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(clean("remove", true).await.status(), StatusCode::CONFLICT);
+    assert!(tree.join("node_modules").is_dir());
+
+    // Hibernated: build output goes and is stamped; removal still waits.
+    let hibernated = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({ "reason": "test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hibernated.status(), StatusCode::OK);
+    let resp = clean("build_output", false).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["bytes_freed"].as_u64().unwrap() >= 4096, "{body}");
+    assert!(!tree.join("node_modules").exists());
+    let listed: Value = client
+        .get(format!("{base}/api/workspaces"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["workspaces"][0]["cleaned_at"], body["cleaned_at"]);
+    assert_eq!(clean("remove", false).await.status(), StatusCode::CONFLICT);
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+
+    // Dirty: refused even when forced.
+    std::fs::write(tree.join("g.txt"), "work\n").unwrap();
+    assert_eq!(clean("remove", true).await.status(), StatusCode::CONFLICT);
+    // Committed but unmerged: refused without force.
+    worktree_git(&tree, &["add", "g.txt"]);
+    worktree_git(&tree, &["commit", "-q", "-m", "work"]);
+    assert_eq!(clean("remove", false).await.status(), StatusCode::CONFLICT);
+    assert!(tree.is_dir());
+
+    // Landed on origin/main: the worktree and the merged branch both go.
+    worktree_git(&tree, &["push", "-q", "origin", "HEAD:main"]);
+    worktree_git(&tree, &["fetch", "-q", "origin"]);
+    let resp = clean("remove", false).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["removed"], true, "{body}");
+    assert_eq!(body["branch_deleted"], "wi-1325-worker");
+    assert!(!tree.exists());
+    assert!(!has_branch(&repo, "wi-1325-worker"));
+}
+
 /// WI-1341: a land fetches, checks the pinned tip, rebases or refuses, checks
 /// history and messages, and pushes the base forward without a merge commit
 /// or `--force` — all in a temporary worktree that is gone afterwards. Only

@@ -276,6 +276,8 @@ from vogt.application.models import (
     WorkListResult,
     WorkManyResult,
     WorkResult,
+    WorkspaceCleanParams,
+    WorkspaceCleanResult,
     WorkspaceListParams,
     WorkspaceListResult,
     WriteBackListParams,
@@ -1650,6 +1652,25 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.workspace_list,
             route=HttpRoute("GET", "/workspaces"),
             cli=CliBinding(("workspace", "list")),
+        ),
+        Operation(
+            name="workspace.clean",
+            summary=(
+                "Clean one session's working tree, by session `id` or `path`. "
+                "mode=build_output drops target/, node_modules and .venv and "
+                "stamps cleaned_at; mode=remove runs `git worktree remove` and "
+                "deletes the branch when merged. The engine refuses (409) a "
+                "tree a live or hibernated session uses, a dirty tree (always), "
+                "and an unmerged branch unless force (a person only; the "
+                "branch is then kept)."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=WorkspaceCleanParams,
+            result_model=WorkspaceCleanResult,
+            handler=services.workspace_clean,
+            route=HttpRoute("POST", "/workspaces/clean"),
+            cli=CliBinding(("workspace", "clean")),
         ),
         Operation(
             name="session.wait_any",

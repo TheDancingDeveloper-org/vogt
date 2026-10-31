@@ -62,6 +62,7 @@ pub mod vogt_core;
 pub mod vogt_tools;
 pub mod wait;
 pub mod workflow_engine;
+pub mod workspace_clean;
 pub mod workspace_path;
 pub mod workspaces;
 pub mod worktree_clean;
