@@ -43,6 +43,7 @@ pub mod metrics;
 pub mod observability;
 pub mod opencode;
 pub mod oversight_answer;
+pub mod oversight_wake;
 pub mod person_gate;
 pub mod policy;
 pub mod product;

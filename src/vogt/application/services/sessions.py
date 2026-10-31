@@ -370,6 +370,8 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 autopilot=autopilot,
                 role=params.role,
                 work_item=subject.work_item_ref,
+                supervisor=started_by_session,
+                wake_on=params.wake_on,
                 policy=subject.policy,
                 budget=budget,
                 worktree=(
@@ -635,8 +637,8 @@ def _digest_of(
 
     `command` stays off the digest; `template` is the replacement, and
     `brief_file` is null until the engine reports a path. `budget` is the
-    engine's economics line when the caller has one. `supervisor` stays null
-    until WI-956 exists.
+    engine's economics line when the caller has one. `supervisor` is the
+    engine id of the session that started this one (WI-1521).
     """
     extra: dict[str, Any] = {}
     for name in fields or []:
@@ -653,6 +655,7 @@ def _digest_of(
         id=summary.id,
         name=summary.name,
         work_item=summary.work_item,
+        supervisor=summary.started_by_session,
         activity=summary.activity,
         attention=attention,
         ready=ready,
@@ -976,7 +979,7 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             project=params.project,
             limit=500,
             offset=0,
-            started_by_session=params.supervised_by,
+            started_by_session=_supervisor_ref(ctx, params.supervised_by),
         ),
         live,
         None,
@@ -2472,12 +2475,55 @@ def _change(change: EngineChange, labels: dict[str, str]) -> SessionChange:
     )
 
 
-def _engine_ids(ctx: AppContext, ids: list[str]) -> list[str] | None:
-    """Resolve named sessions to engine ids; `None` means every session."""
+def _engine_ids(
+    ctx: AppContext, ids: list[str], supervised_by: str | None = None
+) -> list[str] | None:
+    """Resolve named sessions to engine ids; `None` means every session.
+
+    `supervised_by` narrows to the sessions that starter started (WI-1521),
+    intersected with `ids` when both are given. A filter nothing matches
+    becomes the nil id, which no session has, so the engine reads nothing
+    rather than everything.
+    """
     named = [one.strip() for one in ids if one.strip()]
-    if not named:
-        return None
-    return [_target(ctx, one).engine_session_id for one in named]
+    chosen = [_target(ctx, one).engine_session_id for one in named] or None
+    if supervised_by is None:
+        return chosen
+    supervised = _supervised_engine_ids(ctx, supervised_by)
+    if chosen is not None:
+        supervised = [one for one in supervised if one in chosen]
+    return supervised or [_NO_SESSION]
+
+
+#: An engine id no session has: a filter that matches nothing.
+_NO_SESSION = "00000000-0000-0000-0000-000000000000"
+
+
+def _supervisor_ref(ctx: AppContext, named: str | None) -> str | None:
+    """`supervised_by` with `me` resolved to the caller's engine id."""
+    if named is None or named.strip().lower() != "me":
+        return named
+    caller = _caller_engine_session_id(ctx)
+    if caller is None:
+        msg = "supervised_by=me needs the caller to be a session"
+        raise InvalidRequest(msg)
+    return caller
+
+
+def _supervised_engine_ids(ctx: AppContext, named: str) -> list[str]:
+    """Engine ids of the unstopped sessions `named` started."""
+    ref = _supervisor_ref(ctx, named)
+    with ctx.declared.read() as view:
+        starter = _starter_engine_id(view, ref)
+        rows = view.list_sessions(
+            project_id=None,
+            work_item_id=None,
+            started_by_session=starter,
+            include_stopped=False,
+            limit=_DECLARED_FETCH,
+            offset=0,
+        )
+    return [row.engine_session_id for row in rows if row.engine_session_id]
 
 
 def session_changes(
@@ -2489,7 +2535,7 @@ def session_changes(
     ring of what it published; this reads a page of it.
     """
     engine = _engine(ctx)
-    ids = _engine_ids(ctx, params.ids)
+    ids = _engine_ids(ctx, params.ids, params.supervised_by)
     try:
         page = engine.session_changes(since=params.since, ids=ids, limit=params.limit)
     except Conflict:
@@ -2519,7 +2565,7 @@ def session_wait_any(
     at most `timeout_s`.
     """
     engine = _engine(ctx)
-    ids = _engine_ids(ctx, params.ids)
+    ids = _engine_ids(ctx, params.ids, params.supervised_by)
     kinds = [one.strip() for one in params.until if one.strip()] or None
     try:
         waited = engine.wait_any(
@@ -5250,6 +5296,8 @@ def _start_on_engine(
     autopilot: bool = False,
     role: str = "worker",
     work_item: str | None = None,
+    supervisor: str | None = None,
+    wake_on: Sequence[str] = (),
     policy: AgentPolicy | None = None,
     budget: SessionBudgetParams | None = None,
     worktree: dict[str, str] | None = None,
@@ -5281,6 +5329,8 @@ def _start_on_engine(
         autopilot=autopilot,
         role=role,
         work_item=work_item,
+        supervisor=supervisor,
+        wake_on=list(wake_on),
         companion=companion or None,
         charter=charter or None,
         policy=enforced,

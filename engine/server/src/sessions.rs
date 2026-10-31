@@ -301,6 +301,7 @@ impl SessionRegistry {
         spec.name = normalize_session_name(&spec.name)?;
         spec.work_item = vogt_engine_contract::normalize_work_item(spec.work_item.as_deref())
             .map_err(ApiError::BadRequest)?;
+        spec.wake_on = crate::oversight_wake::normalize_wake_on(&spec.wake_on)?;
         // Expand a template name into a command before anything downstream
         // reads `command`. Only when the caller gave no explicit command —
         // the GUI copies a template's command into the spec itself and sends
@@ -816,6 +817,8 @@ impl SessionRegistry {
         session.set_budget(spec.budget.clone());
         session.set_role(spec.role);
         session.set_work_item(spec.work_item.clone());
+        session.set_supervisor(spec.supervisor);
+        session.set_wake_on(spec.wake_on.clone());
         session.set_workspace(workspace.clone());
         // An oversight session is the one that brings the others back, so it
         // must come back by itself: pinned awake, it is never hibernated by
@@ -863,6 +866,8 @@ impl SessionRegistry {
                 record.budget = spec.budget.clone();
                 record.role = spec.role;
                 record.work_item = spec.work_item.clone();
+                record.supervisor = spec.supervisor;
+                record.wake_on = spec.wake_on.clone();
                 record.workspace = workspace.clone();
                 record.keep_awake = session.keep_awake();
                 record.conversation = conversation.clone();
@@ -1649,6 +1654,8 @@ impl SessionRegistry {
             policy: record.policy.clone(),
             role: record.role,
             work_item: record.work_item.clone(),
+            supervisor: record.supervisor,
+            wake_on: record.wake_on.clone(),
             // A wake returns to the worktree the first start already cut; it
             // does not cut another (WI-1298).
             worktree: None,
@@ -2685,6 +2692,8 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         done_at: record.done_at.clone(),
         role: record.role,
         work_item: record.work_item.clone(),
+        supervisor: record.supervisor,
+        wake_on: record.wake_on.clone(),
         workspace: record.workspace.clone(),
         resources: None,
         template: record.template.clone(),
@@ -3107,6 +3116,8 @@ mod tests {
             done_at: None,
             role: vogt_engine_contract::SessionRole::Worker,
             work_item: None,
+            supervisor: None,
+            wake_on: Vec::new(),
             workspace: None,
             resources: None,
             template: None,
