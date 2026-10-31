@@ -43,9 +43,18 @@ pub const TYPING_QUIET: Duration = Duration::from_secs(30);
 const TICK: Duration = Duration::from_secs(5);
 
 /// Kinds an overseer may wake on. `reported` is the `session_report` change
-/// (WI-1520) and matches nothing until the engine emits it.
+/// (WI-1520) and matches nothing until the engine emits it. `escalated`
+/// names no change of its own: it matches any change that carries an
+/// escalation (a blocked report, a permission dialog, a grant request;
+/// WI-996), and the line names it `escalated`.
 pub const WAKE_KINDS: &[&str] = &[
-    "done", "reported", "blocked", "approval", "errored", "budget",
+    "done",
+    "reported",
+    "blocked",
+    "approval",
+    "errored",
+    "budget",
+    "escalated",
 ];
 
 /// `wake_on` as the engine keeps it: trimmed, deduplicated, each a known kind.
@@ -201,16 +210,32 @@ fn slug(name: &str) -> Option<String> {
     (!out.is_empty()).then(|| out.to_string())
 }
 
-/// The overseer to tell about `change`, and the worker's label, when there is one
-/// that asked for this kind.
-fn route(registry: &SessionRegistry, change: &SessionChange) -> Option<(Uuid, String)> {
+/// The `wake_on` kind `change` wakes on: its own kind when asked for, else
+/// `escalated` when it carries an escalation and that was asked for.
+fn wake_kind(wake_on: &[String], change: &SessionChange) -> Option<&'static str> {
+    let asked = |kind: &str| wake_on.iter().any(|k| k == kind);
+    if let Some(kind) = WAKE_KINDS.iter().find(|k| **k == change.kind) {
+        if asked(kind) {
+            return Some(kind);
+        }
+    }
+    (change.escalation.is_some() && asked("escalated")).then_some("escalated")
+}
+
+/// The overseer to tell about `change`, the worker's label and the kind to
+/// name, when there is one that asked for this kind.
+fn route(
+    registry: &SessionRegistry,
+    change: &SessionChange,
+) -> Option<(Uuid, String, &'static str)> {
     let worker = registry.get(change.session).ok()?;
     let overseer_id = worker.supervisor()?;
     let overseer = registry.get(overseer_id).ok()?;
-    if overseer.role() != SessionRole::Oversight || !overseer.wake_on().contains(&change.kind) {
+    if overseer.role() != SessionRole::Oversight {
         return None;
     }
-    Some((overseer_id, label(&worker)))
+    let kind = wake_kind(&overseer.wake_on(), change)?;
+    Some((overseer_id, label(&worker), kind))
 }
 
 fn overseer_state(registry: &SessionRegistry, id: Uuid, now: Instant) -> Overseer {
@@ -250,7 +275,9 @@ pub fn spawn_watcher(state: Arc<AppState>) {
                 got = rx.recv() => match got {
                     Ok(sequenced) => {
                         if let Some(change) = change_of(&sequenced) {
-                            if let Some((overseer, worker)) = route(&state.sessions, &change) {
+                            if let Some((overseer, worker, kind)) = route(&state.sessions, &change) {
+                                // The typed line names only a WAKE_KINDS constant.
+                                let change = SessionChange { kind: kind.to_string(), ..change };
                                 coalescer.add(overseer, worker, &change, Instant::now());
                             }
                         }
@@ -404,6 +431,34 @@ mod tests {
             .due(t1 + WINDOW - Duration::from_secs(2), |_| Overseer::Ready)
             .is_empty());
         assert_eq!(c.due(t1 + WINDOW, |_| Overseer::Ready).len(), 1);
+    }
+
+    #[test]
+    fn escalated_wakes_on_any_change_carrying_an_escalation() {
+        let escalated = vec!["escalated".to_string()];
+        let mut blocked = change(3, "blocked");
+        assert_eq!(wake_kind(&escalated, &blocked), None);
+        blocked.escalation = Some(vogt_engine_contract::ChangeEscalation {
+            needs: Default::default(),
+            boundary: Default::default(),
+            ask: "merge".into(),
+            key: "k".into(),
+            resolve: vec![],
+        });
+        assert_eq!(wake_kind(&escalated, &blocked), Some("escalated"));
+        // Its own kind wins when that was asked for too.
+        let both = vec!["blocked".to_string(), "escalated".to_string()];
+        assert_eq!(wake_kind(&both, &blocked), Some("blocked"));
+        assert_eq!(wake_kind(&escalated, &change(4, "done")), None);
+        let mut c = Coalescer::default();
+        let t0 = Instant::now();
+        let esc = SessionChange {
+            kind: "escalated".into(),
+            ..blocked
+        };
+        c.add(Uuid::nil(), "vogt-1".into(), &esc, t0);
+        let due = c.due(t0 + WINDOW, |_| Overseer::Ready);
+        assert!(due[0].1.contains("(escalated: vogt-1)"), "{}", due[0].1);
     }
 
     #[test]

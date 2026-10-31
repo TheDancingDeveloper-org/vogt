@@ -4645,14 +4645,18 @@ class StartSessionParams(Params):
         ),
     )
     wake_on: list[
-        Literal["done", "reported", "blocked", "approval", "errored", "budget"]
+        Literal[
+            "done", "reported", "blocked", "approval", "errored", "budget", "escalated"
+        ]
     ] = Field(
         default=[],
         description=(
             "For an oversight session: change kinds of the sessions it starts "
             "that make the engine type one coalesced line into it while it "
             "rests at its prompt (at most one a minute, never while a person "
-            "is typing). Empty (default) never types anything."
+            "is typing). `escalated` matches any change that carries an "
+            "escalation (blocked report, permission dialog, grant request). "
+            "Empty (default) never types anything."
         ),
     )
     from_handoff: str | None = Field(
