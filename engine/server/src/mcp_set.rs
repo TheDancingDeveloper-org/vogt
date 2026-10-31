@@ -81,63 +81,174 @@ pub fn worker_names(extra: &[String]) -> Vec<String> {
 
 /// The bridge command that speaks to the vogt endpoint.
 const VOGT_BRIDGE: &str = "vogt-mcp-remote";
+/// The most extra names a project may add; matches the Python model.
+pub const MCP_EXTRA_MAX: usize = 16;
 
-/// Where an entry points: its URL without the query (the tool profile rides
-/// there), or its command and arguments.
-fn endpoint_of(entry: &serde_json::Value) -> Option<String> {
-    if let Some(url) = entry.get("url").and_then(|v| v.as_str()) {
-        let base = url.split(['?', '#']).next().unwrap_or(url);
-        return Some(format!("url:{}", base.trim_end_matches('/')));
-    }
-    let command = entry.get("command").and_then(|v| v.as_str())?;
-    let args: Vec<&str> = entry
-        .get("args")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-    Some(format!("cmd:{command} {}", args.join(" ")))
+/// A server name a project may add: 1-64 of `[A-Za-z0-9_-]`, as the Python
+/// model validates it.
+pub fn valid_extra_name(name: &str) -> bool {
+    (1..=64).contains(&name.len()) && is_bare_key(name)
 }
 
-fn is_vogt_bridge(entry: &serde_json::Value) -> bool {
-    entry
-        .get("command")
-        .and_then(|v| v.as_str())
-        .and_then(|c| Path::new(c).file_name())
-        .is_some_and(|n| n == VOGT_BRIDGE)
+/// Where a URL points: its lowercased host without a trailing dot, and its
+/// port (the scheme's default when absent). Scheme and path are ignored, so
+/// any door onto the same host and port compares equal. `None` when the URL
+/// does not parse or has no host.
+fn host_port(raw: &str) -> Option<(String, u16)> {
+    let url = url::Url::parse(raw.trim()).ok()?;
+    let host = match url.host()? {
+        url::Host::Domain(d) => d.trim_end_matches('.').to_ascii_lowercase(),
+        url::Host::Ipv4(ip) => ip.to_string(),
+        url::Host::Ipv6(ip) => ip.to_string(),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((host, url.port_or_known_default().unwrap_or(0)))
+}
+
+/// A host on this deployment's own network: loopback, `localhost`, a private
+/// or tailnet (100.64.0.0/10) address.
+fn is_local_host(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            let [a, b, ..] = ip.octets();
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_unspecified()
+                || (a == 100 && (64..128).contains(&b))
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xfe00) == 0xfc00
+        }
+        Err(_) => false,
+    }
+}
+
+/// The strings an entry carries: command, args and env values.
+fn entry_strings(entry: &serde_json::Value) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    if let Some(c) = entry.get("command").and_then(|v| v.as_str()) {
+        out.push(c);
+    }
+    if let Some(args) = entry.get("args").and_then(|v| v.as_array()) {
+        out.extend(args.iter().filter_map(|v| v.as_str()));
+    }
+    if let Some(env) = entry.get("env").and_then(|v| v.as_object()) {
+        out.extend(env.values().filter_map(|v| v.as_str()));
+    }
+    out
+}
+
+/// The hosts vogt's own entry points at: its URL, or any URL among a stdio
+/// entry's args and env (the bridge's target).
+fn vogt_hosts(entry: &serde_json::Value) -> Vec<(String, u16)> {
+    if let Some(url) = entry.get("url").and_then(|v| v.as_str()) {
+        return host_port(url).into_iter().collect();
+    }
+    entry_strings(entry)
+        .into_iter()
+        .flat_map(|s| s.split_whitespace())
+        .filter_map(host_port)
+        .collect()
+}
+
+/// A stdio entry that runs the vogt bridge: `vogt-mcp-remote` anywhere in
+/// the command or its args (`npx vogt-mcp-remote`, `sh -c "vogt-mcp-remote
+/// ..."`), or the same command and args as vogt's own stdio entry.
+fn runs_vogt_bridge(entry: &serde_json::Value, vogt: Option<&serde_json::Value>) -> bool {
+    if entry.get("url").is_some() {
+        return false;
+    }
+    let mine = entry_strings(entry);
+    if mine.iter().any(|s| s.contains(VOGT_BRIDGE)) {
+        return true;
+    }
+    vogt.is_some_and(|v| v.get("command").is_some() && cmd_args(v) == cmd_args(entry))
+}
+
+fn cmd_args(e: &serde_json::Value) -> Vec<&str> {
+    let mut v = vec![e.get("command").and_then(|c| c.as_str()).unwrap_or("")];
+    if let Some(args) = e.get("args").and_then(|a| a.as_array()) {
+        v.extend(args.iter().filter_map(|a| a.as_str()));
+    }
+    v
+}
+
+/// Whether an extra is a second door onto vogt. Fails closed: an extra URL
+/// that does not parse counts as one.
+fn aliases_vogt(
+    entry: &serde_json::Value,
+    vogt: Option<&serde_json::Value>,
+    hosts: &[(String, u16)],
+) -> bool {
+    if runs_vogt_bridge(entry, vogt) {
+        return true;
+    }
+    let vogt_local = hosts.iter().any(|(h, _)| is_local_host(h));
+    let hits = |target: &(String, u16)| {
+        hosts.iter().any(|(h, _)| h == &target.0) || (vogt_local && is_local_host(&target.0))
+    };
+    if let Some(url) = entry.get("url") {
+        let Some(target) = url.as_str().and_then(host_port) else {
+            return true;
+        };
+        return hits(&target);
+    }
+    // A stdio extra that names vogt's host in its args or env.
+    entry_strings(entry).into_iter().any(|s| {
+        s.split_whitespace().any(|w| {
+            host_port(w).is_some_and(|t| hits(&t))
+                || hosts
+                    .iter()
+                    .any(|(h, _)| w.to_ascii_lowercase().contains(h.as_str()))
+        })
+    })
 }
 
 /// The extras that are safe to add (WI-2750): an extra registered as a
-/// second door to the vogt endpoint (a `vogt-admin` on the same URL, or the
-/// vogt bridge under another name) would hand a worker the full vogt tool
-/// profile, so it is dropped with a warning. `servers` is the config's
-/// server map, as JSON.
+/// second door to the vogt endpoint (a `vogt-admin` on vogt's host, the vogt
+/// bridge under another name, or anything local when vogt itself is served
+/// locally) would hand a worker the full vogt tool profile, so it is dropped
+/// with a warning. So is a name that is not valid, and anything past
+/// [`MCP_EXTRA_MAX`]. `servers` is the config's server map, as JSON; with no
+/// map nothing is added.
 pub fn safe_extra(
     servers: Option<&serde_json::Map<String, serde_json::Value>>,
     extra: &[String],
 ) -> Vec<String> {
     let Some(servers) = servers else {
-        return extra.to_vec();
+        return Vec::new();
     };
-    let vogt = servers.get("vogt").and_then(endpoint_of);
+    let vogt = servers.get("vogt");
+    let hosts = vogt.map(vogt_hosts).unwrap_or_default();
     extra
         .iter()
+        .filter(|name| !name.trim().is_empty())
+        .take(MCP_EXTRA_MAX)
         .filter(|name| {
             let name = name.trim();
+            if !valid_extra_name(name) {
+                tracing::warn!(name, "project mcp_extra name is not valid; dropped");
+                return false;
+            }
             if WORKER_SERVERS.contains(&name) {
                 return true;
             }
             let Some(entry) = servers.get(name) else {
                 return true;
             };
-            let aliases_vogt =
-                is_vogt_bridge(entry) || (vogt.is_some() && endpoint_of(entry) == vogt);
-            if aliases_vogt {
+            let bad = aliases_vogt(entry, vogt, &hosts);
+            if bad {
                 tracing::warn!(
                     name,
                     "project mcp_extra names a server on the vogt endpoint; dropped"
                 );
             }
-            !aliases_vogt
+            !bad
         })
         .cloned()
         .collect()
@@ -668,5 +779,92 @@ mod tests {
         .unwrap();
         let args = codex_worker_args(&config, &names(&["vogt-admin"]));
         assert!(args.contains(&"mcp_servers.vogt-admin.enabled=false".to_string()));
+    }
+
+    fn dropped(vogt: serde_json::Value, extra: serde_json::Value) -> bool {
+        let servers = serde_json::json!({"vogt": vogt, "x": extra});
+        safe_extra(servers.as_object(), &names(&["x"])).is_empty()
+    }
+
+    #[test]
+    fn url_variants_of_the_vogt_host_are_dropped() {
+        let vogt = serde_json::json!({"url": "https://v.example/mcp"});
+        for url in [
+            "HTTPS://V.EXAMPLE/mcp",
+            "http://v.example/mcp",
+            "https://v.example:443/mcp",
+            "https://v.example./mcp",
+            "https://v.example//mcp",
+            "https://v.example/mcp/./",
+            "https://v.example/other",
+            "not a url",
+        ] {
+            assert!(
+                dropped(vogt.clone(), serde_json::json!({"url": url})),
+                "{url}"
+            );
+        }
+        assert!(!dropped(
+            vogt,
+            serde_json::json!({"url": "https://k.example/mcp"})
+        ));
+    }
+
+    #[test]
+    fn local_extras_are_dropped_when_vogt_is_local() {
+        let vogt = serde_json::json!({"url": "http://100.92.54.45:8910/mcp"});
+        for url in [
+            "http://127.0.0.1:8910/mcp",
+            "http://localhost:8910/mcp",
+            "http://100.100.1.1/mcp",
+            "http://[::1]:8910/mcp",
+        ] {
+            assert!(
+                dropped(vogt.clone(), serde_json::json!({"url": url})),
+                "{url}"
+            );
+        }
+        let public = serde_json::json!({"url": "https://v.example/mcp"});
+        assert!(!dropped(
+            public,
+            serde_json::json!({"url": "http://127.0.0.1:9000/mcp"})
+        ));
+    }
+
+    #[test]
+    fn bridge_launchers_and_vogt_host_args_are_dropped() {
+        let vogt = serde_json::json!({
+            "command": "vogt-mcp-remote", "args": ["https://v.example/mcp"]
+        });
+        for extra in [
+            serde_json::json!({"command": "npx", "args": ["-y", "vogt-mcp-remote"]}),
+            serde_json::json!({"command": "uvx", "args": ["vogt-mcp-remote"]}),
+            serde_json::json!({"command": "sh", "args": ["-c", "vogt-mcp-remote --x"]}),
+            serde_json::json!({"command": "/opt/renamed", "args": ["--url", "https://V.example/mcp"]}),
+            serde_json::json!({"command": "mcp-proxy", "args": ["v.example"]}),
+            serde_json::json!({"command": "p", "env": {"URL": "http://v.example:443/mcp"}}),
+        ] {
+            assert!(dropped(vogt.clone(), extra.clone()), "{extra}");
+        }
+        assert!(!dropped(
+            vogt,
+            serde_json::json!({"command": "komodo-mcp", "args": ["--x"]})
+        ));
+    }
+
+    #[test]
+    fn no_server_map_and_bad_names_add_nothing() {
+        assert!(safe_extra(None, &names(&["komodo"])).is_empty());
+        let servers = serde_json::json!({"vogt": {"url": "https://v.example/mcp"}});
+        let long = "a".repeat(65);
+        assert_eq!(
+            safe_extra(
+                servers.as_object(),
+                &names(&["ok_1", "bad name", &long, "a.b"])
+            ),
+            ["ok_1"]
+        );
+        let many: Vec<String> = (0..20).map(|i| format!("s{i}")).collect();
+        assert_eq!(safe_extra(servers.as_object(), &many).len(), MCP_EXTRA_MAX);
     }
 }
