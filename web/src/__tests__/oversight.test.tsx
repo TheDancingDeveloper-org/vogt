@@ -106,6 +106,37 @@ describe("answering from the board", () => {
     fireEvent.click(await screen.findByText("2. No, exit"));
     await waitFor(() => expect(answer).toHaveBeenCalledWith("uuid-1", 2, "Trust?"));
   });
+
+  it("shows an overseer's recorded pick beside the buttons, never selecting it (WI-996 E0b)", async () => {
+    const options = [
+      { number: 1, label: "Yes", selected: true },
+      { number: 2, label: "No, and tell Claude" },
+    ];
+    const row = ROW({
+      attention: "approval",
+      attention_reason: "asking for approval: Proceed?",
+      recommendation: { option: 2, label: "No, and tell Claude", by: "agent:session:ses_9" },
+      session: { ...ROW({}).session, approval: { question: "Proceed?", options } },
+    });
+    const bad = ROW({
+      attention: "approval",
+      attention_reason: "asking for approval: Other?",
+      recommendation: { option: { x: 1 } },
+      session: { ...ROW({}).session, id: "ses_2", engine_session_id: "uuid-2", approval: { question: "Other?", options } },
+    });
+    vi.spyOn(vogtApi, "sweepSessions").mockResolvedValue({
+      rows: [row, bad],
+      counts: { total: 2, needs_you: 2 },
+      swept_at: new Date().toISOString(),
+      engine: null,
+    });
+    render(() => <Oversight />);
+    const callouts = await screen.findAllByLabelText("Overseer recommendation");
+    expect(callouts).toHaveLength(1);
+    expect(callouts[0]?.textContent).toContain("agent:session:ses_9 recommends 2. No, and tell Claude");
+    const picked = screen.getAllByText("2. No, and tell Claude")[0];
+    expect(picked?.className).not.toContain("--selected");
+  });
 });
 
 describe("what a session is running", () => {
