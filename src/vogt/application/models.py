@@ -6341,6 +6341,27 @@ class SessionWaitResult(Result):
     )
 
 
+class ChangeEscalation(Result):
+    """The ask a change carries, for someone other than the session to
+    resolve (WI-996 E1)."""
+
+    needs: str = Field(description="Who can resolve it: person, overseer or either.")
+    boundary: str = Field(
+        description=("permission_prompt, denied_action, credential, decision or other.")
+    )
+    ask: str = Field(default="", description="The ask, at most 120 characters.")
+    key: str = Field(
+        default="",
+        description=(
+            "Content key `session:boundary:hash`, the one the Inbox and push dedupe on."
+        ),
+    )
+    resolve: list[str] = Field(
+        default=[],
+        description="Ways to resolve it: answer, grant, do, lift_hold.",
+    )
+
+
 class SessionChange(Result):
     """One session delta, oldest first in a page."""
 
@@ -6354,10 +6375,18 @@ class SessionChange(Result):
     )
     kind: str = Field(
         description=(
-            "ready, approval, exited, errored, blocked, unblocked, hibernated or woken."
+            "ready, approval, exited, errored, blocked, unblocked, hibernated, "
+            "woken, done, reported, budget, or escalated (a grant request)."
         )
     )
     summary: str = ""
+    escalation: ChangeEscalation | None = Field(
+        default=None,
+        description=(
+            "Set on a blocked report, a permission dialog and a grant request: "
+            "who it needs, the boundary, the ask, its key and how to resolve it."
+        ),
+    )
 
 
 class SessionChangesParams(Params):
@@ -6420,8 +6449,11 @@ class SessionWaitAnyParams(Params):
         default=[],
         description=(
             "Kinds that end the wait: ready, approval, exited, errored, "
-            "blocked, unblocked, hibernated, woken. Empty uses the engine's "
-            "default (ready, blocked, approval, exited, errored)."
+            "blocked, unblocked, hibernated, woken, done, reported, budget, "
+            "escalated. `escalated` matches any change carrying an "
+            "escalation: a blocked report, a permission dialog or a grant "
+            "request. Empty uses the engine's default (ready, blocked, "
+            "approval, exited, errored, done)."
         ),
     )
     cursor: int | str | None = Field(

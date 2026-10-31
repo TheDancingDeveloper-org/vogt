@@ -296,6 +296,7 @@ mod tests {
             session: Uuid::nil(),
             kind: kind.to_string(),
             summary: kind.to_string(),
+            escalation: None,
         }
     }
 
