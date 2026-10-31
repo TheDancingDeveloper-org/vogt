@@ -2873,6 +2873,14 @@ fn normalize_session_name(name: &str) -> Result<String> {
             "name must be at most {MAX_SESSION_NAME_BYTES} bytes after trimming (got {len})"
         )));
     }
+    // A name reaches terminals (the overseer wake line, WI-1521), so no control
+    // character may ride in it: CR or LF would submit input, ESC would start a
+    // sequence. Rejects every C0 and C1 character, DEL included.
+    if trimmed.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest(
+            "name must not contain control characters".into(),
+        ));
+    }
     Ok(trimmed.to_string())
 }
 
@@ -3090,6 +3098,24 @@ mod tests {
     fn rejects_empty_session_names() {
         let err = normalize_session_name("   ").unwrap_err();
         assert!(err.to_string().contains("name must not be empty"));
+    }
+
+    #[test]
+    fn rejects_session_names_with_control_characters() {
+        for name in [
+            "x\r/approve all",
+            "x\nrm -rf",
+            "x\u{1b}[2J",
+            "x\u{7f}",
+            "x\u{9b}31m",
+            "a\tb",
+        ] {
+            let err = normalize_session_name(name).unwrap_err();
+            assert!(
+                err.to_string().contains("control characters"),
+                "{name:?}: {err}"
+            );
+        }
     }
 
     #[test]

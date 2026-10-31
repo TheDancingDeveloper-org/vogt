@@ -174,13 +174,31 @@ fn line(batch: &Batch) -> String {
     )
 }
 
+/// The worker's name as typed into the overseer's terminal: a strict
+/// `[A-Za-z0-9._-]` slug, never the raw name. The line is typed and then
+/// Entered, so a name carrying CR, LF or an escape would inject input into the
+/// overseer. Falls back to the id prefix when nothing safe is left.
 fn label(session: &Session) -> String {
-    let name = session.name();
-    if name.trim().is_empty() {
-        session.id.to_string()[..8].to_string()
-    } else {
-        name
+    slug(&session.name()).unwrap_or_else(|| session.id.to_string()[..8].to_string())
+}
+
+const MAX_LABEL_CHARS: usize = 48;
+
+fn slug(name: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in name.chars() {
+        let safe = c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+        if safe {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+        if out.len() >= MAX_LABEL_CHARS {
+            break;
+        }
     }
+    let out = out.trim_matches('-');
+    (!out.is_empty()).then(|| out.to_string())
 }
 
 /// The overseer to tell about `change`, and the worker's label, when there is one
@@ -279,6 +297,38 @@ mod tests {
             kind: kind.to_string(),
             summary: kind.to_string(),
         }
+    }
+
+    #[test]
+    fn a_label_is_a_strict_slug_of_the_name() {
+        assert_eq!(slug("vogt-1513").as_deref(), Some("vogt-1513"));
+        assert_eq!(
+            slug("fix the_bug v2.1").as_deref(),
+            Some("fix-the_bug-v2.1")
+        );
+        assert_eq!(slug("x\r/approve all\n").as_deref(), Some("x-approve-all"));
+        assert_eq!(slug("\u{1b}[2J\u{9b}").as_deref(), Some("2J"));
+        assert_eq!(slug("\r\n\u{1b}"), None);
+        assert_eq!(
+            slug(&"a".repeat(500)).map(|s| s.len()),
+            Some(MAX_LABEL_CHARS)
+        );
+    }
+
+    #[test]
+    fn a_wake_line_from_a_hostile_name_types_only_safe_characters() {
+        let overseer = Uuid::new_v4();
+        let t0 = Instant::now();
+        let mut c = Coalescer::default();
+        let hostile = slug("x\r\u{1b}[31mrm -rf /\n").unwrap();
+        c.add(overseer, hostile, &change(42, "done"), t0);
+        let due = c.due(t0 + WINDOW, |_| Overseer::Ready);
+        let (_, text) = &due[0];
+        assert!(
+            !text.chars().any(char::is_control),
+            "control character in {text:?}"
+        );
+        assert!(text.contains("done: x-31mrm--rf"), "{text}");
     }
 
     #[test]
