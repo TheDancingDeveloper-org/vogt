@@ -40,6 +40,7 @@ from vogt.application.models import (
     SessionGrantView,
 )
 from vogt.application.services import _resolve
+from vogt.application.services._recommendation import dialog_recommendation
 from vogt.application.services.ci_watch import (
     BoundBranch,
     bound_branches,
@@ -80,7 +81,6 @@ from vogt.core.entities import (
     SessionReport,
     TrustState,
 )
-from vogt.core.escalation import SESSION_ANSWER_RECOMMENDED, dialog_key
 from vogt.errors import (
     InboxEntryNotFound,
     InvalidCursor,
@@ -1328,7 +1328,9 @@ def _session_entry(
             else f" Auto-deny in {approval.deadline_seconds}s."
         )
         recommended = (
-            None if approval is None else _recommendation(view, session_id, approval)
+            None
+            if approval is None
+            else dialog_recommendation(view, session_id, approval)
         )
         if recommended is not None:
             evidence = {"recommendation": recommended}
@@ -1364,40 +1366,6 @@ def _session_entry(
         evidence_snapshot=evidence,
         **_actor_fields(SYSTEM_ACTOR),
     )
-
-
-#: The most recommendation events read for one dialog.
-_RECOMMENDATION_SCAN = 50
-
-
-def _recommendation(
-    view: ReadView, session_id: str, approval: EngineApproval
-) -> dict[str, object] | None:
-    """The newest recommendation recorded on this dialog (WI-996 E0b).
-
-    An agent whose answer the engine refused has its pick recorded under the
-    dialog's escalation key. It is shown beside the person's buttons, never
-    chosen for them, and only while it still names an option the dialog
-    shows with the same label.
-    """
-    key = dialog_key(session_id, approval.key, approval.question)
-    events = view.list_events(after=0, limit=_RECOMMENDATION_SCAN, entity_id=key)
-    shown = {number: text for number, text, _selected in approval.options}
-    for event in reversed(events):
-        if event.kind != SESSION_ANSWER_RECOMMENDED:
-            continue
-        option = event.summary.get("option")
-        label = event.summary.get("label")
-        if not isinstance(option, int) or shown.get(option) != label:
-            continue
-        return {
-            "option": option,
-            "label": label,
-            "by": str(event.summary.get("by", "an agent")),
-            "at": event.at.isoformat(),
-            "escalation_key": key,
-        }
-    return None
 
 
 def _bound_ref(
