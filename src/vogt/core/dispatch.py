@@ -315,12 +315,26 @@ class Decision(BaseModel):
     blockers_count: int = 0
 
 
+#: The purpose a start that names none is judged as: the default implement
+#: profile. Without it an agent could leave the purpose out to run any model
+#: and skip the escalation (WI-1329).
+DEFAULT_PURPOSE: Purpose = "implement"
+
+
+def judged_purpose(purpose: Purpose | None) -> Purpose:
+    """The purpose the dispatch rules judge a start as."""
+    return DEFAULT_PURPOSE if purpose is None else purpose
+
+
 def escalation(
     purpose: Purpose | None, blockers_count: int, settings: DispatchSettings
 ) -> Purpose | None:
-    """`implement-careful` when an `implement` item has failed review enough."""
+    """`implement-careful` when an `implement` item has failed review enough.
+
+    A start with no purpose is judged as `implement`.
+    """
     if (
-        purpose == "implement"
+        judged_purpose(purpose) == "implement"
         and blockers_count >= settings.escalate_after_failed_reviews
     ):
         return "implement-careful"
@@ -340,7 +354,10 @@ def check(
     """Judge one start against the dispatch rules (design §2.4, WI-1329).
 
     `purpose` is the purpose the start will run (after any escalation) and
-    `model` the model it will run, the caller's or the profile's.
+    `model` the model it will run, the caller's or the profile's. A start
+    with no purpose is judged as `implement`, and every purpose but review
+    must run its profile's model: a review may run another model than the
+    author's, and `review.never_models` bounds it instead.
     `caller_role` is the starter's engine role (`person` for a person);
     `live_workers` counts the caller's live started sessions. A rule that
     has nothing to judge (no model, an unknown role) is not broken. The
@@ -358,14 +375,15 @@ def check(
                 ),
             )
         )
-    if purpose in ("implement", "mechanical") and model is not None:
-        expected = settings.profiles[purpose].model
+    judged = judged_purpose(purpose)
+    if not review and model is not None:
+        expected = settings.profiles[judged].model
         if model != expected:
             violations.append(
                 Violation(
                     rule="profile_model",
                     message=(
-                        f"purpose={purpose} runs model {expected!r} by the "
+                        f"purpose={judged} runs model {expected!r} by the "
                         f"dispatch profile, not {model!r}"
                     ),
                 )
@@ -390,6 +408,7 @@ def check(
 
 __all__ = [
     "DEFAULT_PROFILES",
+    "DEFAULT_PURPOSE",
     "KEYS",
     "KEY_PREFIX",
     "PROFILES_KEY",
@@ -402,6 +421,7 @@ __all__ = [
     "Violation",
     "check",
     "escalation",
+    "judged_purpose",
     "resolve",
     "validate",
 ]
