@@ -3,6 +3,11 @@ overrides:
   # through @capacitor/cli -> rimraf -> glob -> minimatch (build-time tooling,
   # not shipped in the APK). Patched in 5.0.12.
   brace-expansion: '>=5.0.12'
+  # GHSA-g3hv-75wg-m249 (minimatch <11.0.1) and GHSA-3g3m-2fjr-6pw4 (glob
+  # 9.0.0-14.0.1): reached only through @capacitor/cli -> rimraf -> glob. The
+  # latest @capacitor/cli (8.6.0) still pulls rimraf ^6 -> glob 13, so override.
+  glob: '^14.0.2'
+  minimatch: '^11.0.1'
   tar: 7.5.22
   uuid: 11.1.1
   # @capacitor/cli tooling pulls a vulnerable @xmldom/xmldom (build-time only,
