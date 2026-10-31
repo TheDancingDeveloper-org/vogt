@@ -35,6 +35,16 @@ $ uv run vogt connect                 # HTTP/MCP client config for this instance
 $ uv run vogt connect --client bridge # the stdio-bridge config instead
 ```
 
+### A worker's tool list is short
+
+Sessions started for implement, mechanical or review work get the `worker`
+MCP set (WI-2740): `vogt` with its worker tool profile and `cadastre`, and no
+komodo, grafana, github or forgejo servers. The tools you need for a work
+item are there: `work_get`, `work_comment`, `work_transition`,
+`work_create`, `session_report`, `session_report_blocked`, `decision_ask`,
+`project_brief`. A vogt tool outside the list still answers if you call it by
+name. If a task needs another server, ask for a start with `mcp_set="full"`.
+
 ### The three surfaces
 
 | Surface | How you reach it | Use it when |

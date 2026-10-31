@@ -378,6 +378,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 effort=params.effort,
                 resume=params.resume,
                 permission_mode=params.permission_mode,
+                mcp_set=params.mcp_set,
                 account=params.account,
                 autopilot=autopilot,
                 role=params.role,
@@ -5066,6 +5067,7 @@ _PROFILE_FIELDS = (
     "worktree",
     "repo_map",
     "autopilot",
+    "mcp_set",
 )
 
 #: The review profile's hint (WI-1323). Advisory, like autopilot's text.
@@ -5107,6 +5109,7 @@ def _resolve_purpose(
         "worktree": profile.worktree,
         "repo_map": profile.repo_map,
         "autopilot": profile.autopilot,
+        "mcp_set": profile.mcp_set,
     }
     if (
         "model" in given
@@ -5470,6 +5473,7 @@ def _start_on_engine(
     effort: str | None = None,
     resume: str | None = None,
     permission_mode: str | None = None,
+    mcp_set: str | None = None,
     account: str | None = None,
     autopilot: bool = False,
     role: str = "worker",
@@ -5503,6 +5507,7 @@ def _start_on_engine(
         effort=effort,
         resume=resume,
         permission_mode=permission_mode,
+        mcp_set=mcp_set,
         account=account,
         autopilot=autopilot,
         role=role,

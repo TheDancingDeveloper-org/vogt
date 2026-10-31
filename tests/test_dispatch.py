@@ -37,6 +37,9 @@ def test_the_code_defaults_are_the_design_table() -> None:
     assert table.max_workers_per_overseer == 5
     assert table.escalate_after_failed_reviews == 2
     assert table.review_by_oversight_only is True
+    workers = {"implement", "implement-careful", "review", "mechanical"}
+    for name, profile in table.profiles.items():
+        assert profile.mcp_set == ("worker" if name in workers else "full"), name
 
 
 def test_an_override_changes_only_the_field_it_names() -> None:

@@ -1218,3 +1218,77 @@ def test_auto_compact_limit_written_when_unset_and_never_overridden(
     parsed = tomllib.loads(config.read_text(encoding="utf-8"))
     assert parsed["model_auto_compact_token_limit"] == 150000
     assert parsed["model_auto_compact_token_limit_scope"] == "total"
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_codex_catalog_lists_the_groups_that_answer_and_keeps_operator_entries(
+    tmp_path: Path,
+) -> None:
+    """WI-2740: the catalog is what the session key reaches, swack-haiku with
+    Claude's window, and an entry an operator added survives a rewrite."""
+    import threading
+    import tomllib
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Router(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def _send(self, status: int, body: object) -> None:
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self) -> None:
+            rows = [
+                {
+                    "model_name": "swack-haiku",
+                    "model_info": {"max_input_tokens": 1000000},
+                },
+                {"model_name": "gpt-5.4", "model_info": {"max_input_tokens": 1050000}},
+                {"model_name": "broken", "model_info": {}},
+            ]
+            self._send(200, {"data": rows})
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            model = json.loads(self.rfile.read(length))["model"]
+            self._send(500 if model == "broken" else 200, {"choices": []})
+
+    server = HTTPServer(("127.0.0.1", 0), Router)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    catalog_path = codex_home / "vogt-model-catalog.json"
+    operator = {"slug": "my-model", "description": "added by hand", "priority": 99}
+    catalog_path.write_text(json.dumps({"models": [operator]}), encoding="utf-8")
+    env = {
+        "HOMELAB_LITELLM_SESSION_KEY": "test-key",
+        "VOGT_LITELLM_BASE_URL": f"http://127.0.0.1:{server.server_address[1]}/v1",
+    }
+    try:
+        proc = _codex_bootstrap(tmp_path, env)
+    finally:
+        server.shutdown()
+    assert proc.returncode == 0, proc.stderr
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    slugs = [row["slug"] for row in catalog["models"]]
+    assert slugs == ["gpt-5.4", "swack-haiku", "my-model"]
+    windows = {row["slug"]: row.get("context_window") for row in catalog["models"]}
+    assert windows["swack-haiku"] == 200000
+    assert windows["gpt-5.4"] == 1050000
+    assert catalog["models"][-1] == operator
+    parsed = tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
+    assert parsed["model"] == "gpt-5.4", "the default is a group that answers"
+    assert "test-key" not in (codex_home / "config.toml").read_text(encoding="utf-8")
+
+    # The answers are cached: a second run with the router gone is the same.
+    again = _codex_bootstrap(tmp_path, env)
+    assert again.returncode == 0, again.stderr
+    assert json.loads(catalog_path.read_text(encoding="utf-8")) == catalog

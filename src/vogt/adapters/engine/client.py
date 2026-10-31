@@ -855,6 +855,7 @@ class EngineClient:
         effort: str | None = None,
         resume: str | None = None,
         permission_mode: str | None = None,
+        mcp_set: str | None = None,
         account: str | None = None,
         autopilot: bool = False,
         role: str = "worker",
@@ -909,6 +910,10 @@ class EngineClient:
             # Sent only when not the default, so a default start is the
             # request this client has always made.
             spec["permission_mode"] = permission_mode.replace("_", "-")
+        if mcp_set and mcp_set != "full":
+            # Sent only when trimmed (WI-2740); the engine builds the
+            # per-session MCP config.
+            spec["mcp_set"] = mcp_set
         if account:
             # A Claude Code account *name* from the engine's own allowlist;
             # the engine maps it to a config directory and refuses a name it

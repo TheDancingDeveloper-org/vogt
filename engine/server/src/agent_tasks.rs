@@ -1503,6 +1503,7 @@ impl AgentTaskRegistry {
             effort: None,
             resume: None,
             permission_mode: None,
+            mcp_set: None,
             account: None,
             autopilot: false,
             policy: None,
