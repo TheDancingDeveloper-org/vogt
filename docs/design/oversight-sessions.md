@@ -303,6 +303,57 @@ Either way, the worker still runs the WI-926 driven-session policy unless
 bypass was granted, and a denial still becomes a `blocked` report that the
 overseer sees through `wait_any`.
 
+## Oversight loop v2 (WI-1524)
+
+The first oversight loop was a 10-minute timer prompt of about 1.7k
+characters, re-sent into one conversation hundreds of times. It carried a
+hand-kept follow-up list, a list of operator session names, the model policy
+and the merge rules, and it never used `session_wait_any` or
+`session_changes`. Every sweep re-read all of that. Version 2 keeps the
+per-wake prompt short and moves everything that does not change between
+wakes out of it.
+
+### The canonical prompt
+
+The loop prompt the operator gives an overseer (under 600 characters):
+
+```text
+Loop: session_wait_any(supervised_by=me, until=[done,reported,blocked,
+approval,errored,budget], cursor=<last next_cursor>, timeout_s=600).
+Then session_changes(since=<cursor>) and act only on the sessions it
+lists. Keep the new next_cursor. At most once an hour, also
+session_sweep(supervised_by=me, exclude_roles=[operator]) to catch
+anything the changes missed. Reply in 5 lines or fewer.
+```
+
+Each wake costs one `wait_any` and one `changes` call, plus the calls needed
+to act on what they list. A quiet wake (a `timeout` outcome) costs one call.
+Aim for no more than 2.5 calls per wake on average, as `session_economics`
+on the overseer reports.
+
+### What moves out of the prompt
+
+| Was in the prompt | Now lives in |
+| --- | --- |
+| Model policy (which model and effort per purpose) and merge rules | The overseer's brief and the project's `agent_policy`, read once at start |
+| Follow-up list | A Vogt query: the initiative's items, or `work_list(state=review)` |
+| Operator session names | The session's role: `role=operator` (set with `session_set_role`), skipped by `session_sweep(exclude_roles=[operator])` |
+| Disk and CI checks | A separate hourly loop or a Grafana alert, not every wake |
+
+A name list goes stale and gets typos (the old prompt had "overssight2").
+A role is set once on the session and every sweep honours it.
+
+### Rules
+
+- Carry the cursor from one wake to the next. Without it, `wait_any` returns
+  the first change in the ring again.
+- A `timeout` with `still_waiting: true` is not news. Call `wait_any` again
+  with its `next_cursor` and do nothing else.
+- Act only on sessions that `changes` names. Don't screen every worker on
+  every wake.
+- When the engine can push to an idle overseer (slice 3 idle injection), the
+  blocking wait can give way to a push. The prompt is otherwise the same.
+
 ## MCP tools an overseer needs
 
 | Tool | Status |
