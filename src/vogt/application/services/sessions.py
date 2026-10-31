@@ -172,6 +172,7 @@ from vogt.core.escalation import (
     RECOMMENDATION_ENTITY,
     SESSION_ANSWER_RECOMMENDED,
     approval_key,
+    dialog_instance,
     dialog_key,
 )
 from vogt.core.session_economics import SessionEconomics, meter
@@ -4105,6 +4106,7 @@ def _recommend(
             "question": approval.question.strip()[:300],
             "option": number,
             "label": label[:200],
+            "dialog": dialog_instance(approval.detected_at, approval.command_excerpt),
             "by": ctx.principal.identity_ref,
         },
         event_kind=SESSION_ANSWER_RECOMMENDED,
