@@ -363,10 +363,17 @@ def _thread_sections(
     comments = view.comments_for(item.id, limit=200, order="newest")
     lines: list[str] = []
 
-    notes = [one for one in comments if one.kind == "note" and judge(one)]
+    # Newest first, and judging stops once the cap is full: an engine lookup
+    # is only ever made for a note the brief could still show.
+    notes: list[Comment] = []
+    for one in comments:
+        if len(notes) == _DECISION_NOTES:
+            break
+        if one.kind == "note" and judge(one):
+            notes.append(one)
     if notes:
         lines += ["## Decisions", ""]
-        for note in notes[:_DECISION_NOTES]:
+        for note in notes:
             lines += [f"### Note ({_label(note)})", "", _capped(note.body), ""]
 
     handoffs = [one for one in comments if one.kind == "handoff" and one.handoff]

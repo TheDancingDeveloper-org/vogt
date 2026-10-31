@@ -8,6 +8,7 @@ because the forge thread has no kind to keep.
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -564,6 +565,7 @@ def _session(
     sid: str,
     purpose: str | None = "review",
     started_by: Literal["person", "oversight", "worker"] | None = "oversight",
+    engine_id: str | None = None,
 ) -> AppContext:
     """Record a session row and return a context acting as that session."""
     with ctx.declared.read() as view:
@@ -573,7 +575,7 @@ def _session(
         txn.insert_session(
             CodingSession(
                 id=sid,
-                engine_session_id=f"eng-{sid}",
+                engine_session_id=f"eng-{sid}" if engine_id is None else engine_id,
                 project_id=project.id,
                 work_item_id=item_id,
                 actor_id=_actor_of(ctx),
@@ -922,6 +924,182 @@ def test_the_brief_carries_decisions_not_the_worker_thread(
     assert brief.count("### Note (") == 2
     assert brief.index("oversight relays") < brief.index("person decides")
     assert "worker 0" not in brief and "worker 3" not in brief
+
+
+class _Refusing(StandInEngine):
+    """An engine that refuses the role lookup for the named sessions only."""
+
+    def __init__(self, refused: set[str], status: int, said: str) -> None:
+        super().__init__()
+        self.refused = refused
+        self.status = status
+        self.said = said
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        body: bytes = b"",
+        method: str = "GET",
+    ) -> tuple[int, bytes]:
+        if (
+            method == "GET"
+            and "/api/sessions/" in url
+            and url.rsplit("/", 1)[-1] in self.refused
+        ):
+            self.sent.append({"url": url, "method": method, "body": {}})
+            return self.status, json.dumps({"error": self.said}).encode()
+        return super().__call__(url, headers, body, method)
+
+
+def _role_lookups(engine: StandInEngine, engine_id: str) -> int:
+    """How many role reads the engine was asked for one session."""
+    return len(
+        [
+            row
+            for row in engine.sent
+            if row["method"] == "GET" and row["url"].endswith(f"/{engine_id}")
+        ]
+    )
+
+
+def _brief_from_wired_start(ctx: AppContext, engine: StandInEngine, ref: str) -> str:
+    start_session(ctx, StartSessionParams(work_item=ref, reason=WHY))
+    return str(engine.last_spec["prompt"])
+
+
+@pytest.mark.parametrize(
+    ("status", "said"),
+    [
+        (503, "the engine is not answering"),
+        (403, "forbidden: project not open to grants"),
+        (400, "no such session"),
+    ],
+)
+def test_a_refused_role_lookup_drops_the_note_and_the_start_goes_ahead(
+    instance: AppContext, status: int, said: str
+) -> None:
+    engine = _Refusing({"eng-ses_ov"}, status, said)
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    ref, item_id = _item_with_worker(ctx, title=f"Refused {status}")
+    overseer = _session(ctx, item_id, sid="ses_ov", purpose="oversight")
+    comment_work(overseer, CommentParams(ref=ref, body="oversight relays", reason=WHY))
+    comment_work(ctx, CommentParams(ref=ref, body="person decides", reason=WHY))
+
+    brief = _brief_from_wired_start(ctx, engine, ref)
+    assert "person decides" in brief
+    assert "oversight relays" not in brief
+    assert brief.count("### Note (") == 1
+
+
+def test_a_session_the_engine_no_longer_holds_is_a_worker(
+    instance: AppContext,
+) -> None:
+    engine = StandInEngine()
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    ref, item_id = _item_with_worker(ctx, title="Removed")
+    gone = _session(ctx, item_id, sid="ses_gone", purpose="oversight")
+    comment_work(gone, CommentParams(ref=ref, body="gone relays", reason=WHY))
+    comment_work(ctx, CommentParams(ref=ref, body="person decides", reason=WHY))
+
+    brief = _brief_from_wired_start(ctx, engine, ref)
+    assert "gone relays" not in brief and "person decides" in brief
+    assert _role_lookups(engine, "eng-ses_gone") == 1
+
+
+def test_a_session_row_with_no_engine_id_is_a_worker_and_is_not_looked_up(
+    instance: AppContext,
+) -> None:
+    engine = StandInEngine()
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    ref, item_id = _item_with_worker(ctx, title="No engine id")
+    bare = _session(ctx, item_id, sid="ses_bare", purpose="oversight", engine_id="")
+    comment_work(bare, CommentParams(ref=ref, body="bare relays", reason=WHY))
+    comment_work(ctx, CommentParams(ref=ref, body="person decides", reason=WHY))
+
+    brief = _brief_from_wired_start(ctx, engine, ref)
+    assert "bare relays" not in brief and "person decides" in brief
+    assert not [
+        row
+        for row in engine.sent
+        if row["method"] == "GET" and row["url"].endswith("/api/sessions/")
+    ]
+
+
+def test_each_author_is_asked_once_per_brief(instance: AppContext) -> None:
+    engine = StandInEngine()
+    engine.roles["eng-ses_ov"] = "oversight"
+    engine.roles["eng-ses_ov2"] = "oversight"
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    ref, item_id = _item_with_worker(ctx, title="Per author")
+    first = _session(ctx, item_id, sid="ses_ov", purpose="oversight")
+    second = _session(ctx, item_id, sid="ses_ov2", purpose="oversight")
+    for n in range(3):
+        comment_work(first, CommentParams(ref=ref, body=f"first {n}", reason=WHY))
+    for n in range(2):
+        comment_work(second, CommentParams(ref=ref, body=f"second {n}", reason=WHY))
+
+    brief = _brief_from_wired_start(ctx, engine, ref)
+    assert brief.count("### Note (") == 5
+    assert _role_lookups(engine, "eng-ses_ov") == 1
+    assert _role_lookups(engine, "eng-ses_ov2") == 1
+
+
+def test_the_engine_is_not_asked_about_a_note_past_the_cap(
+    instance: AppContext,
+) -> None:
+    engine = StandInEngine()
+    engine.roles["eng-ses_ov"] = "oversight"
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    ref, item_id = _item_with_worker(ctx, title="Cap")
+    overseer = _session(ctx, item_id, sid="ses_ov", purpose="oversight")
+    comment_work(overseer, CommentParams(ref=ref, body="oldest relay", reason=WHY))
+    for n in range(5):
+        comment_work(ctx, CommentParams(ref=ref, body=f"person {n}", reason=WHY))
+
+    brief = _brief_from_wired_start(ctx, engine, ref)
+    assert brief.count("### Note (") == 5
+    assert "oldest relay" not in brief
+    assert _role_lookups(engine, "eng-ses_ov") == 0
+
+
+def test_once_the_engine_is_down_no_later_author_is_asked(
+    instance: AppContext,
+) -> None:
+    engine = _Refusing({"eng-ses_ov", "eng-ses_ov2"}, 503, "the engine is down")
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    ref, item_id = _item_with_worker(ctx, title="Down")
+    first = _session(ctx, item_id, sid="ses_ov", purpose="oversight")
+    second = _session(ctx, item_id, sid="ses_ov2", purpose="oversight")
+    comment_work(first, CommentParams(ref=ref, body="first relay", reason=WHY))
+    comment_work(second, CommentParams(ref=ref, body="second relay", reason=WHY))
+    comment_work(ctx, CommentParams(ref=ref, body="person decides", reason=WHY))
+
+    brief = _brief_from_wired_start(ctx, engine, ref)
+    assert "person decides" in brief
+    assert "first relay" not in brief and "second relay" not in brief
+    # The newest author is asked once, finds the engine down, and the older
+    # one is not asked at all: one unreachable engine, one wait.
+    assert _role_lookups(engine, "eng-ses_ov2") == 1
+    assert _role_lookups(engine, "eng-ses_ov") == 0
 
 
 def test_a_rendered_brief_snapshot(instance: AppContext) -> None:

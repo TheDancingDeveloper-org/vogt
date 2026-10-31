@@ -4167,16 +4167,20 @@ def _decision_author(ctx: AppContext, view: ReadView) -> DecisionAuthor:
     """Whose notes a worker brief carries (WI-1320): a person's, or oversight's.
 
     A session author counts when the engine says its role is `oversight`
-    now. A session that no longer exists, or an engine that cannot say,
-    counts as a worker, and its notes are dropped. One engine read per
-    author, however many notes it wrote.
+    now. A session that no longer exists, or an engine that cannot say
+    (unreachable, refused, or rejecting the lookup), counts as a worker, and
+    its notes are dropped: the brief fails closed, and the start goes ahead.
+    One engine read per author, however many notes it wrote; once the engine
+    is unreachable, no later author is asked for in the same brief.
     """
     person = person_author(view)
     roles: dict[str, bool] = {}
+    engine_down = False
 
     def oversight(actor_id: str) -> bool:
+        nonlocal engine_down
         actor = view.actor_by_id(actor_id)
-        if actor is None or ctx.engine is None:
+        if actor is None or ctx.engine is None or engine_down:
             return False
         ref = actor.identity_ref
         engine_id: str | None = None
@@ -4185,11 +4189,26 @@ def _decision_author(ctx: AppContext, view: ReadView) -> DecisionAuthor:
             engine_id = None if row is None else row.engine_session_id
         elif ref.startswith(ENGINE_SESSION_ACTOR_PREFIX):
             engine_id = ref.removeprefix(ENGINE_SESSION_ACTOR_PREFIX)
-        if engine_id is None:
+        if not engine_id:
             return False
         try:
             live = ctx.engine.get_session(engine_id)
-        except EngineUnavailable:
+        except EngineUnavailable as error:
+            engine_down = True
+            _LOG.warning(
+                "brief decision notes: engine unavailable, session notes dropped "
+                "actor_id=%s error=%s",
+                actor_id,
+                error.code,
+            )
+            return False
+        except VogtError as error:
+            _LOG.warning(
+                "brief decision notes: engine refused the role lookup, "
+                "note author counted as a worker actor_id=%s error=%s",
+                actor_id,
+                error.code,
+            )
             return False
         return live is not None and live.role == "oversight"
 
