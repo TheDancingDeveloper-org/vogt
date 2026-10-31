@@ -3050,8 +3050,8 @@ outside the workspace. An empty `repo` means the workspace root itself.
   500.
 - `GET /api/git/branch?repo=` -> `BranchInfo` `{current, all}`.
 - `POST /api/git/op` `GitOpReq` -> `{"ok": true, "branch"?, "commit"?}`
-  (requires `git-write`) — one of five, tagged by `op`: `stage`, `unstage`,
-  `discard`, `commit`, `checkout`. `commit` returns the new SHA; `checkout`
+  (requires `git-write`) — one of six, tagged by `op`: `stage`, `unstage`,
+  `discard`, `commit`, `checkout`, `land`. `commit` returns the new SHA; `checkout`
   returns the branch and takes `create` for `-b`. `discard` restores a tracked
   path from `HEAD` and `git clean`s an untracked one, which means it destroys
   work with no undo.
@@ -3069,6 +3069,9 @@ outside the workspace. An empty `repo` means the workspace root itself.
     engine session by the `VOGT_SESSION_ID` its record carries (exactly one
     match, or it is not a session); `agent:engine:<uuid>` by the uuid.
 
+  - `land` is vogt-core's stack secret only: a person, break-glass or a
+    session token gets 403. The core decides who asked (WI-1328).
+
   Everything else is a 403, written to the `vogt::audit` log as
   `event=git.op outcome=refused` with the caller, op and target session.
 
@@ -3078,6 +3081,31 @@ outside the workspace. An empty `repo` means the workspace root itself.
   out. It is refused with a 400 unless it resolves to a linked worktree —
   pass `worktree` (workspace-relative or absolute inside the workspace)
   naming the worker's own.
+
+- `land` (WI-1341) `{repo, branch, head_sha, onto, mode: "fast_forward" |
+  "rebase", forbidden_text: [], linear_history: bool}` -> `{ok, branch, commit,
+  onto_before, onto_after, commits: [sha], rebased}`. Lands `branch` on `onto`
+  without a merge commit, in a temporary detached worktree of `repo` (never
+  the checkout's own working tree) that is removed on every path. Each step
+  refuses with a named `409` and leaves both branches on origin untouched:
+  1. `git fetch origin` of `onto` and `branch` into `refs/remotes/origin/*`;
+  2. the fetched `branch` must equal `head_sha` ("stale tip", naming both);
+  3. behind `origin/<onto>`: `fast_forward` refuses ("rebase first"),
+     `rebase` runs `git rebase origin/<onto>`; a conflict aborts and names
+     the conflicting paths ("rebase conflict");
+  4. `linear_history`: no merge commits in `origin/<onto>..head_sha` (checked
+     before a rebase would flatten them), else the merge SHAs are listed;
+  5. every commit message in `origin/<onto>..<tip>` passes `forbidden_text`;
+  6. `git push --atomic origin <tip>:<onto>` — fast-forward only, never
+     `--force`; a rebased branch is updated in the same push, leased on
+     `head_sha`.
+  An `https://github.com` origin fetches and pushes with the value the
+  agent-auth helper's `get` resolves for the manifest entry
+  `ENGINE_AGENT_AUTH_GH_TOKEN_FROM` names (passed only through
+  `GIT_ASKPASS`, redacted from errors); a deployment without that entry gets
+  `409`. Other origins use the engine user's own git credentials. Audited as
+  `event=git.land` with repo, branch, `head_sha`, both `onto` SHAs and the
+  caller; never a diff.
 
 ### GUI APIs
 

@@ -944,6 +944,41 @@ pub enum GitOpReq {
         #[serde(default)]
         create: bool,
     },
+    /// Land `branch` on `onto` at the pinned `head_sha` (WI-1341): a
+    /// fast-forward push, rebasing first when asked, never a merge commit.
+    /// Only vogt-core's own credential may send it.
+    Land {
+        #[serde(default)]
+        repo: String,
+        branch: String,
+        head_sha: String,
+        onto: String,
+        mode: LandMode,
+        #[serde(default)]
+        forbidden_text: Vec<String>,
+        #[serde(default)]
+        linear_history: bool,
+    },
+}
+
+/// How a branch that is behind its base is brought up to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandMode {
+    /// Behind is a refusal: the caller rebases first.
+    FastForward,
+    /// Behind is rebased onto the base in the temporary worktree.
+    Rebase,
+}
+
+/// What a land did. Flattened into [`GitOpResp`].
+#[derive(Debug, Serialize)]
+pub struct LandResult {
+    pub onto_before: String,
+    pub onto_after: String,
+    /// The commits now on `onto` that were not before, oldest first.
+    pub commits: Vec<String>,
+    pub rebased: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -967,6 +1002,9 @@ pub struct GitOpResp {
     /// `unsafe`, and foreign-function bindings.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub review: Vec<String>,
+    /// Set only by `land`.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub land: Option<LandResult>,
 }
 
 impl GitOpResp {
@@ -979,6 +1017,7 @@ impl GitOpResp {
             diff_stat: None,
             diff: None,
             review: Vec::new(),
+            land: None,
         }
     }
 }
@@ -1324,6 +1363,7 @@ impl GitOpReq {
             GitOpReq::Discard { .. } => "discard",
             GitOpReq::Commit { .. } => "commit",
             GitOpReq::Checkout { .. } => "checkout",
+            GitOpReq::Land { .. } => "land",
         }
     }
 
@@ -1360,6 +1400,18 @@ impl GitOpReq {
 /// find which session an agent token belongs to, after the flags have ruled
 /// out a person.
 fn authorize_op(state: &AppState, identity: &AuthorizedIdentity, req: &GitOpReq) -> Result<()> {
+    // A land pushes to a base branch with the forge credential. The core
+    // decides who asked (a person or oversight, with a verdict); here only
+    // its own credential may send it — not a person, not break-glass.
+    if matches!(req, GitOpReq::Land { .. }) {
+        if identity.stack_secret {
+            return Ok(());
+        }
+        return Err(ApiError::Forbidden(format!(
+            "only vogt-core lands a branch; {} asks the core to land it",
+            identity.name
+        )));
+    }
     if identity.person || identity.break_glass {
         return Ok(());
     }
@@ -1550,7 +1602,328 @@ pub async fn operate(
                 ..GitOpResp::bare()
             }))
         }
+        GitOpReq::Land {
+            repo,
+            branch,
+            head_sha,
+            onto,
+            mode,
+            forbidden_text,
+            linear_history,
+        } => {
+            let root = resolve_repo(&state, &repo)
+                .await?
+                .ok_or(ApiError::NotFound)?;
+            let req = LandReq {
+                branch: clean_land_branch("branch", &branch)?,
+                onto: clean_land_branch("onto", &onto)?,
+                head_sha: clean_sha(&head_sha)?,
+                mode,
+                forbidden_text,
+                linear_history,
+            };
+            let token = if origin_is_github_https(&root) {
+                Some(land_push_token(&state).await?)
+            } else {
+                None
+            };
+            let caller = identity.name.clone();
+            let outcome = {
+                let req = req.clone();
+                tokio::task::spawn_blocking(move || land(&root, &req, token.as_deref()))
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("land task: {e}")))?
+            };
+            match &outcome {
+                Ok(done) => tracing::info!(
+                    target: "vogt::audit",
+                    event = "git.land",
+                    outcome = "landed",
+                    caller = %caller,
+                    repo = %repo,
+                    branch = %req.branch,
+                    onto = %req.onto,
+                    head_sha = %req.head_sha,
+                    onto_before = %done.onto_before,
+                    onto_after = %done.onto_after,
+                    rebased = done.rebased,
+                    "branch landed"
+                ),
+                Err(refused) => tracing::warn!(
+                    target: "vogt::audit",
+                    event = "git.land",
+                    outcome = "refused",
+                    caller = %caller,
+                    repo = %repo,
+                    branch = %req.branch,
+                    onto = %req.onto,
+                    head_sha = %req.head_sha,
+                    reason = %refused,
+                    "land refused"
+                ),
+            }
+            let done = outcome?;
+            Ok(Json(GitOpResp {
+                branch: Some(req.onto.clone()),
+                commit: Some(done.onto_after.clone()),
+                land: Some(done),
+                ..GitOpResp::bare()
+            }))
+        }
     }
+}
+
+#[derive(Debug, Clone)]
+struct LandReq {
+    branch: String,
+    onto: String,
+    head_sha: String,
+    mode: LandMode,
+    forbidden_text: Vec<String>,
+    linear_history: bool,
+}
+
+/// A branch name a land may fetch and push: a plain ref name, no leading
+/// dash, no `refs/` prefix games.
+fn clean_land_branch(what: &str, name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || name.contains("//")
+        || name.contains(':')
+    {
+        return Err(ApiError::BadRequest(format!(
+            "{what} {name:?} is not a branch name"
+        )));
+    }
+    clean_ref_name(what, name)
+}
+
+/// The pinned tip: a full 40-hex SHA-1 (or 64-hex SHA-256), lower-cased.
+fn clean_sha(sha: &str) -> Result<String> {
+    let sha = sha.trim().to_ascii_lowercase();
+    if (sha.len() == 40 || sha.len() == 64) && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(sha)
+    } else {
+        Err(ApiError::BadRequest(format!(
+            "head_sha {sha:?} is not a full commit SHA"
+        )))
+    }
+}
+
+/// The forge credential a land pushes with: the value the agent-auth
+/// helper's `get` resolves for the manifest entry
+/// `ENGINE_AGENT_AUTH_GH_TOKEN_FROM` names — the token sessions receive as
+/// `GH_TOKEN`. A deployment with no such helper entry cannot land.
+async fn land_push_token(state: &AppState) -> Result<String> {
+    let var = std::env::var("ENGINE_AGENT_AUTH_GH_TOKEN_FROM")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let broker = state.sessions.secret_broker();
+    let Some(entry) = var.as_deref().and_then(|var| broker.permitted(var)) else {
+        return Err(ApiError::Conflict(
+            "this deployment has no agent-auth helper entry for the forge credential \
+             (ENGINE_AGENT_AUTH_GH_TOKEN_FROM naming a manifest line), so the engine \
+             cannot push a land"
+                .into(),
+        ));
+    };
+    broker
+        .fetch(&entry)
+        .await
+        .map(|token| token.trim().to_string())
+        .map_err(|e| ApiError::Conflict(format!("could not resolve the forge credential: {e}")))
+}
+
+/// The temporary worktree a land works in, removed on every path.
+struct LandWorktree<'a> {
+    repo: &'a Path,
+    path: PathBuf,
+}
+
+impl Drop for LandWorktree<'_> {
+    fn drop(&mut self) {
+        let path = self.path.to_string_lossy().into_owned();
+        let _ = git_output(self.repo, &["worktree", "remove", "--force", &path]);
+        let _ = std::fs::remove_dir_all(&self.path);
+        let _ = git_output(self.repo, &["worktree", "prune"]);
+    }
+}
+
+fn rev_list(dir: &Path, args: &[&str]) -> Result<Vec<String>> {
+    let mut all = vec!["rev-list"];
+    all.extend_from_slice(args);
+    Ok(git_output(dir, &all)?
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// Land `req.branch` on `req.onto` (WI-1341). Every refusal leaves the
+/// remote branch and base untouched; the temporary worktree goes on every
+/// path. `token`, when set, is the only credential git uses for the fetch
+/// and the push.
+fn land(repo: &Path, req: &LandReq, token: Option<&str>) -> Result<LandResult> {
+    let path = std::env::temp_dir().join(format!("vogt-land-{}", uuid::Uuid::new_v4().simple()));
+    let path_arg = path.to_string_lossy().into_owned();
+    git_output(repo, &["worktree", "add", "--quiet", "--detach", &path_arg])?;
+    let wt = LandWorktree { repo, path };
+    let dir = wt.path.as_path();
+    let onto_ref = format!("refs/remotes/origin/{}", req.onto);
+    let branch_ref = format!("refs/remotes/origin/{}", req.branch);
+
+    // 1. Fetch both, into the remote-tracking refs (never a local branch).
+    git_command(
+        dir,
+        &[
+            "fetch",
+            "--quiet",
+            "origin",
+            &format!("+refs/heads/{}:{onto_ref}", req.onto),
+            &format!("+refs/heads/{}:{branch_ref}", req.branch),
+        ],
+        token,
+    )
+    .map_err(|e| {
+        ApiError::Conflict(format!(
+            "could not fetch {:?} and {:?} from origin: {}",
+            req.onto,
+            req.branch,
+            redact_token(e.to_string(), token)
+        ))
+    })?;
+
+    // 2. The branch is still at the tip the caller decided on.
+    let fetched = git_output(dir, &["rev-parse", &branch_ref])?
+        .trim()
+        .to_string();
+    if fetched != req.head_sha {
+        return Err(ApiError::Conflict(format!(
+            "stale tip: {:?} on origin is at {fetched}, not the requested head_sha {}",
+            req.branch, req.head_sha
+        )));
+    }
+    let onto_before = git_output(dir, &["rev-parse", &onto_ref])?
+        .trim()
+        .to_string();
+    git_output(dir, &["checkout", "--quiet", "--detach", &req.head_sha])?;
+
+    // 4 (checked on the branch as pushed, before a rebase would flatten it).
+    if req.linear_history {
+        let merges = rev_list(dir, &["--merges", &format!("{onto_ref}..{}", req.head_sha)])?;
+        if !merges.is_empty() {
+            return Err(ApiError::Conflict(format!(
+                "linear history required: {:?} carries merge commits {}",
+                req.branch,
+                merges.join(", ")
+            )));
+        }
+    }
+
+    // 3. Behind the base: rebase, or refuse.
+    let behind = git_command(
+        dir,
+        &["merge-base", "--is-ancestor", &onto_ref, &req.head_sha],
+        None,
+    )
+    .is_err();
+    let mut rebased = false;
+    if behind {
+        if req.mode == LandMode::FastForward {
+            return Err(ApiError::Conflict(format!(
+                "rebase first: {:?} is behind origin/{}",
+                req.branch, req.onto
+            )));
+        }
+        let has_identity = git_output(dir, &["config", "user.email"])
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        let mut args = Vec::new();
+        if !has_identity {
+            args.extend([
+                "-c",
+                "user.name=vogt-engine",
+                "-c",
+                "user.email=engine@vogt.invalid",
+            ]);
+        }
+        args.extend(["rebase", "--quiet", onto_ref.as_str()]);
+        if git_output(dir, &args).is_err() {
+            let paths = git_output(dir, &["diff", "--name-only", "--diff-filter=U"])
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let _ = git_output(dir, &["rebase", "--abort"]);
+            return Err(ApiError::Conflict(format!(
+                "rebase conflict: {:?} does not rebase onto origin/{} cleanly; conflicting paths: {}",
+                req.branch,
+                req.onto,
+                if paths.is_empty() {
+                    "(none reported)".to_string()
+                } else {
+                    paths.join(", ")
+                }
+            )));
+        }
+        rebased = true;
+    }
+    let tip = git_output(dir, &["rev-parse", "HEAD"])?.trim().to_string();
+    let commits = rev_list(dir, &["--reverse", &format!("{onto_ref}..{tip}")])?;
+    if commits.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "nothing to land: {:?} has no commits beyond origin/{}",
+            req.branch, req.onto
+        )));
+    }
+
+    // 5. Every commit message passes the project's forbidden text.
+    for sha in &commits {
+        let message = git_output(dir, &["log", "-1", "--format=%B", sha])?;
+        check_forbidden(&req.forbidden_text, &message, &req.branch).map_err(|e| {
+            let reason = match e {
+                ApiError::BadRequest(reason) => reason,
+                other => other.to_string(),
+            };
+            ApiError::Conflict(format!("forbidden text in {sha}: {reason}"))
+        })?;
+    }
+
+    // 6. Push: the base fast-forwards only (no `+`, no --force); a rebased
+    // branch follows, leased on the tip the caller pinned.
+    let lease = format!(
+        "--force-with-lease=refs/heads/{}:{}",
+        req.branch, req.head_sha
+    );
+    let onto_spec = format!("{tip}:refs/heads/{}", req.onto);
+    let branch_spec = format!("+{tip}:refs/heads/{}", req.branch);
+    let mut args = vec!["push", "--quiet", "--atomic"];
+    if rebased {
+        args.push(&lease);
+    }
+    args.push("origin");
+    args.push(&onto_spec);
+    if rebased {
+        args.push(&branch_spec);
+    }
+    git_command(dir, &args, token).map_err(|e| {
+        ApiError::Conflict(format!(
+            "push refused: origin/{} did not fast-forward to {tip}: {}",
+            req.onto,
+            redact_token(e.to_string(), token)
+        ))
+    })?;
+    drop(wt);
+    Ok(LandResult {
+        onto_before,
+        onto_after: tip,
+        commits,
+        rebased,
+    })
 }
 
 #[cfg(test)]
