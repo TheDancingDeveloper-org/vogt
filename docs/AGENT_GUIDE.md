@@ -180,6 +180,17 @@ follow-up.
 $ uv run vogt session start --work-item WI-42 --reason "start on the login-timeout fix"
 ```
 
+An autopilot worker started on a `project` with no `work_item` (and no
+`from_handoff` or `review_of`) gets one: `session_start` creates a
+`local_only` p3 chore in that project, titled `Session: <name>` or from the
+task's first line, with the task as its body, audited as `work.created`
+("created for an unbound autopilot worker"). The session is bound to it and
+the result's `work_item` names it, so the worker has an item to post its
+hand-off on. A `resume` reuses the open chore of the same title. A `result`
+report from the session walks the chore to `done`. A `review` or
+`investigate` purpose, an oversight session and a start without autopilot
+get no chore.
+
 #### Start for a purpose
 
 `session_start` takes `purpose`, one of `implement`, `implement-careful`,

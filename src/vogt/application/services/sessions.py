@@ -59,6 +59,7 @@ from vogt.application.models import (
     CancelWatchParams,
     CommitForSessionParams,
     CommitForSessionResult,
+    CreateWorkParams,
     EffectivePolicy,
     EngineSessionTokenParams,
     EngineSessionTokenResult,
@@ -167,7 +168,7 @@ from vogt.errors import (
     VogtError,
 )
 from vogt.observability import logger
-from vogt.storage.interface import ReadView, WriteTxn
+from vogt.storage.interface import ReadView, WorkFilter, WriteTxn
 
 _LOG = logger("sessions")
 
@@ -288,6 +289,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     _refuse_forbidden_model(ctx, params)
     started_by_session, started_by_kind = _started_by(ctx, engine)
     session_id = ctx.id_factory("ses")
+    params = _bind_unbound_worker(ctx, params)
     subject = _subject(ctx, params, session_id)
     if params.cwd:
         subject.cwd = _existing_worktree_cwd(params.cwd, subject.cwd)
@@ -3917,6 +3919,75 @@ def _worktree_base(policy: AgentPolicy) -> str:
     branch when it states one, otherwise `main`."""
     stated = policy.base_branch.strip()
     return stated or "main"
+
+
+#: The body footer that marks a chore `start_session` made for an unbound
+#: autopilot worker (WI-1338). A `result` report closes only such a chore.
+UNBOUND_CHORE_MARKER = "_Created by session.start for an unbound autopilot worker._"
+UNBOUND_CHORE_REASON = "created for an unbound autopilot worker"
+#: Purposes that read or judge rather than deliver: they hand nothing off.
+_NO_CHORE_PURPOSES = frozenset({"review", "investigate"})
+
+
+def _wants_unbound_chore(params: StartSessionParams) -> bool:
+    """Whether a start is an autopilot worker on a project with no item."""
+    return (
+        params.project is not None
+        and params.work_item is None
+        and params.from_handoff is None
+        and params.review_of is None
+        and params.role == "worker"
+        and params.purpose not in _NO_CHORE_PURPOSES
+        and _autopilot(params)
+    )
+
+
+def _unbound_chore_title(params: StartSessionParams) -> str:
+    task = (params.task or "").strip()
+    head = (params.name or "").strip() or (task.splitlines()[0] if task else "")
+    return f"Session: {head.strip()[:180] or 'autopilot worker'}"
+
+
+def _bind_unbound_worker(
+    ctx: AppContext, params: StartSessionParams
+) -> StartSessionParams:
+    """Give an autopilot worker started on a bare project an item (WI-1338).
+
+    Without one it has nowhere to post its hand-off. The chore is
+    `local_only` in that project, titled from the name or the task's first
+    line, its body the task. A resume reuses the open chore of the same
+    title rather than making a second. The subject is then the chore,
+    exactly as if the caller had named it.
+    """
+    if not _wants_unbound_chore(params):
+        return params
+    from vogt.application.services.work import create_work
+
+    title = _unbound_chore_title(params)
+    with ctx.declared.read() as view:
+        project = _resolve.project(view, params.project or "")
+        if params.resume:
+            for item in view.list_work_items(
+                WorkFilter(project_id=project.id, exclude_terminal=True, limit=500)
+            ):
+                if item.title == title and item.body.endswith(UNBOUND_CHORE_MARKER):
+                    return params.model_copy(
+                        update={"work_item": item.ref, "project": None}
+                    )
+    task = (params.task or "").strip()
+    created = create_work(
+        ctx,
+        CreateWorkParams(
+            kind="chore",
+            title=title,
+            body=f"{task}\n\n{UNBOUND_CHORE_MARKER}" if task else UNBOUND_CHORE_MARKER,
+            priority="p3",
+            project=project.slug,
+            local_only=True,
+            reason=UNBOUND_CHORE_REASON,
+        ),
+    )
+    return params.model_copy(update={"work_item": created.item.ref, "project": None})
 
 
 def _review_subject(ctx: AppContext, params: StartSessionParams) -> StartSessionParams:

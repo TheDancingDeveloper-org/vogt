@@ -23,18 +23,22 @@ Two rules:
 
 from __future__ import annotations
 
+import contextlib
+
 from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
     SessionReportParams,
     SessionReportResult,
     SessionReportView,
+    TransitionWorkParams,
 )
 from vogt.application.services import _resolve
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.agent_activity import redact
 from vogt.core.entities import Actor, Comment, SessionReport, SessionReportFields
-from vogt.errors import InvalidRequest, ReportRefused
+from vogt.core.workflow import DONE, TERMINAL_STATES
+from vogt.errors import InvalidRequest, ReportRefused, VogtError
 from vogt.storage.interface import ReadView, WriteTxn
 
 SESSION_REPORT = "session.report"
@@ -102,7 +106,45 @@ def report(ctx: AppContext, params: SessionReportParams) -> SessionReportResult:
             },
         )
 
-    return audited_write(ctx, operation=SESSION_REPORT, reason=reason, body=body)
+    result = audited_write(ctx, operation=SESSION_REPORT, reason=reason, body=body)
+    if params.kind == "result":
+        _close_unbound_chore(ctx, result.report.work_item)
+    return result
+
+
+def _close_unbound_chore(ctx: AppContext, ref: str | None) -> None:
+    """Walk the chore made for an unbound autopilot worker to done (WI-1338).
+
+    Only a chore `session.start` made itself: an item a person or oversight
+    filed is theirs to close. Best effort — the report has landed already,
+    and a workflow that refuses the walk leaves the chore for a person.
+    """
+    if ref is None:
+        return
+    from vogt.application.services.sessions import (
+        UNBOUND_CHORE_MARKER,
+    )
+    from vogt.application.services.work import transition_work
+
+    with ctx.declared.read() as view:
+        item = view.work_item_by_ref(ref)
+    if (
+        item is None
+        or item.kind != "chore"
+        or item.state in TERMINAL_STATES
+        or not item.body.endswith(UNBOUND_CHORE_MARKER)
+    ):
+        return
+    with contextlib.suppress(VogtError):
+        transition_work(
+            ctx,
+            TransitionWorkParams(
+                ref=ref,
+                to_state=DONE,
+                walk=True,
+                reason="the unbound autopilot worker reported its result",
+            ),
+        )
 
 
 def latest_reports(
