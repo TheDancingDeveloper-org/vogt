@@ -18,7 +18,18 @@ SESSION_ANSWER_RECOMMENDED = "session.answer_recommended"
 RECOMMENDATION_ENTITY = "escalation"
 
 
+def dialog_key(engine_session_id: str, engine_key: str, question: str) -> str:
+    """A dialog's escalation key: the engine's own when it sent one.
+
+    The engine computes the key in one place (`ApprovalPrompt.key`), so the
+    trim rule cannot drift between Rust and Python. `approval_key` is only
+    the fallback for an older engine that sends none.
+    """
+    return engine_key or approval_key(engine_session_id, question)
+
+
 def approval_key(engine_session_id: str, question: str) -> str:
-    """The escalation key of the dialog `question` on that engine session."""
+    """The escalation key of the dialog `question` on that engine session,
+    computed here only for an engine that does not send its own."""
     digest = hashlib.sha256(question.strip().encode()).hexdigest()[:16]
     return f"{engine_session_id}:permission_prompt:{digest}"
