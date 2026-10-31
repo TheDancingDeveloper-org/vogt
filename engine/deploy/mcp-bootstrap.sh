@@ -377,6 +377,80 @@ PY
     ) 9>"$lockdir/.config.toml.lock"
 }
 
+# Codex compacts its own context at min(model_auto_compact_token_limit, 90% of
+# the window) (WI-1575). Vogt owns that limit so a fresh pod does not run the
+# model default: the top-level key (ENGINE_CODEX_AUTO_COMPACT_TOKENS, default
+# 200000) and its scope "total" are written only when absent. An operator's
+# value is never overridden, and a config that does not parse is left alone.
+codex_auto_compact() {
+    local config="$1" lockdir
+    lockdir="$(dirname "$config")"
+    mkdir -p "$lockdir"
+    (
+        flock 9
+        CODEX_CONFIG="$config" \
+            CODEX_AUTO_COMPACT="${ENGINE_CODEX_AUTO_COMPACT_TOKENS:-200000}" \
+            python3 - <<'PY'
+import os, sys, tempfile, tomllib
+
+path = os.environ["CODEX_CONFIG"]
+limit = os.environ["CODEX_AUTO_COMPACT"]
+if not limit.isdigit() or int(limit) <= 0:
+    print(
+        f"mcp-bootstrap: ENGINE_CODEX_AUTO_COMPACT_TOKENS={limit!r} is not a "
+        "positive integer; left alone",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+try:
+    parsed = tomllib.loads(text)
+except tomllib.TOMLDecodeError as exc:
+    print(f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+wanted = [
+    ("model_auto_compact_token_limit", str(int(limit))),
+    ("model_auto_compact_token_limit_scope", '"total"'),
+]
+rows = [f"{key} = {value}\n" for key, value in wanted if key not in parsed]
+if not rows:
+    sys.exit(0)
+lines = text.splitlines(keepends=True)
+if lines and not lines[-1].endswith("\n"):
+    lines[-1] += "\n"
+# Root keys go before the first table header, which would swallow them.
+split_at = next(
+    (i for i, row in enumerate(lines) if row.lstrip().startswith("[")),
+    len(lines),
+)
+head = lines[:split_at]
+while head and head[-1].strip() == "":
+    head.pop()
+tail = lines[split_at:]
+new = "".join(head + rows + (["\n"] if tail else []) + tail)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
 # Route Codex through the estate LiteLLM router (WI-1147). The estate fork
 # (WI-1286) speaks the Chat Completions wire as well as Responses, and grok
 # returns tool calls only over chat, so the router is used with
@@ -1152,6 +1226,8 @@ install_vogt_klaudia || printf 'mcp-bootstrap: klaudia registration of vogt fail
 if command -v codex >/dev/null 2>&1; then
     codex_disable_daemon "${CODEX_HOME:-$HOME/.codex}/config.toml" \
         || printf 'mcp-bootstrap: could not disable the Codex app-server daemon\n' >&2
+    codex_auto_compact "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        || printf 'mcp-bootstrap: could not write the Codex auto-compact limit\n' >&2
     codex_litellm_provider "${CODEX_HOME:-$HOME/.codex}/config.toml" \
         || printf 'mcp-bootstrap: could not write the Codex LiteLLM provider\n' >&2
     codex_klaudia_tools "${CODEX_HOME:-$HOME/.codex}/config.toml" \

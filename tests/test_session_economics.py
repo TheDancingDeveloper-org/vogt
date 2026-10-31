@@ -318,6 +318,7 @@ def test_shared_fixtures_match_the_engine_port() -> None:
             },
             "output_tokens": result.output_tokens,
             "usage_measured": result.usage_measured,
+            "context_window_tokens": result.context_window_tokens,
         }
 
     assert reading("claude") == {
@@ -330,6 +331,7 @@ def test_shared_fixtures_match_the_engine_port() -> None:
         "wall_clock": {"count": 1, "max_ms": 30_000, "mean_ms": 30_000},
         "output_tokens": 16,
         "usage_measured": True,
+        "context_window_tokens": 0,
     }
     assert reading("klaudia") == {
         "turns": 2,
@@ -341,17 +343,19 @@ def test_shared_fixtures_match_the_engine_port() -> None:
         "wall_clock": {"count": 1, "max_ms": 60_000, "mean_ms": 60_000},
         "output_tokens": 0,
         "usage_measured": False,
+        "context_window_tokens": 0,
     }
     assert reading("codex") == {
         "turns": 3,
-        "context_tokens": 191,
-        "peak_context_tokens": 191,
-        "compactions": 0,
+        "context_tokens": 625,
+        "peak_context_tokens": 940,
+        "compactions": 1,
         "tool_result_bytes": {"cat": 10, "grep": 9, "shell": 11},
         "reads_repeated": 1,
         "wall_clock": {"count": 2, "max_ms": 45_000, "mean_ms": 22_500},
-        "output_tokens": 0,
-        "usage_measured": False,
+        "output_tokens": 65,
+        "usage_measured": True,
+        "context_window_tokens": 272_000,
     }
 
 
@@ -379,3 +383,12 @@ def test_shared_gap_fixture_counts_milliseconds_exactly() -> None:
     assert result.wall_clock.max_ms == 1001
     assert result.wall_clock.mean_ms == 1001
     assert dict(result.tool_result_bytes) == {"Grep": 71}
+
+
+def test_codex_without_token_count_is_estimated() -> None:
+    """No token_count yet: the 4 chars/token estimate, not measured."""
+    line = json.dumps({"type": "turn_context", "payload": {"content": "x" * 40}})
+    result = meter([line], agent="codex")
+    assert result.usage_measured is False
+    assert result.context_tokens > 0
+    assert result.context_window_tokens == 0

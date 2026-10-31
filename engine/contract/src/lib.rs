@@ -458,6 +458,14 @@ pub struct SessionEconomics {
     pub output_tokens: i64,
     /// True when context came from recorded usage, false when it was estimated.
     pub usage_measured: bool,
+    /// The model's context window when the agent records it (Codex's
+    /// `model_context_window`); 0 when unknown.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub context_window_tokens: i64,
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
 }
 
 /// One sample of a session's process tree: the PTY child and every process
