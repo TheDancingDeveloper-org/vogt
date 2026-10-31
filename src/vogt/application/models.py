@@ -19,6 +19,7 @@ Two conventions worth knowing before adding one:
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -691,6 +692,11 @@ class CharterSetResult(Result):
 # -- projects --------------------------------------------------------------
 
 
+#: Bounds on a project's `mcp_extra` (WI-2750).
+MCP_EXTRA_MAX = 16
+_MCP_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
 class RegisterProjectParams(Params):
     name: Name = Field(description="Display name; the slug is derived from it.")
     root_path: str = Field(description="Folder or git repository this project is.")
@@ -745,6 +751,27 @@ class UpdateProjectParams(Params):
             "current list; leave unset to keep it, pass [] to clear it."
         ),
     )
+
+    @field_validator("mcp_extra")
+    @classmethod
+    def _mcp_names_are_keys(cls, names: list[str] | None) -> list[str] | None:
+        # The engine addresses a Codex server as a bare `-c` key (WI-2750).
+        if names is None:
+            return None
+        # Blank names are dropped later, as before; the rest must be keys.
+        given = [n.strip() for n in names if n.strip()]
+        if len(given) > MCP_EXTRA_MAX:
+            msg = f"mcp_extra holds at most {MCP_EXTRA_MAX} names"
+            raise ValueError(msg)
+        for name in given:
+            if not _MCP_NAME.fullmatch(name):
+                msg = (
+                    f"mcp_extra name {name!r} is not 1-64 characters of "
+                    "letters, digits, '-' or '_'"
+                )
+                raise ValueError(msg)
+        return names
+
     agent_policy: AgentPolicy | None = Field(
         default=None,
         description=(
