@@ -6,3 +6,8 @@
 {"type":"user","content":[{"type":"tool_result","name":"cat","input":{"path":"/b.py"},"content":"alpha"}]}
 {"type":"user","content":[{"type":"tool_result","name":"cat","input":{"path":"/b.py"},"content":"alpha"}]}
 {"type":"assistant","timestamp":"2026-10-11T03:00:45Z","message":{"id":"c1","content":"done"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":900,"output_tokens":40,"total_tokens":940},"last_token_usage":{"input_tokens":900,"output_tokens":40,"total_tokens":940},"model_context_window":272000}}}
+{"type":"compacted","payload":{"message":"summary"}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"ContextCompaction","id":"cc1"}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"output_tokens":65,"total_tokens":1565},"last_token_usage":{"input_tokens":600,"output_tokens":25,"total_tokens":625},"model_context_window":272000}}}
+{"type":"event_msg","payload":{"type":"token_count","info":null}}

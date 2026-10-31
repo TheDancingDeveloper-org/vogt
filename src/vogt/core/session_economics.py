@@ -17,7 +17,13 @@ Three agents, three shapes, one result:
   with a `compact_boundary` line. Context is estimated at 4 chars per token,
   the figure its own compaction doc uses.
 - **Codex** writes `turn_context` entries and carries tool results under
-  `payload`. Same 4 chars/token estimate; no compaction marker is read.
+  `payload`. Its `event_msg` `token_count` events carry
+  `info.last_token_usage.total_tokens` (what the window holds now; the
+  `total_token_usage` beside it is cumulative), the cumulative output and
+  `model_context_window`. Once one is seen the session is measured; before
+  that it is the same 4 chars/token estimate. A `compacted` line, or an
+  `item_completed` ContextCompaction event, is a compaction (the pair that
+  one compaction writes counts once).
 
 `context_tokens` is the latest turn's context, not a sum across turns —
 that sum would count the same history once per turn. `peak_context_tokens`
@@ -79,6 +85,9 @@ class SessionEconomics:
     output_tokens: int = 0
     #: True when context came from recorded usage, false when it was estimated.
     usage_measured: bool = False
+    #: The model's context window when the agent records it (Codex's
+    #: `model_context_window`); 0 when unknown.
+    context_window_tokens: int = 0
 
     def budget_line(self, turn_budget: int | None, window_tokens: int | None) -> str:
         """The one line a digest row carries: `96/120 turns, 61% ctx, 2 compactions`.
@@ -123,6 +132,11 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
     reads: dict[str, int] = {}
     tool_names: dict[str, str] = {}
     stamps: list[str] = []
+    #: Codex's token_count readings: latest context, peak, window, output.
+    codex: dict[str, int] | None = None
+    #: A `compacted` line not yet followed by a token_count; a ContextCompaction
+    #: item in that gap is the same compaction.
+    codex_compaction_open = False
 
     for raw in lines:
         text = raw.strip()
@@ -136,7 +150,29 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
             continue
         kind = entry.get("type")
 
-        if _is_compaction(entry):
+        codex_kind = _codex_compaction(entry)
+        codex_compaction = False
+        if codex_kind == "rollout":
+            codex_compaction_open = True
+            codex_compaction = True
+        elif codex_kind == "item":
+            codex_compaction = not codex_compaction_open
+            codex_compaction_open = False
+        reading = _codex_token_count(entry)
+        if reading is not None:
+            codex_compaction_open = False
+            if codex is None:
+                codex = {"context": 0, "peak": 0, "window": 0, "output": 0}
+            codex["context"] = reading[0]
+            codex["peak"] = max(codex["peak"], reading[0])
+            if reading[1] > 0:
+                codex["window"] = reading[1]
+            if reading[2] is not None:
+                codex["output"] = reading[2]
+            else:
+                codex["output"] += reading[3]
+
+        if codex_compaction or _is_compaction(entry):
             compactions += 1
             # The compacted history is no longer in the window.
             live_chars = 0
@@ -178,6 +214,13 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
     if not measured and context == 0 and live_chars:
         context = live_chars // CHARS_PER_TOKEN
         peak = context
+    output = sum(output_by_turn.values()) + unkeyed_output
+    window = 0
+    if codex is not None:
+        context = codex["context"]
+        peak = codex["peak"]
+        output = codex["output"]
+        window = codex["window"]
 
     return SessionEconomics(
         turns=len(turn_ids) + unkeyed_turns,
@@ -187,8 +230,9 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
         tool_result_bytes=dict(sorted(tools.items())),
         reads_repeated=sum(1 for n in reads.values() if n > 1),
         wall_clock=_timing(stamps),
-        output_tokens=sum(output_by_turn.values()) + unkeyed_output,
-        usage_measured=measured and peak > 0,
+        output_tokens=output,
+        usage_measured=(measured and peak > 0) or codex is not None,
+        context_window_tokens=window,
     )
 
 
@@ -201,6 +245,57 @@ def _is_compaction(entry: Mapping[str, object]) -> bool:
         return True
     message = entry.get("message")
     return isinstance(message, dict) and message.get("isCompactSummary") is True
+
+
+def _codex_compaction(entry: Mapping[str, object]) -> str | None:
+    """`rollout` for Codex's `compacted` line, `item` for an `item_completed`
+    event whose item is a ContextCompaction, else None."""
+    kind = entry.get("type")
+    if kind == "compacted":
+        return "rollout"
+    payload = entry.get("payload")
+    if kind == "event_msg" and isinstance(payload, dict):
+        item = payload.get("item")
+        if (
+            payload.get("type") == "item_completed"
+            and isinstance(item, dict)
+            and item.get("type") == "ContextCompaction"
+        ):
+            return "item"
+    return None
+
+
+def _codex_token_count(
+    entry: Mapping[str, object],
+) -> tuple[int, int, int | None, int] | None:
+    """`(context, window, total_output, last_output)` from a Codex
+    `token_count` event with usage info, or None."""
+    if entry.get("type") != "event_msg":
+        return None
+    payload = entry.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+        return None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    last = info.get("last_token_usage")
+    if not isinstance(last, dict):
+        return None
+    total = info.get("total_token_usage")
+    return (
+        _int(last.get("total_tokens")),
+        _int(info.get("model_context_window")),
+        _int(total.get("output_tokens")) if isinstance(total, dict) else None,
+        _int(last.get("output_tokens")),
+    )
+
+
+def _int(value: object) -> int:
+    """A JSON integer, or 0 for null, a missing value or a non-integer, as
+    the engine's json_int reads it."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
 
 
 def _usage(entry: Mapping[str, object]) -> tuple[int, int] | None:

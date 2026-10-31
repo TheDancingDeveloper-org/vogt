@@ -1185,3 +1185,36 @@ def test_klaudia_tools_writer_keeps_an_explicit_approval_mode(
     assert servers["browser"]["command"].endswith("/klaudia")
     again = _codex_bootstrap(tmp_path, {})
     assert again.returncode == 0, again.stderr
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_auto_compact_limit_written_when_unset_and_never_overridden(
+    tmp_path: Path,
+) -> None:
+    """WI-1575: Vogt owns Codex's auto-compact limit, but an operator's
+    value wins, and a second run changes nothing."""
+    import tomllib
+
+    config = tmp_path / "codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text('model = "grok"\n\n[other]\nkept = true\n', encoding="utf-8")
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    first = config.read_text(encoding="utf-8")
+    parsed = tomllib.loads(first)
+    assert parsed["model_auto_compact_token_limit"] == 200000
+    assert parsed["model_auto_compact_token_limit_scope"] == "total"
+    assert parsed["other"] == {"kept": True}
+    again = _codex_bootstrap(tmp_path, {})
+    assert again.returncode == 0, again.stderr
+    assert config.read_text(encoding="utf-8") == first
+
+    config.write_text("model_auto_compact_token_limit = 150000\n", encoding="utf-8")
+    proc = _codex_bootstrap(tmp_path, {"ENGINE_CODEX_AUTO_COMPACT_TOKENS": "99"})
+    assert proc.returncode == 0, proc.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["model_auto_compact_token_limit"] == 150000
+    assert parsed["model_auto_compact_token_limit_scope"] == "total"
