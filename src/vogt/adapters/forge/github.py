@@ -709,6 +709,7 @@ def _runs(ref: RepoRef, payloads: object) -> Iterable[ForgeCheck]:
             source_url=item.get("html_url"),
             run_id=run_id if isinstance(run_id, int) else None,
             run_attempt=attempt if isinstance(attempt, int) else None,
+            run_started_at=_text(item.get("run_started_at")),
         )
 
 

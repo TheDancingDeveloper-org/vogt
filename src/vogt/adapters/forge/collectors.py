@@ -179,6 +179,8 @@ class ForgeChecksCollector(_ForgeReadCollector):
             if check.run_id is not None:
                 payload["run_id"] = check.run_id
                 payload["run_attempt"] = check.run_attempt
+            if check.run_started_at is not None:
+                payload["run_started_at"] = check.run_started_at
             jobs = self._failed_jobs(
                 ctx, provider, ref, check, prior.get(subject_key), budget
             )
