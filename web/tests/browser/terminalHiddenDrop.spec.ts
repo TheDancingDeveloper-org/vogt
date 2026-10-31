@@ -73,9 +73,7 @@ async function mockedFixtures(page: Page): Promise<void> {
       vogt: { configured: true },
     }),
   );
-  await page.route(/\/api\/sessions(\?.*)?$/, (route) =>
-    route.fulfill({ json: [SESSION] }),
-  );
+  await page.route(/\/api\/sessions(\?.*)?$/, (route) => route.fulfill({ json: [SESSION] }));
   await page.route("**/api/sessions/*", (route) =>
     route.request().method() !== "GET"
       ? route.fulfill({ json: { ok: true } })
@@ -102,20 +100,16 @@ async function controllableVisibility(page: Page): Promise<void> {
       configurable: true,
       get: () => state === "hidden",
     });
-    (
-      window as unknown as {
-        __setVisibility: (s: DocumentVisibilityState) => void;
-      }
-    ).__setVisibility = (next) => {
-      state = next;
-      document.dispatchEvent(new Event("visibilitychange"));
-    };
+    (window as unknown as { __setVisibility: (s: DocumentVisibilityState) => void })
+      .__setVisibility = (next) => {
+        state = next;
+        document.dispatchEvent(new Event("visibilitychange"));
+      };
     // Record every moment the reconnect overlay is in the DOM.
     const w = window as unknown as { __overlaySeen: number };
     w.__overlaySeen = 0;
     new MutationObserver(() => {
-      if (document.querySelector(".terminal-reconnect-overlay"))
-        w.__overlaySeen += 1;
+      if (document.querySelector(".terminal-reconnect-overlay")) w.__overlaySeen += 1;
     }).observe(document, { childList: true, subtree: true });
   });
 }
@@ -125,15 +119,11 @@ test.describe("terminal socket dropped while hidden (mocked)", () => {
     test.skip(isLive(testInfo.project.name), "mocked only");
   });
 
-  test("reconnects within 1 s of return with no overlay flash", async ({
-    page,
-  }) => {
+  test("reconnects within 1 s of return with no overlay flash", async ({ page }) => {
     await controllableVisibility(page);
     await mockedFixtures(page);
 
-    const attaches: {
-      close: (o?: { code?: number; reason?: string }) => Promise<void>;
-    }[] = [];
+    const attaches: { close: (o?: { code?: number; reason?: string }) => Promise<void> }[] = [];
     await page.routeWebSocket(/\/api\/sessions\/.*\/attach/, (ws) => {
       attaches.push(ws);
       let answered = false;
@@ -160,9 +150,7 @@ test.describe("terminal socket dropped while hidden (mocked)", () => {
     await expect(page.locator(".terminal-status-overlay")).toHaveCount(0);
 
     await page.evaluate(() =>
-      (
-        window as unknown as { __setVisibility: (s: string) => void }
-      ).__setVisibility("hidden"),
+      (window as unknown as { __setVisibility: (s: string) => void }).__setVisibility("hidden"),
     );
     await attaches[0].close({ code: 1011, reason: "network gone" });
     // Hidden: no background retry.
@@ -171,18 +159,14 @@ test.describe("terminal socket dropped while hidden (mocked)", () => {
 
     const returnedAt = Date.now();
     await page.evaluate(() =>
-      (
-        window as unknown as { __setVisibility: (s: string) => void }
-      ).__setVisibility("visible"),
+      (window as unknown as { __setVisibility: (s: string) => void }).__setVisibility("visible"),
     );
     await expect.poll(() => attaches.length, { timeout: 1_000 }).toBe(2);
     expect(Date.now() - returnedAt).toBeLessThan(1_000);
 
     await page.waitForTimeout(500);
     expect(
-      await page.evaluate(
-        () => (window as unknown as { __overlaySeen: number }).__overlaySeen,
-      ),
+      await page.evaluate(() => (window as unknown as { __overlaySeen: number }).__overlaySeen),
     ).toBe(0);
     await expect(page.locator(".terminal-reconnect-overlay")).toHaveCount(0);
   });

@@ -26,9 +26,7 @@ const isLive = (project: string) => project === "live";
 // most a cold attach delivers once F1 bounds it. Built from a real transcript.
 function buildCorpus(target: number): Uint8Array {
   const seed = gunzipSync(
-    readFileSync(
-      new URL("../fixtures/transcripts/shell-plain.bin.gz", import.meta.url),
-    ),
+    readFileSync(new URL("../fixtures/transcripts/shell-plain.bin.gz", import.meta.url)),
   );
   const out = new Uint8Array(target);
   for (let off = 0; off < target; off += seed.byteLength) {
@@ -58,9 +56,8 @@ async function mockedFixtures(page: Page): Promise<void> {
     localStorage.setItem("vogt.token", "browser-test-token");
     localStorage.setItem("vogt.appTheme.v1", "dark");
   });
-  const json =
-    (body: unknown) => (route: { fulfill: (o: unknown) => Promise<void> }) =>
-      route.fulfill({ json: body });
+  const json = (body: unknown) => (route: { fulfill: (o: unknown) => Promise<void> }) =>
+    route.fulfill({ json: body });
   await page.route("**/api/install/status", json({ install_mode: false }));
   await page.route(
     "**/api/auth/check",
@@ -109,12 +106,9 @@ async function mockedFixtures(page: Page): Promise<void> {
       vogt: { configured: true },
     }),
   );
-  await page.route(/\/api\/sessions(\?.*)?$/, (route) =>
-    route.fulfill({ json: [SESSION] }),
-  );
+  await page.route(/\/api\/sessions(\?.*)?$/, (route) => route.fulfill({ json: [SESSION] }));
   await page.route("**/api/sessions/*", (route) => {
-    if (route.request().method() !== "GET")
-      return route.fulfill({ json: { ok: true } });
+    if (route.request().method() !== "GET") return route.fulfill({ json: { ok: true } });
     return route.fulfill({ json: { ...SESSION, scrollback_base64: "" } });
   });
   await page.route("**/api/events", (route) =>
@@ -142,11 +136,7 @@ async function streamSnapshot(page: Page, corpus: Uint8Array): Promise<void> {
       );
       const CHUNK = 64 * 1024;
       for (let i = 0; i < corpus.byteLength; i += CHUNK) {
-        ws.send(
-          Buffer.from(
-            corpus.subarray(i, Math.min(i + CHUNK, corpus.byteLength)),
-          ),
-        );
+        ws.send(Buffer.from(corpus.subarray(i, Math.min(i + CHUNK, corpus.byteLength))));
       }
       ws.send(JSON.stringify({ type: "snapshot-done" }));
     });
@@ -158,13 +148,10 @@ test.describe("terminal replay budget (mocked)", () => {
     test.skip(isLive(testInfo.project.name), "mocked only");
   });
 
-  test("a bounded snapshot renders and replays under the per-pane budget", async ({
-    page,
-  }) => {
+  test("a bounded snapshot renders and replays under the per-pane budget", async ({ page }) => {
     const replayLines: string[] = [];
     page.on("console", (msg) => {
-      if (msg.text().includes("[vogt] terminal replay"))
-        replayLines.push(msg.text());
+      if (msg.text().includes("[vogt] terminal replay")) replayLines.push(msg.text());
     });
 
     await mockedFixtures(page);
@@ -192,9 +179,7 @@ test.describe("terminal replay budget (mocked)", () => {
 
     // The client logged the `[vogt] terminal replay` telemetry the live spec
     // reads (kind, snapshotBytes, replayDurationMs).
-    await expect
-      .poll(() => replayLines.length, { timeout: 5_000 })
-      .toBeGreaterThan(0);
+    await expect.poll(() => replayLines.length, { timeout: 5_000 }).toBeGreaterThan(0);
   });
 });
 
@@ -210,7 +195,7 @@ const LIVE_TOKEN = process.env.PLAYWRIGHT_LIVE_TOKEN ?? "";
 const LIVE_LOAD_COMMAND = [
   "/bin/bash",
   "-c",
-  'i=0; while [ "$i" -lt 400000 ]; do ' +
+  "i=0; while [ \"$i\" -lt 400000 ]; do " +
     "printf '\\033[3%dmSEQ%08d the quick brown fox jumps over the lazy dog\\033[0m\\n' " +
     '"$((i % 8))" "$i"; i=$((i + 1)); ' +
     "if [ \"$((i % 64))\" -eq 0 ]; then printf '\\033[H'; fi; " +
@@ -230,9 +215,7 @@ async function liveScrollbackPos(page: Page, id: string): Promise<number> {
   const res = await page.request.get(`/api/sessions/${id}`, {
     headers: { authorization: `Bearer ${LIVE_TOKEN}` },
   });
-  return (
-    ((await res.json()) as { scrollback_pos?: number }).scrollback_pos ?? 0
-  );
+  return ((await res.json()) as { scrollback_pos?: number }).scrollback_pos ?? 0;
 }
 
 test.describe("terminal replay budget (live acceptance)", () => {
@@ -251,11 +234,7 @@ test.describe("terminal replay budget (live acceptance)", () => {
   test("symptom 1: switch away past the ring and back — bounded reattach, no disconnect", async ({
     page,
   }) => {
-    const replays: {
-      kind?: string;
-      snapshotBytes?: number;
-      reset?: boolean;
-    }[] = [];
+    const replays: { kind?: string; snapshotBytes?: number; reset?: boolean }[] = [];
     page.on("console", (msg) => {
       const text = msg.text();
       if (!text.includes("[vogt] terminal replay")) return;
@@ -271,48 +250,33 @@ test.describe("terminal replay budget (live acceptance)", () => {
 
     const id = await liveCreateLoadSession(page);
     await page.goto(`/#/t/${id}`);
-    await expect(page.locator(".xterm-rows")).toContainText("SEQ", {
-      timeout: 20_000,
-    });
+    await expect(page.locator(".xterm-rows")).toContainText("SEQ", { timeout: 20_000 });
     const openPos = await liveScrollbackPos(page, id);
 
     // Switch away to another place, wait until the ring has wrapped well past
     // where we were, then switch back.
     await page.goto("/#/sessions");
     await expect
-      .poll(() => liveScrollbackPos(page, id), {
-        timeout: 60_000,
-        intervals: [500],
-      })
+      .poll(() => liveScrollbackPos(page, id), { timeout: 60_000, intervals: [500] })
       .toBeGreaterThan(openPos + 4 * 1024 * 1024);
     replays.length = 0; // only measure the reattach
     await page.goto(`/#/t/${id}`);
-    await expect(page.locator(".xterm-rows")).toContainText("SEQ", {
-      timeout: 20_000,
-    });
+    await expect(page.locator(".xterm-rows")).toContainText("SEQ", { timeout: 20_000 });
 
     // No [disconnected] marker in the buffer.
-    await expect(page.locator(".xterm-rows")).not.toContainText(
-      "[disconnected]",
-    );
+    await expect(page.locator(".xterm-rows")).not.toContainText("[disconnected]");
     // The reattach replayed at most the budget (F1). It may be a bounded reset
     // until F4 lands, when it becomes a no-reset resume; either way it is <= budget.
-    const reattach = replays.filter(
-      (r) => r.kind === "snapshot" || r.kind === "cache",
-    );
+    const reattach = replays.filter((r) => r.kind === "snapshot" || r.kind === "cache");
     for (const r of reattach) {
       expect(r.snapshotBytes ?? 0).toBeLessThanOrEqual(1024 * 1024);
     }
   });
 
-  test("symptom 2: reload with the session cached — active pane under budget", async ({
-    page,
-  }) => {
+  test("symptom 2: reload with the session cached — active pane under budget", async ({ page }) => {
     const id = await liveCreateLoadSession(page);
     await page.goto(`/#/t/${id}`);
-    await expect(page.locator(".xterm-rows")).toContainText("SEQ", {
-      timeout: 20_000,
-    });
+    await expect(page.locator(".xterm-rows")).toContainText("SEQ", { timeout: 20_000 });
     // Let the client persist its cache, then reload.
     await page.waitForTimeout(6000);
     await page.reload();
@@ -329,8 +293,6 @@ test.describe("terminal replay budget (live acceptance)", () => {
     );
     const measure = (await handle.jsonValue()) as { duration: number };
     expect(measure.duration).toBeLessThan(REPLAY_BUDGET_MS);
-    await expect(page.locator(".xterm-rows")).not.toContainText(
-      "[disconnected]",
-    );
+    await expect(page.locator(".xterm-rows")).not.toContainText("[disconnected]");
   });
 });
