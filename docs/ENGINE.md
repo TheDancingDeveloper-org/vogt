@@ -856,7 +856,10 @@ than these routes.
   `origin/main`, or the repo's stash holds an entry made on the branch. A
   forced removal keeps the branch. A main checkout is never removed (400).
   `force` is accepted from a person, break-glass or vogt-core only (403
-  otherwise). Every outcome logs `event=workspace.clean` (path, mode, actor,
+  otherwise; vogt-core has already refused a force from an agent). Either
+  mode is refused (403) unless the path, symlinks resolved, is inside
+  `workspace_root` or is exactly a workspace a session recorded. Every
+  outcome logs `event=workspace.clean` (path, mode, actor,
   outcome, bytes freed; never a file list). Requires `sessions`.
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
@@ -2254,7 +2257,11 @@ regenerable and do not), `HEAD` must be in its base ref, upstream,
 `origin/HEAD` or `origin/main`, the branch must have no stash entries, and
 no other running or hibernated session may work there. Then
 `git worktree remove` runs from the main checkout and the merged branch is
-deleted. Any doubt keeps the tree. A hibernation never removes one.
+deleted. Only a worktree the engine cut itself (one with a recorded
+`base_ref`) is removed, and only when the tree is that recorded workspace
+and inside `workspace_root` or the recorded path; a worktree a session was
+merely started in is kept. Any doubt keeps the tree. A hibernation never
+removes one.
 
 #### Session scratch, background processes and free space
 

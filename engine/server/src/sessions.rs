@@ -143,6 +143,9 @@ enum Origin {
 /// A stop's request to remove the worktree after cleaning it (WI-1774).
 struct Removal {
     base_ref: Option<String>,
+    /// The engine-cut worktree's recorded path: the tree removed must be it.
+    path: String,
+    workspace_root: std::path::PathBuf,
 }
 
 /// Remove a stopped session's linked worktree when nothing in it would be
@@ -151,8 +154,16 @@ struct Removal {
 /// branch has no stash entries. The caller has already made sure no other
 /// running or hibernated session works there and the session's processes
 /// are gone. Any doubt keeps the tree; never forced.
-fn remove_stopped_worktree(id: Uuid, root: &std::path::Path, base_ref: Option<&str>) {
-    let plan = match crate::workspace_clean::plan_removal(root, base_ref, false) {
+fn remove_stopped_worktree(id: Uuid, root: &std::path::Path, removal: &Removal) {
+    let recorded = std::fs::canonicalize(&removal.path).ok();
+    if recorded.as_deref() != Some(root)
+        || !crate::workspace_clean::confined(&removal.workspace_root, [&removal.path], root)
+    {
+        tracing::info!(session = %id, worktree = %root.display(), "kept the stopped session's worktree: not the engine-cut workspace inside its confinement");
+        return;
+    }
+    let plan = match crate::workspace_clean::plan_removal(root, removal.base_ref.as_deref(), false)
+    {
         Ok(plan) => plan,
         Err(why) => {
             tracing::info!(session = %id, worktree = %root.display(), %why, "kept the stopped session's worktree");
@@ -2386,10 +2397,29 @@ impl SessionRegistry {
 
     /// Whether a stop should go on to remove the worktree (WI-1774): only
     /// with `ENGINE_WORKTREE_REMOVE_ON_STOP`, carrying the ref the engine
-    /// cut it from so a branch merged into that base counts as merged.
+    /// cut it from so a branch merged into that base counts as merged. Only
+    /// a worktree the engine cut itself (a record of it carries a `base_ref`) is removed;
+    /// a worktree a session was merely started in is someone else's.
     fn removal_for(&self, workspace: Option<vogt_engine_contract::Workspace>) -> Option<Removal> {
-        self.cfg.worktree_remove_on_stop.then(|| Removal {
-            base_ref: workspace.and_then(|w| w.base_ref),
+        if !self.cfg.worktree_remove_on_stop {
+            return None;
+        }
+        let ws = workspace?;
+        if ws.kind != vogt_engine_contract::WorkspaceKind::Worktree {
+            return None;
+        }
+        // A session started inside another's engine-cut worktree has no
+        // base_ref of its own; the cutting session's record carries it.
+        let base_ref = ws.base_ref.clone().filter(|b| !b.is_empty()).or_else(|| {
+            self.workspaces()
+                .into_iter()
+                .filter(|(_, _, other)| other.path == ws.path)
+                .find_map(|(_, _, other)| other.base_ref.filter(|b| !b.is_empty()))
+        })?;
+        Some(Removal {
+            base_ref: Some(base_ref),
+            path: ws.path,
+            workspace_root: self.cfg.workspace_root.clone(),
         })
     }
 
@@ -2453,7 +2483,7 @@ impl SessionRegistry {
                 );
             }
             if let Some(removal) = removal {
-                remove_stopped_worktree(id, &root, removal.base_ref.as_deref());
+                remove_stopped_worktree(id, &root, &removal);
             }
         };
         match tokio::runtime::Handle::try_current() {
