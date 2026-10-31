@@ -10648,6 +10648,7 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
             idle_after: Some(Duration::from_millis(500)),
             memavailable_below: None,
             live_cap: None,
+            done_after: None,
         },
     )
     .await;
@@ -17983,4 +17984,93 @@ while True:
     assert_eq!(answered["dismissed"], true, "{answered}");
     live_output_containing(&client, &base, &id, &["chose 1"]).await;
     wait_for_unblocked(&client, &base, &id).await;
+}
+
+/// WI-1523: a session done and quiet past `ENGINE_HIBERNATE_DONE_AFTER` is
+/// hibernated with trigger `done`; one given input after its declaration,
+/// and an overseer, are not.
+#[tokio::test]
+async fn the_done_policy_hibernates_a_quiet_done_session_only() {
+    use vogt_engine_server::hibernate_policy::{exemption, run_once, Policy};
+
+    let (tmp, cfg, _stub) = hibernation_sandbox();
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let quiet = "#!/bin/sh\nsleep 300 &\nprintf 'helper=[%s]\\n> ' \"$!\"\nwait\n";
+    let ids = start_stub_agents(
+        &client,
+        &base,
+        &tmp.path().join("agents"),
+        &[("done", quiet), ("typed", quiet), ("overseer", quiet)],
+    )
+    .await;
+    let [done_id, typed_id, overseer_id] = [0, 1, 2].map(|i| ids[i].parse::<uuid::Uuid>().unwrap());
+    let long_ago = (time::OffsetDateTime::now_utc() - time::Duration::minutes(20))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    for id in [done_id, typed_id, overseer_id] {
+        assert!(state.sessions.mark_done(id, long_ago.clone()));
+    }
+    state
+        .sessions
+        .set_role(overseer_id, vogt_engine_contract::SessionRole::Oversight)
+        .unwrap();
+    // The role pins it awake; unpin it so the role alone is what spares it.
+    state
+        .sessions
+        .get(overseer_id)
+        .unwrap()
+        .set_keep_awake(false);
+    // Input after the declaration: the agent was given more to do.
+    state
+        .sessions
+        .get(typed_id)
+        .unwrap()
+        .write_input(b"\x1b")
+        .unwrap();
+    let why = |id: uuid::Uuid| exemption(&state.sessions, &state.sessions.get(id).unwrap());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while [done_id, typed_id, overseer_id]
+        .iter()
+        .any(|id| why(*id).is_some())
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for id in [done_id, typed_id, overseer_id] {
+        assert_eq!(why(id), None, "{id}");
+    }
+
+    run_once(
+        &state.sessions,
+        &Policy {
+            done_after: Some(Duration::from_secs(600)),
+            ..Policy::default()
+        },
+    )
+    .await;
+
+    let listed: Value = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let listed: Vec<Value> = serde_json::from_value(listed["sessions"].clone()).unwrap();
+    let row = |id: uuid::Uuid| {
+        listed
+            .iter()
+            .find(|s| s["id"] == id.to_string().as_str())
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(done_id)["activity"], "hibernated");
+    assert_eq!(row(done_id)["hibernation"]["trigger"], "done");
+    assert_ne!(row(typed_id)["activity"], "hibernated", "input since done");
+    assert_ne!(row(overseer_id)["activity"], "hibernated", "an overseer");
 }

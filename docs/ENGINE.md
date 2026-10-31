@@ -2048,7 +2048,14 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   session that has had no input or output for that long.
   `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` (`2GiB`, `512M`, or bytes)
   hibernates the quietest eligible session while the pod's available memory
-  is below it, one session per minute. Available memory is the cgroup
+  is below it, one session per minute. `ENGINE_HIBERNATE_DONE_AFTER` (off by
+  default; `10m` recommended) hibernates a session, trigger `done`, whose
+  agent declared itself done (`AUTOPILOT: DONE` or a `result` report) at least
+  that long ago with no input written to it since; an oversight session is
+  never taken this way, and autopilot does not exempt it. The change reads
+  `hibernated (done)` in `session_changes`. A blocked report a later turn
+  dealt with is cleared by the engine without a model turn (WI-1314, see
+  Blocked reports). Available memory is the cgroup
   `memory.max` minus `memory.current` when the pod has a limit, otherwise
   (and never more than) the host's `MemAvailable`. Both settings keep every
   exemption, and the watcher logs each one:
