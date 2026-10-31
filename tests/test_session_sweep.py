@@ -37,6 +37,7 @@ class Engine:
         self.rows: dict[str, dict[str, Any]] = {}
         self.counter = 0
         self.sweep_supported = True
+        self.refuse_starts = False
         self.sweep_queries: list[str] = []
         self.inputs: list[tuple[str, dict[str, Any]]] = []
 
@@ -58,6 +59,8 @@ class Engine:
     ) -> tuple[int, bytes]:
         path, _, query = url.removeprefix("http://127.0.0.1:8910").partition("?")
         if method == "POST" and path == "/api/sessions":
+            if self.refuse_starts:
+                return 409, b'{"error": "refused: no capacity"}'
             self.counter += 1
             engine_id = f"00000000-0000-4000-8000-00000000000{self.counter}"
             self.rows[engine_id] = self.row(engine_id)
