@@ -303,6 +303,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     if escalated_to is not None and enforcing:
         params = params.model_copy(update={"purpose": escalated_to})
     params, overrides, read_only = _resolve_purpose(ctx, params)
+    _refuse_task_without_agent(params)
     if params.cwd and params.worktree:
         params = params.model_copy(update={"worktree": None})
     # After the profile fills the model, before anything reaches the engine:
@@ -5203,6 +5204,23 @@ def _claimed_oversight(
     if live is None or not live.alive or live.role != "oversight":
         return None, None
     return claimed, "oversight"
+
+
+def _refuse_task_without_agent(params: StartSessionParams) -> None:
+    """A `task` needs an agent to read it (WI-1807).
+
+    Without a template the engine opens a plain shell, which never reads the
+    brief, so the task would be dropped while the session sits idle. Checked
+    after the purpose profile has filled the start, so a profile that names
+    the template still satisfies it.
+    """
+    if params.task and params.task.strip() and not params.template:
+        msg = (
+            "task given without a template: a plain shell never reads the "
+            "brief, so the task would be dropped; name an agent template "
+            "(e.g. template='claude') or a purpose that sets one"
+        )
+        raise InvalidRequest(msg)
 
 
 def _autopilot(params: StartSessionParams) -> bool:
