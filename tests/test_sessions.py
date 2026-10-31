@@ -3581,7 +3581,7 @@ def test_wake_on_is_sent_to_the_engine_and_checked_wi1521(
     )
     assert engine.last_spec["wake_on"] == ["done", "blocked"]
     with pytest.raises(ValueError):
-        StartSessionParams(work_item="WI-1", wake_on=["ready"], reason=WHY)
+        StartSessionParams(work_item="WI-1", wake_on=["ready"], reason=WHY)  # type: ignore[list-item]
 
 
 def test_supervised_by_narrows_changes_and_wait_any_to_the_starters_sessions_wi1521(
