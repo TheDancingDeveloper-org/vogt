@@ -4062,6 +4062,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `work.unrelate` | Confirmation-gated | Available after approval: Remove a typed relation between two work items. |
 | `work.bind_branch` | Confirmation-gated | Available after approval: Declare the git branch a work item is worked on. |
 | `work.comment` | Confirmation-gated | Available after approval: Comment on a work item, attributed to the acting actor. |
+| `work.land` | Operator-only | Unavailable: Pushes a reviewed branch onto the base branch; a person or oversight lands it from the CLI, GUI or MCP. |
 | `backlog` | Voice-readable | Available: The ranked backlog, globally or for one project. |
 | `bugs` | Voice-readable | Available: Open bugs across every project, ranked. |
 | `why` | Voice-readable | Available: Per-input score contributions for one ranked item. |
