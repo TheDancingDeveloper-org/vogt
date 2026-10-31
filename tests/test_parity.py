@@ -770,6 +770,62 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "offset": 2,
         },
     ),
+    # Last, so the item it creates shifts no earlier ref. A landing rule on
+    # the unlinked scaffold project, a hand-off naming the branch and a
+    # person's verdict at its tip: the land the engine stand-in answers.
+    (
+        "project.update",
+        {
+            "slug": "parity-scaffold",
+            "agent_policy": {
+                "landing": {
+                    "base_branch": "main",
+                    "worker_lands_by": "push_branch",
+                    "merge_by": "oversight",
+                    "merge_mode": "rebase",
+                }
+            },
+            "reason": WHY,
+        },
+    ),
+    (
+        "work.create",
+        {
+            "kind": "feature",
+            "title": "Land me",
+            "project": "parity-scaffold",
+            "local_only": True,
+            "reason": WHY,
+        },
+    ),
+    (
+        "work.comment",
+        lambda seen: {
+            "ref": seen["work.create"]["item"]["ref"],
+            "body": "handed off",
+            "kind": "handoff",
+            "handoff": {"branch": "wi-parity", "head_sha": "abc1234def"},
+            "reason": WHY,
+        },
+    ),
+    (
+        "work.comment",
+        lambda seen: {
+            "ref": seen["work.create"]["item"]["ref"],
+            "body": "reviewed",
+            "kind": "verdict",
+            "verdict": {"head_sha": "abc1234def", "verdict": "no_blockers"},
+            "reason": WHY,
+        },
+    ),
+    (
+        "work.land",
+        lambda seen: {
+            "ref": seen["work.create"]["item"]["ref"],
+            "head_sha": "abc1234def",
+            "reason": WHY,
+        },
+    ),
 ]
 
 #: Values that legitimately differ between two runs of the same sequence.
@@ -1214,6 +1270,10 @@ def _stand_in_engine() -> EngineClient:
                     "digest": "1 file changed, 2 insertions(+)",
                     "diff_stat": " a.rs | 2 ++",
                     "review": [],
+                    "onto_before": "base0000",
+                    "onto_after": "land2222",
+                    "commits": ["land1111", "land2222"],
+                    "rebased": True,
                 }
             ).encode()
         if method == "POST" and path.endswith("/blocked"):

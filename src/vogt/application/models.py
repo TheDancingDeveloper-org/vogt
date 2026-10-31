@@ -2188,6 +2188,32 @@ class BindBranchParams(Params):
     reason: Reason
 
 
+class LandWorkParams(Params):
+    """Land a work item's reviewed branch onto its base (WI-1328)."""
+
+    ref: str = Field(description="Work item reference, e.g. WI-7.")
+    head_sha: str = Field(
+        min_length=7,
+        description=(
+            "The branch tip the review saw. The latest verdict must name this "
+            "SHA, and the engine refuses when the branch has moved past it."
+        ),
+    )
+    reason: Reason
+
+
+class LandWorkResult(Result):
+    onto_before: str = Field(description="The base branch's SHA before the land.")
+    onto_after: str = Field(description="The base branch's SHA after the land.")
+    commits: list[str] = Field(
+        default_factory=list,
+        description="The commits now on the base that were not before, oldest first.",
+    )
+    rebased: bool = Field(
+        description="Whether the branch was rebased onto the base before landing."
+    )
+
+
 class CommentParams(Params):
     verbose: bool = Field(
         default=False,

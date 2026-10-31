@@ -141,6 +141,18 @@ class CommentRefused(VogtError):
     http_status = 403
 
 
+class LandRefused(VogtError):
+    """A `work.land` the landing rule does not allow (WI-1328).
+
+    Only a person or an oversight session lands, only on a project whose
+    merges are oversight's, and only at a `no_blockers` verdict for the exact
+    tip from a reviewer who is not the worker. The message names the rule.
+    """
+
+    code = "land_refused"
+    http_status = 403
+
+
 class EngineOnly(VogtError):
     """An operation only the session engine's own credential may call.
 
