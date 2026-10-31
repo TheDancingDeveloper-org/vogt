@@ -249,6 +249,36 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
                 info!(session = %id, ok = counts.ok, fail = counts.fail, queued = counts.queued, "push dispatched");
                 continue;
             }
+            // A grant request (WI-973) asks a person for a credential the
+            // session cannot get by itself: the same interruption as a
+            // blocked report, on the same preference (WI-996 E0).
+            if let ServerEvent::VogtChanged { kind, summary, .. } = &ev {
+                let Some(push) = grant_request_push(kind, summary, |target| {
+                    target
+                        .parse()
+                        .ok()
+                        .and_then(|id| state.sessions.get(id).ok())
+                        .map(|s| s.name())
+                }) else {
+                    continue;
+                };
+                let counts = state
+                    .push
+                    .notify(
+                        NotificationKind::WaitingForInput,
+                        &push.title,
+                        &push.body,
+                        push.data,
+                    )
+                    .await;
+                info!(
+                    ok = counts.ok,
+                    fail = counts.fail,
+                    queued = counts.queued,
+                    "grant-request push dispatched"
+                );
+                continue;
+            }
             if let ServerEvent::Activity {
                 id,
                 state: act,
@@ -290,6 +320,56 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
             }
         }
     });
+}
+
+/// The core event a grant request raises (`grants.SESSION_GRANT_REQUESTED_EVENT`).
+const GRANT_REQUESTED_KIND: &str = "session.grant_requested";
+
+/// A notification to send: title, body and the click payload.
+struct PushMessage {
+    title: String,
+    body: String,
+    data: serde_json::Value,
+}
+
+/// The push for a newly requested grant, or `None` for any other event.
+///
+/// Built from the event summary alone, which names the grant and never a
+/// value. The grant is decided in the Inbox, so that is where the tap goes.
+/// `name_of` maps the target engine session id to its display name.
+fn grant_request_push(
+    kind: &str,
+    summary: &serde_json::Value,
+    name_of: impl FnOnce(&str) -> Option<String>,
+) -> Option<PushMessage> {
+    if kind != GRANT_REQUESTED_KIND {
+        return None;
+    }
+    let field = |k: &str| summary.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let target = field("target");
+    let var = field("var");
+    let name = name_of(target).unwrap_or_else(|| {
+        if target.is_empty() {
+            "A session".to_string()
+        } else {
+            target.to_string()
+        }
+    });
+    let what = if var.is_empty() { "a grant" } else { var };
+    let title = format!("{name} asks for {what}");
+    let body = match summary.get("uses").and_then(|v| v.as_i64()) {
+        Some(n) => format!("{n} use(s). Approve or deny it in the Inbox."),
+        None => "Approve or deny it in the Inbox.".to_string(),
+    };
+    let data = json!({
+        "kind": "grant-request",
+        "grant_id": field("grant_id"),
+        "session_id": target,
+        "needs": "person",
+        "boundary": "credential",
+        "url": "/#/inbox",
+    });
+    Some(PushMessage { title, body, data })
 }
 
 /// A push body for a permission dialog: the deadline, when there is one, and
@@ -532,6 +612,41 @@ mod tests {
         assert!(validate_webpush_endpoint("https://[::1]/x").is_err());
         assert!(validate_webpush_endpoint("https://[fd00::1]/x").is_err());
         assert!(validate_webpush_endpoint("not a url").is_err());
+    }
+
+    #[test]
+    fn a_grant_request_pushes_to_the_inbox_and_nothing_else_does() {
+        let summary = json!({
+            "grant_id": "grt_1", "target": "abc", "kind": "credential",
+            "var": "GH_TOKEN", "uses": 1, "state": "pending",
+        });
+        let push = grant_request_push("session.grant_requested", &summary, |t| {
+            assert_eq!(t, "abc");
+            Some("worker-1".into())
+        })
+        .expect("a grant request pushes");
+        assert_eq!(push.title, "worker-1 asks for GH_TOKEN");
+        assert_eq!(push.body, "1 use(s). Approve or deny it in the Inbox.");
+        assert_eq!(push.data["kind"], "grant-request");
+        assert_eq!(push.data["grant_id"], "grt_1");
+        assert_eq!(push.data["needs"], "person");
+        assert_eq!(push.data["url"], "/#/inbox");
+
+        // An unknown session falls back to its id; a bare summary still reads.
+        let push = grant_request_push("session.grant_requested", &summary, |_| None).unwrap();
+        assert_eq!(push.title, "abc asks for GH_TOKEN");
+        let push = grant_request_push("session.grant_requested", &serde_json::Value::Null, |_| {
+            None
+        })
+        .unwrap();
+        assert_eq!(push.title, "A session asks for a grant");
+
+        for kind in ["session.grant_decided", "drift.raised", "work.created"] {
+            assert!(
+                grant_request_push(kind, &summary, |_| None).is_none(),
+                "{kind}"
+            );
+        }
     }
 
     fn vogt_event(kind: &str) -> ServerEvent {
