@@ -3313,6 +3313,7 @@ mod tests {
             detected_at: "2020-01-01T00:00:00Z".into(),
             kind: "permission".into(),
             options: vec![],
+            key: String::new(),
         });
         assert!(!hidden(&approval));
     }

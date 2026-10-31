@@ -80,7 +80,7 @@ from vogt.core.entities import (
     SessionReport,
     TrustState,
 )
-from vogt.core.escalation import SESSION_ANSWER_RECOMMENDED, approval_key
+from vogt.core.escalation import SESSION_ANSWER_RECOMMENDED, dialog_key
 from vogt.errors import (
     InboxEntryNotFound,
     InvalidCursor,
@@ -1380,7 +1380,7 @@ def _recommendation(
     chosen for them, and only while it still names an option the dialog
     shows with the same label.
     """
-    key = approval_key(session_id, approval.question)
+    key = dialog_key(session_id, approval.key, approval.question)
     events = view.list_events(after=0, limit=_RECOMMENDATION_SCAN, entity_id=key)
     shown = {number: text for number, text, _selected in approval.options}
     for event in reversed(events):

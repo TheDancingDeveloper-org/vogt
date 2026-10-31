@@ -93,10 +93,7 @@ pub(crate) fn approval_escalation(
     id: Uuid,
     approval: Option<&vogt_engine_contract::ApprovalPrompt>,
 ) -> ChangeEscalation {
-    use sha2::{Digest, Sha256};
     let question = approval.map(|a| a.question.trim()).unwrap_or("");
-    let digest = Sha256::digest(question.as_bytes());
-    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
     ChangeEscalation {
         needs: EscalationNeeds::Person,
         boundary: EscalationBoundary::PermissionPrompt,
@@ -105,7 +102,7 @@ pub(crate) fn approval_escalation(
         } else {
             question
         }),
-        key: format!("{id}:permission_prompt:{hex}"),
+        key: crate::pty::approval_key(id, question),
         resolve: vec!["answer".to_string()],
     }
 }

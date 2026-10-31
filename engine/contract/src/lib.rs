@@ -984,6 +984,11 @@ pub struct ApprovalPrompt {
     /// number with `POST /api/sessions/{id}/answer`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<ApprovalOption>,
+    /// The dialog's escalation key, `session:permission_prompt:hash(question)`
+    /// (WI-996). The engine computes it in one place; callers use it rather
+    /// than hashing the question themselves. Empty from an older engine.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
 }
 
 fn default_permission() -> String {

@@ -808,10 +808,7 @@ impl Session {
                 "the session has exited; there is nothing to block".into(),
             ));
         }
-        let report = report.map(|mut r| {
-            r.key = escalation_key(self.id, &r);
-            r
-        });
+        let report = report.map(|r| stamp_report(self.id, r));
         *self.blocked.lock() = report.clone();
         self.reset_unblock();
         bus.publish(ServerEvent::SessionBlocked {
@@ -824,10 +821,11 @@ impl Session {
     /// The permission dialog on screen, as the wire shows it, with the
     /// countdown computed now.
     pub fn approval_prompt(&self) -> Option<vogt_engine_contract::ApprovalPrompt> {
-        self.approval
-            .lock()
-            .as_ref()
-            .map(|p| p.to_wire(time::OffsetDateTime::now_utc()))
+        self.approval.lock().as_ref().map(|p| {
+            let mut wire = p.to_wire(time::OffsetDateTime::now_utc());
+            wire.key = approval_key(self.id, &wire.question);
+            wire
+        })
     }
 
     /// The dialog on the screen right now, read fresh from a render rather
@@ -2561,6 +2559,34 @@ pub fn escalation_key(session: Uuid, report: &vogt_engine_contract::BlockedRepor
     format!("{session}:{}:{hex}", report.boundary.as_str())
 }
 
+/// A blocked report as the engine keeps it (WI-996): a `credential` or
+/// `permission_prompt` boundary always needs a person, whatever the worker
+/// sent, and the content key is stamped.
+pub fn stamp_report(
+    session: Uuid,
+    mut report: vogt_engine_contract::BlockedReport,
+) -> vogt_engine_contract::BlockedReport {
+    use vogt_engine_contract::{EscalationBoundary, EscalationNeeds};
+    if matches!(
+        report.boundary,
+        EscalationBoundary::Credential | EscalationBoundary::PermissionPrompt
+    ) {
+        report.needs = EscalationNeeds::Person;
+    }
+    report.key = escalation_key(session, &report);
+    report
+}
+
+/// A permission dialog's escalation key (WI-996):
+/// `session:permission_prompt:sha256(trimmed question)[:16]`. The one place
+/// it is computed; the wire carries it as `ApprovalPrompt.key`.
+pub fn approval_key(session: Uuid, question: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(question.trim().as_bytes());
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{session}:permission_prompt:{hex}")
+}
+
 #[cfg(test)]
 mod escalation_key_tests {
     use super::*;
@@ -2588,5 +2614,40 @@ mod escalation_key_tests {
             a,
             escalation_key(Uuid::from_u128(4), &report("gh pr merge denied", "x"))
         );
+    }
+
+    #[test]
+    fn a_credential_or_dialog_report_always_needs_a_person() {
+        use vogt_engine_contract::EscalationNeeds;
+        let id = Uuid::from_u128(3);
+        for (boundary, want) in [
+            (EscalationBoundary::Credential, EscalationNeeds::Person),
+            (
+                EscalationBoundary::PermissionPrompt,
+                EscalationNeeds::Person,
+            ),
+            (EscalationBoundary::DeniedAction, EscalationNeeds::Overseer),
+            (EscalationBoundary::Decision, EscalationNeeds::Overseer),
+            (EscalationBoundary::Other, EscalationNeeds::Overseer),
+        ] {
+            let sent = BlockedReport {
+                needs: EscalationNeeds::Overseer,
+                boundary,
+                ..report("ask", "x")
+            };
+            let kept = stamp_report(id, sent.clone());
+            assert_eq!(kept.needs, want, "{boundary:?}");
+            assert_eq!(kept.key, escalation_key(id, &sent));
+        }
+    }
+
+    #[test]
+    fn the_dialog_key_trims_the_question_and_hashes_it_once() {
+        let id = Uuid::nil();
+        assert_eq!(
+            approval_key(id, "  \n"),
+            format!("{id}:permission_prompt:e3b0c44298fc1c14")
+        );
+        assert_eq!(approval_key(id, " go? "), approval_key(id, "go?"));
     }
 }
