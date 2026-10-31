@@ -1551,10 +1551,19 @@ fn hibernation_policy_from_env() -> Result<crate::hibernate_policy::Policy> {
                 })?,
         ),
     };
+    let done_after = match read("ENGINE_HIBERNATE_DONE_AFTER")? {
+        None => None,
+        Some(v) => Some(parse_duration(&v).ok_or_else(|| {
+            ApiError::Config(format!(
+                "ENGINE_HIBERNATE_DONE_AFTER={v:?} is not a duration like 10m, 1h or 600"
+            ))
+        })?),
+    };
     Ok(Policy {
         idle_after,
         memavailable_below,
         live_cap,
+        done_after,
     })
 }
 

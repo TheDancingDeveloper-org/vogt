@@ -127,7 +127,7 @@ export interface AgentConversation {
 /** When and why a session was hibernated (engine `Hibernation`). */
 export interface Hibernation {
   at: string;
-  trigger: "manual" | "idle" | "memory" | "shutdown" | "recovered";
+  trigger: "manual" | "idle" | "memory" | "shutdown" | "recovered" | "budget" | "done";
   reason?: string | null;
   /** False for a shell, which wakes as a fresh process. */
   resumable: boolean;
