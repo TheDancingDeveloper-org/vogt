@@ -33,6 +33,7 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -629,6 +630,26 @@ def _state_of(summary: SessionSummary, attention: str | None) -> str | None:
     return summary.activity or attention
 
 
+def _role_of(summary: SessionSummary) -> str:
+    """The role a digest filter sees (WI-1525).
+
+    `operator` is a session Vogt never linked: one a person typed by hand.
+    A session Vogt started keeps its role, whoever asked for it.
+    """
+    if summary.role == "oversight":
+        return "oversight"
+    if not summary.linked:
+        return "operator"
+    return summary.role or "worker"
+
+
+def _excluded_roles(exclude: Sequence[str] | None, mode: str) -> set[str]:
+    """Digest listings drop operator sessions unless asked (WI-1525)."""
+    if exclude is not None:
+        return set(exclude)
+    return {"operator"} if mode == "digest" else set()
+
+
 def _kept(
     summary: SessionSummary, attention: str | None, states: list[str] | None
 ) -> bool:
@@ -718,9 +739,11 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
     joined, declared_overflow = _rows(ctx, params, live, detail)
     now = ctx.clock()
     stall_after = timedelta(minutes=params.stall_after_minutes)
+    excluded = _excluded_roles(params.exclude_roles, params.mode)
+    kept = [summary for summary in joined if _role_of(summary) not in excluded]
     kept = [
         summary
-        for summary in joined
+        for summary in kept
         if params.mode == "full"
         or _kept(
             summary,
@@ -830,10 +853,17 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
         # (it keeps only sessions the engine still runs), pushing a live link
         # older than the newest 500 starts out of the table entirely (WI-1266
         # review).
-        ListSessionsParams(project=params.project, limit=500, offset=0),
+        ListSessionsParams(
+            project=params.project,
+            limit=500,
+            offset=0,
+            started_by_session=params.supervised_by,
+        ),
         live,
         None,
     )
+    excluded = _excluded_roles(params.exclude_roles, params.mode)
+    summaries = [s for s in summaries if _role_of(s) not in excluded]
     rows: list[SessionSweepRow] = []
     for summary in summaries:
         entry = tails.get(summary.engine_session_id)
@@ -960,8 +990,9 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                             else live_row.economics
                         ),
                     ),
-                    screen_tail=row.screen_tail,
-                    ready=row.ready,
+                    # Empty and duplicated fields stay off the row (WI-1525):
+                    # `digest.ready` already says it.
+                    screen_tail=row.screen_tail or None,
                     blocked_since=row.blocked_since,
                     blocked_age_s=row.blocked_age_s,
                     blocked_stale=row.blocked_stale,

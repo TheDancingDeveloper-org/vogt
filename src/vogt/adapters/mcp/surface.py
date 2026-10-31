@@ -99,6 +99,10 @@ class McpSurface:
         _TOOL_CACHE[self._registry] = tools
         return tools
 
+    def operation_name(self, tool: str) -> str:
+        """The registry operation a tool name calls."""
+        return self._registry.by_mcp_tool(tool).name
+
     def call_tool(
         self, name: str, arguments: dict[str, Any] | None = None
     ) -> dict[str, Any]:

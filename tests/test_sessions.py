@@ -1162,7 +1162,10 @@ def test_a_page_of_hibernated_links_does_not_hide_a_live_unlinked_session(
         engine.alive[engine_id] = "hibernated"
     engine.unlinked["eng-live"] = "running"
 
-    digest = list_sessions(wired, ListSessionsParams())
+    # The unlinked session is the operator's own: the default digest drops
+    # it (WI-1525), and `exclude_roles=[]` keeps every role.
+    assert list_sessions(wired, ListSessionsParams()).digests == []
+    digest = list_sessions(wired, ListSessionsParams(exclude_roles=[]))
     assert [row.id for row in digest.digests] == ["eng-live"]
     assert digest.total == 1 and digest.truncated is False
     assert digest.sessions == []

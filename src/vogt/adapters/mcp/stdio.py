@@ -27,6 +27,7 @@ from typing import Any, TextIO
 from pydantic import ValidationError
 
 from vogt import __version__
+from vogt.adapters.mcp.compact import text_payload
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.errors import VogtError
 
@@ -205,7 +206,8 @@ class StdioServer:
             return _result(
                 message_id, _tool_error("error", f"internal error (ref {ref})")
             )
-        return _result(message_id, tool_success(payload))
+        text = text_payload(self._surface.operation_name(name), arguments, payload)
+        return _result(message_id, tool_success(payload, text=text))
 
 
 def _result(message_id: MessageId, result: dict[str, Any]) -> dict[str, Any]:
@@ -241,7 +243,9 @@ def _without_nulls(value: object) -> object:
     return value
 
 
-def tool_success(payload: dict[str, Any]) -> dict[str, Any]:
+def tool_success(
+    payload: dict[str, Any], *, text: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """structuredContent plus the same result as compact text (design C1).
 
     The text is the whole result, never truncated: Klaudia (msp-klaudia
@@ -250,10 +254,17 @@ def tool_success(payload: dict[str, Any]) -> dict[str, Any]:
     the result. The saving is in the shape instead: no indentation and no
     null-valued keys. structuredContent is the full result, nulls included, so
     it matches CLI and REST. Errors stay text-only via `_tool_error`.
+
+    `text`, when given, is what the text carries instead: the compact digest
+    of a bulk write operation (WI-1525, `compact.text_payload`).
     """
-    text = json.dumps(_without_nulls(payload), separators=(",", ":"), default=str)
+    text_body = json.dumps(
+        _without_nulls(payload if text is None else text),
+        separators=(",", ":"),
+        default=str,
+    )
     return {
-        "content": [{"type": "text", "text": text}],
+        "content": [{"type": "text", "text": text_body}],
         "structuredContent": payload,
         "isError": False,
     }

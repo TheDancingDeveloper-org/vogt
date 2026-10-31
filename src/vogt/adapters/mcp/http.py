@@ -20,6 +20,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+from vogt.adapters.mcp.compact import text_payload
 from vogt.adapters.mcp.stdio import (
     INVALID_PARAMS,
     METHOD_NOT_FOUND,
@@ -196,7 +197,8 @@ def _call(
     # dump so CLI, REST and MCP still agree (parity reads structuredContent
     # via McpSurface, and a null field is part of the result).
     body: dict[str, Any] = payload.model_dump(mode="json")
-    return _result(message_id, tool_success(body))
+    text = text_payload(operation.name, arguments, body)
+    return _result(message_id, tool_success(body, text=text))
 
 
 def _version() -> str:

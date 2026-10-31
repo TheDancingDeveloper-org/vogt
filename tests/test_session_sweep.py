@@ -252,7 +252,8 @@ def test_digest_drops_hibernated_keeps_counts_and_fits_fifteen_k(
     assert len(result.rows) == 3
     assert {row.digest.id for row in result.rows if row.digest} == set(live_ids)
     assert all(row.session is None for row in result.rows)
-    assert all(row.screen_tail == [] for row in result.rows)
+    assert all(row.screen_tail is None for row in result.rows)
+    assert all(row.ready is None for row in result.rows)
     payload = result.model_dump_json(exclude_none=True)
     assert len(payload) < 15_000
     for row in result.rows:
@@ -475,3 +476,88 @@ def test_a_bypass_lost_on_resume_is_said_on_the_sweep_and_the_list(
     }
     assert "posture lost on resume" in reasons[lost]
     assert "posture lost on resume" not in reasons[kept]
+
+
+def test_digest_drops_operator_sessions_and_empty_fields_wi1525(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1525: a session Vogt never linked is the operator's own, off the
+    default digest; `exclude_roles=[]` brings it back, and full mode (the
+    GUI's) never drops it. A digest row carries no empty `screen_tail` and no
+    row-level `ready` beside `digest.ready`, and stays under 300 characters."""
+    session_id, _engine_id = _start(wired)
+    engine.rows[UNLINKED] = engine.row(UNLINKED)
+
+    default = sweep_sessions(wired, SweepSessionsParams())
+    assert [row.digest.id for row in default.rows if row.digest] == [session_id]
+    assert default.counts["total"] == 1
+    row = default.rows[0]
+    assert row.screen_tail is None and row.ready is None
+    assert len(row.model_dump_json(exclude_none=True)) <= 300
+
+    every = sweep_sessions(wired, SweepSessionsParams(exclude_roles=[]))
+    assert {row.digest.id for row in every.rows if row.digest} == {
+        session_id,
+        UNLINKED,
+    }
+    full = sweep_sessions(wired, SweepSessionsParams(mode="full"))
+    assert len(full.rows) == 2
+    assert all(isinstance(row.screen_tail, list) for row in full.rows)
+
+    workers = sweep_sessions(wired, SweepSessionsParams(exclude_roles=["worker"]))
+    assert [row.digest.id for row in workers.rows if row.digest] == [UNLINKED]
+
+
+def test_supervised_by_keeps_only_sessions_that_starter_started_wi1525(
+    wired: AppContext, engine: Engine
+) -> None:
+    _start(wired)
+    swept = sweep_sessions(
+        wired, SweepSessionsParams(supervised_by="11111111-2222-4333-8444-555566667777")
+    )
+    assert swept.rows == []
+    assert swept.counts["total"] == 0
+
+
+def test_mcp_write_results_are_compact_unless_verbose_wi1525(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1525: start/hibernate/wake/stop/bind tool text is the digest row,
+    under 600 characters; `verbose: true` keeps the full result."""
+    from vogt.adapters.mcp.compact import COMPACTORS, text_payload
+    from vogt.registry.registry import default_registry
+
+    started = start_session(
+        wired, StartSessionParams(project="vogt", reason=WHY)
+    ).model_dump(mode="json")
+    for operation in (
+        "session.start",
+        "session.hibernate",
+        "session.wake",
+        "session.stop",
+    ):
+        compact = text_payload(operation, {}, started)
+        assert set(compact) == {"digest"}
+        assert compact["digest"]["id"] == started["session"]["id"]
+        assert len(json.dumps(compact, separators=(",", ":"))) <= 600
+        assert text_payload(operation, {"verbose": True}, started) == started
+    stopped = {**started, "digest": None}
+    assert (
+        text_payload("session.stop", {}, stopped)["digest"]["id"]
+        == (started["session"]["id"])
+    )
+    bound = {
+        "session": started["session"],
+        "previous_work_item": None,
+        "project_mismatch": False,
+        "engine_label": "written",
+    }
+    compact = text_payload("session.bind_work", {}, bound)
+    assert compact["engine_label"] == "written"
+    assert compact["digest"]["id"] == started["session"]["id"]
+    assert "session" not in compact
+
+    registry = default_registry()
+    for operation in COMPACTORS:
+        schema = registry.get(operation).params_model.model_json_schema()
+        assert "verbose" in schema["properties"], operation
