@@ -564,3 +564,60 @@ def test_mcp_write_results_are_compact_unless_verbose_wi1525(
     for operation in COMPACTORS:
         schema = registry.get(operation).params_model.model_json_schema()
         assert "verbose" in schema["properties"], operation
+
+
+def test_since_cursor_returns_only_changed_rows_wi1525(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1525: each sweep returns a cursor; passing it as `since` returns only
+    rows whose state changed, with the rest counted as `unchanged` and dropped
+    sessions in `gone`. Counts still cover every session."""
+    first_id, first_engine = _start(wired)
+    second_id, second_engine = _start(wired)
+
+    base = sweep_sessions(wired, SweepSessionsParams())
+    assert base.cursor and base.cursor_reset is None and base.unchanged is None
+    assert len(base.rows) == 2
+
+    quiet = sweep_sessions(wired, SweepSessionsParams(since=base.cursor))
+    assert quiet.rows == []
+    assert quiet.unchanged == 2 and quiet.gone == []
+    assert quiet.counts["total"] == 2
+
+    engine.rows[first_engine]["activity"] = "waiting-for-input"
+    engine.rows[second_engine]["alive"] = False
+    moved = sweep_sessions(wired, SweepSessionsParams(since=quiet.cursor))
+    assert [row.digest.id for row in moved.rows if row.digest] == [first_id]
+    assert moved.unchanged == 0
+    assert moved.gone == [second_engine]
+    assert second_id not in moved.model_dump_json()
+
+    full = sweep_sessions(wired, SweepSessionsParams(mode="full", since=moved.cursor))
+    assert full.rows == [] and full.unchanged == 1
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    ["garbage", "sw1.!!!", "sw1." + "A" * 12],
+)
+def test_an_invalid_cursor_returns_every_row_flagged_wi1525(
+    wired: AppContext, engine: Engine, cursor: str
+) -> None:
+    _start(wired)
+    swept = sweep_sessions(wired, SweepSessionsParams(since=cursor))
+    assert swept.cursor_reset is True
+    assert len(swept.rows) == 1
+    assert swept.cursor and swept.cursor != cursor
+
+
+def test_an_expired_cursor_returns_every_row_flagged_wi1525(
+    wired: AppContext, engine: Engine
+) -> None:
+    from datetime import timedelta
+
+    from vogt.application.services.sessions import _encode_cursor
+
+    _start(wired)
+    old = _encode_cursor(wired.clock() - timedelta(days=2), {})
+    swept = sweep_sessions(wired, SweepSessionsParams(since=old))
+    assert swept.cursor_reset is True and len(swept.rows) == 1

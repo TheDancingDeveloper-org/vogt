@@ -363,11 +363,19 @@ defaults to `["operator"]`: a session Vogt never linked, typed by hand. Pass
 sessions one starter started. A digest row omits an empty `screen_tail` and
 the row-level `ready` (`digest.ready` carries it) (WI-1525).
 
+Every sweep returns an opaque `cursor`. Pass it back as `since` to get only
+the rows whose attention, activity, blocked report, latest report, approval
+or work item changed since that sweep: `unchanged` counts the rows left out
+and `gone` lists the engine ids of sessions no longer swept. `counts` still
+covers every session. A cursor that cannot be read, or is older than 24
+hours, returns every row with `cursor_reset: true` (WI-1525).
+
 Over MCP, the tool text of `session.start`, `session.hibernate`,
 `session.wake`, `session.stop`, `session.bind_work` (`digest`, plus
-`previous_work_item`, `project_mismatch` and `engine_label`), `work.create`
-and `work.transition` (`ref`, `state`, `title`, `updated_at`) is a compact
-digest. Pass `verbose: true` for the full result as text. structuredContent,
+`previous_work_item`, `project_mismatch` and `engine_label`), `work.create`,
+`work.update` and `work.transition` (`ref`, `state`, `title`, `updated_at`)
+and `work.comment` (the comment's `id`, `kind`, `created_at` and
+`write_back`) is a compact digest. Pass `verbose: true` for the full result as text. structuredContent,
 REST and the CLI always return the full result (WI-1525).
 
 `session.hibernate` (`work.write`, audited) stops a session's processes to
