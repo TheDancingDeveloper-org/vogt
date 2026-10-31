@@ -12,6 +12,12 @@ module
   declared feed and types a one-line notice into each live session started
   for the item, so the agent wakes on the result.
 
+A run still queued or in progress past `ci_hung_queued_after_minutes` /
+`ci_hung_running_after_minutes` (WI-1334) is a `ci.run_hung` Inbox entry
+(gone once the run concludes) and one notice per run into the same
+sessions, recorded as a `ci.run_hung` event keyed by the run. Detection
+only: nothing is cancelled.
+
 "Once" is the event: its entity id names the item, branch, revision and
 verdict, and a conclusion that already has an event is never re-announced —
 not by the next sweep, not by a restart. Only *fresh* conclusions (the last
@@ -28,14 +34,16 @@ from datetime import datetime, timedelta
 from vogt.adapters.engine import EngineUnavailable
 from vogt.adapters.forge.kinds import KIND_CHECK
 from vogt.application.context import AppContext
-from vogt.core.ci_alerts import BranchCi, branch_ci
-from vogt.core.entities import Observation
+from vogt.config import VogtConfig
+from vogt.core.ci_alerts import BranchCi, HungRun, HungThresholds, branch_ci
+from vogt.core.entities import CodingSession, Observation
 from vogt.core.workflow import TERMINAL_STATES
 from vogt.errors import PersonRequired
 from vogt.observability import logger
 from vogt.storage.interface import ReadView
 
 CI_BRANCH_CONCLUDED_EVENT = "ci.branch_concluded"
+CI_RUN_HUNG_EVENT = "ci.run_hung"
 #: How recent a conclusion must be to be announced to a session.
 FRESH_WINDOW = timedelta(hours=6)
 #: Bound overlays considered per read. A work item binds a handful of
@@ -64,9 +72,32 @@ class BoundBranch:
         return f"{self.work_item_ref}:{self.branch}@{self.ci.revision}:{self.ci.state}"
 
 
+def hung_thresholds(config: VogtConfig) -> HungThresholds:
+    """The configured hung-run thresholds; zero minutes is off."""
+    queued = config.ci_hung_queued_after_minutes
+    running = config.ci_hung_running_after_minutes
+    return HungThresholds(
+        queued=timedelta(minutes=queued) if queued > 0 else None,
+        running=timedelta(minutes=running) if running > 0 else None,
+    )
+
+
+def hung_entity(hung: HungRun) -> str:
+    """What a hung run is deduped by: the run (and attempt) itself, or the
+    observation's subject where the forge gave no run id."""
+    if hung.run_id is None:
+        return f"run:{hung.observation.subject_key}"
+    attempt = hung.observation.payload.get("run_attempt")
+    suffix = f".{attempt}" if isinstance(attempt, int) else ""
+    return f"run:{hung.observation.payload.get('repo') or ''}:{hung.run_id}{suffix}"
+
+
 def bound_branches(
     view: ReadView,
     checks_by_branch: Mapping[tuple[str, str], list[Observation]],
+    *,
+    now: datetime | None = None,
+    hung_after: HungThresholds | None = None,
 ) -> list[BoundBranch]:
     """CI on the newest revision of every branch an open item is bound to.
 
@@ -80,7 +111,11 @@ def bound_branches(
         settled: list[tuple[str, BranchCi]] = []
         for branch in overlay.branches:
             runs = checks_by_branch.get((overlay.project_id, branch))
-            ci = None if not runs else branch_ci(runs, branch)
+            ci = (
+                None
+                if not runs
+                else branch_ci(runs, branch, now=now, hung_after=hung_after)
+            )
             if ci is not None:
                 settled.append((branch, ci))
         if not settled:
@@ -146,6 +181,17 @@ def notice_text(bound: BoundBranch) -> str:
     return "".join(ch for ch in line if ch.isprintable())[:NOTICE_MAX_CHARS]
 
 
+def hung_notice_text(bound: BoundBranch, hung: HungRun) -> str:
+    """The one line typed into a bound session about a hung run."""
+    run = hung.run_id if hung.run_id is not None else "?"
+    verb = "been queued" if hung.phase == "queued" else "been running"
+    line = (
+        f"[vogt] CI run {run} ({hung.workflow}) on {bound.branch} has {verb} "
+        f"{hung.elapsed_minutes} min; it may be hung ({bound.work_item_ref})"
+    )
+    return "".join(ch for ch in line if ch.isprintable())[:NOTICE_MAX_CHARS]
+
+
 def announce_concluded(ctx: AppContext) -> int:
     """Announce fresh, not-yet-announced bound-branch conclusions.
 
@@ -169,9 +215,15 @@ def announce_concluded(ctx: AppContext) -> int:
                     kinds=(KIND_CHECK,), project_id=project_id, limit=2000
                 )
             )
-        found = bound_branches(view, index_by_branch(checks))
+        found = bound_branches(
+            view,
+            index_by_branch(checks),
+            now=now,
+            hung_after=hung_thresholds(ctx.config),
+        )
     announced = 0
     for bound in found:
+        _announce_hung(ctx, bound)
         if not bound.ci.settled or not _fresh(bound.ci.concluded_at, now):
             continue
         with ctx.declared.read() as view:
@@ -206,10 +258,61 @@ def announce_concluded(ctx: AppContext) -> int:
     return announced
 
 
-def _nudge(ctx: AppContext, engine_ids: list[str], bound: BoundBranch) -> int:
+def _announce_hung(ctx: AppContext, bound: BoundBranch) -> int:
+    """One event and one session notice per hung run, ever."""
+    announced = 0
+    for hung in bound.ci.hung:
+        entity = hung_entity(hung)
+        with ctx.declared.read() as view:
+            if view.list_events(after=0, limit=1, entity_id=entity):
+                continue
+            sessions = _live_sessions(view, bound)
+        nudged = _nudge(
+            ctx,
+            [s.engine_session_id for s in sessions],
+            bound,
+            text=hung_notice_text(bound, hung),
+        )
+        ctx.declared.publish_event(
+            kind=CI_RUN_HUNG_EVENT,
+            entity_kind="ci_run",
+            entity_id=entity,
+            summary={
+                "work_item": bound.work_item_ref,
+                "branch": bound.branch,
+                "workflow": hung.workflow,
+                "run_id": hung.run_id,
+                "phase": hung.phase,
+                "elapsed_minutes": hung.elapsed_minutes,
+                "sessions_notified": nudged,
+            },
+            at=ctx.clock(),
+        )
+        announced += 1
+    return announced
+
+
+def _live_sessions(view: ReadView, bound: BoundBranch) -> list[CodingSession]:
+    if bound.work_item_id is None:
+        return []
+    return view.list_sessions(
+        work_item_id=bound.work_item_id,
+        include_stopped=False,
+        limit=MAX_SESSIONS,
+        offset=0,
+    )
+
+
+def _nudge(
+    ctx: AppContext,
+    engine_ids: list[str],
+    bound: BoundBranch,
+    *,
+    text: str | None = None,
+) -> int:
     if ctx.engine is None or not ctx.config.ci_watch_notify_sessions:
         return 0
-    text = notice_text(bound)
+    text = notice_text(bound) if text is None else text
     sent = 0
     for engine_id in engine_ids:
         try:
@@ -247,9 +350,13 @@ def _fresh(concluded_at: str | None, now: datetime) -> bool:
 
 __all__ = [
     "CI_BRANCH_CONCLUDED_EVENT",
+    "CI_RUN_HUNG_EVENT",
     "BoundBranch",
     "announce_concluded",
     "bound_branches",
+    "hung_entity",
+    "hung_notice_text",
+    "hung_thresholds",
     "index_by_branch",
     "notice_text",
 ]

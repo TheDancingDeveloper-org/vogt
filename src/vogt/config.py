@@ -388,6 +388,28 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    ci_hung_queued_after_minutes: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "A run on a bound branch still queued (waiting for a runner) this "
+            "many minutes after it started raises a `ci.run_hung` Inbox entry "
+            "and one notice to the item's live sessions. Zero turns queued "
+            "detection off. Detection only: nothing is cancelled."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    ci_hung_running_after_minutes: int = Field(
+        default=90,
+        ge=0,
+        description=(
+            "A run on a bound branch still in progress this many minutes "
+            "after it started raises a `ci.run_hung` Inbox entry and one "
+            "notice to the item's live sessions. Zero turns running "
+            "detection off. Detection only: nothing is cancelled."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     autopilot_done_requires_result_report: bool = Field(
         default=False,
         description=(
