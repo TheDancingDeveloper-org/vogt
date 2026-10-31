@@ -239,6 +239,9 @@ class ForgeCheck:
     #: (`failed_jobs`) is keyed by.
     run_id: int | None = None
     run_attempt: int | None = None
+    #: When the run (this attempt) started, as the forge said — what hung-run
+    #: detection measures from. `None` where the forge does not say.
+    run_started_at: str | None = None
 
 
 @dataclass(frozen=True)

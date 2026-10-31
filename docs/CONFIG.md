@@ -29,6 +29,8 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `ci_alert_branches` | `VOGT_CI_ALERT_BRANCHES` | list of strings | `main`, `master`, `prod` | behaviour |
 | `ci_alert_tags` | `VOGT_CI_ALERT_TAGS` | list of strings | `v*` | behaviour |
 | `ci_watch_notify_sessions` | `VOGT_CI_WATCH_NOTIFY_SESSIONS` | boolean | `True` | behaviour |
+| `ci_hung_queued_after_minutes` | `VOGT_CI_HUNG_QUEUED_AFTER_MINUTES` | integer | `30` | behaviour |
+| `ci_hung_running_after_minutes` | `VOGT_CI_HUNG_RUNNING_AFTER_MINUTES` | integer | `90` | behaviour |
 | `autopilot_done_requires_result_report` | `VOGT_AUTOPILOT_DONE_REQUIRES_RESULT_REPORT` | boolean | `False` | behaviour |
 | `deploy_lanes` | `VOGT_DEPLOY_LANES` | list of `DeployLane` tables | *(empty)* | behaviour |
 | `usage_accounts` | `VOGT_USAGE_ACCOUNTS` | list of `UsageAccount` tables | *(empty)* | behaviour |
@@ -147,6 +149,14 @@ Tags (glob patterns) whose failed CI runs raise an Inbox alert — the release w
 ### `ci_watch_notify_sessions`
 
 When CI finishes on a branch bound to a work item (`work.bind_branch`), type a one-line pass/fail notice into each live session started for that item, so an agent wakes on the result instead of polling. Sent once per run conclusion, by the sweep that observed it. The Inbox entry is raised either way; this only turns the session nudge off.
+
+### `ci_hung_queued_after_minutes`
+
+A run on a bound branch still queued (waiting for a runner) this many minutes after it started raises a `ci.run_hung` Inbox entry and one notice to the item's live sessions. Zero turns queued detection off. Detection only: nothing is cancelled.
+
+### `ci_hung_running_after_minutes`
+
+A run on a bound branch still in progress this many minutes after it started raises a `ci.run_hung` Inbox entry and one notice to the item's live sessions. Zero turns running detection off. Detection only: nothing is cancelled.
 
 ### `autopilot_done_requires_result_report`
 

@@ -18,7 +18,8 @@ This module reads the same check observations by **lane** instead:
   its newest revision's runs say whether CI is still going, passed or failed
   — the event an agent would otherwise poll for.
 
-Pure: observations in, verdicts out. Nothing here reads a store or a clock.
+Pure: observations in, verdicts out. Nothing here reads a store or a clock;
+hung-run detection takes `now` from the caller.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from fnmatch import fnmatchcase
 from typing import Literal
 
@@ -83,6 +84,13 @@ PASSING_CONCLUSIONS: frozenset[str] = frozenset({"success", "neutral", "skipped"
 
 LaneKind = Literal["branch", "tag"]
 BranchState = Literal["running", "passed", "failed", "cancelled"]
+HungPhase = Literal["queued", "running"]
+
+#: Statuses of a run that has not got a runner yet. Anything else short of
+#: `completed` counts as running.
+QUEUED_STATUSES: frozenset[str] = frozenset(
+    {"queued", "waiting", "pending", "requested", "blocked"}
+)
 
 
 @dataclass(frozen=True)
@@ -115,6 +123,30 @@ class BranchRun:
 
 
 @dataclass(frozen=True)
+class HungThresholds:
+    """How long a run may sit queued or running before it looks hung.
+    `None` turns that phase's detection off."""
+
+    queued: timedelta | None = None
+    running: timedelta | None = None
+
+
+@dataclass(frozen=True)
+class HungRun:
+    """A run still going past its phase's threshold."""
+
+    observation: Observation
+    workflow: str
+    run_id: int | None
+    phase: HungPhase
+    #: The moment measured from, and which payload field it came from:
+    #: `run_started_at`, or `updated_at` when the forge did not say.
+    since: str
+    since_field: Literal["run_started_at", "updated_at"]
+    elapsed_minutes: int
+
+
+@dataclass(frozen=True)
 class BranchCi:
     """CI on a bound branch's newest observed revision."""
 
@@ -125,6 +157,8 @@ class BranchCi:
     failing: tuple[str, ...]
     #: When the last run on the revision finished, as the forge said.
     concluded_at: str | None
+    #: Runs still going past a threshold (only when `branch_ci` got `now`).
+    hung: tuple[HungRun, ...] = ()
 
     @property
     def settled(self) -> bool:
@@ -209,9 +243,18 @@ def watched_failures(
     ]
 
 
-def branch_ci(checks: Iterable[Observation], branch: str) -> BranchCi | None:
+def branch_ci(
+    checks: Iterable[Observation],
+    branch: str,
+    *,
+    now: datetime | None = None,
+    hung_after: HungThresholds | None = None,
+) -> BranchCi | None:
     """What CI says about `branch`'s newest observed revision, or `None`
-    when no run on the branch has been observed."""
+    when no run on the branch has been observed.
+
+    With `now` and `hung_after`, runs still going past their phase's
+    threshold are listed in `hung`."""
     on_branch = [
         check
         for check in checks
@@ -260,7 +303,63 @@ def branch_ci(checks: Iterable[Observation], branch: str) -> BranchCi | None:
         runs=runs,
         failing=failing,
         concluded_at=max(stamps) if stamps and state != "running" else None,
+        hung=(
+            ()
+            if now is None or hung_after is None
+            else tuple(
+                hung
+                for run in runs
+                if (hung := hung_run(run.observation, now, hung_after)) is not None
+            )
+        ),
     )
+
+
+def hung_run(
+    check: Observation, now: datetime, hung_after: HungThresholds
+) -> HungRun | None:
+    """`check` as a hung run, or `None` when it is concluded, has no usable
+    start stamp, or is within its phase's threshold."""
+    payload = check.payload
+    status = payload.get("status")
+    if _conclusion(check) is not None or status == "completed":
+        return None
+    phase: HungPhase = (
+        "queued" if isinstance(status, str) and status in QUEUED_STATUSES else "running"
+    )
+    limit = hung_after.queued if phase == "queued" else hung_after.running
+    if limit is None:
+        return None
+    since_field: Literal["run_started_at", "updated_at"] = "run_started_at"
+    since = payload.get("run_started_at")
+    if not isinstance(since, str) or not since:
+        since_field, since = "updated_at", payload.get("updated_at")
+    if not isinstance(since, str):
+        return None
+    moment = _parse_stamp(since)
+    if moment is None:
+        return None
+    elapsed = now - moment
+    if elapsed < limit:
+        return None
+    run_id = payload.get("run_id")
+    return HungRun(
+        observation=check,
+        workflow=_workflow(check),
+        run_id=run_id if isinstance(run_id, int) else None,
+        phase=phase,
+        since=since,
+        since_field=since_field,
+        elapsed_minutes=int(elapsed.total_seconds() // 60),
+    )
+
+
+def _parse_stamp(stamp: str) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
 
 
 def ran_at(check: Observation) -> tuple[str, int, datetime]:
@@ -301,12 +400,16 @@ __all__ = [
     "GITHUB_MANAGED_EVENTS",
     "PASSING_CONCLUSIONS",
     "PULL_REQUEST_EVENTS",
+    "QUEUED_STATUSES",
     "BranchCi",
     "BranchRun",
+    "HungRun",
+    "HungThresholds",
     "RefFailure",
     "WatchedRef",
     "branch_ci",
     "github_managed",
+    "hung_run",
     "ran_at",
     "watched_failures",
     "watched_ref",

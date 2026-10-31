@@ -43,6 +43,8 @@ from vogt.application.services import _resolve
 from vogt.application.services.ci_watch import (
     BoundBranch,
     bound_branches,
+    hung_entity,
+    hung_thresholds,
     index_by_branch,
 )
 from vogt.application.services.decisions import pending_decisions
@@ -60,7 +62,12 @@ from vogt.core.actors import (
     normalise_bot_logins,
 )
 from vogt.core.checks import roll_up
-from vogt.core.ci_alerts import RefFailure, github_managed, watched_failures
+from vogt.core.ci_alerts import (
+    HungRun,
+    RefFailure,
+    github_managed,
+    watched_failures,
+)
 from vogt.core.digest import digest_of
 from vogt.core.entities import (
     Actor,
@@ -90,6 +97,7 @@ AGENT_KIND: Literal["agent"] = "agent"
 #: The `kind` of the CI entries beyond "the newest revision is red".
 REF_FAILURE_KIND = "ci.ref_failure"
 BRANCH_CONCLUDED_KIND = "ci.branch_concluded"
+RUN_HUNG_KIND = "ci.run_hung"
 DEPLOY_FAILED_KIND = "deploy.failed"
 MAX_SCAN = 10_000
 #: Reports read for the Inbox; the newest per session is kept.
@@ -553,9 +561,20 @@ def _collect_stored(ctx: AppContext, view: ReadView) -> _StoredInbox:
 
     # Bound branches (WI-855): the settled CI verdict on the newest revision
     # of each branch an open work item is bound to.
-    for bound in bound_branches(view, index_by_branch(checks_all)):
-        if bound.ci.settled and bound.project_id in projects:
+    for bound in bound_branches(
+        view,
+        index_by_branch(checks_all),
+        now=ctx.clock(),
+        hung_after=hung_thresholds(ctx.config),
+    ):
+        if bound.project_id not in projects:
+            continue
+        if bound.ci.settled:
             entries.append(_bound_branch_entry(ctx, bound, projects))
+        # WI-1334: one entry per hung run; it goes when the run concludes.
+        entries.extend(
+            _hung_run_entry(ctx, bound, hung, projects) for hung in bound.ci.hung
+        )
 
     # Read only when lanes are configured: an instance without any pays no
     # extra store read on every Inbox and badge projection.
@@ -812,6 +831,45 @@ def _bound_branch_entry(
         action=InboxAction(
             kind="observation", subject_key=newest.observation.subject_key
         ),
+        **_actor_fields(SYSTEM_ACTOR),
+    )
+
+
+def _hung_run_entry(
+    ctx: AppContext, bound: BoundBranch, hung: HungRun, projects: dict[str, Project]
+) -> InboxEntry:
+    """A run on a bound branch still queued or running past its threshold."""
+    project = projects.get(bound.project_id)
+    observation = hung.observation
+    run = str(hung.run_id) if hung.run_id is not None else "unknown run"
+    state = "queued" if hung.phase == "queued" else "running"
+    basis = (
+        ""
+        if hung.since_field == "run_started_at"
+        else " (measured from the run's last update: the forge gave no start time)"
+    )
+    cancel = f" Suggested: `gh run cancel {hung.run_id}`." if hung.run_id else ""
+    summary = (
+        f"{hung.workflow} run {run} on {bound.branch} for {bound.work_item_ref} "
+        f"has been {state} {hung.elapsed_minutes} min, since {hung.since}"
+        f"{basis}.{cancel} Clears when the run concludes."
+    )
+    trust, freshness = _freshness(ctx, observation.observed_at)
+    return InboxEntry(
+        entry_key=f"ci:hung:{hung_entity(hung)}",
+        source=CI_KIND,
+        kind=RUN_HUNG_KIND,
+        occurred_at=_when(hung.since) or observation.observed_at,
+        observed_at=observation.observed_at,
+        title=f"CI run may be hung: {hung.workflow} {state} {hung.elapsed_minutes} min",
+        summary=summary[:1000],
+        project_slug=None if project is None else project.slug,
+        work_item_ref=bound.work_item_ref,
+        source_subject_key=observation.subject_key,
+        source_url=observation.source_url,
+        trust_state=trust,
+        freshness=freshness,
+        action=InboxAction(kind="observation", subject_key=observation.subject_key),
         **_actor_fields(SYSTEM_ACTOR),
     )
 
