@@ -1419,6 +1419,38 @@ class EngineClient:
             raise EngineUnavailable(msg)
         return payload
 
+    def land(
+        self,
+        *,
+        repo: str,
+        branch: str,
+        head_sha: str,
+        onto: str,
+        mode: str,
+        forbidden_text: list[str],
+        linear_history: bool,
+    ) -> dict[str, Any]:
+        """Land `branch` on `onto` at the pinned `head_sha` (WI-1341): a
+        fast-forward push, rebasing first when `mode` is `rebase`, never a
+        merge commit. Only the core's own credential may send it; the engine's
+        refusal (moved tip, behind in fast-forward mode, forbidden text)
+        arrives as `InvalidRequest` or `Conflict` carrying its own words."""
+        body: dict[str, Any] = {
+            "op": "land",
+            "repo": repo,
+            "branch": branch,
+            "head_sha": head_sha,
+            "onto": onto,
+            "mode": mode,
+            "forbidden_text": forbidden_text,
+            "linear_history": linear_history,
+        }
+        payload = self._call("/api/git/op", method="POST", payload=body)
+        if not isinstance(payload, dict):
+            msg = f"the {self.label} returned nothing for the land of {branch}"
+            raise EngineUnavailable(msg)
+        return payload
+
     def keep_awake(self, session_id: str, *, keep_awake: bool) -> EngineSession | None:
         """Pin a session awake (or unpin it); `None` on a 404."""
         payload = self._call(

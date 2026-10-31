@@ -146,6 +146,8 @@ from vogt.application.models import (
     KeepSessionAwakeParams,
     LabelListResult,
     LabelResult,
+    LandWorkParams,
+    LandWorkResult,
     ListActorsParams,
     ListAuditParams,
     ListDecisionsParams,
@@ -627,6 +629,26 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.bind_branch,
             route=HttpRoute("POST", "/work/bind-branch"),
             cli=CliBinding(("work", "bind-branch")),
+        ),
+        Operation(
+            name="work.land",
+            summary=(
+                "Land a work item's reviewed branch onto the project's base "
+                "branch at a pinned tip: a fast-forward, or a rebase where the "
+                "landing rule says so, never a merge commit. Only a person or "
+                "an oversight session may call it, only on a project whose "
+                "merges are oversight's, and only when the latest verdict is "
+                "`no_blockers` for exactly `head_sha` from a review session a "
+                "person or oversight started for this item (or a person). The "
+                "branch is the latest hand-off's. Refusals name the rule."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=LandWorkParams,
+            result_model=LandWorkResult,
+            handler=services.land_work,
+            route=HttpRoute("POST", "/work/land"),
+            cli=CliBinding(("work", "land")),
         ),
         Operation(
             name="work.comment",

@@ -208,6 +208,10 @@ ENGINE_ONLY: Mapping[str, str] = {
     "GET /api/git/diff": _WORKSPACE,
     "GET /api/git/log": _WORKSPACE,
     "GET /api/git/branch": _WORKSPACE,
+    # One route, several ops. `land` (WI-1341) is reached only through the
+    # core: "POST /api/git/op (Land)" is `work.land`, which checks the caller
+    # and the verdict and sends it with the core's own credential, as
+    # `session.commit_for` sends `commit`. The rest stay workspace-only.
     "POST /api/git/op": _WORKSPACE,
     "POST /api/gui/launch": _GUI,
     "GET /api/gui/processes": _GUI,
