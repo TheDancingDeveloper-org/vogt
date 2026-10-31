@@ -117,7 +117,8 @@ terminates TLS in front of it, and read [SECURITY.md](SECURITY.md) first.
   wire contract, the assistant, agent tasks.
 - [Architecture](docs/ARCHITECTURE.md) — how the product is put together.
 - [Contributing](docs/CONTRIBUTING.md) — workflow, checks, and the
-  two-container developer stack.
+  two-container developer stack. For how changes land, see
+  [How changes land](docs/CONTRIBUTING.md#how-changes-land).
 - [AI policy](AI_POLICY.md) — how this product is built, and what that means
   for contributions.
 

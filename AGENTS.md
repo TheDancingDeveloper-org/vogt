@@ -20,18 +20,11 @@ depends on the engine.
 - This file applies repository-wide. Before changing `engine/`, `web/`, or
   `mobile/`, also read `engine/AGENTS.md`; its more specific rules supplement
   this file. `CLAUDE.md` files are pointers, not a second source of rules.
-- **Landing base is `integrate/vogt-next`, not `main`.** Workers branch from
-  `origin/integrate/vogt-next` in their own worktree, on `wi-<n>-<slug>`, and
-  land by pushing that branch only: no pull request. Oversight merges reviewed
-  branches into `integrate/vogt-next` by rebase or fast-forward. The operator
-  approves the integration pull request to `main` and every deploy. `main` is
-  rebase-only with linear history, and releases are `v*` tags on `main`. The
-  integration branch is rebased onto `origin/main`; `main` is never merged into
-  it. From now on, oversight merges into `integrate/*` by rebase or
-  fast-forward only, and no merge commit lands there. `integrate/vogt-next`
-  still carries merge commits from earlier oversight merges; WI-1315 cleans
-  that up. See
-  [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md#2-workflow) for the full flow.
+- **Landing is through graft, not by branch or pull request.** Workers land
+  with `g land` on the graft line, and oversight batches the lands into one
+  pull request. See [How changes land](docs/CONTRIBUTING.md#how-changes-land).
+  `main` is rebase-only with linear history, and releases are `v*` tags on
+  `main`. The operator approves every deploy.
 - Run `git status --short --branch` before editing. Preserve unrelated staged,
   unstaged, and untracked work; do not fold it into the task or rewrite it to
   make checks pass.
@@ -347,9 +340,10 @@ does not need an APK rebuild.
   defaults. Exposure and identity values such as a public URL or non-loopback
   bind address must be stated, not guessed. Read `docs/DEPLOYMENT.md` before
   changing Compose defaults.
-- Landing is through the merge queue (`docs/ci.md`): push a branch and open
-  a PR; the PR runs only fast, path-scoped checks, so don't expect full CI on
-  it and don't re-run the full suite by hand. `land-pr` enqueues the PR and
+- Landing is through graft ([How changes land](docs/CONTRIBUTING.md#how-changes-land)),
+  and the batch PR goes through the merge queue (`docs/ci.md`). The PR runs
+  only fast, path-scoped checks, so don't expect full CI on it and don't
+  re-run the full suite by hand. `land-pr` enqueues the PR and
   waits on the queue's `merge_group` runs, where the full suite runs. Rebase
   only when the queue reports a conflict.
 - CI intentionally runs on self-hosted runners. A queued job is a runner
@@ -371,6 +365,6 @@ does not need an APK rebuild.
 - Relevant surface gates pass, and the PR records the exact commands run plus
   any intentionally skipped external or live validation.
 - `git diff --check`, `git status`, and the final diff show only intended
-  changes. A worker's branch lands on `integrate/vogt-next` by push and gets
-  no pull request. A pull request to `main` (the integration pull request, or
+  changes. A worker's change lands through graft and gets no pull request.
+  A pull request to `main` (the integration pull request, or
   a fork pull request) follows `.github/PULL_REQUEST_TEMPLATE.md`.

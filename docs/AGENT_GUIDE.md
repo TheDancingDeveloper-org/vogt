@@ -734,7 +734,10 @@ not reconciled.
 
 ### Link the PR back to the item
 
-When you open a pull request, name the item in the way Vogt already reads: a
+Workers in this repository do not open pull requests; they land through graft
+(see [How changes land](CONTRIBUTING.md#how-changes-land)), and oversight's batch
+PR names the items it carries. Where a pull request is opened anyway (a fork,
+say), name the item in the way Vogt already reads: a
 `Closes #42` / `Fixes owner/repo#42` closing keyword in the PR title or body, or
 a branch named for the issue. The forge sync reads that as an **`implemented_by`**
 edge and folds the PR under the work item it implements, so a single piece
