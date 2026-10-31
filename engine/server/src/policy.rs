@@ -651,8 +651,9 @@ fn walk(
     }
 }
 
-/// `command` without the bodies of its quoted heredocs (`<<'X'`, `<<"X"`,
-/// `<<\X`, and the `<<-` forms), which the shell passes on as plain text.
+/// `command` without its comments and the bodies of its quoted heredocs
+/// (`<<'X'`, `<<"X"`, `<<\X`, and the `<<-` forms), which the shell passes
+/// on as plain text.
 /// An unquoted heredoc expands `$( … )` and backticks, so its body stays.
 /// A body with no closing delimiter runs to the end, as in the shell.
 fn strip_quoted_heredocs(command: &str) -> String {
@@ -663,6 +664,20 @@ fn strip_quoted_heredocs(command: &str) -> String {
     let mut quote: Option<char> = None;
     let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
+        // An unquoted `#` that starts a word comments out the rest of the
+        // line: no heredoc opens there, and nothing in it runs.
+        if quote.is_none()
+            && c == '#'
+            && out
+                .chars()
+                .last()
+                .is_none_or(|p| p.is_whitespace() || ";&|()<>".contains(p))
+        {
+            while chars.peek().is_some_and(|n| *n != '\n') {
+                chars.next();
+            }
+            continue;
+        }
         out.push(c);
         match quote {
             Some(q) => {
@@ -1996,12 +2011,21 @@ mod tests {
             "cat <<\\EOF\ngit checkout -- README.md\nEOF",
             "cat <<-'EOF'\n\tgit clean -fd\n\tEOF\ngit log",
             "git status <<< 'git reset --hard'",
+            "true # git reset --hard",
+            "git status # ; git stash",
         ] {
             assert_eq!(check(&p, command, root), None, "{command}");
         }
         for command in [
             "cat <<EOF > notes.md\n$(git reset --hard)\nEOF",
             "cat <<'EOF'\ntext\nEOF\ngit reset --hard",
+            // A heredoc marker inside a comment opens nothing.
+            "true # <<'X'\ngit reset --hard\nX",
+            "true #<<'X'\ngit stash\nX",
+            // A `#` inside quotes or mid-word starts no comment.
+            "echo '# <<X' && git reset --hard",
+            "echo \"#\" <<'X'; git reset --hard\nX\ngit stash",
+            "echo a#b; git reset --hard",
         ] {
             let reason = check(&p, command, root).unwrap_or_else(|| panic!("allowed: {command}"));
             assert!(reason.contains("discard guard"), "{command}: {reason}");
