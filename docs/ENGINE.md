@@ -1261,6 +1261,35 @@ What is refused, and only for an agent session that carries a policy:
   names none, is a protected branch (`main_branches`, or `main` when that list
   is empty).
 
+Two more rules read the session's workspace (WI-1326). The engine copies
+the session's workspace block (above) into its policy before the child runs:
+`workspace_kind` from `kind`, `workspace_path` from `path` (the worktree
+toplevel) and `discard_baseline` from `baseline_dirty`. A wake copies the
+record's block, so it judges against the first start's baseline and never
+recaptures. A session with no block (one from before the workspace record,
+or a cwd outside any repository) gets neither rule; the agent's own guard
+(Klaudia's gitguard) still judges its discards. vogt-core adds `protected_checkouts`, every registered project's
+root, on a `worktree` or `cwd` start. A repo is resolved with `git rev-parse
+--show-toplevel` from the command's `-C` or the cwd:
+
+- **discard guard** — any session with a baseline: `git checkout [<ref>] --
+  <paths>`, `git checkout <path>`, `git restore`, `git rm -f`, `git clean -f`,
+  `git stash [push]`, `git reset --hard`, `git checkout -f` and `git switch
+  --discard-changes` in the session's own repo, when a path they reach is in
+  the baseline. `reset --hard`, `clean`, `stash` with no paths, and a command
+  whose paths cannot be read (a glob, an expansion, `xargs`, `eval`, a `cd`
+  earlier on the line) reach every one. A repo that cannot be resolved counts
+  as the session's own. `git restore --staged` only unstages and is allowed.
+- **protected checkout** — only a `worktree` session: a git write (`commit`,
+  `push`, `merge`, `rebase`, `reset`, `checkout`, `switch`, `restore`, `clean`,
+  `stash`, `add`, `rm`, `mv`, `cherry-pick`, `revert`, `am`, `branch
+  -d/-D/-m`, `worktree remove/move/prune`) whose repo is a protected checkout
+  and not the session's own worktree. Reads are never refused, and a repo
+  that cannot be resolved is not protected. A `checkout` session (oversight, a
+  shell on the project root) is never held to it.
+
+Reasons name the rule and a path count, never a path's contents.
+
 A denial exits 2 with the reason on stderr and the command does not run. When
 the engine cannot be reached, or answers anything but 2xx, the hook fails
 closed for that `git` or `gh` command (`vogt policy check unavailable;

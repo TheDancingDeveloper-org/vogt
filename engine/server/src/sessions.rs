@@ -612,6 +612,12 @@ impl SessionRegistry {
             env.push((WORKSPACE_PATH_ENV.to_string(), ws.path.clone()));
         }
 
+        // The policy check judges discards and protected checkouts against
+        // that same block (WI-1326): captured before the child runs, and on a
+        // wake the first start's, so the session's own edits are never its
+        // baseline.
+        spec.policy = crate::policy::with_workspace(spec.policy.take(), workspace.as_ref());
+
         // Scratch builds share one Cargo target per repository (WI-1810):
         // a config file under the session's scratch directory, so the
         // session's own worktree keeps its own target.

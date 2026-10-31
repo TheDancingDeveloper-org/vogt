@@ -112,6 +112,33 @@ def test_an_allow_passes_and_a_denial_exits_2_with_the_reason(tmp_path: Path) ->
         broker.close()
 
 
+def test_a_workspace_rule_denial_reaches_the_agent(tmp_path: Path) -> None:
+    """WI-1326: the discard guard's and the protected-checkout rule's reasons
+    come back on stderr with exit 2, like any other policy denial."""
+    for reason in (
+        "refusing: discard guard: git restore would discard 1 path(s) that had "
+        "uncommitted changes before this session started",
+        "refusing: protected checkout: git commit writes to a project checkout",
+    ):
+        broker = _Broker(
+            200, json.dumps({"decision": "deny", "reason": reason}).encode()
+        )
+        try:
+            env = {
+                "VOGT_ENGINE_BROKER_URL": broker.url,
+                "VOGT_ENGINE_BROKER_TOKEN": "t",
+            }
+            denied = run(
+                tmp_path,
+                '{"tool_name":"Bash","tool_input":{"command":"git restore f"}}',
+                env,
+            )
+            assert denied.returncode == 2
+            assert reason in denied.stderr
+        finally:
+            broker.close()
+
+
 def test_an_unreachable_engine_refuses_a_git_command(tmp_path: Path) -> None:
     refused = run(
         tmp_path,
