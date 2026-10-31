@@ -1187,6 +1187,68 @@ def test_a_refused_answer_comes_back_escalated_with_its_keys(
     assert typed.value.details == details
 
 
+def test_a_refused_answer_is_shown_to_the_person_as_a_recommendation(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-996 E0b: an agent's refused pick is recorded under the dialog's
+    escalation key and shown on the Inbox entry beside the person's buttons,
+    by the engine's label, never chosen. A pick no option matches records
+    nothing, and a recommendation for another question is not shown."""
+    from vogt.application.models import AnswerSessionParams
+    from vogt.application.services import answer_session
+    from vogt.errors import PersonRequired
+
+    ses_id, engine_id = _started(wired)
+    engine.permission_prompt = True
+    options = [
+        {"number": 1, "label": "Yes", "selected": True},
+        {"number": 2, "label": "No, and tell Claude", "selected": False},
+    ]
+    engine.extra = {
+        "activity": "awaiting-approval",
+        "activity_changed_at": "2026-10-31T01:02:03Z",
+        "approval": {"question": "Do you want to proceed?", "options": options},
+    }
+    agent = _as(wired, AGENTS[0])
+    with pytest.raises(PersonRequired) as unmatched:
+        answer_session(agent, AnswerSessionParams(id=ses_id, label="maybe", reason=WHY))
+    assert "recommendation" not in (unmatched.value.details or {})
+    with pytest.raises(PersonRequired, match="as a recommendation") as refused:
+        answer_session(
+            agent,
+            AnswerSessionParams(id=ses_id, label="no, AND tell claude", reason=WHY),
+        )
+    details = refused.value.details or {}
+    assert details["recommendation"] == "recorded"
+
+    entry = next(
+        e
+        for e in list_inbox(wired, InboxListParams()).entries
+        if e.entry_key == details["inbox_entry_key"]
+    )
+    shown = (entry.evidence_snapshot or {})["recommendation"]
+    assert isinstance(shown, dict)
+    assert shown["option"] == 2
+    assert shown["label"] == "No, and tell Claude"
+    assert shown["by"] == AGENTS[0]
+    assert shown["escalation_key"] == details["escalation_key"]
+    assert f"{AGENTS[0]} recommends 2." in entry.summary
+
+    # The next dialog asks something else: the old pick is not carried over.
+    engine.extra = {
+        "activity": "awaiting-approval",
+        "activity_changed_at": "2026-10-31T01:05:00Z",
+        "approval": {"question": "Run rm -rf build?", "options": options},
+    }
+    entry = next(
+        e
+        for e in list_inbox(wired, InboxListParams()).entries
+        if e.kind == "session.attention" and e.session_id == engine_id
+    )
+    assert entry.evidence_snapshot is None
+    assert "recommends" not in entry.summary
+
+
 def test_an_oversight_session_answers_a_permission_prompt_and_is_audited(
     wired: AppContext, engine: Engine
 ) -> None:
