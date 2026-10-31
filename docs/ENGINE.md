@@ -1277,9 +1277,16 @@ root, on a `worktree` or `cwd` start. A repo is resolved with `git rev-parse
   `git stash [push]`, `git reset --hard`, `git checkout -f` and `git switch
   --discard-changes` in the session's own repo, when a path they reach is in
   the baseline. `reset --hard`, `clean`, `stash` with no paths, and a command
-  whose paths cannot be read (a glob, an expansion, `xargs`, `eval`, a `cd`
-  earlier on the line) reach every one. A repo that cannot be resolved counts
-  as the session's own. `git restore --staged` only unstages and is allowed.
+  whose paths cannot be read (a glob, an expansion, `xargs`, `eval`, a
+  relative or expanded `cd` earlier on the line, a program spelled `$GIT`,
+  `$(which git)` or `` `which git` ``) reach every one. A literal absolute
+  `cd /path` is followed, so the paths after it resolve from there. A line
+  that defines a git alias inline (`git -c alias.x=…`) reaches every path and
+  counts as a write. Long options match by any prefix git accepts (`--ha` is
+  `--hard`), short ones inside a cluster (`-qf`), and an attached value is
+  not read as flags (`-sSTABLE` is not `-S`). A repo that cannot be resolved
+  counts as the session's own. `git restore --staged` only unstages and is
+  allowed, as in gitguard (pending an operator call).
 - **protected checkout** — only a `worktree` session: a git write (`commit`,
   `push`, `merge`, `rebase`, `reset`, `checkout`, `switch`, `restore`, `clean`,
   `stash`, `add`, `rm`, `mv`, `cherry-pick`, `revert`, `am`, `branch

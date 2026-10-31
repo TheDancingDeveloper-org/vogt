@@ -4689,8 +4689,9 @@ def _enforced_policy(
     Guidance (`commit_identity`, `test_recipe`, `rules`) stays in the brief
     and never reaches the session. With nothing to refuse — no forbidden
     text, merges that do not deploy, and no checkouts to protect — the spec
-    omits `policy` entirely, so a start is byte-identical to one from before
-    enforcement existed.
+    omits `policy` entirely. Any registered project with a root gives
+    `protected_checkouts`, so on a populated deployment a start carries a
+    `policy` even when the project itself enforces nothing.
 
     `protected_checkouts` (WI-1326) are the registered projects' roots a
     worktree session may not write to; the engine holds only a session whose

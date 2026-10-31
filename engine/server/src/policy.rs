@@ -13,8 +13,10 @@
 //! `gh api`.
 //!
 //! The check looks at the command as a shell would run it. A line joined by
-//! `&&`, `||`, `;` or `|`, or split over newlines, is several commands, and
-//! any one of them refusing refuses the whole line. Assignments and the
+//! `&&`, `||`, `;`, `|` or a background `&`, split over newlines or wrapped
+//! in a `( … )` subshell, is several commands, and any one of them refusing
+//! refuses the whole line. Reserved words (`if`, `then`, `do`, `{`, `!`,
+//! `time`, …) in front of a command are stepped over. Assignments and the
 //! `env`, `sudo`, `command`, `exec`, `nohup`, `nice` and `timeout` wrappers
 //! in front of a command are stepped over, and so are git's global options,
 //! so `sudo git commit` and `git -C ../other commit` are judged as the commit
@@ -428,8 +430,10 @@ fn git_output(dir: &Path, args: &[&str], timeout: Duration) -> Option<String> {
 /// `policy` with the session's workspace block (WI-1324) filled in for the
 /// discard and protected-checkout rules (WI-1326): its kind, its toplevel and
 /// the paths already dirty in it when the session first started. The engine
-/// captures that block before the child runs, and a wake passes the record's
-/// copy, so the session's own edits never become its baseline. With no
+/// captures that block before the child runs — in the worktree it has just
+/// cut for a worktree start (so the baseline is what the base ref left dirty,
+/// usually nothing), in the cwd's tree otherwise — and a wake passes the
+/// record's copy, so the session's own edits never become its baseline. With no
 /// block (a session from before WI-1324, or a cwd outside any repository)
 /// the policy is returned as it is: neither rule applies, and the agent's
 /// own guard (Klaudia's gitguard) stays the one that judges discards.
@@ -465,6 +469,45 @@ struct GitCall {
     /// `--git-dir`, `--work-tree`, `GIT_DIR` or `core.worktree`. The discard
     /// guard then counts every protected path as reached.
     unreadable: bool,
+    /// The line defines a git alias (`git -c alias.x=…`): its subcommand is
+    /// not the command that runs, so it may be any write or discard.
+    aliased: bool,
+}
+
+/// The words after an expanded program (`$GIT`, `${GIT}`, `$(which git)`,
+/// `` `which git` ``), or `None` when the program is a plain word.
+fn expanded_program(words: &[String]) -> Option<Vec<String>> {
+    let first = words.first()?;
+    let end = if first.starts_with("$(") {
+        words.iter().position(|w| w.ends_with(')'))?
+    } else if let Some(tail) = first.strip_prefix('`') {
+        if tail.contains('`') {
+            0
+        } else {
+            words.iter().skip(1).position(|w| w.contains('`'))? + 1
+        }
+    } else if first.starts_with('$') {
+        0
+    } else {
+        return None;
+    };
+    Some(words[end + 1..].to_vec())
+}
+
+/// Whether `git`'s global options define an alias inline.
+fn inline_alias(words: &[String]) -> bool {
+    let is_alias = |v: &str| v.to_ascii_lowercase().starts_with("alias.");
+    words.iter().enumerate().any(|(i, w)| {
+        (w == "-c" && words.get(i + 1).is_some_and(|v| is_alias(v)))
+            || w.strip_prefix("-c").is_some_and(is_alias)
+            || w.starts_with("--config-env")
+    })
+}
+
+/// A `cd` target that names one directory without the shell's help: absolute,
+/// with no expansion or glob.
+fn literal_absolute(target: &str) -> bool {
+    target.starts_with('/') && !target.contains(['$', '`', '*', '?', '[', '~'])
 }
 
 /// Every git invocation in `command`, following `sh -c` payloads, `eval`,
@@ -493,11 +536,27 @@ fn walk(command: &str, cwd: &Path, unreadable: bool, depth: usize, out: &mut Vec
     let mut dir = cwd.to_path_buf();
     let mut unreadable = unreadable;
     for simple in split_commands(command) {
-        let words = command_words(&simple);
-        let Some(first) = words.first() else {
+        let mut words = command_words(&simple);
+        if words.is_empty() {
             continue;
-        };
+        }
+        // `$GIT`, `$(which git)` or `` `which git` `` as the program: read
+        // it as git with paths that cannot be read.
+        let mut expanded = false;
+        if let Some(rest) = expanded_program(&words) {
+            words = std::iter::once("git".to_string()).chain(rest).collect();
+            expanded = true;
+        }
+        let first = words[0].clone();
+        let first = first.as_str();
         match base(first) {
+            "cd" if words.len() == 2 && literal_absolute(&words[1]) => {
+                // An absolute literal target is not looked up in CDPATH, so
+                // the paths after it resolve from there. If the cd fails,
+                // `&&` runs nothing after it; a `;` line that runs on in
+                // the old directory is the one reading this gets wrong.
+                dir = normalize(Path::new(&words[1]));
+            }
             "cd" | "pushd" | "popd" => {
                 // Whether the cd ran, and where CDPATH sent it, is not
                 // something this reading knows: the paths after it are
@@ -526,14 +585,17 @@ fn walk(command: &str, cwd: &Path, unreadable: bool, depth: usize, out: &mut Vec
                 walk(&xargs_command(&words).join(" "), &dir, true, depth + 1, out);
             }
             "git" => {
-                let hidden = simple.contains(['$', '`'])
+                let hidden = expanded
+                    || simple.contains(['$', '`'])
                     || words
                         .iter()
                         .any(|w| w.starts_with("--git-dir") || w.starts_with("--work-tree"));
+                let aliased = inline_alias(&words);
                 out.push(GitCall {
                     words,
                     cwd: dir.clone(),
-                    unreadable: unreadable || hidden,
+                    unreadable: unreadable || hidden || aliased,
+                    aliased,
                 });
             }
             _ => {}
@@ -606,7 +668,14 @@ fn discard(policy: &SessionPolicy, calls: &[GitCall], repos: &mut Repos) -> Opti
         let Some(sub) = args.first() else {
             continue;
         };
-        let Some(reach) = discards(sub, &args[1..]) else {
+        let reach = if call.aliased {
+            Reach {
+                all: true,
+                paths: Vec::new(),
+            }
+        } else if let Some(reach) = discards(sub, &args[1..]) {
+            reach
+        } else {
             continue;
         };
         let dir = canonical(&git_dir(&call.words, &call.cwd));
@@ -651,18 +720,20 @@ fn discard(policy: &SessionPolicy, calls: &[GitCall], repos: &mut Repos) -> Opti
 /// `discard`, minus its staging rules.
 fn discards(sub: &str, args: &[String]) -> Option<Reach> {
     let (flags, paths, dashdash) = split_args(args);
+    // A long option may be abbreviated to any prefix git can tell apart
+    // (`--ha` is `--hard`); a short one may sit in a cluster (`-qf`).
     let has = |names: &[&str]| {
         flags.iter().any(|f| {
-            names
-                .iter()
-                .any(|n| f == n || f.starts_with(&format!("{n}=")))
+            names.iter().any(|n| {
+                if n.starts_with("--") {
+                    long_matches(f, n)
+                } else {
+                    f == n || short_in_cluster(f, n.chars().nth(1).unwrap_or('-'))
+                }
+            })
         })
     };
-    let short = |letter: char| {
-        flags
-            .iter()
-            .any(|f| f.len() > 1 && !f.starts_with("--") && f[1..].contains(letter))
-    };
+    let short = |letter: char| flags.iter().any(|f| short_in_cluster(f, letter));
     let all = || {
         Some(Reach {
             all: true,
@@ -676,6 +747,8 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
                 return all();
             }
             if has(&["-b", "-B", "--orphan"]) && !dashdash {
+                // `-b` takes the branch name, so `-fb x` is still `-f`:
+                // the force was checked above.
                 return None;
             }
             if dashdash {
@@ -718,6 +791,60 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
         }),
         _ => None,
     }
+}
+
+/// The short options of the discarding commands that take a value: in a
+/// cluster, the rest of the word is that value (`-sSTABLE`, `-bnew`).
+const VALUED_SHORT: &[char] = &['s', 'b', 'B', 'm', 'e', 'o'];
+
+/// Whether the short option `-<letter>` is in the cluster `flag` (`-qf`),
+/// reading no further than an option that takes the rest as its value.
+fn short_in_cluster(flag: &str, letter: char) -> bool {
+    let Some(cluster) = flag.strip_prefix('-') else {
+        return false;
+    };
+    if cluster.starts_with('-') {
+        return false;
+    }
+    for c in cluster.chars() {
+        if c == letter {
+            return true;
+        }
+        if VALUED_SHORT.contains(&c) {
+            return false;
+        }
+    }
+    false
+}
+
+/// The shortest prefix git accepts for each long option the guard reads:
+/// enough to tell it from the subcommand's other options (`--s` could be
+/// restore's `--source`, `--d` switch's `--detach`).
+const LONG_MIN: &[(&str, usize)] = &[
+    ("--staged", 4),
+    ("--discard-changes", 4),
+    ("--dry-run", 3),
+    ("--hard", 3),
+    ("--merge", 3),
+    ("--keep", 3),
+    ("--force", 3),
+    ("--worktree", 3),
+    ("--cached", 3),
+    ("--orphan", 3),
+];
+
+/// Whether `flag` is the long option `name`, whole or abbreviated, with or
+/// without an attached `=value`.
+fn long_matches(flag: &str, name: &str) -> bool {
+    if !flag.starts_with("--") {
+        return false;
+    }
+    let flag = flag.split_once('=').map_or(flag, |(f, _)| f);
+    let min = LONG_MIN
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or(name.len(), |(_, m)| *m);
+    flag.len() >= min && name.starts_with(flag)
 }
 
 /// Flags and positional words, the value of an option that takes one
@@ -807,7 +934,7 @@ fn protected(policy: &SessionPolicy, calls: &[GitCall], repos: &mut Repos) -> Op
         let Some(sub) = args.first() else {
             continue;
         };
-        if !git_write(sub, &args[1..]) {
+        if !call.aliased && !git_write(sub, &args[1..]) {
             continue;
         }
         let Some(top) = repos.top(&canonical(&git_dir(&call.words, &call.cwd))) else {
@@ -907,8 +1034,26 @@ fn base(program: &str) -> &str {
 /// into words.
 fn command_words(simple: &str) -> Vec<String> {
     let mut words = shell_words(simple);
-    while words.len() > 1 && is_assignment(&words[0]) {
-        words.remove(0);
+    loop {
+        match words.first().map(String::as_str) {
+            // Reserved words and a negation in front of the command.
+            Some("{" | "}" | "!" | "if" | "then" | "elif" | "else" | "do" | "while" | "until") => {
+                words.remove(0);
+            }
+            Some(w) if w.len() > 1 && w.starts_with(['{', '!']) => {
+                words[0].remove(0);
+            }
+            Some("time") => {
+                words.remove(0);
+                while words.first().is_some_and(|w| w.starts_with('-')) {
+                    words.remove(0);
+                }
+            }
+            Some(w) if words.len() > 1 && is_assignment(w) => {
+                words.remove(0);
+            }
+            _ => break,
+        }
     }
     loop {
         match words.first().map(|w| base(w)) {
@@ -974,6 +1119,8 @@ fn split_commands(command: &str) -> Vec<String> {
     let mut cur = String::new();
     let mut chars = command.chars().peekable();
     let mut quote: Option<char> = None;
+    // Open `$(` substitutions: their parentheses belong to the word.
+    let mut substitution = 0usize;
     while let Some(c) = chars.next() {
         match quote {
             Some(q) => {
@@ -992,7 +1139,16 @@ fn split_commands(command: &str) -> Vec<String> {
                 quote = Some(c);
                 cur.push(c);
             }
-            None if c == '\n' || c == ';' => {
+            None if c == '(' && cur.ends_with('$') => {
+                substitution += 1;
+                cur.push(c);
+            }
+            None if c == ')' && substitution > 0 => {
+                substitution -= 1;
+                cur.push(c);
+            }
+            // A subshell's parentheses end the command before and inside.
+            None if c == '\n' || c == ';' || c == '(' || c == ')' => {
                 push_command(&mut out, &mut cur);
             }
             None if c == '|' => {
@@ -1001,8 +1157,14 @@ fn split_commands(command: &str) -> Vec<String> {
                 }
                 push_command(&mut out, &mut cur);
             }
-            None if c == '&' && chars.peek() == Some(&'&') => {
-                chars.next();
+            // `2>&1`, `>&2` and `&>file` are redirections, not a background `&`.
+            None if c == '&' && (cur.ends_with(['>', '<']) || chars.peek() == Some(&'>')) => {
+                cur.push(c);
+            }
+            None if c == '&' => {
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                }
                 push_command(&mut out, &mut cur);
             }
             None => cur.push(c),
@@ -1346,6 +1508,92 @@ mod tests {
         ] {
             assert_eq!(check(&p, command, root), None, "{command}");
         }
+    }
+
+    /// The second review's bypasses (WI-1326): each is refused with a
+    /// non-empty baseline, and its look-alike that discards nothing passes.
+    #[test]
+    fn discard_guard_reads_what_the_review_found() {
+        let root = Path::new("/r");
+        let p = workspace(&["README.md", "src/a.py"], Some("checkout"), root);
+        for command in [
+            // 1. abbreviated long options
+            "git reset --ha",
+            "git reset --hard=",
+            "git checkout --forc main",
+            "git switch --disc main",
+            "git restore --st --wor src/a.py",
+            "git rm --fo README.md",
+            // 2. short-flag clusters
+            "git checkout -qf main",
+            "git switch -qf main",
+            "git restore -SW src/a.py",
+            "git clean -qf",
+            // 3. inline aliases
+            "git -c alias.x='checkout --' x README.md",
+            "git -calias.y=reset y --hard",
+            // 4. reserved words, subshells and a background `&`
+            "(git reset --hard)",
+            "{ git reset --hard; }",
+            "if true; then git reset --hard; fi",
+            "for f in a; do git checkout -- README.md; done",
+            "true || ! git reset --hard",
+            "time git reset --hard",
+            "sleep 1 & git reset --hard",
+            // 5. an expanded program
+            "$(which git) checkout -- README.md",
+            "`which git` checkout -- README.md",
+            "$GIT reset --hard",
+            // 6. an attached -s value is not -S
+            "git restore -sSTABLE src/a.py",
+            // 7. a literal absolute cd is followed, not given up on
+            "cd /r/src && git checkout -- a.py",
+        ] {
+            let reason = check(&p, command, root).unwrap_or_else(|| panic!("allowed: {command}"));
+            assert!(reason.contains("discard guard"), "{command}: {reason}");
+        }
+        for command in [
+            "git reset --soft HEAD~1",
+            "git checkout -q main",
+            "git switch --detach main",
+            "git restore --staged src/a.py",
+            "git restore -S src/a.py",
+            "git clean -qn",
+            "git -c color.ui=never status",
+            "(git status)",
+            "if git diff --quiet; then echo clean; fi",
+            "git status 2>&1 | head",
+            "git log &>/dev/null & git status",
+            "$(which git) status",
+            "$GIT log",
+            "cd /r/src && git checkout -- b.py",
+            "cd /r && git restore docs/other.md",
+        ] {
+            assert_eq!(check(&p, command, root), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn the_shared_parser_keeps_the_older_rules() {
+        let p = policy(&["SECRET"], true, &[]);
+        assert!(check(&p, "(gh pr merge 1)", &cwd()).is_some());
+        assert!(check(&p, "sleep 1 & gh pr merge 1", &cwd()).is_some());
+        assert!(check(&p, "if true; then git commit -m SECRET; fi", &cwd()).is_some());
+        assert!(check(&p, "git log 2>&1 | grep SECRET", &cwd()).is_none());
+        assert!(check(&p, "echo \"(a & b)\"", &cwd()).is_none());
+    }
+
+    #[test]
+    fn an_inline_alias_counts_as_a_write_to_a_protected_checkout() {
+        let (main, wt) = checkout_and_worktree("alias");
+        let mut p = workspace(&[], Some("worktree"), &wt);
+        p.protected_checkouts = vec![main.display().to_string()];
+        let command = format!("git -C {} -c alias.l=commit l -m x", main.display());
+        assert!(check(&p, &command, &wt).is_some());
+        let read = format!("git -C {} -c color.ui=never log", main.display());
+        assert_eq!(check(&p, &read, &wt), None);
+        std::fs::remove_dir_all(&main).ok();
+        std::fs::remove_dir_all(&wt).ok();
     }
 
     #[test]
