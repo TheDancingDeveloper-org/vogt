@@ -84,3 +84,39 @@ def test_digest_lines_are_bounded(wired: AppContext) -> None:
     digest = brief_project(wired, ProjectBriefParams(slug="vogt")).digest
 
     assert len(digest.recent_results[0]) <= 160
+
+
+def test_the_newest_live_session_holds_an_item() -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from vogt.application.services.projects import _digest_in_progress
+
+    def at(hour: int) -> datetime:
+        return datetime(2026, 10, 31, hour, tzinfo=UTC)
+
+    sessions = [
+        SimpleNamespace(
+            id="ses_stopped", work_item_id="w1", started_at=at(9), stopped_at=at(10)
+        ),
+        SimpleNamespace(
+            id="ses_old", work_item_id="w1", started_at=at(1), stopped_at=None
+        ),
+        SimpleNamespace(
+            id="ses_new", work_item_id="w1", started_at=at(5), stopped_at=None
+        ),
+    ]
+    view = SimpleNamespace(list_sessions=lambda **_: sessions)
+    item = SimpleNamespace(
+        id="w1",
+        ref="WI-1",
+        title="T",
+        state="in_progress",
+        updated_at=at(1),
+        assignee_identity_ref=None,
+    )
+    lines = _digest_in_progress(
+        cast(Any, view), cast(Any, SimpleNamespace(id="p")), [cast(Any, item)]
+    )
+    assert lines == ["WI-1 [session ses_new]: T"]
